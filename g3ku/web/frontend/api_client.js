@@ -39,6 +39,10 @@ class ApiClient {
         return this._request("PUT", path, { params, body });
     }
 
+    static delete(path, params = {}) {
+        return this._request("DELETE", path, { params });
+    }
+
     static getCeoWsUrl() {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;
@@ -93,6 +97,10 @@ class ApiClient {
     static async resumeProject(projectId) {
         const data = await this.post(`/api/projects/${projectId}/resume`);
         return data.project || null;
+    }
+
+    static async deleteProject(projectId) {
+        return this.delete(`/api/projects/${projectId}`);
     }
 
     static async getProjectDetails(projectId) {

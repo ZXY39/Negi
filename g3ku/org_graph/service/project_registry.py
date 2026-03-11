@@ -105,6 +105,25 @@ class ProjectRegistry:
         control = await self.control_for(project_id)
         return control.cancel_event.is_set()
 
+    async def purge_project(self, project_id: str, payload: dict[str, Any] | None = None) -> None:
+        async with self._lock:
+            task = self._project_tasks.pop(project_id, None)
+            self._controls.pop(project_id, None)
+            subscriber_items = [
+                (key, queues)
+                for key, queues in self._project_subscribers.items()
+                if key[1] == project_id
+            ]
+            for key, _ in subscriber_items:
+                self._project_subscribers.pop(key, None)
+        if payload is not None:
+            for _, queues in subscriber_items:
+                for queue in list(queues):
+                    await queue.put(dict(payload))
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def close(self) -> None:
         async with self._lock:
             tasks = list(self._project_tasks.values())

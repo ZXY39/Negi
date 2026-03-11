@@ -91,14 +91,27 @@
                 <div class="project-list-container">
                     <div class="project-toolbar">
                         <div class="project-toolbar-group">
-                            <button id="project-select-all-active" class="toolbar-btn" type="button">全选可暂停</button>
-                            <button id="project-select-all-blocked" class="toolbar-btn" type="button">全选已暂停</button>
-                            <button id="project-select-clear" class="toolbar-btn ghost" type="button">清空选择</button>
+                            <button id="project-multi-toggle" class="toolbar-btn" type="button" aria-pressed="false">&#22810;&#36873;</button>
+                            <div id="project-select-wrap" class="toolbar-dropdown" hidden>
+                                <button id="project-select-menu-trigger" class="toolbar-btn ghost" type="button" aria-haspopup="menu" aria-expanded="false">&#20840;&#36873;</button>
+                                <div id="project-select-menu" class="toolbar-menu" role="menu" hidden>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="blocked">&#24050;&#26242;&#20572;</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="completed">&#24050;&#23436;&#25104;</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="failed">&#24050;&#22833;&#36133;</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="running">&#36827;&#34892;&#20013;</button>
+                                </div>
+                            </div>
+                            <div id="project-batch-wrap" class="toolbar-dropdown" hidden>
+                                <button id="project-batch-menu-trigger" class="toolbar-btn ghost" type="button" aria-haspopup="menu" aria-expanded="false">&#25209;&#37327;&#25805;&#20316;</button>
+                                <div id="project-batch-menu" class="toolbar-menu" role="menu" hidden>
+                                    <button class="toolbar-menu-item danger" type="button" role="menuitem" data-batch-action="delete">&#21024;&#38500;</button>
+                                    <button class="toolbar-menu-item warn" type="button" role="menuitem" data-batch-action="pause">&#26242;&#20572;</button>
+                                    <button class="toolbar-menu-item success" type="button" role="menuitem" data-batch-action="resume">&#24674;&#22797;</button>
+                                </div>
+                            </div>
                         </div>
                         <div class="project-toolbar-group project-toolbar-actions">
-                            <span id="project-selection-summary" class="project-selection-summary">已选择 0 项</span>
-                            <button id="project-batch-pause" class="toolbar-btn warn" type="button" disabled>批量暂停</button>
-                            <button id="project-batch-resume" class="toolbar-btn success" type="button" disabled>批量恢复</button>
+                            <span id="project-selection-summary" class="project-selection-summary">&#24050;&#36873;&#25321; 0 &#39033;</span>
                         </div>
                     </div>
                     <div id="project-card-grid" class="project-card-grid">
@@ -310,6 +323,34 @@
                     </div>
                 </div>
             </section>
+
+            <div id="app-toast-viewport" class="app-toast-viewport" aria-live="polite" aria-atomic="true">
+                <div id="app-toast" class="app-toast" hidden>
+                    <div class="app-toast-copy">
+                        <div id="app-toast-title" class="app-toast-title">&#25805;&#20316;&#25104;&#21151;</div>
+                        <div id="app-toast-text" class="app-toast-text">&#20462;&#25913;&#24050;&#29983;&#25928;</div>
+                    </div>
+                    <div class="app-toast-side">
+                        <span id="app-toast-countdown" class="app-toast-countdown">3</span>
+                        <button id="app-toast-close" class="icon-btn app-toast-close" type="button" aria-label="close toast">
+                            <i data-lucide="x"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="confirm-backdrop" class="confirm-backdrop" hidden>
+                <div id="confirm-dialog" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+                    <div class="confirm-header">
+                        <h2 id="confirm-title">&#30830;&#35748;&#25805;&#20316;</h2>
+                    </div>
+                    <p id="confirm-text" class="confirm-text">&#27492;&#25805;&#20316;&#19981;&#21487;&#24674;&#22797;&#12290;</p>
+                    <div class="confirm-actions">
+                        <button id="confirm-cancel" class="toolbar-btn ghost" type="button">&#21462;&#28040;</button>
+                        <button id="confirm-accept" class="toolbar-btn danger" type="button">&#30830;&#35748;</button>
+                    </div>
+                </div>
+            </div>
         </main>
     </div>
 

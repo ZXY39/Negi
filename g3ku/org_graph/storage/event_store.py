@@ -63,3 +63,7 @@ class EventStore:
             row = self._conn.execute('SELECT COALESCE(MAX(seq), 0) FROM events WHERE project_id = ?', (project_id,)).fetchone()
         return int(row[0]) if row else 0
 
+    def delete_project(self, project_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute('DELETE FROM events WHERE project_id = ?', (project_id,))
+

@@ -28,6 +28,11 @@ app.include_router(org_graph_router, prefix='/api')
 WEB_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = WEB_DIR / 'frontend'
 FRONTEND_ENTRY = FRONTEND_DIR / 'org_graph.html'
+FRONTEND_NO_CACHE_HEADERS = {
+    'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+}
 
 
 def _active_assets_dir() -> Path:
@@ -52,7 +57,7 @@ def _safe_child_file(base_dir: Path, relative_path: str) -> Path:
 def _frontend_index_response(directory: Path) -> FileResponse:
     if not FRONTEND_ENTRY.exists():
         raise HTTPException(status_code=404, detail=f'Frontend not found at {FRONTEND_ENTRY}')
-    return FileResponse(str(FRONTEND_ENTRY))
+    return FileResponse(str(FRONTEND_ENTRY), headers=FRONTEND_NO_CACHE_HEADERS)
 
 
 @app.get('/')
@@ -62,7 +67,7 @@ async def serve_frontend_root():
 
 @app.get('/assets/{asset_path:path}')
 async def serve_frontend_assets(asset_path: str):
-    return FileResponse(str(_safe_child_file(_active_assets_dir(), asset_path)))
+    return FileResponse(str(_safe_child_file(_active_assets_dir(), asset_path)), headers=FRONTEND_NO_CACHE_HEADERS)
 
 
 @app.get('/{full_path:path}')
@@ -77,7 +82,7 @@ async def serve_frontend_spa(full_path: str):
         raise HTTPException(status_code=404, detail='Not found') from exc
 
     if candidate.exists() and candidate.is_file():
-        return FileResponse(str(candidate))
+        return FileResponse(str(candidate), headers=FRONTEND_NO_CACHE_HEADERS)
     return _frontend_index_response(FRONTEND_DIR)
 
 

@@ -192,6 +192,14 @@ class ProjectStore:
             self._conn.execute('DELETE FROM units WHERE project_id = ? AND unit_id != ?', (project_id, keep_unit_id))
             self._conn.execute('DELETE FROM stages WHERE project_id = ?', (project_id,))
 
+    def delete_project(self, project_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute('DELETE FROM notices WHERE project_id = ?', (project_id,))
+            self._conn.execute('DELETE FROM artifacts WHERE project_id = ?', (project_id,))
+            self._conn.execute('DELETE FROM stages WHERE project_id = ?', (project_id,))
+            self._conn.execute('DELETE FROM units WHERE project_id = ?', (project_id,))
+            self._conn.execute('DELETE FROM projects WHERE project_id = ?', (project_id,))
+
     def recount_project_units(self, project_id: str) -> None:
         project = self.get_project(project_id)
         if project is None:

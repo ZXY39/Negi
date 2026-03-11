@@ -845,6 +845,35 @@ class ProjectService:
         await self.publish_summary(updated)
         return updated
 
+    async def delete_project(self, project_id: str):
+        project = self.get_project(project_id)
+        if project is None:
+            return None
+
+        unit_ids = [unit.unit_id for unit in self.list_units(project_id)]
+        artifacts = self.list_artifacts(project_id)
+        task = await self.registry.task_for(project_id)
+        if task is not None and not task.done():
+            await self.registry.cancel(project_id)
+            await asyncio.gather(task, return_exceptions=True)
+            await self.registry.clear_task(project_id)
+
+        self.checkpoint_store.delete_many(unit_ids)
+        self.event_store.delete_project(project_id)
+        self.artifact_store.delete_project_artifacts(project_id, artifacts)
+        self.store.delete_project(project_id)
+        await self.registry.purge_project(
+            project_id,
+            payload=build_envelope(
+                channel='project',
+                session_id=project.session_id,
+                project_id=project_id,
+                type='project.deleted',
+                data={'project_id': project_id},
+            ),
+        )
+        return {'project_id': project_id}
+
     async def close(self) -> None:
         self._started = False
         await self.registry.close()

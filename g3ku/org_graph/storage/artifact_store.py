@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from g3ku.org_graph.ids import new_artifact_id
@@ -47,6 +48,22 @@ class ArtifactStore:
 
     def list_artifacts(self, project_id: str) -> list[ProjectArtifactRecord]:
         return self._project_store.list_artifacts(project_id)
+
+    def _project_dir(self, project_id: str) -> Path:
+        safe_project_id = project_id.replace(':', '_').replace('/', '_').replace('\\', '_')
+        return self._artifact_dir / safe_project_id
+
+    def delete_project_artifacts(self, project_id: str, artifacts: list[ProjectArtifactRecord] | None = None) -> None:
+        for artifact in artifacts or self.list_artifacts(project_id):
+            path = Path(artifact.path) if artifact.path else None
+            if path and path.exists():
+                try:
+                    path.unlink()
+                except IsADirectoryError:
+                    shutil.rmtree(path, ignore_errors=True)
+                except FileNotFoundError:
+                    pass
+        shutil.rmtree(self._project_dir(project_id), ignore_errors=True)
 
 
 

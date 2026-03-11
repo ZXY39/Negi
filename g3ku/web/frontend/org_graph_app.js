@@ -15,7 +15,13 @@ const S = {
     currentProjectId: null,
     projects: [],
     selectedProjects: new Set(),
+    multiSelectMode: false,
+    projectSelectMenuOpen: false,
+    projectBatchMenuOpen: false,
     projectBusy: false,
+    confirmState: null,
+    toastState: { timeoutId: null, intervalId: null, remaining: 0 },
+    resourceSaveTimers: { skill: null, tool: null },
     modelCatalog: {
         items: [],
         catalog: [],
@@ -68,11 +74,13 @@ const U = {
     modelDetail: document.getElementById("model-detail-content"),
     projectGrid: document.getElementById("project-card-grid"),
     projectSummary: document.getElementById("project-selection-summary"),
-    selectActive: document.getElementById("project-select-all-active"),
-    selectBlocked: document.getElementById("project-select-all-blocked"),
-    selectClear: document.getElementById("project-select-clear"),
-    pauseBatch: document.getElementById("project-batch-pause"),
-    resumeBatch: document.getElementById("project-batch-resume"),
+    projectMultiToggle: document.getElementById("project-multi-toggle"),
+    projectSelectWrap: document.getElementById("project-select-wrap"),
+    projectSelectTrigger: document.getElementById("project-select-menu-trigger"),
+    projectSelectMenu: document.getElementById("project-select-menu"),
+    projectBatchWrap: document.getElementById("project-batch-wrap"),
+    projectBatchTrigger: document.getElementById("project-batch-menu-trigger"),
+    projectBatchMenu: document.getElementById("project-batch-menu"),
     backToProjects: document.getElementById("back-to-projects"),
     pdTitle: document.getElementById("pd-title"),
     pdStatus: document.getElementById("pd-status"),
@@ -110,6 +118,16 @@ const U = {
     toolDrawer: document.querySelector(".tool-detail-panel"),
     toolRefresh: document.getElementById("tool-refresh-btn"),
     toolSave: document.getElementById("tool-save-btn"),
+    toast: document.getElementById("app-toast"),
+    toastTitle: document.getElementById("app-toast-title"),
+    toastText: document.getElementById("app-toast-text"),
+    toastCountdown: document.getElementById("app-toast-countdown"),
+    toastClose: document.getElementById("app-toast-close"),
+    confirmBackdrop: document.getElementById("confirm-backdrop"),
+    confirmTitle: document.getElementById("confirm-title"),
+    confirmText: document.getElementById("confirm-text"),
+    confirmCancel: document.getElementById("confirm-cancel"),
+    confirmAccept: document.getElementById("confirm-accept"),
 };
 
 const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -140,6 +158,84 @@ function addNotice(notice, bump = true) {
     li.innerHTML = `<div class="notice-title">${esc(notice.title || "系统通知")}</div><div class="notice-text">${esc(notice.text || "")}</div>`;
     U.noticeList.prepend(li);
     if (bump) U.noticeBadge.textContent = String(Number(U.noticeBadge.textContent || 0) + 1);
+}
+
+
+function clearToastTimers() {
+    if (S.toastState.timeoutId) window.clearTimeout(S.toastState.timeoutId);
+    if (S.toastState.intervalId) window.clearInterval(S.toastState.intervalId);
+    S.toastState.timeoutId = null;
+    S.toastState.intervalId = null;
+}
+
+function closeToast() {
+    clearToastTimers();
+    if (!U.toast) return;
+    U.toast.hidden = true;
+    U.toast.className = "app-toast";
+}
+
+function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000 } = {}) {
+    if (!U.toast || !U.toastTitle || !U.toastText || !U.toastCountdown) return;
+    clearToastTimers();
+    S.toastState.remaining = Math.max(1, Math.ceil(durationMs / 1000));
+    U.toastTitle.textContent = title;
+    U.toastText.textContent = text;
+    U.toastCountdown.textContent = String(S.toastState.remaining);
+    U.toast.hidden = false;
+    U.toast.className = `app-toast is-open is-${kind}`;
+    S.toastState.intervalId = window.setInterval(() => {
+        S.toastState.remaining = Math.max(0, S.toastState.remaining - 1);
+        if (S.toastState.remaining > 0) U.toastCountdown.textContent = String(S.toastState.remaining);
+    }, 1000);
+    S.toastState.timeoutId = window.setTimeout(closeToast, durationMs);
+    icons();
+}
+
+function queueResourceSave(kind) {
+    const timerKey = kind === "tool" ? "tool" : "skill";
+    const currentTimer = S.resourceSaveTimers?.[timerKey];
+    if (currentTimer) window.clearTimeout(currentTimer);
+    S.resourceSaveTimers[timerKey] = window.setTimeout(() => {
+        S.resourceSaveTimers[timerKey] = null;
+        if (timerKey === "tool") {
+            void saveTool();
+            return;
+        }
+        void saveSkill();
+    }, 320);
+}
+
+function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, returnFocus = null }) {
+    S.confirmState = { onConfirm, returnFocus };
+    U.confirmTitle.textContent = title;
+    U.confirmText.textContent = text;
+    U.confirmAccept.textContent = confirmLabel;
+    U.confirmAccept.className = `toolbar-btn ${confirmKind}`;
+    U.confirmBackdrop.hidden = false;
+    U.confirmBackdrop.classList.add("is-open");
+    window.requestAnimationFrame(() => U.confirmCancel?.focus());
+}
+
+function closeConfirm({ restoreFocus = true } = {}) {
+    const returnFocus = S.confirmState?.returnFocus;
+    S.confirmState = null;
+    U.confirmBackdrop.hidden = true;
+    U.confirmBackdrop.classList.remove("is-open");
+    if (restoreFocus) returnFocus?.focus?.();
+}
+
+async function acceptConfirm() {
+    if (!S.confirmState?.onConfirm) return;
+    U.confirmAccept.disabled = true;
+    U.confirmCancel.disabled = true;
+    try {
+        await S.confirmState.onConfirm();
+        closeConfirm();
+    } finally {
+        U.confirmAccept.disabled = false;
+        U.confirmCancel.disabled = false;
+    }
 }
 
 function modelScopeLabel(scope) {
@@ -661,16 +757,94 @@ function sendCeoMessage() {
     S.ceoWs.send(JSON.stringify({ type: "client.user_message", session_id: "web:shared", text }));
 }
 
+const canDeleteSingle = () => true;
+const canDeleteBatch = (v) => ["blocked", "completed", "failed", "canceled", "archived"].includes(pStatus(v));
+
+function statusBucketMatches(project, bucketKey) {
+    const status = pStatus(project?.status);
+    if (bucketKey === "blocked") return status === "blocked";
+    if (bucketKey === "completed") return status === "completed";
+    if (bucketKey === "failed") return ["failed", "canceled"].includes(status);
+    if (bucketKey === "running") return canPause(status);
+    return false;
+}
+
+function getSelectedProjects() {
+    return S.projects.filter((project) => S.selectedProjects.has(project.project_id));
+}
+
+function setProjectMenuVisibility() {
+    const selectOpen = !!(S.multiSelectMode && S.projectSelectMenuOpen);
+    const batchOpen = !!(S.multiSelectMode && S.projectBatchMenuOpen);
+    if (U.projectSelectWrap) U.projectSelectWrap.hidden = !S.multiSelectMode;
+    if (U.projectBatchWrap) U.projectBatchWrap.hidden = !S.multiSelectMode;
+    if (U.projectSelectMenu) U.projectSelectMenu.hidden = !selectOpen;
+    if (U.projectBatchMenu) U.projectBatchMenu.hidden = !batchOpen;
+    U.projectSelectTrigger?.setAttribute("aria-expanded", selectOpen ? "true" : "false");
+    U.projectBatchTrigger?.setAttribute("aria-expanded", batchOpen ? "true" : "false");
+}
+
+function setProjectMenuOpen(menu, open) {
+    if (menu === "select") {
+        S.projectSelectMenuOpen = !!open;
+        if (open) S.projectBatchMenuOpen = false;
+    } else {
+        S.projectBatchMenuOpen = !!open;
+        if (open) S.projectSelectMenuOpen = false;
+    }
+    setProjectMenuVisibility();
+}
+
+function closeProjectMenus() {
+    S.projectSelectMenuOpen = false;
+    S.projectBatchMenuOpen = false;
+    setProjectMenuVisibility();
+}
+
+function setMultiSelectMode(enabled) {
+    S.multiSelectMode = !!enabled;
+    if (!S.multiSelectMode) {
+        S.selectedProjects.clear();
+        closeProjectMenus();
+    }
+    renderProjects();
+}
+
+function toggleProjectSelection(projectId) {
+    if (S.selectedProjects.has(projectId)) S.selectedProjects.delete(projectId);
+    else S.selectedProjects.add(projectId);
+    renderProjects();
+}
+
 function syncProjectSelection() {
-    const ids = new Set(S.projects.map((p) => p.project_id));
+    const ids = new Set(S.projects.map((project) => project.project_id));
     [...S.selectedProjects].forEach((id) => !ids.has(id) && S.selectedProjects.delete(id));
+    if (!S.multiSelectMode) S.selectedProjects.clear();
 }
 
 function updateProjectToolbar() {
-    const selected = S.projects.filter((p) => S.selectedProjects.has(p.project_id));
+    const selected = getSelectedProjects();
     U.projectSummary.textContent = `已选择 ${selected.length} 项`;
-    U.pauseBatch.disabled = S.projectBusy || !selected.some((p) => canPause(p.status));
-    U.resumeBatch.disabled = S.projectBusy || !selected.some((p) => canResume(p.status));
+    if (U.projectMultiToggle) {
+        U.projectMultiToggle.textContent = S.multiSelectMode ? "取消多选" : "多选";
+        U.projectMultiToggle.setAttribute("aria-pressed", S.multiSelectMode ? "true" : "false");
+        U.projectMultiToggle.disabled = S.projectBusy;
+    }
+    const selectButtons = [...(U.projectSelectMenu?.querySelectorAll("[data-select-bucket]") || [])];
+    selectButtons.forEach((button) => {
+        button.disabled = S.projectBusy || !S.projects.some((project) => statusBucketMatches(project, button.dataset.selectBucket));
+    });
+    const batchButtons = [...(U.projectBatchMenu?.querySelectorAll("[data-batch-action]") || [])];
+    batchButtons.forEach((button) => {
+        const action = button.dataset.batchAction;
+        const enabled = action === "pause"
+            ? selected.some((project) => canPause(project.status))
+            : action === "resume"
+                ? selected.some((project) => canResume(project.status))
+                : selected.some((project) => canDeleteBatch(project.status));
+        button.disabled = S.projectBusy;
+    });
+    setProjectMenuVisibility();
 }
 
 function setDrawerOpen(backdrop, drawer, open) {
@@ -715,6 +889,10 @@ function renderToolActions() {
 }
 
 function clearSkillSelection() {
+    if (S.resourceSaveTimers?.skill) {
+        window.clearTimeout(S.resourceSaveTimers.skill);
+        S.resourceSaveTimers.skill = null;
+    }
     S.selectedSkill = null;
     S.skillFiles = [];
     S.skillContents = {};
@@ -724,9 +902,58 @@ function clearSkillSelection() {
 }
 
 function clearToolSelection() {
+    if (S.resourceSaveTimers?.tool) {
+        window.clearTimeout(S.resourceSaveTimers.tool);
+        S.resourceSaveTimers.tool = null;
+    }
     S.selectedTool = null;
     renderTools();
     renderToolDetail();
+}
+
+function primaryProjectAction(status) {
+    if (canPause(status)) return { action: "pause", label: "暂停", tone: "warn" };
+    if (canResume(status)) return { action: "resume", label: "恢复", tone: "success" };
+    return null;
+}
+
+function projectActionText(action) {
+    return ({ pause: "暂停", resume: "恢复", delete: "删除" }[action] || "操作");
+}
+
+async function requestProjectAction(projectId, action) {
+    if (action === "pause") return ApiClient.pauseProject(projectId);
+    if (action === "resume") return ApiClient.resumeProject(projectId);
+    if (action === "delete") return ApiClient.deleteProject(projectId);
+    throw new Error(`Unsupported project action: ${action}`);
+}
+
+function confirmDeleteProject(project, trigger) {
+    closeProjectMenus();
+    const text = canPause(project.status)
+        ? "将先终止项目，再彻底删除该项目及关联数据，且不可恢复。"
+        : "将彻底删除该项目及关联数据，且不可恢复。";
+    openConfirm({
+        title: "确认删除项目",
+        text,
+        confirmLabel: "确认删除",
+        confirmKind: "danger",
+        returnFocus: trigger,
+        onConfirm: () => runProjectAction(project.project_id, "delete"),
+    });
+}
+
+function confirmBatchDelete(trigger) {
+    closeProjectMenus();
+    const deletable = getSelectedProjects().filter((project) => canDeleteBatch(project.status));
+    openConfirm({
+        title: "确认批量删除",
+        text: `本次将删除 ${deletable.length} 个项目及其关联数据，操作不可恢复。`,
+        confirmLabel: "确认批量删除",
+        confirmKind: "danger",
+        returnFocus: trigger,
+        onConfirm: () => runProjectBatchAction("delete"),
+    });
 }
 
 function renderProjects() {
@@ -737,31 +964,51 @@ function renderProjects() {
     }
     S.projects.forEach((p) => {
         const selected = S.selectedProjects.has(p.project_id);
+        const primaryAction = primaryProjectAction(p.status);
         const el = document.createElement("div");
-        el.className = `project-card${selected ? " is-selected" : ""}`;
+        el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
         el.innerHTML = `
             <div class="pc-topbar">
-                <label class="project-select-toggle"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""}><span>选择</span></label>
+                <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.projectBusy ? "disabled" : ""}><span>勾选</span></label>
                 <span class="status-badge" data-status="${esc(p.status)}">${esc(String(p.status || "").toUpperCase())}</span>
             </div>
             <div class="pc-header"><div><h3 class="pc-title">${esc(p.title)}</h3><span class="pc-id">${esc(p.project_id)}</span></div></div>
             <div class="pc-summary">${esc(p.summary || "暂无摘要")}</div>
             <div class="pc-stats">${esc(String(p.active_unit_count || 0))} 个活动单元</div>
             <div class="pc-actions">
-                <button class="project-action-btn warn" type="button" data-action="pause" ${canPause(p.status) ? "" : "disabled"}>暂停</button>
-                <button class="project-action-btn success" type="button" data-action="resume" ${canResume(p.status) ? "" : "disabled"}>恢复</button>
+                <div class="pc-actions-left">
+                    ${primaryAction ? `<button class="project-action-btn ${primaryAction.tone}" type="button" data-action="${primaryAction.action}" ${S.projectBusy ? "disabled" : ""}>${primaryAction.label}</button>` : ""}
+                </div>
+                <div class="pc-actions-right">
+                    <button class="project-action-btn danger" type="button" data-action="delete" ${S.projectBusy || !canDeleteSingle(p.status) ? "disabled" : ""}>删除</button>
+                </div>
             </div>
         `;
-        el.querySelector(".project-select-checkbox")?.addEventListener("change", (e) => {
+        const toggle = el.querySelector(".project-select-toggle");
+        const checkbox = el.querySelector(".project-select-checkbox");
+        toggle?.addEventListener("click", (e) => e.stopPropagation());
+        checkbox?.addEventListener("change", (e) => {
+            e.stopPropagation();
             if (e.target.checked) S.selectedProjects.add(p.project_id);
             else S.selectedProjects.delete(p.project_id);
             renderProjects();
         });
         el.querySelectorAll(".project-action-btn").forEach((btn) => btn.addEventListener("click", async (e) => {
             e.stopPropagation();
-            await runProjectAction(p.project_id, btn.dataset.action);
+            const action = btn.dataset.action;
+            if (action === "delete") {
+                confirmDeleteProject(p, btn);
+                return;
+            }
+            await runProjectAction(p.project_id, action);
         }));
-        el.addEventListener("click", () => openProject(p.project_id));
+        el.addEventListener("click", () => {
+            if (S.multiSelectMode) {
+                toggleProjectSelection(p.project_id);
+                return;
+            }
+            openProject(p.project_id);
+        });
         U.projectGrid.appendChild(el);
     });
     updateProjectToolbar();
@@ -776,21 +1023,65 @@ async function loadProjects() {
         renderProjects();
     } catch (e) {
         U.projectGrid.innerHTML = `<div class="empty-state error" style="grid-column: 1/-1;">加载项目失败：${esc(e.message)}</div>`;
+        showToast({ title: "加载失败", text: e.message || "Unknown error", kind: "error" });
     }
 }
 
 async function runProjectAction(projectId, action) {
     S.projectBusy = true;
     updateProjectToolbar();
+    renderProjects();
     try {
-        if (action === "pause") await ApiClient.pauseProject(projectId);
-        if (action === "resume") await ApiClient.resumeProject(projectId);
+        await requestProjectAction(projectId, action);
+        if (action === "delete" && S.currentProjectId === projectId) {
+            S.currentProjectId = null;
+            switchView("projects");
+        }
         await loadProjects();
+        showToast({ title: `${projectActionText(action)}成功`, text: `项目已${projectActionText(action)}。`, kind: "success" });
     } catch (e) {
         addMsg(`项目操作失败：${projectId} - ${e.message}`, "system");
+        showToast({ title: `${projectActionText(action)}失败`, text: e.message || "Unknown error", kind: "error" });
     } finally {
         S.projectBusy = false;
         updateProjectToolbar();
+        renderProjects();
+    }
+}
+
+async function runProjectBatchAction(action) {
+    const selected = getSelectedProjects();
+    const eligible = selected.filter((project) => {
+        if (action === "pause") return canPause(project.status);
+        if (action === "resume") return canResume(project.status);
+        if (action === "delete") return canDeleteBatch(project.status);
+        return false;
+    });
+    const skipped = selected.length - eligible.length;
+    if (!eligible.length) {
+        showToast({ title: "没有可操作项目", text: "当前选择中没有符合条件的项目。", kind: "warn" });
+        return;
+    }
+    S.projectBusy = true;
+    closeProjectMenus();
+    updateProjectToolbar();
+    renderProjects();
+    try {
+        const results = await Promise.allSettled(eligible.map((project) => requestProjectAction(project.project_id, action)));
+        const success = results.filter((result) => result.status === "fulfilled").length;
+        const failed = results.length - success;
+        await loadProjects();
+        showToast({
+            title: `批量${projectActionText(action)}完成`,
+            text: `成功 ${success} 项，跳过 ${skipped} 项，失败 ${failed} 项`,
+            kind: failed ? "warn" : "success",
+        });
+    } catch (e) {
+        showToast({ title: `批量${projectActionText(action)}失败`, text: e.message || "Unknown error", kind: "error" });
+    } finally {
+        S.projectBusy = false;
+        updateProjectToolbar();
+        renderProjects();
     }
 }
 
@@ -978,52 +1269,6 @@ function renderSkills() {
     });
 }
 
-function renderSkillDetail() {
-    if (!S.selectedSkill) { U.skillEmpty.style.display = "block"; U.skillDetail.innerHTML = ""; return; }
-    U.skillEmpty.style.display = "none";
-    const roles = ["ceo", "execution", "inspection"];
-    U.skillDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedSkill.display_name)}</h2><p class="subtitle">${esc(S.selectedSkill.skill_id)}</p></div></div><label class="role-toggle checked"><input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}><span>已启用</span></label><div class="resource-section"><h3>允许角色</h3><div class="resource-filter-row">${roles.map((r) => `<label class="role-toggle ${S.selectedSkill.allowed_roles.includes(r) ? "checked" : ""}"><input type="checkbox" class="skill-role" data-role="${r}" ${S.selectedSkill.allowed_roles.includes(r) ? "checked" : ""}><span>${esc(roleLabel(r))}</span></label>`).join("")}</div></div><div class="resource-section"><h3>可编辑文件</h3><div class="resource-filter-row">${S.skillFiles.map((f) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === f.file_key ? "active" : ""}" data-file="${esc(f.file_key)}">${esc(f.file_key)}</button>`).join("")}</div><textarea id="skill-editor" rows="18" class="resource-editor">${esc(S.skillContents[S.selectedSkillFile] || "")}</textarea></div></article>`;
-    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => { S.selectedSkill.enabled = !!e.target.checked; });
-    U.skillDetail.querySelectorAll(".skill-role").forEach((cb) => cb.addEventListener("change", (e) => {
-        const set = new Set(S.selectedSkill.allowed_roles || []);
-        if (e.target.checked) set.add(e.target.dataset.role); else set.delete(e.target.dataset.role);
-        S.selectedSkill.allowed_roles = [...set];
-        renderSkillDetail();
-    }));
-    U.skillDetail.querySelectorAll(".skill-file").forEach((btn) => btn.addEventListener("click", () => {
-        const editor = document.getElementById("skill-editor");
-        if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
-        S.selectedSkillFile = btn.dataset.file;
-        renderSkillDetail();
-    }));
-}
-
-async function loadSkills() { S.skills = await ApiClient.getSkills(0, 300); renderSkills(); }
-
-async function openSkill(skillId) {
-    const [skill, files] = await Promise.all([ApiClient.getSkill(skillId), ApiClient.getSkillFiles(skillId)]);
-    S.selectedSkill = skill;
-    S.skillFiles = files;
-    S.selectedSkillFile = files[0]?.file_key || "";
-    S.skillContents = {};
-    await Promise.all(files.map(async (file) => {
-        const data = await ApiClient.getSkillFile(skillId, file.file_key);
-        S.skillContents[file.file_key] = data.content || "";
-    }));
-    renderSkills();
-    renderSkillDetail();
-}
-
-async function saveSkill() {
-    if (!S.selectedSkill) return;
-    const editor = document.getElementById("skill-editor");
-    if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
-    for (const [key, content] of Object.entries(S.skillContents)) await ApiClient.saveSkillFile(S.selectedSkill.skill_id, key, content);
-    await ApiClient.updateSkillPolicy(S.selectedSkill.skill_id, { enabled: !!S.selectedSkill.enabled, allowed_roles: S.selectedSkill.allowed_roles || [] });
-    await loadSkills();
-    await openSkill(S.selectedSkill.skill_id);
-}
-
 function filterTools() {
     const q = String(U.toolSearch.value || "").trim().toLowerCase();
     return S.tools.filter((tool) => {
@@ -1042,67 +1287,21 @@ function renderTools() {
     if (!items.length) return void (U.toolList.innerHTML = '<div class="empty-state">没有匹配的工具族。</div>');
     items.forEach((tool) => {
         const el = document.createElement("button");
-        el.type = "button";
-        el.className = `resource-list-item${S.selectedTool?.tool_id === tool.tool_id ? " selected" : ""}`;
-        el.innerHTML = `<div class="resource-list-title">${esc(tool.display_name)}</div><div class="resource-list-subtitle">${esc(tool.tool_id)}</div><div class="resource-list-meta">${tool.enabled ? "已启用" : "已禁用"} · ${(tool.actions || []).length} 个动作</div>`;
-        el.addEventListener("click", () => openTool(tool.tool_id));
-        U.toolList.appendChild(el);
-    });
-}
-
-function renderToolDetail() {
-    if (!S.selectedTool) { U.toolEmpty.style.display = "block"; U.toolDetail.innerHTML = ""; return; }
-    U.toolEmpty.style.display = "none";
-    const roles = ["ceo", "execution", "inspection"];
-    U.toolDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedTool.display_name)}</h2><p class="subtitle">${esc(S.selectedTool.tool_id)}</p></div></div><label class="role-toggle checked"><input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}><span>已启用</span></label><div class="resource-section"><h3>动作矩阵</h3><div class="matrix-table"><table><thead><tr><th>动作</th><th>风险</th>${roles.map((r) => `<th>${esc(roleLabel(r))}</th>`).join("")}</tr></thead><tbody>${(S.selectedTool.actions || []).map((a) => `<tr><td>${esc(a.label || a.action_id)}</td><td>${esc(a.risk_level || "medium")}</td>${roles.map((r) => `<td><input type="checkbox" class="tool-role" data-action="${esc(a.action_id)}" data-role="${r}" ${a.allowed_roles?.includes(r) ? "checked" : ""}></td>`).join("")}</tr>`).join("")}</tbody></table></div></div></article>`;
-    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => { S.selectedTool.enabled = !!e.target.checked; });
-    U.toolDetail.querySelectorAll(".tool-role").forEach((cb) => cb.addEventListener("change", (e) => {
-        const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
-        if (!action) return;
-        const set = new Set(action.allowed_roles || []);
-        if (e.target.checked) set.add(e.target.dataset.role); else set.delete(e.target.dataset.role);
-        action.allowed_roles = [...set];
-    }));
-}
-
-async function loadTools() { S.tools = await ApiClient.getTools(0, 300); renderTools(); }
-async function openTool(toolId) { S.selectedTool = await ApiClient.getTool(toolId); renderTools(); renderToolDetail(); }
-async function saveTool() {
-    if (!S.selectedTool) return;
-    await ApiClient.updateToolPolicy(S.selectedTool.tool_id, { enabled: !!S.selectedTool.enabled, actions: (S.selectedTool.actions || []).map((a) => ({ action_id: a.action_id, allowed_roles: a.allowed_roles || [] })) });
-    await loadTools();
-    await openTool(S.selectedTool.tool_id);
-}
-
-function toggleTheme() {
-    const html = document.documentElement;
-    const dark = html.getAttribute("data-theme") === "dark";
-    html.setAttribute("data-theme", dark ? "light" : "dark");
-    const darkIcon = U.theme.querySelector(".dark-icon");
-    const lightIcon = U.theme.querySelector(".light-icon");
-    if (darkIcon && lightIcon) { darkIcon.style.display = dark ? "none" : "block"; lightIcon.style.display = dark ? "block" : "none"; }
-}
-
-function renderSkillDetail() {
-    if (!S.selectedSkill) {
-        U.skillEmpty.style.display = "block";
-        U.skillDetail.innerHTML = "";
-        setDrawerOpen(U.skillBackdrop, U.skillDrawer, false);
-        renderSkillActions();
-        return;
-    }
-    U.skillEmpty.style.display = "none";
-    setDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
+        el    U.skillDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header" style="display:flex; justify-content:space-between; align-items:flex-start;"><div><h2>${esc(S.selectedSkill.display_name)}</h2><p class="subtitle">${esc(S.selectedSkill.skill_id)}</p></div><div style="display:flex; gap:8px;"><button type="button" class="toolbar-btn ghost" id="skill-modal-close" style="padding: 4px 8px;">关闭</button><button type="button" class="toolbar-btn success" id="skill-modal-save" style="padding: 4px 16px;">保存</button></div></div><label class="role-toggle checked"><input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}><span>启用该技能</span></label><div class="resource-section"><h3>允许的角色</h3><div class="resource-filter-row">${roles.map((r) => `<label class="role-toggle ${allowedRoles.includes(r) ? "checked" : ""}"><input type="checkbox" class="skill-role" data-role="${r}" ${allowedRoles.includes(r) ? "checked" : ""}><span>${esc(roleLabel(r))}</span></label>`).join("")}</div></div><div class="resource-section"><h3>可编辑文件</h3><div class="resource-filter-row">${S.skillFiles.map((f) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === f.file_key ? "active" : ""}" data-file="${esc(f.file_key)}">${esc(f.file_key)}</button>`).join("")}</div><textarea id="skill-editor" rows="18" class="resource-editor">${esc(S.skillContents[S.selectedSkillFile] || "")}</textarea></div></article>`;
+    U.skillDetail.querySelector("#skill-modal-close")?.addEventListener("click", () => clearSkillSelection());
+    U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => saveSkill());
+    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => { S.selectedSkill.enabled = !!e.target.checked; queueResourceSave("skill"); });etDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
     const roles = ["ceo", "execution", "inspection"];
     const allowedRoles = Array.isArray(S.selectedSkill.allowed_roles) ? S.selectedSkill.allowed_roles : [];
-    U.skillDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedSkill.display_name)}</h2><p class="subtitle">${esc(S.selectedSkill.skill_id)}</p></div></div><label class="role-toggle checked"><input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}><span>已启用</span></label><div class="resource-section"><h3>允许角色</h3><div class="resource-filter-row">${roles.map((r) => `<label class="role-toggle ${allowedRoles.includes(r) ? "checked" : ""}"><input type="checkbox" class="skill-role" data-role="${r}" ${allowedRoles.includes(r) ? "checked" : ""}><span>${esc(roleLabel(r))}</span></label>`).join("")}</div></div><div class="resource-section"><h3>可编辑文件</h3><div class="resource-filter-row">${S.skillFiles.map((f) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === f.file_key ? "active" : ""}" data-file="${esc(f.file_key)}">${esc(f.file_key)}</button>`).join("")}</div><textarea id="skill-editor" rows="18" class="resource-editor">${esc(S.skillContents[S.selectedSkillFile] || "")}</textarea></div></article>`;
-    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => { S.selectedSkill.enabled = !!e.target.checked; });
+    U.skillDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedSkill.display_name)}</h2><p class="subtitle">${esc(S.selectedSkill.skill_id)}</p></div></div><label class="role-toggle checked"><input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}><span>???</span></label><div class="resource-section"><h3>????</h3><div class="resource-filter-row">${roles.map((r) => `<label class="role-toggle ${allowedRoles.includes(r) ? "checked" : ""}"><input type="checkbox" class="skill-role" data-role="${r}" ${allowedRoles.includes(r) ? "checked" : ""}><span>${esc(roleLabel(r))}</span></label>`).join("")}</div></div><div class="resource-section"><h3>?????</h3><div class="resource-filter-row">${S.skillFiles.map((f) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === f.file_key ? "active" : ""}" data-file="${esc(f.file_key)}">${esc(f.file_key)}</button>`).join("")}</div><textarea id="skill-editor" rows="18" class="resource-editor">${esc(S.skillContents[S.selectedSkillFile] || "")}</textarea></div></article>`;
+    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => { S.selectedSkill.enabled = !!e.target.checked; queueResourceSave("skill"); });
     U.skillDetail.querySelectorAll(".skill-role").forEach((cb) => cb.addEventListener("change", (e) => {
         const set = new Set(allowedRoles);
         if (e.target.checked) set.add(e.target.dataset.role);
         else set.delete(e.target.dataset.role);
         S.selectedSkill.allowed_roles = [...set];
         renderSkillDetail();
+        queueResourceSave("skill");
     }));
     U.skillDetail.querySelectorAll(".skill-file").forEach((btn) => btn.addEventListener("click", () => {
         const editor = document.getElementById("skill-editor");
@@ -1115,10 +1314,11 @@ function renderSkillDetail() {
 
 async function loadSkills() {
     U.skillList.innerHTML = '<div class="empty-state">Loading skills...</div>';
+    const selectedId = S.selectedSkill?.skill_id || "";
     try {
         S.skills = await ApiClient.getSkills(0, 300);
-        if (S.selectedSkill) {
-            const next = S.skills.find((skill) => skill.skill_id === S.selectedSkill.skill_id);
+        if (selectedId) {
+            const next = S.skills.find((skill) => skill.skill_id === selectedId);
             if (next) S.selectedSkill = next;
             else clearSkillSelection();
         }
@@ -1132,10 +1332,12 @@ async function loadSkills() {
     }
 }
 
-async function openSkill(skillId) {
-    setDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
-    U.skillEmpty.style.display = "none";
-    U.skillDetail.innerHTML = '<div class="empty-state">Loading skill details...</div>';
+async function openSkill(skillId, quiet = false) {
+    if (!quiet) {
+        setDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
+        U.skillEmpty.style.display = "none";
+        U.skillDetail.innerHTML = '<div class="empty-state">Loading skill details...</div>';
+    }
     try {
         const [skill, files] = await Promise.all([ApiClient.getSkill(skillId), ApiClient.getSkillFiles(skillId)]);
         S.selectedSkill = skill;
@@ -1157,30 +1359,25 @@ async function openSkill(skillId) {
 }
 
 async function saveSkill() {
-    if (!S.selectedSkill) {
+    if (S.resourceSaveTimers?.skill) {
+        window.clearTimeout(S.resourceSaveTimers.skill);
+        S.resourceSaveTimers.skill = null;
+    }
+    const selectedId = String(S.selectedSkill?.skill_id || "").trim();
+    const displayName = String(S.selectedSkill?.display_name || selectedId || "Skill").trim();
+    const enabled = !!S.selectedSkill?.enabled;
+    const allowedRoles = Array.isArray(S.selectedSkill?.allowed_roles) ? [...S.selectedSkill.allowed_roles] : [];
+    if (!selectedId || !S.selectedSkill) {
         addNotice({ kind: "resource_failed", title: "No skill selected", text: "Select a skill before saving." });
+        showToast({ title: "保存失败", text: "未选择 Skill", kind: "error" });
         return;
     }
     S.skillBusy = true;
     renderSkillActions();
-    try {
-        const editor = document.getElementById("skill-editor");
-        if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
-        for (const [key, content] of Object.entries(S.skillContents)) {
-            await ApiClient.saveSkillFile(S.selectedSkill.skill_id, key, content);
-        }
-        await ApiClient.updateSkillPolicy(S.selectedSkill.skill_id, {
-            enabled: !!S.selectedSkill.enabled,
-            allowed_roles: S.selectedSkill.allowed_roles || [],
-        });
-        const selectedId = S.selectedSkill.skill_id;
-        await loadSkills();
-        await openSkill(selectedId);
-        addNotice({ kind: "resource_saved", title: "Skill saved", text: S.selectedSkill.display_name || selectedId });
-    } catch (e) {
-        addNotice({ kind: "resource_failed", title: "Skill save failed", text: e.message || "Unknown error" });
-    } finally {
-        S.skillBusy = false;
+       U.toolDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header" style="display:flex; justify-content:space-between; align-items:flex-start;"><div><h2>${esc(S.selectedTool.display_name)}</h2><p class="subtitle">${esc(S.selectedTool.tool_id)}</p></div><div style="display:flex; gap:8px;"><button type="button" class="toolbar-btn ghost" id="tool-modal-close" style="padding: 4px 8px;">关闭</button><button type="button" class="toolbar-btn success" id="tool-modal-save" style="padding: 4px 16px;">保存</button></div></div><label class="role-toggle checked"><input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}><span>启用工具族</span></label><div class="resource-section"><h3>分配动作权限</h3><div class="matrix-table"><table><thead><tr><th>动作</th><th>风险</th>${roles.map((r) => `<th>${esc(roleLabel(r))}</th>`).join("")}</tr></thead><tbody>${(S.selectedTool.actions || []).map((a) => `<tr><td>${esc(a.label || a.action_id)}</td><td>${esc(a.risk_level || "medium")}</td>${roles.map((r) => `<td><input type="checkbox" class="tool-role" data-action="${esc(a.action_id)}" data-role="${r}" ${a.allowed_roles?.includes(r) ? "checked" : ""}></td>`).join("")}</tr>`).join("")}</tbody></table></div></div></article>`;
+    U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", () => clearToolSelection());
+    U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => saveTool());
+    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => { S.selectedTool.enabled = !!e.target.checked; queueResourceSave("tool"); });     S.skillBusy = false;
         renderSkillActions();
     }
 }
@@ -1196,8 +1393,8 @@ function renderToolDetail() {
     U.toolEmpty.style.display = "none";
     setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
     const roles = ["ceo", "execution", "inspection"];
-    U.toolDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedTool.display_name)}</h2><p class="subtitle">${esc(S.selectedTool.tool_id)}</p></div></div><label class="role-toggle checked"><input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}><span>已启用</span></label><div class="resource-section"><h3>动作矩阵</h3><div class="matrix-table"><table><thead><tr><th>动作</th><th>风险</th>${roles.map((r) => `<th>${esc(roleLabel(r))}</th>`).join("")}</tr></thead><tbody>${(S.selectedTool.actions || []).map((a) => `<tr><td>${esc(a.label || a.action_id)}</td><td>${esc(a.risk_level || "medium")}</td>${roles.map((r) => `<td><input type="checkbox" class="tool-role" data-action="${esc(a.action_id)}" data-role="${r}" ${a.allowed_roles?.includes(r) ? "checked" : ""}></td>`).join("")}</tr>`).join("")}</tbody></table></div></div></article>`;
-    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => { S.selectedTool.enabled = !!e.target.checked; });
+    U.toolDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedTool.display_name)}</h2><p class="subtitle">${esc(S.selectedTool.tool_id)}</p></div></div><label class="role-toggle checked"><input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}><span>???</span></label><div class="resource-section"><h3>????</h3><div class="matrix-table"><table><thead><tr><th>??</th><th>??</th>${roles.map((r) => `<th>${esc(roleLabel(r))}</th>`).join("")}</tr></thead><tbody>${(S.selectedTool.actions || []).map((a) => `<tr><td>${esc(a.label || a.action_id)}</td><td>${esc(a.risk_level || "medium")}</td>${roles.map((r) => `<td><input type="checkbox" class="tool-role" data-action="${esc(a.action_id)}" data-role="${r}" ${a.allowed_roles?.includes(r) ? "checked" : ""}></td>`).join("")}</tr>`).join("")}</tbody></table></div></div></article>`;
+    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => { S.selectedTool.enabled = !!e.target.checked; queueResourceSave("tool"); });
     U.toolDetail.querySelectorAll(".tool-role").forEach((cb) => cb.addEventListener("change", (e) => {
         const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
         if (!action) return;
@@ -1205,16 +1402,18 @@ function renderToolDetail() {
         if (e.target.checked) set.add(e.target.dataset.role);
         else set.delete(e.target.dataset.role);
         action.allowed_roles = [...set];
+        queueResourceSave("tool");
     }));
     renderToolActions();
 }
 
 async function loadTools() {
     U.toolList.innerHTML = '<div class="empty-state">Loading tools...</div>';
+    const selectedId = S.selectedTool?.tool_id || "";
     try {
         S.tools = await ApiClient.getTools(0, 300);
-        if (S.selectedTool) {
-            const next = S.tools.find((tool) => tool.tool_id === S.selectedTool.tool_id);
+        if (selectedId) {
+            const next = S.tools.find((tool) => tool.tool_id === selectedId);
             if (next) S.selectedTool = next;
             else clearToolSelection();
         }
@@ -1228,10 +1427,12 @@ async function loadTools() {
     }
 }
 
-async function openTool(toolId) {
-    setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
-    U.toolEmpty.style.display = "none";
-    U.toolDetail.innerHTML = '<div class="empty-state">Loading tool details...</div>';
+async function openTool(toolId, quiet = false) {
+    if (!quiet) {
+        setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
+        U.toolEmpty.style.display = "none";
+        U.toolDetail.innerHTML = '<div class="empty-state">Loading tool details...</div>';
+    }
     try {
         S.selectedTool = await ApiClient.getTool(toolId);
         renderTools();
@@ -1245,26 +1446,39 @@ async function openTool(toolId) {
 }
 
 async function saveTool() {
-    if (!S.selectedTool) {
+    if (S.resourceSaveTimers?.tool) {
+        window.clearTimeout(S.resourceSaveTimers.tool);
+        S.resourceSaveTimers.tool = null;
+    }
+    const selectedId = String(S.selectedTool?.tool_id || "").trim();
+    const displayName = String(S.selectedTool?.display_name || selectedId || "Tool").trim();
+    const enabled = !!S.selectedTool?.enabled;
+    const actions = Array.isArray(S.selectedTool?.actions)
+        ? S.selectedTool.actions.map((action) => ({
+            action_id: action.action_id,
+            allowed_roles: Array.isArray(action.allowed_roles) ? [...action.allowed_roles] : [],
+        }))
+        : [];
+    if (!selectedId || !S.selectedTool) {
         addNotice({ kind: "resource_failed", title: "No tool selected", text: "Select a tool before saving." });
+        showToast({ title: "保存失败", text: "未选择工具族", kind: "error" });
         return;
     }
     S.toolBusy = true;
     renderToolActions();
     try {
-        await ApiClient.updateToolPolicy(S.selectedTool.tool_id, {
-            enabled: !!S.selectedTool.enabled,
-            actions: (S.selectedTool.actions || []).map((a) => ({
-                action_id: a.action_id,
-                allowed_roles: a.allowed_roles || [],
-            })),
+        await ApiClient.updateToolPolicy(selectedId, {
+            enabled,
+            actions,
         });
-        const selectedId = S.selectedTool.tool_id;
+        await ApiClient.reloadResources();
         await loadTools();
-        await openTool(selectedId);
-        addNotice({ kind: "resource_saved", title: "Tool saved", text: S.selectedTool.display_name || selectedId });
+        await openTool(selectedId, true);
+        addNotice({ kind: "resource_saved", title: "Tool saved", text: displayName || selectedId });
+        showToast({ title: "保存成功", text: "工具权限已保存", kind: "success" });
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Tool save failed", text: e.message || "Unknown error" });
+        showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error" });
     } finally {
         S.toolBusy = false;
         renderToolActions();
@@ -1320,6 +1534,7 @@ function switchView(view) {
         S.projectWs.close();
         S.projectWs = null;
     }
+    if (view !== "projects") setMultiSelectMode(false);
     if (view !== "skills") setDrawerOpen(U.skillBackdrop, U.skillDrawer, false);
     if (view !== "tools") setDrawerOpen(U.toolBackdrop, U.toolDrawer, false);
     S.view = view;
@@ -1395,24 +1610,27 @@ function bind() {
             toggle.classList.toggle("checked", e.target.checked);
         }
     });
-    U.selectActive?.addEventListener("click", () => {
-        S.selectedProjects = new Set(S.projects.filter((p) => canPause(p.status)).map((p) => p.project_id));
+    U.projectMultiToggle?.addEventListener("click", () => setMultiSelectMode(!S.multiSelectMode));
+    U.projectSelectTrigger?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setProjectMenuOpen("select", !S.projectSelectMenuOpen);
+    });
+    U.projectBatchTrigger?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setProjectMenuOpen("batch", !S.projectBatchMenuOpen);
+    });
+    U.projectSelectMenu?.querySelectorAll("[data-select-bucket]")?.forEach((button) => button.addEventListener("click", () => {
+        S.selectedProjects = new Set(S.projects.filter((project) => statusBucketMatches(project, button.dataset.selectBucket)).map((project) => project.project_id));
+        closeProjectMenus();
         renderProjects();
-    });
-    U.selectBlocked?.addEventListener("click", () => {
-        S.selectedProjects = new Set(S.projects.filter((p) => canResume(p.status)).map((p) => p.project_id));
-        renderProjects();
-    });
-    U.selectClear?.addEventListener("click", () => {
-        S.selectedProjects.clear();
-        renderProjects();
-    });
-    U.pauseBatch?.addEventListener("click", async () => {
-        for (const id of [...S.selectedProjects]) await runProjectAction(id, "pause");
-    });
-    U.resumeBatch?.addEventListener("click", async () => {
-        for (const id of [...S.selectedProjects]) await runProjectAction(id, "resume");
-    });
+    }));
+    U.projectBatchMenu?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
+        if (button.dataset.batchAction === "delete") {
+            confirmBatchDelete(button);
+            return;
+        }
+        await runProjectBatchAction(button.dataset.batchAction);
+    }));
     U.closeAgent?.addEventListener("click", () => {
         S.selectedUnitId = null;
         U.feedTitle.textContent = "项目全局动态 / 详情";
@@ -1428,8 +1646,26 @@ function bind() {
     U.toolSave?.addEventListener("click", () => void saveTool());
     U.skillBackdrop?.addEventListener("click", clearSkillSelection);
     U.toolBackdrop?.addEventListener("click", clearToolSelection);
+    U.toastClose?.addEventListener("click", closeToast);
+    U.confirmBackdrop?.addEventListener("click", (e) => {
+        if (e.target === U.confirmBackdrop) closeConfirm();
+    });
+    U.confirmCancel?.addEventListener("click", () => closeConfirm());
+    U.confirmAccept?.addEventListener("click", () => void acceptConfirm());
+    document.addEventListener("click", (e) => {
+        if (!(e.target instanceof Element)) return;
+        if (!e.target.closest(".toolbar-dropdown")) closeProjectMenus();
+    });
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
+        if (S.confirmState) {
+            closeConfirm();
+            return;
+        }
+        if (S.projectSelectMenuOpen || S.projectBatchMenuOpen) {
+            closeProjectMenus();
+            return;
+        }
         if (S.selectedSkill) clearSkillSelection();
         if (S.selectedTool) clearToolSelection();
     });

@@ -196,6 +196,15 @@ async def archive_project(project_id: str):
     return JSONResponse({'ok': True, 'project': project.model_dump(mode='json')})
 
 
+@router.delete('/projects/{project_id}')
+async def delete_project(project_id: str):
+    service = get_org_graph_service()
+    result = await service.delete_project(project_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail='project_not_found')
+    return JSONResponse({'ok': True, **result})
+
+
 @router.get('/projects/{project_id}/tree')
 async def get_tree(project_id: str):
     service = get_org_graph_service()
