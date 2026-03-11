@@ -10,13 +10,16 @@ if not exist "%BOOTSTRAP%" (
   exit /b 1
 )
 
-if exist "%VENV_PYTHON%" goto run_venv_python
-
-where python >nul 2>nul
-if %ERRORLEVEL%==0 goto run_python_path
+if exist "%VENV_PYTHON%" (
+  "%VENV_PYTHON%" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>nul
+  if not errorlevel 1 goto run_venv_python
+)
 
 where py >nul 2>nul
 if %ERRORLEVEL%==0 goto run_py_launcher
+
+where python >nul 2>nul
+if %ERRORLEVEL%==0 goto run_python_path
 
 echo [g3ku] Python not found. Install Python or create a local .venv first.
 exit /b 1

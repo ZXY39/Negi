@@ -9,7 +9,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
-VENV_PYTHON = VENV_DIR / "Scripts" / "python.exe"
+if os.name == "nt":
+    VENV_PYTHON = VENV_DIR / "Scripts" / "python.exe"
+else:
+    VENV_PYTHON = VENV_DIR / "bin" / "python"
 BOOTSTRAP_MARKER = VENV_DIR / ".g3ku_bootstrap_complete"
 MIN_PYTHON = (3, 11)
 

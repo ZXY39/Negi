@@ -9,17 +9,27 @@ if (-not (Test-Path $bootstrap)) {
 }
 
 if (Test-Path $venvPython) {
-    & $venvPython $bootstrap @args
-    exit $LASTEXITCODE
+    $venvReady = $false
+    try {
+        & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" *> $null
+        $venvReady = ($LASTEXITCODE -eq 0)
+    } catch {
+        $venvReady = $false
+    }
 }
 
-if (Get-Command python -ErrorAction SilentlyContinue) {
-    & python $bootstrap @args
+if ($venvReady) {
+    & $venvPython $bootstrap @args
     exit $LASTEXITCODE
 }
 
 if (Get-Command py -ErrorAction SilentlyContinue) {
     & py -3 $bootstrap @args
+    exit $LASTEXITCODE
+}
+
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    & python $bootstrap @args
     exit $LASTEXITCODE
 }
 
