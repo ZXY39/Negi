@@ -1,0 +1,28 @@
+﻿schema_version: 1
+name: agent-browser
+display_name: Agent Browser
+description: Browser automation skill for opening, searching, clicking, filling, and screenshot capture.
+version: "1.0.0"
+content:
+  main: SKILL.md
+governance:
+  enabled_by_default: true
+  allowed_roles:
+    - ceo
+    - execution
+    - execution
+  editable_files:
+    - SKILL.md
+    - skill.yaml
+  risk_level: medium
+runtime:
+  load_action: load
+  requires_tools:
+    - browser.open
+    - browser.click
+    - browser.fill
+    - browser.snapshot
+metadata:
+  tags:
+    - builtin
+

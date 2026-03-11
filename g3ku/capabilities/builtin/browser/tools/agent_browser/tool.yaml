@@ -1,0 +1,76 @@
+﻿schema_version: 1
+name: agent_browser
+label: agent_browser
+description: Browser automation via agent-browser
+entrypoint: g3ku.capabilities.builtin_factories:build_agent_browser
+permissions:
+  network: true
+  filesystem:
+    - workspace
+streaming: false
+admin_only: false
+governance:
+  family: browser
+  actions:
+    - id: open
+      label: Open Page
+      risk_level: low
+      destructive: false
+      allowed_roles: [ceo, execution, inspection]
+      match: {kind: browser_command, command: open}
+    - id: snapshot
+      label: Snapshot DOM
+      risk_level: low
+      destructive: false
+      allowed_roles: [ceo, execution, inspection]
+      match: {kind: browser_command, command: snapshot}
+    - id: click
+      label: Click Element
+      risk_level: medium
+      destructive: false
+      allowed_roles: [ceo, execution, inspection]
+      match: {kind: browser_command, command: click}
+    - id: fill
+      label: Fill Form
+      risk_level: medium
+      destructive: false
+      allowed_roles: [ceo, execution, inspection]
+      match: {kind: browser_command, command: fill}
+    - id: get
+      label: Read State
+      risk_level: low
+      destructive: false
+      allowed_roles: [ceo, execution, inspection]
+      match: {kind: browser_command, command: get}
+    - id: wait
+      label: Wait
+      risk_level: low
+      destructive: false
+      allowed_roles: [ceo, execution, inspection]
+      match: {kind: browser_command, command: wait}
+    - id: cookies
+      label: Cookies
+      risk_level: medium
+      destructive: false
+      allowed_roles: [ceo, inspection]
+      match: {kind: browser_command, command: cookies}
+    - id: storage
+      label: Storage
+      risk_level: medium
+      destructive: false
+      allowed_roles: [ceo, inspection]
+      match: {kind: browser_command, command: storage}
+    - id: screenshot
+      label: Screenshot
+      risk_level: low
+      destructive: false
+      allowed_roles: [ceo, execution, inspection]
+      match: {kind: browser_command, command: screenshot}
+    - id: close
+      label: Close Browser
+      risk_level: low
+      destructive: false
+      allowed_roles: [ceo, execution, inspection]
+      match: {kind: browser_command, command: close}
+
+

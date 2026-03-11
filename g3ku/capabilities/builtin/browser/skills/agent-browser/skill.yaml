@@ -1,0 +1,22 @@
+﻿schema_version: 1
+name: agent-browser
+description: 使用 agent_browser 工具执行网站打开、搜索、点击、填表、登录、截图和状态复用
+trigger:
+  keywords:
+    - 打开网站
+    - 浏览器搜索
+    - 点击页面
+    - 打开浏览器
+    - 让我看到浏览器操作
+  always: false
+requires:
+  tools:
+    - agent_browser
+  bins:
+    - node
+  env: []
+content:
+  main: ../../../../../skills/agent-browser/SKILL.md
+  references:
+    - ../../../../../skills/agent-browser/references/commands.md
+    - ../../../../../skills/agent-browser/references/authentication.md

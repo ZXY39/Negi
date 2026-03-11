@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: capability_install
+label: capability_install
+description: Install a capability pack
+entrypoint: g3ku.capabilities.builtin_factories:build_capability_install
+permissions:
+  network: true
+  filesystem:
+    - workspace
+streaming: false
+admin_only: true
+

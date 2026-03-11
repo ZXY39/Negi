@@ -1,0 +1,17 @@
+﻿schema_version: 1
+name: memory
+description: Two-layer memory system with grep-based recall
+trigger:
+  keywords: []
+  always: true
+requires:
+  tools:
+    - exec
+    - read_file
+    - write_file
+    - edit_file
+  bins: []
+  env: []
+content:
+  main: ../../../../skills/memory/SKILL.md
+  references: []

@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: capability_list
+label: capability_list
+description: List capability packs
+entrypoint: g3ku.capabilities.builtin_factories:build_capability_list
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: true
+

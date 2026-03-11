@@ -1,0 +1,24 @@
+﻿schema_version: 1
+name: memory_search
+label: memory_search
+description: Search indexed memory
+entrypoint: g3ku.capabilities.builtin_factories:build_memory_search
+permissions:
+  network: false
+streaming: false
+admin_only: false
+governance:
+  family: memory
+  actions:
+    - id: search
+      label: Memory Search
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - execution
+      match:
+        kind: static
+
+

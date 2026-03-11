@@ -1,0 +1,32 @@
+schema_version: 1
+name: capability-admin
+display_name: Capability Admin
+version: 0.1.0
+kind:
+  - tool
+compat:
+  g3ku_core: '>=1.0.0,<2.0.0'
+  capability_api: '1.x'
+source:
+  type: builtin
+  uri: null
+defaults:
+  enabled: true
+requires:
+  bins:
+    - git
+  env: []
+  python: []
+exports:
+  tools:
+    - capability_list
+    - capability_sources
+    - capability_search
+    - capability_validate
+    - capability_enable
+    - capability_disable
+    - capability_init
+    - capability_install
+    - capability_update
+    - capability_remove
+  skills: []

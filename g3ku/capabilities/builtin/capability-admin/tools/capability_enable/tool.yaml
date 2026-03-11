@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: capability_enable
+label: capability_enable
+description: Enable a capability pack
+entrypoint: g3ku.capabilities.builtin_factories:build_capability_enable
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: true
+

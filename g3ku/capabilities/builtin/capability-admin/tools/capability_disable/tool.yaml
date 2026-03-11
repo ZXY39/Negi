@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: capability_disable
+label: capability_disable
+description: Disable a capability pack
+entrypoint: g3ku.capabilities.builtin_factories:build_capability_disable
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: true
+

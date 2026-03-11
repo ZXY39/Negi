@@ -1,0 +1,4 @@
+﻿# Messaging
+
+Builtin capability pack.
+

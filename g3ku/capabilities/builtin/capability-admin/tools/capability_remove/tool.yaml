@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: capability_remove
+label: capability_remove
+description: Remove a capability pack
+entrypoint: g3ku.capabilities.builtin_factories:build_capability_remove
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: true
+

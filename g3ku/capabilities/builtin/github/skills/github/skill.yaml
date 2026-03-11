@@ -1,0 +1,15 @@
+﻿schema_version: 1
+name: github
+description: Interact with GitHub using the gh CLI
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools:
+    - exec
+  bins:
+    - gh
+  env: []
+content:
+  main: ../../../../skills/github/SKILL.md
+  references: []

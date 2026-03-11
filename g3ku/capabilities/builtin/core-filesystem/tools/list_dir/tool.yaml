@@ -1,0 +1,26 @@
+﻿schema_version: 1
+name: list_dir
+label: list_dir
+description: List directory contents
+entrypoint: g3ku.capabilities.builtin_factories:build_list_dir
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: false
+governance:
+  family: filesystem
+  actions:
+    - id: list
+      label: List Directory
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - execution
+      match:
+        kind: static
+
+

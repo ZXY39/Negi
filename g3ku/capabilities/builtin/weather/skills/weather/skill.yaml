@@ -1,0 +1,15 @@
+﻿schema_version: 1
+name: weather
+description: Get current weather and forecasts
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools:
+    - exec
+  bins:
+    - curl
+  env: []
+content:
+  main: ../../../../skills/weather/SKILL.md
+  references: []

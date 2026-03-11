@@ -1,0 +1,14 @@
+﻿schema_version: 1
+name: cron
+description: Schedule reminders and recurring tasks
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools:
+    - cron
+  bins: []
+  env: []
+content:
+  main: ../../../../skills/cron/SKILL.md
+  references: []

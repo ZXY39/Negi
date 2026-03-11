@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: cron
+label: cron
+description: Schedule reminders and recurring tasks
+entrypoint: g3ku.capabilities.builtin_factories:build_cron
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: false
+

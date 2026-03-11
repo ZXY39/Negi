@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: message
+label: message
+description: Send a message to the user
+entrypoint: g3ku.capabilities.builtin_factories:build_message
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: false
+

@@ -1,0 +1,25 @@
+schema_version: 1
+name: browser
+display_name: Agent Browser
+version: 0.1.0
+kind:
+  - tool
+  - skill
+compat:
+  g3ku_core: '>=1.0.0,<2.0.0'
+  capability_api: '1.x'
+source:
+  type: builtin
+  uri: null
+defaults:
+  enabled: true
+requires:
+  bins:
+    - node
+  env: []
+  python: []
+exports:
+  tools:
+    - agent_browser
+  skills:
+    - agent-browser

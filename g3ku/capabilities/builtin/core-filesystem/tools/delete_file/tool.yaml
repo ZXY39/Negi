@@ -1,0 +1,23 @@
+﻿schema_version: 1
+name: delete_file
+label: delete_file
+description: Delete a file
+entrypoint: g3ku.capabilities.builtin_factories:build_delete_file
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: false
+governance:
+  family: filesystem
+  actions:
+    - id: delete
+      label: Delete File
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+      match:
+        kind: static
+

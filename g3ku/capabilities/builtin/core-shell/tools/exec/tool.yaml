@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: exec
+label: exec
+description: Execute a shell command
+entrypoint: g3ku.capabilities.builtin_factories:build_exec
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: false
+

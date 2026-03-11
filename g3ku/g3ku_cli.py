@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+import os
+import webbrowser
+from pathlib import Path
+
+import typer
+import uvicorn
+
+
+app = typer.Typer(
+    add_completion=False,
+    rich_markup_mode=None,
+    help="G3ku project launcher.",
+    no_args_is_help=True,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FRONTEND_ENTRY = PROJECT_ROOT / "g3ku" / "web" / "frontend" / "org_graph.html"
+
+
+def _resolve_project_root() -> Path:
+    os.chdir(PROJECT_ROOT)
+    return PROJECT_ROOT
+
+
+def _ensure_frontend_ready() -> str:
+    if not FRONTEND_ENTRY.exists():
+        raise typer.BadParameter(f"Missing frontend entry file: {FRONTEND_ENTRY}")
+    return "static"
+
+
+@app.callback()
+def _main() -> None:
+    """G3ku command group."""
+
+
+@app.command()
+def start(
+    host: str = typer.Option("127.0.0.1", "--host", help="Backend bind host."),
+    port: int = typer.Option(3000, "--port", min=1, max=65535, help="Backend bind port."),
+    reload: bool = typer.Option(False, "--reload", help="Enable uvicorn reload mode."),
+    open_browser: bool = typer.Option(False, "--open", help="Open the app URL in the default browser."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the resolved actions without starting the server."),
+) -> None:
+    """Start the unified G3ku web app.
+
+    The frontend is served by the backend from `g3ku/web/frontend/org_graph.html`.
+    """
+
+    root = _resolve_project_root()
+    frontend_mode = _ensure_frontend_ready()
+    url = f"http://{host}:{port}"
+
+    typer.echo(f"[g3ku] project root: {root}")
+    typer.echo(f"[g3ku] frontend mode: {frontend_mode}")
+    typer.echo(f"[g3ku] backend url: {url}")
+
+    if open_browser:
+        typer.echo(f"[g3ku] opening browser: {url}")
+        if not dry_run:
+            webbrowser.open(url)
+
+    if dry_run:
+        return
+
+    uvicorn.run(
+        "g3ku.web.main:app",
+        host=host,
+        port=port,
+        reload=reload,
+    )
+
+
+def main() -> None:
+    app()
+
+
+if __name__ == "__main__":
+    main()

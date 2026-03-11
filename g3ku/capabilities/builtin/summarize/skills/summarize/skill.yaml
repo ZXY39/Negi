@@ -1,0 +1,15 @@
+﻿schema_version: 1
+name: summarize
+description: Summarize URLs, podcasts, and local files
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools:
+    - exec
+  bins:
+    - summarize
+  env: []
+content:
+  main: ../../../../skills/summarize/SKILL.md
+  references: []

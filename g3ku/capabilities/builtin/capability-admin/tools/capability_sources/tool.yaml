@@ -1,0 +1,12 @@
+﻿schema_version: 1
+name: capability_sources
+label: capability_sources
+description: List capability source policy
+entrypoint: g3ku.capabilities.builtin_factories:build_capability_sources
+permissions:
+  network: true
+  filesystem:
+    - workspace
+streaming: false
+admin_only: true
+

@@ -1,0 +1,23 @@
+﻿schema_version: 1
+name: skill-creator
+display_name: Skill Creator
+description: Skill authoring and maintenance skill following the SKILL.md convention.
+version: "1.0.0"
+content:
+  main: SKILL.md
+governance:
+  enabled_by_default: true
+  allowed_roles:
+    - ceo
+    - execution
+    - execution
+  editable_files:
+    - SKILL.md
+    - skill.yaml
+  risk_level: medium
+runtime:
+  load_action: load
+metadata:
+  tags:
+    - builtin
+

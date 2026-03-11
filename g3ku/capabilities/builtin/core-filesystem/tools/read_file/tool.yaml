@@ -1,0 +1,26 @@
+﻿schema_version: 1
+name: read_file
+label: read_file
+description: Read the contents of a file
+entrypoint: g3ku.capabilities.builtin_factories:build_read_file
+permissions:
+  network: false
+  filesystem:
+    - workspace
+streaming: false
+admin_only: false
+governance:
+  family: filesystem
+  actions:
+    - id: read
+      label: Read File
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - execution
+      match:
+        kind: static
+
+
