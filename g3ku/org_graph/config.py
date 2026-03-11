@@ -16,8 +16,11 @@ class ResolvedOrgGraphConfig:
     governance_store_path: Path
     artifact_dir: Path
     ceo_model: str
+    ceo_model_chain: list[str]
     execution_model: str
+    execution_model_chain: list[str]
     inspection_model: str
+    inspection_model_chain: list[str]
     default_max_depth: int
     hard_max_depth: int
     max_parallel_units_total: int
@@ -56,6 +59,9 @@ def resolve_org_graph_config(config: Config | None = None) -> ResolvedOrgGraphCo
     governance_store_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     fallback_model = cfg.agents.defaults.model
+    ceo_model_chain = cfg.get_scope_model_refs("ceo")
+    execution_model_chain = cfg.get_scope_model_refs("execution")
+    inspection_model_chain = cfg.get_scope_model_refs("inspection")
     return ResolvedOrgGraphConfig(
         raw=cfg,
         project_store_path=project_store_path,
@@ -63,9 +69,12 @@ def resolve_org_graph_config(config: Config | None = None) -> ResolvedOrgGraphCo
         checkpoint_store_path=checkpoint_store_path,
         governance_store_path=governance_store_path,
         artifact_dir=artifact_dir,
-        ceo_model=org.ceo_model or fallback_model,
-        execution_model=org.execution_model or fallback_model,
-        inspection_model=org.inspection_model or org.execution_model or fallback_model,
+        ceo_model=(ceo_model_chain[0] if ceo_model_chain else (org.ceo_model or fallback_model)),
+        ceo_model_chain=ceo_model_chain,
+        execution_model=(execution_model_chain[0] if execution_model_chain else (org.execution_model or fallback_model)),
+        execution_model_chain=execution_model_chain,
+        inspection_model=(inspection_model_chain[0] if inspection_model_chain else (org.inspection_model or org.execution_model or fallback_model)),
+        inspection_model_chain=inspection_model_chain,
         default_max_depth=org.default_max_depth,
         hard_max_depth=org.hard_max_depth,
         max_parallel_units_total=org.max_parallel_units_total,

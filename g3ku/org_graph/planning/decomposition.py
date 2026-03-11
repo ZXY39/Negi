@@ -300,6 +300,7 @@ async def build_execution_plan(
     effective_max_depth: int,
     llm=None,
     provider_model: str | None = None,
+    provider_model_chain: list[str] | None = None,
     local_available_tools: list[str] | None = None,
     local_available_skills: list[str] | None = None,
     delegate_available_tools: list[str] | None = None,
@@ -328,7 +329,12 @@ async def build_execution_plan(
             '只返回一个 JSON 对象，顶层必须是 `stages` 数组。'
         )
         try:
-            payload = await llm.chat_json(system_prompt=PLANNER_SYSTEM_PROMPT, user_prompt=user_prompt, provider_model=provider_model)
+            payload = await llm.chat_json(
+                system_prompt=PLANNER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                provider_model=provider_model,
+                provider_model_chain=provider_model_chain,
+            )
             if payload:
                 plan = _coerce_plan(
                     payload,

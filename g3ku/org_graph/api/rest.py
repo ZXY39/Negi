@@ -22,10 +22,35 @@ class SkillFileBody(BaseModel):
     content: str = ''
 
 
-class ModelDefaultsBody(BaseModel):
-    ceo: str | None = None
-    execution: str | None = None
-    inspection: str | None = None
+class ModelCatalogBody(BaseModel):
+    key: str
+    provider_model: str = Field(alias="providerModel")
+    api_key: str = Field(alias="apiKey")
+    api_base: str = Field(alias="apiBase")
+    extra_headers: dict[str, str] | None = Field(default=None, alias="extraHeaders")
+    enabled: bool = True
+    max_tokens: int | None = Field(default=None, alias="maxTokens")
+    temperature: float | None = None
+    reasoning_effort: str | None = Field(default=None, alias="reasoningEffort")
+    retry_on: list[str] | None = Field(default=None, alias="retryOn")
+    description: str = ""
+    scopes: list[str] = Field(default_factory=list)
+
+
+class ModelCatalogPatchBody(BaseModel):
+    provider_model: str | None = Field(default=None, alias="providerModel")
+    api_key: str | None = Field(default=None, alias="apiKey")
+    api_base: str | None = Field(default=None, alias="apiBase")
+    extra_headers: dict[str, str] | None = Field(default=None, alias="extraHeaders")
+    max_tokens: int | None = Field(default=None, alias="maxTokens")
+    temperature: float | None = None
+    reasoning_effort: str | None = Field(default=None, alias="reasoningEffort")
+    retry_on: list[str] | None = Field(default=None, alias="retryOn")
+    description: str | None = None
+
+
+class ModelRoleChainBody(BaseModel):
+    model_keys: list[str] = Field(default_factory=list, alias="modelKeys")
 
 
 def _paginate(items, *, offset: int, limit: int) -> tuple[list, int, int, int]:
@@ -55,17 +80,75 @@ async def list_projects(session_id: str = Query('web:shared'), offset: int = Que
 @router.get('/models')
 async def list_provider_models():
     service = get_org_graph_service()
-    return JSONResponse({'ok': True, 'items': service.list_available_provider_models(), 'defaults': service.default_node_provider_models()})
+    return JSONResponse({'ok': True, **service.list_model_catalog()})
 
 
-@router.put('/models/defaults')
-async def update_provider_model_defaults(body: ModelDefaultsBody):
+@router.post('/models')
+async def create_model_catalog_entry(body: ModelCatalogBody):
     service = get_org_graph_service()
     try:
-        defaults = await service.update_default_provider_models(body.model_dump(mode='json'))
+        model = await service.add_model_catalog_entry(body.model_dump(mode='json'))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return JSONResponse({'ok': True, 'items': service.list_available_provider_models(), 'defaults': defaults})
+    return JSONResponse({'ok': True, 'model': model, **service.list_model_catalog()})
+
+
+@router.put('/models/roles/{scope}')
+async def update_model_role_chain(scope: str, body: ModelRoleChainBody):
+    service = get_org_graph_service()
+    try:
+        result = await service.update_model_role_chain(scope, body.model_keys)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({'ok': True, 'result': result, **service.list_model_catalog()})
+
+
+@router.get('/models/{model_key}')
+async def get_model_catalog_entry(model_key: str):
+    service = get_org_graph_service()
+    item = next((item for item in service.list_model_catalog().get('catalog', []) if item.get('key') == model_key), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail='model_not_found')
+    return JSONResponse({'ok': True, 'model': item})
+
+
+@router.put('/models/{model_key}')
+async def update_model_catalog_entry(model_key: str, body: ModelCatalogPatchBody):
+    service = get_org_graph_service()
+    try:
+        model = await service.update_model_catalog_entry(model_key, body.model_dump(mode='json', exclude_none=True))
+    except ValueError as exc:
+        detail = str(exc)
+        if 'Unknown model key' in detail:
+            raise HTTPException(status_code=404, detail='model_not_found') from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    return JSONResponse({'ok': True, 'model': model, **service.list_model_catalog()})
+
+
+@router.post('/models/{model_key}/enable')
+async def enable_model_catalog_entry(model_key: str):
+    service = get_org_graph_service()
+    try:
+        model = await service.set_model_catalog_entry_enabled(model_key, True)
+    except ValueError as exc:
+        detail = str(exc)
+        if 'Unknown model key' in detail:
+            raise HTTPException(status_code=404, detail='model_not_found') from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    return JSONResponse({'ok': True, 'model': model, **service.list_model_catalog()})
+
+
+@router.post('/models/{model_key}/disable')
+async def disable_model_catalog_entry(model_key: str):
+    service = get_org_graph_service()
+    try:
+        model = await service.set_model_catalog_entry_enabled(model_key, False)
+    except ValueError as exc:
+        detail = str(exc)
+        if 'Unknown model key' in detail:
+            raise HTTPException(status_code=404, detail='model_not_found') from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    return JSONResponse({'ok': True, 'model': model, **service.list_model_catalog()})
 
 
 @router.get('/projects/{project_id}')

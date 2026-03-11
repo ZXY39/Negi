@@ -16,6 +16,7 @@ from g3ku.org_graph.governance.capability_filter import list_effective_tool_name
 from g3ku.org_graph.governance.action_mapper import resolve_tool_action
 from g3ku.org_graph.llm.provider_factory import build_provider_from_model
 from g3ku.org_graph.prompt_loader import load_prompt
+from g3ku.providers.fallback import is_retryable_model_error, response_requires_retry
 
 TOOL_SYSTEM_PROMPT = load_prompt('tool_runtime.md')
 ENGINEERING_FAILURE_PREFIX = 'ENGINEERING_FAILURE:'
@@ -81,7 +82,7 @@ class OrgGraphToolRuntime:
     async def _run_tool_loop(
         self,
         *,
-        provider_model: str,
+        provider_model_chain: list[str],
         messages: list[dict[str, Any]],
         tools: dict[str, Tool],
         project,
@@ -90,19 +91,15 @@ class OrgGraphToolRuntime:
         event_origin: str,
         permission_subject=None,
     ) -> str | None:
-        target = build_provider_from_model(self._service.config.raw, provider_model)
         breaker = RepeatedActionCircuitBreaker(window=3, threshold=3)
         tool_defs = [tool.to_schema() for tool in tools.values()]
         while True:
-            response = await target.provider.chat(
+            response = await self._call_with_fallback(
+                provider_model_chain=provider_model_chain,
                 messages=messages,
                 tools=tool_defs,
-                model=target.model_id,
                 max_tokens=1200,
                 temperature=0.2,
-                reasoning_effort=self._service.config.raw.agents.defaults.reasoning_effort,
-                tool_choice='auto',
-                parallel_tool_calls=False,
             )
             if response.tool_calls:
                 assistant_tool_calls = []
@@ -178,6 +175,52 @@ class OrgGraphToolRuntime:
                 return content
             return None
 
+    async def _call_with_fallback(
+        self,
+        *,
+        provider_model_chain: list[str],
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int,
+        temperature: float,
+    ):
+        last_error: Exception | None = None
+        last_response = None
+        chain = [str(item or "").strip() for item in provider_model_chain if str(item or "").strip()]
+        for index, provider_model in enumerate(chain):
+            try:
+                target = build_provider_from_model(self._service.config.raw, provider_model)
+            except Exception as exc:
+                last_error = exc
+                if index < len(chain) - 1:
+                    continue
+                raise
+            effective_max_tokens = max(1, min(int(max_tokens), int(target.max_tokens_limit))) if target.max_tokens_limit else max(1, int(max_tokens))
+            effective_temperature = float(target.default_temperature) if target.default_temperature is not None else float(temperature)
+            try:
+                response = await target.provider.chat(
+                    messages=messages,
+                    tools=tools,
+                    model=target.model_id,
+                    max_tokens=effective_max_tokens,
+                    temperature=effective_temperature,
+                    reasoning_effort=target.default_reasoning_effort or self._service.config.raw.agents.defaults.reasoning_effort,
+                    tool_choice='auto',
+                    parallel_tool_calls=False,
+                )
+            except Exception as exc:
+                last_error = exc
+                if index < len(chain) - 1 and is_retryable_model_error(exc, retry_on=target.retry_on):
+                    continue
+                raise
+            last_response = response
+            if index < len(chain) - 1 and response_requires_retry(response, retry_on=target.retry_on):
+                continue
+            return response
+        if last_error is not None:
+            raise last_error
+        return last_response
+
     async def run(self, *, unit, project, stage, prompt_preview: str, objective: str) -> str | None:
         effective_tools = list_effective_tool_names(
             subject=self._service.build_policy_subject(
@@ -194,9 +237,8 @@ class OrgGraphToolRuntime:
         if not effective_tools:
             return None
         provider_model = str(unit.provider_model or self._service.config.execution_model)
-        try:
-            build_provider_from_model(self._service.config.raw, provider_model)
-        except Exception:
+        provider_model_chain = [provider_model] if unit.provider_model else self._service.resolve_project_model_chain(project=project, node_type='execution')
+        if not any(self._service._provider_model_is_ready(candidate) for candidate in provider_model_chain):
             return None
         tools = self._build_tools(
             effective_tools=effective_tools,
@@ -221,7 +263,7 @@ class OrgGraphToolRuntime:
             },
         ]
         return await self._run_tool_loop(
-            provider_model=provider_model,
+            provider_model_chain=provider_model_chain,
             messages=messages,
             tools=tools,
             project=project,
@@ -249,6 +291,7 @@ class OrgGraphToolRuntime:
         validation_tools: list[str] | None,
     ) -> str:
         provider_model = str(unit.provider_model or self._service.config.inspection_model or self._service.config.execution_model)
+        provider_model_chain = [provider_model] if unit.provider_model else self._service.resolve_project_model_chain(project=project, node_type='inspection')
         permission_subject = self._service.build_policy_subject(
             session_id=project.session_id,
             actor_role='inspection',
@@ -288,7 +331,7 @@ class OrgGraphToolRuntime:
         try:
             if tools:
                 content = await self._run_tool_loop(
-                    provider_model=provider_model,
+                    provider_model_chain=provider_model_chain,
                     messages=messages,
                     tools=tools,
                     project=project,
@@ -298,13 +341,12 @@ class OrgGraphToolRuntime:
                     permission_subject=permission_subject,
                 )
             else:
-                target = build_provider_from_model(self._service.config.raw, provider_model)
-                response = await target.provider.chat(
+                response = await self._call_with_fallback(
+                    provider_model_chain=provider_model_chain,
                     messages=messages,
-                    model=target.model_id,
+                    tools=None,
                     max_tokens=600,
                     temperature=0.1,
-                    reasoning_effort=self._service.config.raw.agents.defaults.reasoning_effort,
                 )
                 content = str(response.content or '').strip() or None
         except Exception as exc:

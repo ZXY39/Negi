@@ -260,6 +260,38 @@ class ModelFallbackTarget(Base):
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
 
 
+class ManagedModelConfig(Base):
+    """Managed model profile with credentials and runtime defaults."""
+
+    key: str
+    provider_model: str
+    api_key: str
+    api_base: str | None = None
+    extra_headers: dict[str, str] | None = None
+    enabled: bool = True
+    max_tokens: int = 4096
+    temperature: float = 0.1
+    reasoning_effort: str | None = None
+    retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+    description: str = ""
+
+
+class RoleModelRoutingConfig(Base):
+    """Ordered model references for each runtime scope."""
+
+    agent: list[str] = Field(default_factory=list)
+    ceo: list[str] = Field(default_factory=list)
+    execution: list[str] = Field(default_factory=list)
+    inspection: list[str] = Field(default_factory=list)
+
+
+class ModelsConfig(Base):
+    """Managed model catalog and role routing."""
+
+    catalog: list[ManagedModelConfig] = Field(default_factory=list)
+    roles: RoleModelRoutingConfig = Field(default_factory=RoleModelRoutingConfig)
+
+
 class MultiAgentConfig(Base):
     """Dynamic subagent orchestration configuration."""
 
@@ -584,6 +616,7 @@ class Config(BaseSettings):
     """Root configuration for g3ku."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
@@ -641,10 +674,39 @@ class Config(BaseSettings):
 
     def get_model_target(self, model: str | None = None) -> tuple[str, str]:
         """Get parsed (provider_id, model_id) from strict provider:model syntax."""
-        return self.parse_provider_model(model or self.agents.defaults.model)
+        resolved = self.resolve_provider_model_reference(model or self.agents.defaults.model)
+        return self.parse_provider_model(resolved)
+
+    def get_managed_model(self, ref: str | None = None) -> ManagedModelConfig | None:
+        key = str(ref or "").strip()
+        if not key:
+            return None
+        for item in self.models.catalog:
+            if str(item.key or "").strip() == key:
+                return item
+        matches = [item for item in self.models.catalog if str(item.provider_model or "").strip() == key]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def resolve_provider_model_reference(self, ref: str | None = None) -> str:
+        raw = str(ref or "").strip()
+        if not raw:
+            raw = str(self.agents.defaults.model or "").strip()
+        managed = self.get_managed_model(raw)
+        if managed is not None:
+            return str(managed.provider_model or "").strip()
+        return raw
 
     def get_provider(self, model: str | None = None) -> ProviderConfig | None:
         """Get provider config selected by strict provider:model syntax."""
+        managed = self.get_managed_model(model)
+        if managed is not None:
+            return ProviderConfig(
+                api_key=str(managed.api_key or ""),
+                api_base=managed.api_base,
+                extra_headers=managed.extra_headers,
+            )
         provider_id, _ = self.get_model_target(model)
         return getattr(self.providers, provider_id, None)
 
@@ -662,6 +724,9 @@ class Config(BaseSettings):
         """Get API base URL for strict provider:model, with gateway defaults."""
         from g3ku.providers.registry import find_by_name
 
+        managed = self.get_managed_model(model)
+        if managed is not None and managed.api_base:
+            return managed.api_base
         provider_id, _ = self.get_model_target(model)
         p = getattr(self.providers, provider_id, None)
         if p and p.api_base:
@@ -670,6 +735,44 @@ class Config(BaseSettings):
         if spec and spec.is_gateway and spec.default_api_base:
             return spec.default_api_base
         return None
+
+    def get_model_runtime_profile(self, ref: str | None = None) -> ManagedModelConfig | None:
+        return self.get_managed_model(ref)
+
+    def get_scope_model_refs(self, scope: str) -> list[str]:
+        normalized = str(scope or "").strip().lower().replace("-", "_")
+        roles = self.models.roles
+        if normalized in {"agent", "main", "default"}:
+            refs = list(roles.agent or [])
+            return refs or [str(self.agents.defaults.model or "").strip()]
+        if normalized in {"ceo", "org_graph.ceo", "org_graph_ceo"}:
+            refs = list(roles.ceo or [])
+            legacy = str(self.org_graph.ceo_model or self.agents.defaults.model or "").strip()
+            return refs or ([legacy] if legacy else [])
+        if normalized in {"execution", "org_graph.execution", "org_graph_execution"}:
+            refs = list(roles.execution or [])
+            legacy = str(self.org_graph.execution_model or self.agents.defaults.model or "").strip()
+            return refs or ([legacy] if legacy else [])
+        if normalized in {"inspection", "checker", "org_graph.inspection", "org_graph_inspection"}:
+            refs = list(roles.inspection or [])
+            legacy = str(self.org_graph.inspection_model or self.org_graph.execution_model or self.agents.defaults.model or "").strip()
+            return refs or ([legacy] if legacy else [])
+        return []
+
+    def get_scope_model_chain(self, scope: str) -> list[ModelFallbackTarget]:
+        chain: list[ModelFallbackTarget] = []
+        for ref in self.get_scope_model_refs(scope):
+            key = str(ref or "").strip()
+            if not key:
+                continue
+            managed = self.get_managed_model(key)
+            if managed is not None:
+                if not managed.enabled:
+                    continue
+                chain.append(ModelFallbackTarget(provider_model=key, retry_on=list(managed.retry_on or [])))
+                continue
+            chain.append(ModelFallbackTarget(provider_model=key))
+        return chain
 
     model_config = ConfigDict(env_prefix="G3KU_", env_nested_delimiter="__")
 

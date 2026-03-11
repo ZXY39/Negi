@@ -28,6 +28,7 @@ from g3ku.agent.tools.file_vault import (
 from g3ku.agent.tools.filesystem import DeleteFileTool, EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from g3ku.agent.tools.memory_search import MemorySearchTool
 from g3ku.agent.tools.message import MessageTool
+from g3ku.agent.tools.model_config import ModelConfigTool
 from g3ku.agent.tools.picture_washing import PictureWashingTool
 from g3ku.agent.tools.shell import ExecTool
 from g3ku.agent.tools.web import WebFetchTool, WebSearchTool
@@ -97,6 +98,11 @@ def build_agent_browser(*, loop: Any, descriptor: Any | None = None):
 def build_message(*, loop: Any, descriptor: Any | None = None):
     _ = descriptor
     return MessageTool(send_callback=loop.bus.publish_outbound)
+
+
+def build_model_config(*, loop: Any, descriptor: Any | None = None):
+    _ = descriptor, loop
+    return ModelConfigTool()
 
 
 def build_cron(*, loop: Any, descriptor: Any | None = None):

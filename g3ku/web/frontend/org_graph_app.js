@@ -1,3 +1,13 @@
+const MODEL_SCOPES = [
+    { key: "agent", label: "主 Agent" },
+    { key: "ceo", label: "CEO" },
+    { key: "execution", label: "执行" },
+    { key: "inspection", label: "检验" },
+];
+
+const EMPTY_MODEL_ROLES = () => ({ agent: [], ceo: [], execution: [], inspection: [] });
+const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+
 const S = {
     view: "ceo",
     ceoWs: null,
@@ -6,7 +16,19 @@ const S = {
     projects: [],
     selectedProjects: new Set(),
     projectBusy: false,
-    modelCatalog: { items: [], defaults: { ceo: "", execution: "", inspection: "" }, loading: false, saving: false, error: "" },
+    modelCatalog: {
+        items: [],
+        catalog: [],
+        roles: EMPTY_MODEL_ROLES(),
+        defaults: DEFAULT_MODEL_DEFAULTS(),
+        loading: false,
+        saving: false,
+        error: "",
+        search: "",
+        selectedModelKey: "",
+        mode: "view",
+        rolesDirty: false,
+    },
     tree: null,
     selectedUnitId: null,
     events: [],
@@ -36,11 +58,14 @@ const U = {
     viewModels: document.getElementById("view-models"),
     viewProjectDetails: document.getElementById("view-project-details"),
     modelHint: document.getElementById("sidebar-model-hint"),
-    modelCeo: document.getElementById("sidebar-model-ceo"),
-    modelExecution: document.getElementById("sidebar-model-execution"),
-    modelInspection: document.getElementById("sidebar-model-inspection"),
-    modelSave: document.getElementById("sidebar-model-save-btn"),
-    modelReset: document.getElementById("sidebar-model-reset-btn"),
+    modelRefresh: document.getElementById("model-refresh-btn"),
+    modelCreate: document.getElementById("model-create-btn"),
+    modelRolesSave: document.getElementById("model-roles-save-btn"),
+    modelRoleEditors: document.getElementById("model-role-editors"),
+    modelSearch: document.getElementById("model-search-input"),
+    modelList: document.getElementById("model-list"),
+    modelDetailEmpty: document.getElementById("model-detail-empty"),
+    modelDetail: document.getElementById("model-detail-content"),
     projectGrid: document.getElementById("project-card-grid"),
     projectSummary: document.getElementById("project-selection-summary"),
     selectActive: document.getElementById("project-select-all-active"),
@@ -117,29 +142,282 @@ function addNotice(notice, bump = true) {
     if (bump) U.noticeBadge.textContent = String(Number(U.noticeBadge.textContent || 0) + 1);
 }
 
-function renderModelCatalog() {
-    const controls = { ceo: U.modelCeo, execution: U.modelExecution, inspection: U.modelInspection };
-    const items = S.modelCatalog.items;
-    const defaults = S.modelCatalog.defaults;
-    const disabled = S.modelCatalog.loading || S.modelCatalog.saving || !items.length;
-    Object.entries(controls).forEach(([key, select]) => {
-        select.innerHTML = "";
-        const base = document.createElement("option");
-        base.value = "";
-        base.textContent = `使用当前默认 (${defaults[key] || "未配置"})`;
-        select.appendChild(base);
-        items.forEach((m) => {
-            const option = document.createElement("option");
-            option.value = m;
-            option.textContent = m;
-            select.appendChild(option);
-        });
-        select.disabled = disabled;
+function modelScopeLabel(scope) {
+    return (MODEL_SCOPES.find((item) => item.key === scope) || { label: String(scope || "") }).label;
+}
+
+function modelRefItem(ref) {
+    const raw = String(ref || "").trim();
+    if (!raw) return null;
+    return S.modelCatalog.catalog.find((item) => String(item.key || "").trim() === raw || String(item.provider_model || "").trim() === raw) || null;
+}
+
+function modelRefEquivalent(left, right) {
+    const leftRaw = String(left || "").trim();
+    const rightRaw = String(right || "").trim();
+    if (!leftRaw || !rightRaw) return false;
+    if (leftRaw === rightRaw) return true;
+    const leftItem = modelRefItem(leftRaw);
+    const rightItem = modelRefItem(rightRaw);
+    if (leftItem && rightItem) return String(leftItem.key || "") === String(rightItem.key || "");
+    if (leftItem) return rightRaw === String(leftItem.key || "") || rightRaw === String(leftItem.provider_model || "");
+    if (rightItem) return leftRaw === String(rightItem.key || "") || leftRaw === String(rightItem.provider_model || "");
+    return false;
+}
+
+function modelScopeChain(scope) {
+    return Array.isArray(S.modelCatalog.roles?.[scope]) ? [...S.modelCatalog.roles[scope]] : [];
+}
+
+function modelScopeContains(scope, ref) {
+    return modelScopeChain(scope).some((item) => modelRefEquivalent(item, ref));
+}
+
+function normalizeModelRoleChain(refs) {
+    const normalized = [];
+    (refs || []).forEach((ref) => {
+        const raw = String(ref || "").trim();
+        if (!raw) return;
+        const item = modelRefItem(raw);
+        const target = String(item?.key || raw).trim();
+        if (!target || normalized.some((existing) => modelRefEquivalent(existing, target))) return;
+        normalized.push(target);
     });
-    if (S.modelCatalog.loading) return hint("正在加载全局默认模型...");
-    if (S.modelCatalog.saving) return hint("正在保存全局默认模型...");
+    return normalized;
+}
+
+function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
+    const payload = data && typeof data === "object" ? data : {};
+    const rolesPayload = payload.roles && typeof payload.roles === "object" ? payload.roles : {};
+    const nextRoles = EMPTY_MODEL_ROLES();
+    MODEL_SCOPES.forEach(({ key }) => {
+        nextRoles[key] = Array.isArray(rolesPayload[key])
+            ? rolesPayload[key].map((item) => String(item || "").trim()).filter(Boolean)
+            : [];
+    });
+    S.modelCatalog.items = Array.isArray(payload.items) ? payload.items.map((item) => String(item || "").trim()).filter(Boolean) : [];
+    S.modelCatalog.catalog = Array.isArray(payload.catalog) ? payload.catalog.map((item) => ({ ...item })) : [];
+    if (!preserveRoleDrafts) {
+        S.modelCatalog.roles = nextRoles;
+        S.modelCatalog.rolesDirty = false;
+    }
+    S.modelCatalog.defaults = { ...DEFAULT_MODEL_DEFAULTS(), ...(payload.defaults || {}) };
+    if (S.modelCatalog.mode !== "create") {
+        const selectedKey = String(S.modelCatalog.selectedModelKey || "").trim();
+        if (selectedKey && !S.modelCatalog.catalog.some((item) => String(item.key || "").trim() === selectedKey)) {
+            S.modelCatalog.selectedModelKey = "";
+        }
+    }
+}
+
+function filterModels() {
+    const q = String(S.modelCatalog.search || "").trim().toLowerCase();
+    if (!q) return [...S.modelCatalog.catalog];
+    return S.modelCatalog.catalog.filter((item) => [item.key, item.provider_model, item.description].join("\n").toLowerCase().includes(q));
+}
+
+function syncModelDetailScopeToggles() {
+    if (!U.modelDetail || S.modelCatalog.mode === "create") return;
+    const selectedKey = String(S.modelCatalog.selectedModelKey || "").trim();
+    if (!selectedKey) return;
+    MODEL_SCOPES.forEach(({ key }) => {
+        const input = U.modelDetail.querySelector(`[name="scope_${key}"]`);
+        if (!(input instanceof HTMLInputElement)) return;
+        const checked = modelScopeContains(key, selectedKey);
+        input.checked = checked;
+        input.closest(".role-toggle")?.classList.toggle("checked", checked);
+    });
+}
+
+function renderModelHint() {
+    if (S.modelCatalog.loading) return hint("正在加载模型配置...");
+    if (S.modelCatalog.saving) return hint("正在保存模型配置...");
     if (S.modelCatalog.error) return hint(`模型配置错误：${S.modelCatalog.error}`, true);
-    hint(items.length ? "修改后点击“保存默认模型”生效。" : "当前没有可用模型。");
+    if (!S.modelCatalog.catalog.length) return hint("当前还没有模型，请先添加模型。", false);
+    if (S.modelCatalog.rolesDirty) return hint("角色模型链有未保存的修改，请点击“保存角色链”。", false);
+    return hint("可在这里维护模型目录、角色降级链和模型参数。", false);
+}
+
+function renderModelRoleEditors() {
+    if (!U.modelRoleEditors) return;
+    U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
+        const chain = modelScopeChain(scope.key);
+        const options = S.modelCatalog.catalog.filter((item) => !chain.some((ref) => modelRefEquivalent(ref, item.key)));
+        const defaultText = scope.key === "agent"
+            ? "主流程调用链"
+            : (S.modelCatalog.defaults[scope.key] ? `当前首选 ${S.modelCatalog.defaults[scope.key]}` : "未配置当前首选");
+        const chainMarkup = chain.length
+            ? chain.map((ref, index) => {
+                const item = modelRefItem(ref);
+                const badges = [index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ""];
+                if (item?.enabled === false) badges.push('<span class="policy-chip neutral">已禁用</span>');
+                if (!item) badges.push('<span class="policy-chip neutral">未托管</span>');
+                return `
+                    <div class="model-chain-item">
+                        <div class="model-chain-item-main">
+                            <div class="resource-list-title">${esc(item?.key || ref)}</div>
+                            <div class="resource-list-subtitle">${esc(item?.provider_model || ref)}</div>
+                            <div class="model-inline-meta">${badges.join("")}</div>
+                        </div>
+                        <div class="model-chain-item-actions">
+                            <button type="button" class="toolbar-btn ghost small" data-model-chain-action="up" data-scope="${scope.key}" data-index="${index}" ${index === 0 ? "disabled" : ""}>上移</button>
+                            <button type="button" class="toolbar-btn ghost small" data-model-chain-action="down" data-scope="${scope.key}" data-index="${index}" ${index === chain.length - 1 ? "disabled" : ""}>下移</button>
+                            <button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>
+                        </div>
+                    </div>`;
+            }).join("")
+            : '<div class="empty-state compact">未配置降级链</div>';
+        return `
+            <section class="model-chain-card">
+                <div class="panel-header">
+                    <div>
+                        <h3>${esc(scope.label)}</h3>
+                        <p class="subtitle">${esc(defaultText)}</p>
+                    </div>
+                    <span class="policy-chip neutral">${chain.length} 个候选</span>
+                </div>
+                <div class="model-chain-list">${chainMarkup}</div>
+                <div class="model-chain-adder">
+                    <select class="resource-select" data-model-role-select="${scope.key}" ${!options.length ? "disabled" : ""}>
+                        <option value="">添加模型到该角色链</option>
+                        ${options.map((item) => `<option value="${esc(item.key)}">${esc(item.key)} · ${esc(item.provider_model)}</option>`).join("")}
+                    </select>
+                    <button type="button" class="toolbar-btn ghost" data-model-role-add="${scope.key}" ${!options.length ? "disabled" : ""}>添加</button>
+                </div>
+            </section>`;
+    }).join("");
+}
+
+function renderModelList() {
+    if (!U.modelList) return;
+    const items = filterModels();
+    if (!items.length) {
+        U.modelList.innerHTML = `<div class="empty-state">${S.modelCatalog.search ? "没有匹配的模型。" : "还没有模型，请点击“添加模型”。"}</div>`;
+        return;
+    }
+    U.modelList.innerHTML = items.map((item) => {
+        const scopes = MODEL_SCOPES.filter((scope) => modelScopeContains(scope.key, item.key)).map((scope) => scope.label);
+        const meta = [item.enabled ? "已启用" : "已禁用", scopes.length ? scopes.join(" · ") : "未加入角色链"];
+        if (item.description) meta.push(item.description);
+        return `
+            <button type="button" class="resource-list-item${S.modelCatalog.mode !== "create" && S.modelCatalog.selectedModelKey === item.key ? " selected" : ""}" data-model-key="${esc(item.key)}">
+                <div class="resource-list-item-top">
+                    <div>
+                        <div class="resource-list-title">${esc(item.key)}</div>
+                        <div class="resource-list-subtitle">${esc(item.provider_model)}</div>
+                    </div>
+                    <span class="policy-chip ${item.enabled ? "risk-low" : "neutral"}">${item.enabled ? "已启用" : "已禁用"}</span>
+                </div>
+                <div class="resource-list-meta">${esc(meta.join(" · "))}</div>
+            </button>`;
+    }).join("");
+}
+
+function renderModelDetail() {
+    if (!U.modelDetail || !U.modelDetailEmpty) return;
+    const isCreate = S.modelCatalog.mode === "create";
+    const current = isCreate ? null : modelRefItem(S.modelCatalog.selectedModelKey);
+    if (!isCreate && !current) {
+        U.modelDetailEmpty.style.display = "grid";
+        U.modelDetail.innerHTML = "";
+        return;
+    }
+
+    const enabled = isCreate ? true : !!current?.enabled;
+    const selectedScopes = MODEL_SCOPES.filter((scope) => current && modelScopeContains(scope.key, current.key)).map((scope) => scope.label);
+    const scopeMarkup = MODEL_SCOPES.map((scope) => {
+        const checked = current ? modelScopeContains(scope.key, current.key) : false;
+        return `<label class="role-toggle ${checked ? "checked" : ""}"><input type="checkbox" name="scope_${scope.key}" ${checked ? "checked" : ""}><span>${esc(scope.label)}</span></label>`;
+    }).join("");
+
+    U.modelDetailEmpty.style.display = "none";
+    U.modelDetail.innerHTML = `
+        <article class="model-detail-card">
+            <div class="panel-header">
+                <div>
+                    <h2>${isCreate ? "添加模型" : "模型配置"}</h2>
+                    <p class="subtitle">${esc(isCreate ? "填写必填项后写入 .g3ku/config.json" : `${current.key} · ${current.provider_model}`)}</p>
+                </div>
+                <div class="model-inline-meta">
+                    <span class="policy-chip ${enabled ? "risk-low" : "neutral"}">${enabled ? "已启用" : "已禁用"}</span>
+                    ${!isCreate ? `<span class="policy-chip neutral">${esc(selectedScopes.join(" / ") || "未加入角色链")}</span>` : ""}
+                </div>
+            </div>
+            <form id="model-detail-form" class="model-detail-form" data-mode="${isCreate ? "create" : "edit"}" data-model-key="${esc(current?.key || "")}">
+                <section class="resource-section">
+                    <h3>基本信息</h3>
+                    <div class="model-form-grid">
+                        <label class="resource-field">
+                            <span class="resource-field-label">模型 Key *</span>
+                            <input class="resource-search" name="key" ${isCreate ? `value=""` : `value="${esc(current.key)}" disabled`} placeholder="如 openai_primary">
+                        </label>
+                        <label class="resource-field">
+                            <span class="resource-field-label">Provider / Model *</span>
+                            <input class="resource-search" name="providerModel" value="${esc(current?.provider_model || "")}" placeholder="如 openai:gpt-4.1">
+                        </label>
+                        <label class="resource-field">
+                            <span class="resource-field-label">API Key *</span>
+                            <input class="resource-search" name="apiKey" value="${esc(current?.api_key || "")}" placeholder="sk-...">
+                        </label>
+                        <label class="resource-field">
+                            <span class="resource-field-label">Base URL ${isCreate ? "*" : ""}</span>
+                            <input class="resource-search" name="apiBase" value="${esc(current?.api_base || "")}" placeholder="https://api.example.com/v1">
+                        </label>
+                    </div>
+                    <label class="role-toggle ${enabled ? "checked" : ""}"><input type="checkbox" name="enabled" ${enabled ? "checked" : ""}><span>启用此模型</span></label>
+                </section>
+                <section class="resource-section">
+                    <h3>模型参数</h3>
+                    <div class="model-form-grid">
+                        <label class="resource-field">
+                            <span class="resource-field-label">Max Tokens</span>
+                            <input class="resource-search" type="number" min="1" step="1" name="maxTokens" value="${esc(String(current?.max_tokens ?? ""))}" placeholder="留空使用默认值">
+                        </label>
+                        <label class="resource-field">
+                            <span class="resource-field-label">Temperature</span>
+                            <input class="resource-search" type="number" min="0" max="2" step="0.1" name="temperature" value="${esc(String(current?.temperature ?? ""))}" placeholder="留空使用默认值">
+                        </label>
+                        <label class="resource-field">
+                            <span class="resource-field-label">Reasoning Effort</span>
+                            <input class="resource-search" name="reasoningEffort" value="${esc(current?.reasoning_effort || "")}" placeholder="如 low / medium / high">
+                        </label>
+                        <label class="resource-field">
+                            <span class="resource-field-label">Retry On</span>
+                            <input class="resource-search" name="retryOn" value="${esc((current?.retry_on || []).join(", "))}" placeholder="如 network, 429, 5xx">
+                        </label>
+                    </div>
+                </section>
+                <section class="resource-section">
+                    <h3>作用范围</h3>
+                    <div class="model-scopes-grid">${scopeMarkup}</div>
+                </section>
+                <section class="resource-section">
+                    <h3>额外请求头</h3>
+                    <textarea class="resource-editor model-textarea" name="extraHeaders" rows="6" placeholder='{"X-Trace-Id": "demo"}'>${esc(current?.extra_headers ? JSON.stringify(current.extra_headers, null, 2) : "")}</textarea>
+                </section>
+                <section class="resource-section">
+                    <h3>说明</h3>
+                    <textarea class="resource-editor model-textarea" name="description" rows="5" placeholder="可填写用途、限制、成本等说明">${esc(current?.description || "")}</textarea>
+                </section>
+                <div class="model-actions">
+                    <button type="submit" class="toolbar-btn success">${isCreate ? "添加并保存" : "保存模型"}</button>
+                    ${isCreate ? '<button type="button" class="toolbar-btn ghost" data-model-detail-cancel="1">取消</button>' : ""}
+                </div>
+            </form>
+        </article>`;
+}
+
+function renderModelCatalog() {
+    if (U.modelRefresh) U.modelRefresh.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
+    if (U.modelCreate) U.modelCreate.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
+    if (U.modelRolesSave) {
+        U.modelRolesSave.disabled = S.modelCatalog.loading || S.modelCatalog.saving || !S.modelCatalog.rolesDirty;
+        U.modelRolesSave.textContent = S.modelCatalog.saving ? "正在保存角色链..." : "保存角色链";
+    }
+    renderModelHint();
+    renderModelRoleEditors();
+    renderModelList();
+    renderModelDetail();
 }
 
 async function loadModels() {
@@ -148,8 +426,7 @@ async function loadModels() {
     renderModelCatalog();
     try {
         const data = await ApiClient.getOrgGraphModels();
-        S.modelCatalog.items = data.items || [];
-        S.modelCatalog.defaults = data.defaults || { ceo: "", execution: "", inspection: "" };
+        applyModelCatalog(data);
     } catch (e) {
         S.modelCatalog.error = e.message || "load failed";
     } finally {
@@ -158,30 +435,193 @@ async function loadModels() {
     }
 }
 
-function resetModels() {
-    [U.modelCeo, U.modelExecution, U.modelInspection].forEach((el) => { el.value = ""; });
-    hint("已重置为当前默认值，尚未保存。");
+function openModel(key) {
+    S.modelCatalog.mode = "view";
+    S.modelCatalog.selectedModelKey = String(key || "").trim();
+    renderModelCatalog();
 }
 
-async function saveModels() {
-    const body = {};
-    [["ceo", U.modelCeo], ["execution", U.modelExecution], ["inspection", U.modelInspection]].forEach(([k, el]) => {
-        const value = String(el.value || "").trim();
-        if (value) body[k] = value;
+function startCreateModel() {
+    S.modelCatalog.mode = "create";
+    S.modelCatalog.selectedModelKey = "";
+    renderModelCatalog();
+}
+
+function updateRoleChainDraft(scope, nextChain) {
+    S.modelCatalog.roles[scope] = normalizeModelRoleChain(nextChain);
+    S.modelCatalog.rolesDirty = true;
+    renderModelHint();
+    renderModelRoleEditors();
+    renderModelList();
+    syncModelDetailScopeToggles();
+}
+
+function setModelScopesInState(modelKey, selectedScopes) {
+    const changed = [];
+    MODEL_SCOPES.forEach(({ key }) => {
+        const currentChain = modelScopeChain(key);
+        const exists = currentChain.some((item) => modelRefEquivalent(item, modelKey));
+        const shouldExist = selectedScopes.has(key);
+        if (exists === shouldExist) return;
+        changed.push(key);
+        S.modelCatalog.roles[key] = normalizeModelRoleChain(
+            shouldExist
+                ? [...currentChain, modelKey]
+                : currentChain.filter((item) => !modelRefEquivalent(item, modelKey))
+        );
     });
+    if (changed.length) S.modelCatalog.rolesDirty = true;
+    return changed;
+}
+
+async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "角色模型链已保存。") {
+    const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!targets.length) return;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {
-        const data = await ApiClient.updateOrgGraphModelDefaults(body);
-        S.modelCatalog.items = data.items || S.modelCatalog.items;
-        S.modelCatalog.defaults = data.defaults || S.modelCatalog.defaults;
-        resetModels();
-        hint("全局默认模型已保存。");
+        let payload = null;
+        for (const scope of targets) {
+            payload = await ApiClient.updateModelRoleChain(scope, normalizeModelRoleChain(S.modelCatalog.roles[scope] || []));
+        }
+        if (payload) applyModelCatalog(payload);
+        hint(successText);
     } catch (e) {
         S.modelCatalog.error = e.message || "save failed";
+        hint(`模型配置错误：${S.modelCatalog.error}`, true);
+        throw e;
     } finally {
         S.modelCatalog.saving = false;
         renderModelCatalog();
+    }
+}
+
+function parseModelRetryOn(raw) {
+    return String(raw || "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function parseModelHeaders(raw) {
+    const text = String(raw || "").trim();
+    if (!text) return null;
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("额外请求头必须是 JSON 对象");
+    }
+    return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [String(key), String(value)]));
+}
+
+function collectModelFormData(form, current) {
+    const isCreate = form.dataset.mode === "create";
+    const formData = new FormData(form);
+    const key = isCreate ? String(formData.get("key") || "").trim() : String(form.dataset.modelKey || "").trim();
+    const providerModel = String(formData.get("providerModel") || "").trim();
+    const apiKey = String(formData.get("apiKey") || "").trim();
+    const apiBase = String(formData.get("apiBase") || "").trim();
+    const maxTokensText = String(formData.get("maxTokens") || "").trim();
+    const temperatureText = String(formData.get("temperature") || "").trim();
+    const reasoningEffort = String(formData.get("reasoningEffort") || "").trim();
+    const retryOnRaw = String(formData.get("retryOn") || "").trim();
+    const description = String(formData.get("description") || "").trim();
+    const enabled = formData.get("enabled") === "on";
+    const selectedScopes = new Set(MODEL_SCOPES.filter((scope) => formData.get(`scope_${scope.key}`) === "on").map((scope) => scope.key));
+
+    if (!key) throw new Error("模型 Key 不能为空");
+    if (!providerModel) throw new Error("Provider / Model 不能为空");
+    if (!apiKey) throw new Error("API Key 不能为空");
+    if (isCreate && !apiBase) throw new Error("Base URL 不能为空");
+
+    const extraHeaders = parseModelHeaders(formData.get("extraHeaders"));
+    const retryOn = retryOnRaw ? parseModelRetryOn(retryOnRaw) : null;
+    const maxTokens = maxTokensText ? Number(maxTokensText) : null;
+    const temperature = temperatureText ? Number(temperatureText) : null;
+
+    if (maxTokensText && (!Number.isInteger(maxTokens) || maxTokens <= 0)) {
+        throw new Error("Max Tokens 必须是正整数");
+    }
+    if (temperatureText && (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)) {
+        throw new Error("Temperature 必须在 0 到 2 之间");
+    }
+
+    if (isCreate) {
+        const payload = {
+            key,
+            providerModel,
+            apiKey,
+            apiBase,
+            enabled,
+            scopes: [...selectedScopes],
+            description,
+        };
+        if (maxTokens !== null) payload.maxTokens = maxTokens;
+        if (temperature !== null) payload.temperature = temperature;
+        if (reasoningEffort) payload.reasoningEffort = reasoningEffort;
+        if (retryOn !== null) payload.retryOn = retryOn;
+        if (extraHeaders !== null) payload.extraHeaders = extraHeaders;
+        return { isCreate, key, enabled, selectedScopes, payload };
+    }
+
+    const patch = {};
+    if (providerModel !== String(current?.provider_model || "")) patch.providerModel = providerModel;
+    if (apiKey !== String(current?.api_key || "")) patch.apiKey = apiKey;
+    if (apiBase !== String(current?.api_base || "")) patch.apiBase = apiBase;
+    if (maxTokens !== null && maxTokens !== Number(current?.max_tokens ?? NaN)) patch.maxTokens = maxTokens;
+    if (temperature !== null && temperature !== Number(current?.temperature ?? NaN)) patch.temperature = temperature;
+    if (reasoningEffort !== String(current?.reasoning_effort || "")) patch.reasoningEffort = reasoningEffort;
+    if (retryOn !== null && JSON.stringify(retryOn) !== JSON.stringify(current?.retry_on || [])) patch.retryOn = retryOn;
+    if (description !== String(current?.description || "")) patch.description = description;
+    if (extraHeaders !== null && JSON.stringify(extraHeaders) !== JSON.stringify(current?.extra_headers || null)) patch.extraHeaders = extraHeaders;
+    return { isCreate, key, enabled, selectedScopes, patch };
+}
+
+async function saveModelDetail() {
+    const form = U.modelDetail?.querySelector("#model-detail-form");
+    if (!(form instanceof HTMLFormElement)) return;
+    const current = form.dataset.mode === "create" ? null : modelRefItem(form.dataset.modelKey);
+    const previousRoles = structuredClone(S.modelCatalog.roles);
+    const previousDirty = S.modelCatalog.rolesDirty;
+    try {
+        const draft = collectModelFormData(form, current);
+        const targetKey = draft.isCreate ? draft.key : String(current?.key || draft.key);
+        const changedScopes = setModelScopesInState(targetKey, draft.selectedScopes);
+        const preserveRoleDrafts = S.modelCatalog.rolesDirty;
+        const enableChanged = !draft.isCreate && draft.enabled !== !!current?.enabled;
+        if (!draft.isCreate && !Object.keys(draft.patch).length && !enableChanged && !S.modelCatalog.rolesDirty) {
+            hint("没有需要保存的更改。");
+            return;
+        }
+
+        if (draft.isCreate) {
+            const payload = await ApiClient.createManagedModel(draft.payload);
+            applyModelCatalog(payload, { preserveRoleDrafts });
+            S.modelCatalog.mode = "view";
+            S.modelCatalog.selectedModelKey = payload.model?.key || draft.key;
+        } else {
+            if (Object.keys(draft.patch).length) {
+                const payload = await ApiClient.updateManagedModel(current.key, draft.patch);
+                applyModelCatalog(payload, { preserveRoleDrafts });
+            }
+            if (enableChanged) {
+                const payload = draft.enabled ? await ApiClient.enableManagedModel(current.key) : await ApiClient.disableManagedModel(current.key);
+                applyModelCatalog(payload, { preserveRoleDrafts });
+            }
+            S.modelCatalog.mode = "view";
+            S.modelCatalog.selectedModelKey = current.key;
+        }
+
+        if (S.modelCatalog.rolesDirty || changedScopes.length) {
+            await persistModelRoleChains(MODEL_SCOPES.map((item) => item.key), draft.isCreate ? "模型已添加并同步角色链。" : "模型配置已保存。");
+            return;
+        }
+        hint(draft.isCreate ? "模型已添加。" : "模型配置已保存。");
+        renderModelCatalog();
+    } catch (e) {
+        S.modelCatalog.roles = previousRoles;
+        S.modelCatalog.rolesDirty = previousDirty;
+        S.modelCatalog.error = e.message || "save failed";
+        hint(`模型配置错误：${S.modelCatalog.error}`, true);
+        renderModelRoleEditors();
+        renderModelList();
+        syncModelDetailScopeToggles();
     }
 }
 
@@ -643,49 +1083,6 @@ function toggleTheme() {
     if (darkIcon && lightIcon) { darkIcon.style.display = dark ? "none" : "block"; lightIcon.style.display = dark ? "block" : "none"; }
 }
 
-function switchView(view) {
-    const map = { ceo: U.viewCeo, projects: U.viewProjects, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, "project-details": U.viewProjectDetails };
-    const navView = view === "project-details" ? "projects" : view;
-    U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
-    Object.entries(map).forEach(([key, el]) => { if (el) el.style.display = key === view ? (key === "ceo" || key === "project-details" || key === "models" ? "flex" : "block") : "none"; });
-    if (view !== "project-details" && S.projectWs) { S.projectWs.close(); S.projectWs = null; }
-    S.view = view;
-    if (view === "projects") void loadProjects();
-    if (view === "skills") void loadSkills();
-    if (view === "tools") void loadTools();
-    if (view === "models") void loadModels();
-}
-
-function bind() {
-    U.theme?.addEventListener("click", toggleTheme);
-    U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
-    U.backToProjects?.addEventListener("click", () => switchView("projects"));
-    U.ceoSend?.addEventListener("click", sendCeoMessage);
-    U.ceoInput?.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendCeoMessage(); } });
-    U.modelSave?.addEventListener("click", () => void saveModels());
-    U.modelReset?.addEventListener("click", resetModels);
-    U.selectActive?.addEventListener("click", () => { S.selectedProjects = new Set(S.projects.filter((p) => canPause(p.status)).map((p) => p.project_id)); renderProjects(); });
-    U.selectBlocked?.addEventListener("click", () => { S.selectedProjects = new Set(S.projects.filter((p) => canResume(p.status)).map((p) => p.project_id)); renderProjects(); });
-    U.selectClear?.addEventListener("click", () => { S.selectedProjects.clear(); renderProjects(); });
-    U.pauseBatch?.addEventListener("click", async () => { for (const id of [...S.selectedProjects]) await runProjectAction(id, "pause"); });
-    U.resumeBatch?.addEventListener("click", async () => { for (const id of [...S.selectedProjects]) await runProjectAction(id, "resume"); });
-    U.closeAgent?.addEventListener("click", () => { S.selectedUnitId = null; U.feedTitle.textContent = "项目全局动态 / 详情"; hideAgent(); renderTree(); renderFeed(); });
-    [U.skillSearch, U.skillRisk, U.skillStatus, U.skillLegacy].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderSkills));
-    U.skillRefresh?.addEventListener("click", () => void loadSkills());
-    U.skillSave?.addEventListener("click", () => void saveSkill());
-    [U.toolSearch, U.toolStatus, U.toolRisk].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderTools));
-    U.toolRefresh?.addEventListener("click", () => void loadTools());
-    U.toolSave?.addEventListener("click", () => void saveTool());
-}
-
-function init() {
-    bind();
-    icons();
-    void loadModels();
-    void loadNotices();
-    initCeoWs();
-}
-
 function renderSkillDetail() {
     if (!S.selectedSkill) {
         U.skillEmpty.style.display = "block";
@@ -912,32 +1309,6 @@ async function refreshTools() {
     }
 }
 
-function renderModelCatalog() {
-    const controls = { ceo: U.modelCeo, execution: U.modelExecution, inspection: U.modelInspection };
-    const items = S.modelCatalog.items;
-    const defaults = S.modelCatalog.defaults;
-    const disabled = S.modelCatalog.loading || S.modelCatalog.saving || !items.length;
-    Object.entries(controls).forEach(([key, select]) => {
-        select.innerHTML = "";
-        const base = document.createElement("option");
-        base.value = "";
-        base.textContent = `使用当前默认 (${defaults[key] || "未配置"})`;
-        select.appendChild(base);
-        items.forEach((m) => {
-            const option = document.createElement("option");
-            option.value = m;
-            option.textContent = m;
-            select.appendChild(option);
-        });
-        select.disabled = disabled;
-    });
-    if (S.modelCatalog.loading) return hint("正在加载全局默认模型...");
-    if (S.modelCatalog.saving) return hint("正在保存全局默认模型...");
-    if (S.modelCatalog.error) return hint(`模型配置错误: ${S.modelCatalog.error}`, true);
-    if (!items.length) return hint("当前没有可用模型。请先配置 Provider API key，然后刷新页面。", true);
-    hint("修改后点击“保存默认模型”生效。");
-}
-
 function switchView(view) {
     const map = { ceo: U.viewCeo, projects: U.viewProjects, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, "project-details": U.viewProjectDetails };
     const navView = view === "project-details" ? "projects" : view;
@@ -969,8 +1340,61 @@ function bind() {
             sendCeoMessage();
         }
     });
-    U.modelSave?.addEventListener("click", () => void saveModels());
-    U.modelReset?.addEventListener("click", resetModels);
+    U.modelRefresh?.addEventListener("click", () => void loadModels());
+    U.modelCreate?.addEventListener("click", startCreateModel);
+    U.modelRolesSave?.addEventListener("click", () => void persistModelRoleChains(MODEL_SCOPES.map((item) => item.key)));
+    U.modelSearch?.addEventListener("input", (e) => {
+        S.modelCatalog.search = String(e.target.value || "");
+        renderModelList();
+    });
+    U.modelList?.addEventListener("click", (e) => {
+        const button = e.target.closest("[data-model-key]");
+        if (!button) return;
+        openModel(button.dataset.modelKey);
+    });
+    U.modelRoleEditors?.addEventListener("click", (e) => {
+        const action = e.target.closest("[data-model-chain-action]");
+        if (action) {
+            const scope = String(action.dataset.scope || "");
+            const index = Number(action.dataset.index || -1);
+            const chain = modelScopeChain(scope);
+            if (!scope || index < 0 || index >= chain.length) return;
+            if (action.dataset.modelChainAction === "remove") {
+                chain.splice(index, 1);
+            } else if (action.dataset.modelChainAction === "up" && index > 0) {
+                [chain[index - 1], chain[index]] = [chain[index], chain[index - 1]];
+            } else if (action.dataset.modelChainAction === "down" && index < chain.length - 1) {
+                [chain[index], chain[index + 1]] = [chain[index + 1], chain[index]];
+            }
+            updateRoleChainDraft(scope, chain);
+            return;
+        }
+        const add = e.target.closest("[data-model-role-add]");
+        if (!add) return;
+        const scope = String(add.dataset.modelRoleAdd || "");
+        const select = U.modelRoleEditors.querySelector(`[data-model-role-select="${scope}"]`);
+        const value = String(select?.value || "").trim();
+        if (!scope || !value) return;
+        updateRoleChainDraft(scope, [...modelScopeChain(scope), value]);
+        select.value = "";
+    });
+    U.modelDetail?.addEventListener("submit", (e) => {
+        if (e.target?.id !== "model-detail-form") return;
+        e.preventDefault();
+        void saveModelDetail();
+    });
+    U.modelDetail?.addEventListener("click", (e) => {
+        const cancel = e.target.closest("[data-model-detail-cancel]");
+        if (!cancel) return;
+        S.modelCatalog.mode = "view";
+        renderModelCatalog();
+    });
+    U.modelDetail?.addEventListener("change", (e) => {
+        const toggle = e.target.closest(".role-toggle");
+        if (toggle && e.target instanceof HTMLInputElement && e.target.type === "checkbox") {
+            toggle.classList.toggle("checked", e.target.checked);
+        }
+    });
     U.selectActive?.addEventListener("click", () => {
         S.selectedProjects = new Set(S.projects.filter((p) => canPause(p.status)).map((p) => p.project_id));
         renderProjects();

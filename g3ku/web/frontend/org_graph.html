@@ -62,7 +62,7 @@
             <section id="view-ceo" class="view-section active">
                 <header class="content-header">
                     <h1>CEO 控制面板</h1>
-                    <p class="subtitle">发起任务、追踪项目，并统一管理全局默认模型。</p>
+                    <p class="subtitle">发起任务、追踪项目，并统一管理模型配置与角色降级链。</p>
                 </header>
 
                 <div class="chat-wrapper">
@@ -202,41 +202,39 @@
                 <header class="content-header resource-header">
                     <div>
                         <h1>模型配置</h1>
-                        <p class="subtitle">统一管理系统各角色的全局默认模型。</p>
-                        <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载全局默认模型...</p>
+                        <p class="subtitle">直接维护 <code>models.catalog</code> 和 <code>models.roles</code>，管理模型目录、参数、启用状态，以及按顺序降级的角色模型链。</p>
+                        <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载模型配置...</p>
                     </div>
                     <div class="resource-header-actions">
-                        <button id="sidebar-model-reset-btn" class="toolbar-btn ghost" type="button">重置</button>
-                        <button id="sidebar-model-save-btn" class="toolbar-btn success" type="button">保存默认模型</button>
+                        <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
+                        <button id="model-create-btn" class="toolbar-btn" type="button">添加模型</button>
+                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button">保存角色链</button>
                     </div>
                 </header>
 
-                <div class="resource-layout" style="padding: var(--space-6) var(--space-8); overflow-y: auto;">
-                    <div class="model-config-container" style="max-width: 600px; display: flex; flex-direction: column; gap: var(--space-6);">
-                        <div class="model-form-group">
-                            <label class="ceo-model-field" for="sidebar-model-ceo" style="display: flex; flex-direction: column; gap: 8px;">
-                                <span style="font-weight: 600; font-size: 1rem;">CEO 模型</span>
-                                <select id="sidebar-model-ceo" class="ceo-model-select" style="padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); background: var(--bg-app); color: var(--text-primary); font-size: 0.95rem; cursor: pointer;" disabled>
-                                    <option value="">正在加载...</option>
-                                </select>
-                            </label>
+                <div class="model-admin-shell">
+                    <section class="resource-list-panel model-routing-panel">
+                        <div class="panel-header">
+                            <div>
+                                <h2>角色模型链</h2>
+                                <p class="subtitle">可为主 Agent、CEO、执行、检验分别配置多个模型；当触发限制时会按链路顺序自动降级。</p>
+                            </div>
                         </div>
-                        <div class="model-form-group">
-                            <label class="ceo-model-field" for="sidebar-model-execution" style="display: flex; flex-direction: column; gap: 8px;">
-                                <span style="font-weight: 600; font-size: 1rem;">执行模型</span>
-                                <select id="sidebar-model-execution" class="ceo-model-select" style="padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); background: var(--bg-app); color: var(--text-primary); font-size: 0.95rem; cursor: pointer;" disabled>
-                                    <option value="">正在加载...</option>
-                                </select>
-                            </label>
-                        </div>
-                        <div class="model-form-group">
-                            <label class="ceo-model-field" for="sidebar-model-inspection" style="display: flex; flex-direction: column; gap: 8px;">
-                                <span style="font-weight: 600; font-size: 1rem;">检验模型</span>
-                                <select id="sidebar-model-inspection" class="ceo-model-select" style="padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); background: var(--bg-app); color: var(--text-primary); font-size: 0.95rem; cursor: pointer;" disabled>
-                                    <option value="">正在加载...</option>
-                                </select>
-                            </label>
-                        </div>
+                        <div id="model-role-editors" class="model-routing-grid"></div>
+                    </section>
+
+                    <div class="resource-layout model-admin-layout">
+                        <aside class="resource-list-panel model-list-panel">
+                            <div class="resource-controls">
+                                <input id="model-search-input" class="resource-search" type="search" placeholder="搜索模型 key、provider:model、说明">
+                            </div>
+                            <div id="model-list" class="resource-list"></div>
+                        </aside>
+
+                        <section class="resource-detail-panel model-detail-panel">
+                            <div id="model-detail-empty" class="empty-state resource-empty">请选择一个模型，或点击“添加模型”。</div>
+                            <div id="model-detail-content" class="resource-detail-shell"></div>
+                        </section>
                     </div>
                 </div>
             </section>

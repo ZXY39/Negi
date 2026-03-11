@@ -13,6 +13,7 @@ from loguru import logger
 
 from g3ku.integrations.langchain_runtime import ProviderChatModelAdapter
 from g3ku.config.schema import Config, ProviderConfig
+from g3ku.providers.fallback import FallbackProvider
 from g3ku.providers.litellm_provider import LiteLLMProvider
 from g3ku.providers.openai_codex_provider import OpenAICodexProvider
 from g3ku.providers.registry import ProviderSpec, find_by_name
@@ -22,87 +23,19 @@ _SPECIAL_PROVIDER_BRIDGES = {"openai_codex", "responses", "github_copilot"}
 
 
 def build_chat_model(config: Config) -> BaseChatModel:
-    """Build a BaseChatModel for the configured strict provider:model target."""
-    provider_id, model_id = config.get_model_target()
-    provider_cfg = config.get_provider()
+    """Build a BaseChatModel for the configured agent model chain."""
+    chain = [target.provider_model for target in config.get_scope_model_chain("agent")]
+    default_ref = str(chain[0] if chain else config.agents.defaults.model or "").strip()
+    if not default_ref:
+        raise ValueError("No model configured for agent scope.")
 
-    if provider_id in _SPECIAL_PROVIDER_BRIDGES:
-        return _build_special_provider_bridge(
-            provider_id=provider_id,
-            model_id=model_id,
-            provider_cfg=provider_cfg,
-            config=config,
-        )
-
-    spec = find_by_name(provider_id)
-    if spec is None:
-        raise ValueError(f"Unknown provider '{provider_id}' in agents.defaults.model")
-
-    _validate_provider_credentials(spec, provider_id, provider_cfg, config.get_api_base())
-
-    if provider_id == "openai" or provider_id == "custom":
-        try:
-            from langchain_openai import ChatOpenAI
-        except Exception as exc:  # pragma: no cover - import failure path
-            raise RuntimeError(
-                "Missing dependency for OpenAI chat model. Install langchain-openai."
-            ) from exc
-
-        return ChatOpenAI(
-            model=model_id,
-            api_key=(provider_cfg.api_key or None) if provider_cfg else None,
-            base_url=config.get_api_base() or ("http://localhost:8000/v1" if provider_id == "custom" else None),
-            default_headers=(provider_cfg.extra_headers or None) if provider_cfg else None,
-        )
-
-    if provider_id == "anthropic":
-        try:
-            from langchain_anthropic import ChatAnthropic
-        except Exception as exc:  # pragma: no cover - import failure path
-            raise RuntimeError(
-                "Missing dependency for Anthropic chat model. Install langchain-anthropic."
-            ) from exc
-
-        return ChatAnthropic(
-            model_name=model_id,
-            api_key=(provider_cfg.api_key or None) if provider_cfg else None,
-            base_url=config.get_api_base() or None,
-            default_headers=(provider_cfg.extra_headers or None) if provider_cfg else None,
-        )
-
-    if provider_id == "gemini":
-        try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-        except Exception as exc:  # pragma: no cover - import failure path
-            raise RuntimeError(
-                "Missing dependency for Gemini chat model. Install langchain-google-genai."
-            ) from exc
-
-        return ChatGoogleGenerativeAI(
-            model=model_id,
-            api_key=(provider_cfg.api_key or None) if provider_cfg else None,
-            additional_headers=(provider_cfg.extra_headers or None) if provider_cfg else None,
-        )
-
-    try:
-        from langchain_community.chat_models import ChatLiteLLM
-    except Exception as exc:  # pragma: no cover - import failure path
-        raise RuntimeError(
-            "Missing dependency for LiteLLM chat model. Install langchain-community."
-        ) from exc
-
-    resolved_model = _resolve_litellm_model(provider_id, model_id)
-    _setup_litellm_env(spec, provider_cfg, config.get_api_base())
-
-    model_kwargs: dict[str, Any] = {}
-    if provider_cfg and provider_cfg.extra_headers:
-        model_kwargs["extra_headers"] = dict(provider_cfg.extra_headers)
-
-    return ChatLiteLLM(
-        model=resolved_model,
-        api_key=(provider_cfg.api_key or None) if provider_cfg else None,
-        api_base=config.get_api_base() or None,
-        model_kwargs=model_kwargs,
+    provider = FallbackProvider(config=config, model_chain=chain or [default_ref], default_model_ref=default_ref)
+    return ProviderChatModelAdapter(
+        provider=provider,
+        default_model=default_ref,
+        default_temperature=config.agents.defaults.temperature,
+        default_max_tokens=config.agents.defaults.max_tokens,
+        default_reasoning_effort=config.agents.defaults.reasoning_effort,
     )
 
 

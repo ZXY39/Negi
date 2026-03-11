@@ -18,6 +18,7 @@ from g3ku.agent.tools.file_vault import (
 from g3ku.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from g3ku.agent.tools.memory_search import MemorySearchTool
 from g3ku.agent.tools.message import MessageTool
+from g3ku.agent.tools.model_config import ModelConfigTool
 from g3ku.agent.tools.picture_washing import PictureWashingTool
 from g3ku.agent.tools.shell import ExecTool
 from g3ku.agent.tools.web import WebFetchTool, WebSearchTool
@@ -204,6 +205,7 @@ class RuntimeBootstrapBridge:
         except Exception as exc:
             logger.debug("AgentBrowserTool unavailable, skipping registration: {}", exc)
         self._loop.tools.register(MessageTool(send_callback=self._loop.bus.publish_outbound))
+        self._loop.tools.register(ModelConfigTool())
         if self._loop.cron_service:
             self._loop.tools.register(CronTool(self._loop.cron_service))
 

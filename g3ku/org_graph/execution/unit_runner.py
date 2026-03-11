@@ -66,12 +66,14 @@ class UnitRunner:
                     text=f'{unit.role_title} is building a stage plan',
                 )
                 provider_model = str(unit.provider_model or self._service.config.execution_model)
+                provider_model_chain = [provider_model] if unit.provider_model else self._service.resolve_project_model_chain(project=project, node_type='execution')
                 plan = await build_execution_plan(
                     unit.objective_summary,
                     level=unit.level,
                     effective_max_depth=project.effective_max_depth,
                     llm=self._service.llm,
                     provider_model=provider_model,
+                    provider_model_chain=provider_model_chain,
                     local_available_tools=self._service.list_effective_tool_names(
                         session_id=project.session_id,
                         actor_role=unit.role_kind,
@@ -554,6 +556,7 @@ class UnitRunner:
             await self._service.emit_event(project=project, scope='tool', event_name='tool.updated', text=action, unit_id=unit.unit_id, stage_id=stage.stage_id)
             await asyncio.sleep(0.05)
         provider_model = str(unit.provider_model or self._service.config.execution_model)
+        provider_model_chain = [provider_model] if unit.provider_model else self._service.resolve_project_model_chain(project=project, node_type='execution')
         result_text = None
         try:
             result_text = await self._service.tool_runtime.run(
@@ -571,6 +574,7 @@ class UnitRunner:
             try:
                 result_text = await self._service.llm.chat_text(
                     provider_model=provider_model,
+                    provider_model_chain=provider_model_chain,
                     system_prompt=LOCAL_EXECUTION_SYSTEM_PROMPT,
                     user_prompt=(
                         f'Project: {project.title}\n'
@@ -704,6 +708,7 @@ class UnitRunner:
         try:
             payload = await self._service.llm.chat_json(
                 provider_model=str(work_state.get('provider_model') or self._service.config.execution_model),
+                provider_model_chain=[str(work_state.get('provider_model') or self._service.config.execution_model)],
                 system_prompt=REWORK_REWRITER_SYSTEM_PROMPT,
                 user_prompt=json.dumps(
                     {
@@ -785,6 +790,7 @@ class UnitRunner:
         try:
             result = await self._service.llm.chat_text(
                 provider_model=self._service.resolve_project_provider_model(project=project, node_type='inspection'),
+                provider_model_chain=self._service.resolve_project_model_chain(project=project, node_type='inspection'),
                 system_prompt=STAGE_SYNTHESIS_SYSTEM_PROMPT,
                 user_prompt=json.dumps(
                     {

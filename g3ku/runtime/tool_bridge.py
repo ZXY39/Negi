@@ -303,6 +303,7 @@ class ToolExecutionBridge:
                 "message_id": message_id,
                 "tool_name": tool_name,
                 "temp_dir": str(self._loop.temp_dir),
+                "loop": self._loop,
             }
         )
         try:
@@ -391,6 +392,7 @@ class ToolExecutionBridge:
                 "message_id": message_id,
                 "tool_name": tool_name,
                 "temp_dir": str(self._loop.temp_dir),
+                "loop": self._loop,
             }
         )
         try:

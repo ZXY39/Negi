@@ -48,6 +48,7 @@ class ModelChainExecutor:
             return self._loop.model_client
         copied = app_config.model_copy(deep=True)
         copied.agents.defaults.model = provider_model
+        copied.models.roles.agent = [provider_model]
         return build_chat_model(copied)
 
     def _default_provider_model(self) -> str:

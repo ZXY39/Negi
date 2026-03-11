@@ -206,25 +206,22 @@ def onboard(
     ),
 ):
     """Initialize g3ku configuration and workspace."""
-    from g3ku.config.loader import get_config_path, load_config, save_config
-    from g3ku.config.schema import Config
+    from g3ku.config.loader import build_project_config_from_example, get_config_path, load_config, save_config
     from g3ku.utils.helpers import get_workspace_path
 
     config_path = (Path.cwd() / ".g3ku" / "config.json") if project else get_config_path()
 
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
-        console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
-        console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
+        console.print("  [bold]y[/bold] = overwrite from project example config")
+        console.print("  [bold]N[/bold] = re-save current config in compact format")
         if typer.confirm("Overwrite?"):
-            config = Config()
-            if project:
-                config.agents.defaults.workspace = "."
+            config = build_project_config_from_example()
             if project:
                 save_config(config, config_path)
             else:
                 save_config(config)
-            console.print(f"[green]OK[/green] Config reset to defaults at {config_path}")
+            console.print(f"[green]OK[/green] Config rebuilt from example at {config_path}")
         else:
             config = load_config(config_path if project else None)
             if project:
@@ -233,14 +230,12 @@ def onboard(
                 save_config(config)
             console.print(f"[green]OK[/green] Config refreshed at {config_path} (existing values preserved)")
     else:
-        config = Config()
-        if project:
-            config.agents.defaults.workspace = "."
+        config = build_project_config_from_example()
         if project:
             save_config(config, config_path)
         else:
             save_config(config)
-        console.print(f"[green]OK[/green] Created config at {config_path}")
+        console.print(f"[green]OK[/green] Created config from example at {config_path}")
 
     # Create workspace
     workspace = get_workspace_path(config.agents.defaults.workspace if "config" in locals() else None)

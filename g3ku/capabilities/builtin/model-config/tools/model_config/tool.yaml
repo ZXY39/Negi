@@ -1,0 +1,3 @@
+name: model_config
+description: Manage model catalog entries, parameters, and ordered scope bindings.
+entrypoint: g3ku.capabilities.builtin_factories:build_model_config

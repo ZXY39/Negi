@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from g3ku.config.model_manager import ModelManager
 from g3ku.org_graph.config import ResolvedOrgGraphConfig
 from g3ku.org_graph.errors import PermissionDeniedError
 from g3ku.org_graph.governance.approval_service import GovernanceApprovalService
@@ -31,8 +32,6 @@ from g3ku.org_graph.tracing.tree_builder import TreeBuilder
 
 
 class ProjectService:
-    PROJECT_NODE_MODEL_TYPES = ('ceo', 'execution', 'inspection')
-
     def __init__(self, config: ResolvedOrgGraphConfig):
         self.config = config
         self.store = ProjectStore(config.project_store_path)
@@ -117,6 +116,79 @@ class ProjectService:
             unit_id=unit_id,
         )
 
+    def _reload_runtime_config(self, config=None) -> None:
+        from g3ku.org_graph.config import resolve_org_graph_config
+
+        self.config = resolve_org_graph_config(config or self.config.raw)
+        self.llm = OrgGraphLLM.from_config(self.config.raw, default_model=self.config.execution_model)
+
+    def _model_manager(self) -> ModelManager:
+        return ModelManager(self.config.raw.model_copy(deep=True))
+
+    def list_model_catalog(self) -> dict[str, Any]:
+        manager = self._model_manager()
+        catalog = manager.list_models()
+        return {
+            "items": [str(item.get('key') or '').strip() for item in catalog if str(item.get('key') or '').strip()],
+            "catalog": catalog,
+            "roles": {
+                "agent": list(manager.config.models.roles.agent),
+                "ceo": list(manager.config.models.roles.ceo),
+                "execution": list(manager.config.models.roles.execution),
+                "inspection": list(manager.config.models.roles.inspection),
+            },
+            "scopes": ["agent", "ceo", "execution", "inspection"],
+            "defaults": self.default_node_provider_models(),
+        }
+
+    async def add_model_catalog_entry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        manager = self._model_manager()
+        result = manager.add_model(
+            key=str(payload.get("key") or "").strip(),
+            provider_model=str(payload.get("provider_model") or "").strip(),
+            api_key=str(payload.get("api_key") or "").strip(),
+            api_base=str(payload.get("api_base") or "").strip(),
+            scopes=[str(item) for item in (payload.get("scopes") or [])],
+            extra_headers=payload.get("extra_headers") if isinstance(payload.get("extra_headers"), dict) else None,
+            enabled=bool(payload.get("enabled", True)),
+            max_tokens=payload.get("max_tokens"),
+            temperature=payload.get("temperature"),
+            reasoning_effort=payload.get("reasoning_effort"),
+            retry_on=[str(item) for item in (payload.get("retry_on") or [])] if payload.get("retry_on") is not None else None,
+            description=str(payload.get("description") or ""),
+        )
+        self._reload_runtime_config(manager.config)
+        return result
+
+    async def update_model_catalog_entry(self, model_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        manager = self._model_manager()
+        result = manager.update_model(
+            key=model_key,
+            provider_model=payload.get("provider_model"),
+            api_key=payload.get("api_key"),
+            api_base=payload.get("api_base"),
+            extra_headers=payload.get("extra_headers") if isinstance(payload.get("extra_headers"), dict) else None,
+            max_tokens=payload.get("max_tokens"),
+            temperature=payload.get("temperature"),
+            reasoning_effort=payload.get("reasoning_effort"),
+            retry_on=[str(item) for item in (payload.get("retry_on") or [])] if payload.get("retry_on") is not None else None,
+            description=payload.get("description"),
+        )
+        self._reload_runtime_config(manager.config)
+        return result
+
+    async def set_model_catalog_entry_enabled(self, model_key: str, enabled: bool) -> dict[str, Any]:
+        manager = self._model_manager()
+        result = manager.set_model_enabled(model_key, enabled)
+        self._reload_runtime_config(manager.config)
+        return result
+
+    async def update_model_role_chain(self, scope: str, model_keys: list[str]) -> dict[str, Any]:
+        manager = self._model_manager()
+        result = manager.set_scope_chain(scope, model_keys)
+        self._reload_runtime_config(manager.config)
+        return result
+
     def default_node_provider_models(self) -> dict[str, str]:
         fallback = self._first_ready_provider_model()
         return to_public_model_defaults(
@@ -128,12 +200,21 @@ class ProjectService:
         )
 
     def _provider_model_candidates(self) -> list[str]:
+        role_refs = [
+            *self.config.raw.models.roles.agent,
+            *self.config.raw.models.roles.ceo,
+            *self.config.raw.models.roles.execution,
+            *self.config.raw.models.roles.inspection,
+        ]
+        catalog_refs = [item.key for item in self.config.raw.models.catalog]
         return [
             self.config.raw.agents.defaults.model,
             self.config.raw.agents.multi_agent.orchestrator_model,
             self.config.raw.org_graph.ceo_model,
             self.config.raw.org_graph.execution_model,
             self.config.raw.org_graph.inspection_model,
+            *catalog_refs,
+            *role_refs,
         ]
 
     def _provider_model_is_ready(self, provider_model: str) -> bool:
@@ -161,42 +242,17 @@ class ProjectService:
             return candidate
         return str(fallback or '').strip()
 
-    def list_available_provider_models(self) -> list[str]:
-        seen: set[str] = set()
-        models: list[str] = []
-        for candidate in self._provider_model_candidates():
-            provider_model = str(candidate or '').strip()
-            if not provider_model or provider_model in seen:
-                continue
-            try:
-                self.config.raw.parse_provider_model(provider_model)
-            except Exception:
-                continue
-            if not self._provider_model_is_ready(provider_model):
-                continue
-            seen.add(provider_model)
-            models.append(provider_model)
-        return models
-
-    def validate_default_provider_models(self, payload: dict[str, Any] | None) -> dict[str, str]:
-        payload = payload if isinstance(payload, dict) else {}
-        allowed = set(self.list_available_provider_models())
-        normalized: dict[str, str] = {}
-        for node_type in self.PROJECT_NODE_MODEL_TYPES:
-            provider_model = str(payload.get(node_type) or '').strip()
-            if not provider_model:
-                continue
-            try:
-                self.config.raw.parse_provider_model(provider_model)
-            except Exception as exc:
-                raise ValueError(f'Invalid provider model for {node_type}: {provider_model}') from exc
-            if allowed and provider_model not in allowed:
-                raise ValueError(f'Provider model for {node_type} must come from the system model list')
-            normalized[node_type] = provider_model
-        return normalized
+    def resolve_project_model_chain(self, *, project: ProjectRecord | None, node_type: str) -> list[str]:
+        normalized_type = 'inspection' if node_type in {'inspection', 'checker'} else 'execution' if node_type in {'execution'} else 'ceo'
+        scope = {'ceo': 'ceo', 'execution': 'execution', 'inspection': 'inspection'}[normalized_type]
+        chain = [target.provider_model for target in self.config.raw.get_scope_model_chain(scope)]
+        if chain:
+            return chain
+        fallback = self.resolve_project_provider_model(project=project, node_type=node_type)
+        return [fallback] if fallback else []
 
     def resolve_project_provider_model(self, *, project: ProjectRecord | None, node_type: str) -> str:
-        normalized_type = 'inspection' if node_type in {'inspection', 'checker'} else 'execution' if node_type in {'execution', 'execution', 'execution'} else 'ceo'
+        normalized_type = 'inspection' if node_type in {'inspection', 'checker'} else 'execution' if node_type in {'execution'} else 'ceo'
         raw_defaults = {
             'ceo': str(self.config.ceo_model or '').strip(),
             'execution': str(self.config.execution_model or '').strip(),
@@ -207,25 +263,6 @@ class ProjectService:
         if resolved:
             return resolved
         return raw_defaults[normalized_type]
-
-    async def update_default_provider_models(self, payload: dict[str, Any]) -> dict[str, str]:
-        normalized = self.validate_default_provider_models(payload)
-        org_graph = self.config.raw.org_graph.model_copy(
-            update={
-                'ceo_model': normalized.get('ceo') or self.config.raw.org_graph.ceo_model,
-                'execution_model': normalized.get('execution') or self.config.raw.org_graph.execution_model,
-                'inspection_model': normalized.get('inspection') or self.config.raw.org_graph.inspection_model,
-            }
-        )
-        self.config.raw = self.config.raw.model_copy(update={'org_graph': org_graph})
-        from g3ku.config.loader import save_config
-
-        save_config(self.config.raw)
-        self.config.ceo_model = org_graph.ceo_model or self.config.ceo_model
-        self.config.execution_model = org_graph.execution_model or self.config.execution_model
-        self.config.inspection_model = org_graph.inspection_model or self.config.inspection_model
-        self.llm = OrgGraphLLM.from_config(self.config.raw, default_model=self.config.execution_model)
-        return self.default_node_provider_models()
 
     def list_effective_tool_names(
         self,

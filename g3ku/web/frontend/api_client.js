@@ -60,8 +60,24 @@ class ApiClient {
         return this.get("/api/models");
     }
 
-    static async updateOrgGraphModelDefaults(defaults) {
-        return this.put("/api/models/defaults", defaults);
+    static async createManagedModel(payload) {
+        return this.post("/api/models", payload);
+    }
+
+    static async updateManagedModel(modelKey, payload) {
+        return this.put(`/api/models/${modelKey}`, payload);
+    }
+
+    static async enableManagedModel(modelKey) {
+        return this.post(`/api/models/${modelKey}/enable`);
+    }
+
+    static async disableManagedModel(modelKey) {
+        return this.post(`/api/models/${modelKey}/disable`);
+    }
+
+    static async updateModelRoleChain(scope, modelKeys) {
+        return this.put(`/api/models/roles/${scope}`, { modelKeys });
     }
 
     static async getNotices(offset = 0, limit = 50) {
