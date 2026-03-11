@@ -136,10 +136,146 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
             {'id': 'close', 'label': 'Close Browser', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES, 'match': {'kind': 'browser_command', 'command': 'close'}},
         ],
     },
+    'message': {
+        'tool_id': 'messaging',
+        'display_name': 'Messaging',
+        'description': 'Send outbound user-facing messages.',
+        'actions': [
+            {'id': 'send', 'label': 'Send Message', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES},
+        ],
+    },
+    'cron': {
+        'tool_id': 'automation',
+        'display_name': 'Automation',
+        'description': 'Schedule reminders and recurring jobs.',
+        'actions': [
+            {'id': 'schedule', 'label': 'Schedule Task', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo', 'execution']},
+        ],
+    },
+    'exec': {
+        'tool_id': 'exec_runtime',
+        'display_name': 'Exec Runtime',
+        'description': 'Execute shell commands.',
+        'actions': [
+            {'id': 'run', 'label': 'Run Command', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo', 'execution']},
+        ],
+    },
+    'model_config': {
+        'tool_id': 'model_admin',
+        'display_name': 'Model Admin',
+        'description': 'Manage model catalog and role routing.',
+        'actions': [
+            {'id': 'manage', 'label': 'Manage Models', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'picture_washing': {
+        'tool_id': 'media_tools',
+        'display_name': 'Media Tools',
+        'description': 'Generate or transform pictures.',
+        'actions': [
+            {'id': 'transform', 'label': 'Transform Picture', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES},
+        ],
+    },
+    'file_vault_lookup': {
+        'tool_id': 'file_vault',
+        'display_name': 'File Vault',
+        'description': 'Search and manage uploaded file vault content.',
+        'actions': [
+            {'id': 'lookup', 'label': 'Lookup Vault', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES},
+        ],
+    },
+    'file_vault_read': {
+        'tool_id': 'file_vault',
+        'display_name': 'File Vault',
+        'description': 'Search and manage uploaded file vault content.',
+        'actions': [
+            {'id': 'read', 'label': 'Read Vault File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES},
+        ],
+    },
+    'file_vault_stats': {
+        'tool_id': 'file_vault',
+        'display_name': 'File Vault',
+        'description': 'Search and manage uploaded file vault content.',
+        'actions': [
+            {'id': 'stats', 'label': 'Vault Stats', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES},
+        ],
+    },
+    'file_vault_set_policy': {
+        'tool_id': 'file_vault',
+        'display_name': 'File Vault',
+        'description': 'Search and manage uploaded file vault content.',
+        'actions': [
+            {'id': 'set_policy', 'label': 'Set Vault Policy', 'risk_level': 'medium', 'destructive': True, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'file_vault_cleanup': {
+        'tool_id': 'file_vault',
+        'display_name': 'File Vault',
+        'description': 'Search and manage uploaded file vault content.',
+        'actions': [
+            {'id': 'cleanup', 'label': 'Cleanup Vault', 'risk_level': 'medium', 'destructive': True, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'orggraph_create_project': {
+        'tool_id': 'project_execution',
+        'display_name': 'Project Execution',
+        'description': 'Create and control org-graph background projects.',
+        'actions': [
+            {'id': 'create_project', 'label': 'Create Project', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'orggraph_control_project': {
+        'tool_id': 'project_execution',
+        'display_name': 'Project Execution',
+        'description': 'Create and control org-graph background projects.',
+        'actions': [
+            {'id': 'control_project', 'label': 'Control Project', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'task_monitor_summary': {
+        'tool_id': 'task_monitoring',
+        'display_name': 'Task Monitoring',
+        'description': 'Summarize and inspect background project progress.',
+        'actions': [
+            {'id': 'summary', 'label': 'Task Summary', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'task_monitor_list': {
+        'tool_id': 'task_monitoring',
+        'display_name': 'Task Monitoring',
+        'description': 'Summarize and inspect background project progress.',
+        'actions': [
+            {'id': 'list', 'label': 'Task List', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'task_monitor_progress': {
+        'tool_id': 'task_monitoring',
+        'display_name': 'Task Monitoring',
+        'description': 'Summarize and inspect background project progress.',
+        'actions': [
+            {'id': 'progress', 'label': 'Task Progress', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'task_monitor_engineering_exceptions': {
+        'tool_id': 'task_monitoring',
+        'display_name': 'Task Monitoring',
+        'description': 'Summarize and inspect background project progress.',
+        'actions': [
+            {'id': 'engineering_exceptions', 'label': 'Engineering Exceptions', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    'load_skill_context': {
+        'tool_id': 'skill_access',
+        'display_name': 'Skill Access',
+        'description': 'Load detailed skill context for currently visible skills.',
+        'actions': [
+            {'id': 'load_context', 'label': 'Load Skill Context', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
 }
 
 
-DEFAULT_FAMILY_ORDER = ['filesystem', 'web_access', 'browser', 'memory']
+DEFAULT_FAMILY_ORDER = ['filesystem', 'web_access', 'browser', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'media_tools', 'file_vault', 'project_execution', 'task_monitoring', 'skill_access']
 
 
 def get_default_tool_governance(tool_name: str) -> dict[str, Any] | None:

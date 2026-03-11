@@ -129,6 +129,14 @@ class ProjectStore:
         rows = self._fetchall('SELECT payload_json FROM units WHERE project_id = ? ORDER BY level ASC, created_at ASC', (project_id,))
         return [self._parse(row['payload_json'], UnitAgentRecord) for row in rows]
 
+    def delete_units(self, unit_ids: list[str]) -> None:
+        values = [str(item or '').strip() for item in unit_ids if str(item or '').strip()]
+        if not values:
+            return
+        placeholders = ', '.join('?' for _ in values)
+        with self._lock, self._conn:
+            self._conn.execute(f'DELETE FROM units WHERE unit_id IN ({placeholders})', tuple(values))
+
     def upsert_stage(self, record: UnitStageRecord) -> UnitStageRecord:
         self._upsert(
             'stages',
@@ -141,6 +149,14 @@ class ProjectStore:
     def list_stages(self, project_id: str) -> list[UnitStageRecord]:
         rows = self._fetchall('SELECT payload_json FROM stages WHERE project_id = ? ORDER BY idx ASC', (project_id,))
         return [self._parse(row['payload_json'], UnitStageRecord) for row in rows]
+
+    def delete_stages_for_units(self, unit_ids: list[str]) -> None:
+        values = [str(item or '').strip() for item in unit_ids if str(item or '').strip()]
+        if not values:
+            return
+        placeholders = ', '.join('?' for _ in values)
+        with self._lock, self._conn:
+            self._conn.execute(f'DELETE FROM stages WHERE unit_id IN ({placeholders})', tuple(values))
 
     def get_stage(self, stage_id: str) -> UnitStageRecord | None:
         row = self._fetchone('SELECT payload_json FROM stages WHERE stage_id = ?', (stage_id,))
@@ -182,6 +198,14 @@ class ProjectStore:
     def list_artifacts(self, project_id: str) -> list[ProjectArtifactRecord]:
         rows = self._fetchall('SELECT payload_json FROM artifacts WHERE project_id = ? ORDER BY created_at ASC', (project_id,))
         return [self._parse(row['payload_json'], ProjectArtifactRecord) for row in rows]
+
+    def delete_artifacts_for_units(self, unit_ids: list[str]) -> None:
+        values = [str(item or '').strip() for item in unit_ids if str(item or '').strip()]
+        if not values:
+            return
+        placeholders = ', '.join('?' for _ in values)
+        with self._lock, self._conn:
+            self._conn.execute(f'DELETE FROM artifacts WHERE unit_id IN ({placeholders})', tuple(values))
 
     def get_artifact(self, artifact_id: str) -> ProjectArtifactRecord | None:
         row = self._fetchone('SELECT payload_json FROM artifacts WHERE artifact_id = ?', (artifact_id,))

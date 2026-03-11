@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any, Iterable
 
 from g3ku.org_graph.planning.depth_policy import can_delegate
@@ -305,6 +305,7 @@ async def build_execution_plan(
     local_available_skills: list[str] | None = None,
     delegate_available_tools: list[str] | None = None,
     delegate_available_skills: list[str] | None = None,
+    monitor_context: dict[str, Any] | None = None,
 ) -> ExecutionPlan:
     text = str(objective or '').strip() or '未命名目标'
     delegation_allowed = can_delegate(level, effective_max_depth)
@@ -334,6 +335,7 @@ async def build_execution_plan(
                 user_prompt=user_prompt,
                 provider_model=provider_model,
                 provider_model_chain=provider_model_chain,
+                monitor_context=monitor_context,
             )
             if payload:
                 plan = _coerce_plan(
@@ -345,6 +347,19 @@ async def build_execution_plan(
                     return plan
         except Exception:
             pass
-    return _fallback_plan(text)
+    plan = _fallback_plan(text)
+    ctx = monitor_context if isinstance(monitor_context, dict) else {}
+    service = ctx.get('service')
+    project = ctx.get('project')
+    unit = ctx.get('unit')
+    if service is not None and project is not None and unit is not None:
+        service.monitor_service.record_output(
+            project=project,
+            unit=unit,
+            content=json.dumps(asdict(plan), ensure_ascii=False, indent=2),
+            kind='output',
+            meta={'source': 'fallback_plan'},
+        )
+    return plan
 
 

@@ -90,6 +90,7 @@ class OrgGraphToolRuntime:
         unit,
         event_origin: str,
         permission_subject=None,
+        monitor_context: dict[str, Any] | None = None,
     ) -> str | None:
         breaker = RepeatedActionCircuitBreaker(window=3, threshold=3)
         tool_defs = [tool.to_schema() for tool in tools.values()]
@@ -100,6 +101,7 @@ class OrgGraphToolRuntime:
                 tools=tool_defs,
                 max_tokens=1200,
                 temperature=0.2,
+                monitor_context=monitor_context,
             )
             if response.tool_calls:
                 assistant_tool_calls = []
@@ -183,6 +185,7 @@ class OrgGraphToolRuntime:
         tools: list[dict[str, Any]] | None,
         max_tokens: int,
         temperature: float,
+        monitor_context: dict[str, Any] | None = None,
     ):
         last_error: Exception | None = None
         last_response = None
@@ -198,6 +201,7 @@ class OrgGraphToolRuntime:
             effective_max_tokens = max(1, min(int(max_tokens), int(target.max_tokens_limit))) if target.max_tokens_limit else max(1, int(max_tokens))
             effective_temperature = float(target.default_temperature) if target.default_temperature is not None else float(temperature)
             try:
+                self._record_monitor_input(monitor_context, messages)
                 response = await target.provider.chat(
                     messages=messages,
                     tools=tools,
@@ -216,9 +220,12 @@ class OrgGraphToolRuntime:
             last_response = response
             if index < len(chain) - 1 and response_requires_retry(response, retry_on=target.retry_on):
                 continue
+            self._record_monitor_output(monitor_context, str(response.content or ''))
             return response
         if last_error is not None:
             raise last_error
+        if last_response is not None:
+            self._record_monitor_output(monitor_context, str(last_response.content or ''))
         return last_response
 
     async def run(self, *, unit, project, stage, prompt_preview: str, objective: str) -> str | None:
@@ -276,6 +283,13 @@ class OrgGraphToolRuntime:
                 project_id=project.project_id,
                 unit_id=unit.unit_id,
             ),
+            monitor_context={
+                'project': project,
+                'unit': unit,
+                'stage_id': stage.stage_id,
+                'input_kind': 'input',
+                'output_kind': 'output',
+            },
         )
 
     async def run_checker(
@@ -339,6 +353,13 @@ class OrgGraphToolRuntime:
                     unit=unit,
                     event_origin='checker',
                     permission_subject=permission_subject,
+                    monitor_context={
+                        'project': project,
+                        'unit': parent_unit,
+                        'stage_id': stage.stage_id,
+                        'input_kind': 'check_input',
+                        'output_kind': 'check_output',
+                    },
                 )
             else:
                 response = await self._call_with_fallback(
@@ -347,6 +368,13 @@ class OrgGraphToolRuntime:
                     tools=None,
                     max_tokens=600,
                     temperature=0.1,
+                    monitor_context={
+                        'project': project,
+                        'unit': parent_unit,
+                        'stage_id': stage.stage_id,
+                        'input_kind': 'check_input',
+                        'output_kind': 'check_output',
+                    },
                 )
                 content = str(response.content or '').strip() or None
         except Exception as exc:
@@ -356,5 +384,46 @@ class OrgGraphToolRuntime:
         if not content:
             raise EngineeringFailureError('Checker returned empty output')
         return content
+
+    def _record_monitor_input(self, monitor_context: dict[str, Any] | None, messages: list[dict[str, Any]]) -> None:
+        ctx = monitor_context if isinstance(monitor_context, dict) else {}
+        project = ctx.get('project')
+        unit = ctx.get('unit')
+        if project is None or unit is None:
+            return
+        content = json.dumps(messages, ensure_ascii=False, indent=2)
+        self._service.monitor_service.record_input(
+            project=project,
+            unit=unit,
+            content=content,
+            stage_id=ctx.get('stage_id'),
+            kind=str(ctx.get('input_kind') or 'input'),
+            meta={'source': 'tool_runtime'},
+        )
+
+    def _record_monitor_output(self, monitor_context: dict[str, Any] | None, content: str) -> None:
+        ctx = monitor_context if isinstance(monitor_context, dict) else {}
+        project = ctx.get('project')
+        unit = ctx.get('unit')
+        if project is None or unit is None:
+            return
+        kind = str(ctx.get('output_kind') or 'output')
+        if kind == 'check_output':
+            self._service.monitor_service.record_check_output(
+                project=project,
+                unit=unit,
+                content=content,
+                stage_id=ctx.get('stage_id'),
+                meta={'source': 'tool_runtime'},
+            )
+            return
+        self._service.monitor_service.record_output(
+            project=project,
+            unit=unit,
+            content=content,
+            stage_id=ctx.get('stage_id'),
+            kind=kind,
+            meta={'source': 'tool_runtime'},
+        )
 
 

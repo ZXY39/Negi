@@ -35,10 +35,6 @@ async def project_websocket(websocket: WebSocket, project_id: str):
         tree = service.get_tree(project_id)
         if tree is not None:
             await websocket.send_json(build_envelope(channel='project', session_id=session_id, project_id=project_id, seq=after_seq, type='snapshot.tree', data=tree.model_dump(mode='json')))
-        for artifact in service.list_artifacts(project_id):
-            await websocket.send_json(build_envelope(channel='project', session_id=session_id, project_id=project_id, seq=after_seq, type='artifact.created', data=artifact.model_dump(mode='json')))
-        for event in service.list_events(project_id, after_seq=after_seq):
-            await websocket.send_json(build_envelope(channel='project', session_id=session_id, project_id=project_id, seq=event.seq, type='project.event', event_name=event.event_name, data=event.model_dump(mode='json')))
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:

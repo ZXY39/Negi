@@ -373,8 +373,8 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "executionModel": org_execution_model,
             "inspectionModel": org_inspection_model,
             "projectStorePath": cfg.org_graph.project_store_path,
-            "eventStorePath": cfg.org_graph.event_store_path,
             "checkpointStorePath": cfg.org_graph.checkpoint_store_path,
+            "taskMonitorStorePath": cfg.org_graph.task_monitor_store_path,
             "artifactDir": cfg.org_graph.artifact_dir,
             "defaultMaxDepth": cfg.org_graph.default_max_depth,
             "hardMaxDepth": cfg.org_graph.hard_max_depth,
@@ -433,6 +433,10 @@ def load_config(config_path: Path | None = None) -> Config:
     if path != expected_path:
         raise ValueError(f"Config must be loaded from {expected_path}, got {path}")
     raw_data = _load_json_file(expected_path)
+    org_graph_raw = raw_data.get('orgGraph') if isinstance(raw_data.get('orgGraph'), dict) else raw_data.get('org_graph')
+    if isinstance(org_graph_raw, dict):
+        if 'taskMonitorStorePath' not in org_graph_raw and 'task_monitor_store_path' not in org_graph_raw:
+            org_graph_raw['taskMonitorStorePath'] = '.g3ku/org-graph/task-monitor.sqlite3'
     migrated = _migrate_config(deepcopy(raw_data))
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(raw_data, cfg)

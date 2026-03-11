@@ -74,16 +74,41 @@ class ToolRegistry:
 
             execute_kwargs = dict(normalized)
             runtime_context = self._runtime_context.get() or {}
+            callback = runtime_context.get("on_progress")
+            emit_lifecycle = bool(runtime_context.get("emit_lifecycle", False))
             if runtime_context and self._accepts_runtime_context(tool):
                 execute_kwargs["__g3ku_runtime"] = runtime_context
+
+            if callback and emit_lifecycle:
+                try:
+                    await callback(f"{name} started", event_kind="tool_start", event_data={"tool_name": name})
+                except Exception:
+                    pass
 
             result = await tool.execute(**execute_kwargs)
             if isinstance(result, str) and result.startswith("Error"):
                 await self._emit_progress(f"[tool:{name}] 鎵ц澶辫触: {result}")
+                if callback and emit_lifecycle:
+                    try:
+                        await callback(result, event_kind="tool_error", event_data={"tool_name": name})
+                    except Exception:
+                        pass
                 return result + _hint
+            if callback and emit_lifecycle:
+                try:
+                    await callback(str(result or ''), event_kind="tool_result", event_data={"tool_name": name})
+                except Exception:
+                    pass
             return result
         except Exception as e:
             await self._emit_progress(f"[tool:{name}] 鎵ц寮傚父: {e}")
+            runtime_context = self._runtime_context.get() or {}
+            callback = runtime_context.get("on_progress")
+            if callback and runtime_context.get("emit_lifecycle"):
+                try:
+                    await callback(str(e), event_kind="tool_error", event_data={"tool_name": name})
+                except Exception:
+                    pass
             return f"Error executing {name}: {str(e)}" + _hint
 
     def to_langchain_tools(self) -> list[BaseTool]:
@@ -102,6 +127,29 @@ class ToolRegistry:
                 )
             )
         tools.extend(self._langchain_tools.values())
+        return tools
+
+    def to_langchain_tools_filtered(self, allowed_names: list[str] | set[str]) -> list[BaseTool]:
+        """Convert only the selected registered tools to official BaseTool instances."""
+        visible = {str(name or '').strip() for name in (allowed_names or []) if str(name or '').strip()}
+        tools: list[BaseTool] = []
+        for tool in self._tools.values():
+            if tool.name not in visible:
+                continue
+            args_schema = self._build_args_schema(tool)
+            coroutine = self._build_tool_coroutine(tool.name)
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=coroutine,
+                    name=tool.name,
+                    description=tool.description,
+                    args_schema=args_schema,
+                    infer_schema=False,
+                )
+            )
+        for name, tool in self._langchain_tools.items():
+            if name in visible:
+                tools.append(tool)
         return tools
 
     def _build_tool_coroutine(self, tool_name: str):

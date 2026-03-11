@@ -44,3 +44,7 @@ class OrdinaryTaskFailureError(RuntimeError):
 
 class EngineeringFailureError(RuntimeError):
     pass
+
+
+class ModelChainUnavailableError(RuntimeError):
+    pass

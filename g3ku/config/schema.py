@@ -601,8 +601,8 @@ class OrgGraphConfig(Base):
     execution_model: str | None = None
     inspection_model: str | None = None
     project_store_path: str = ".g3ku/org-graph/projects.sqlite3"
-    event_store_path: str = ".g3ku/org-graph/events.sqlite3"
     checkpoint_store_path: str = ".g3ku/org-graph/checkpoints.sqlite3"
+    task_monitor_store_path: str = ".g3ku/org-graph/task-monitor.sqlite3"
     artifact_dir: str = ".g3ku/org-graph/artifacts"
     default_max_depth: int = 1
     hard_max_depth: int = 4

@@ -3,12 +3,14 @@
 import asyncio
 import json
 import os
+from dataclasses import asdict
 from typing import Any
 
 import json_repair
 
 from g3ku.org_graph.errors import (
     EngineeringFailureError,
+    ModelChainUnavailableError,
     OrdinaryTaskFailureError,
     PermissionBlockedError,
     PermissionDeniedError,
@@ -100,6 +102,14 @@ class UnitRunner:
                         project_id=project.project_id,
                         unit_id=unit.unit_id,
                     ),
+                    monitor_context={
+                        'service': self._service,
+                        'project': project,
+                        'unit': unit,
+                        'stage_id': None,
+                        'input_kind': 'input',
+                        'output_kind': 'output',
+                    },
                 )
                 checkpoint = self._new_checkpoint(plan)
                 self._persist_checkpoint(unit.unit_id, checkpoint)
@@ -586,8 +596,18 @@ class UnitRunner:
                     ),
                     max_tokens=1000,
                     temperature=0.2,
+                    monitor_context={
+                        'service': self._service,
+                        'project': project,
+                        'unit': unit,
+                        'stage_id': stage.stage_id,
+                        'input_kind': 'input',
+                        'output_kind': 'output',
+                    },
                 )
             except Exception as exc:
+                if isinstance(exc, ModelChainUnavailableError):
+                    raise
                 if _offline_fallback_enabled():
                     result_text = json.dumps(
                         {
@@ -664,6 +684,9 @@ class UnitRunner:
             work_state['failure_kind'] = None
             work_state['last_checker_id'] = None
             work_state['raw_result_ready'] = False
+            previous_child_unit_id = str(work_state.get('child_unit_id') or '').strip()
+            if previous_child_unit_id:
+                self._service.delete_execution_subtree(project_id=project.project_id, root_unit_id=previous_child_unit_id)
             work_state['child_unit_id'] = None
             failed_indexes.append(int(work_state.get('index') or 0))
         stage_error = ' | '.join(str(failure.get('reason') or '') for failure in failures if failure.get('reason'))
@@ -724,8 +747,18 @@ class UnitRunner:
                 ),
                 max_tokens=1200,
                 temperature=0.2,
+                monitor_context={
+                    'service': self._service,
+                    'project': project,
+                    'unit': unit,
+                    'stage_id': stage.stage_id,
+                    'input_kind': 'input',
+                    'output_kind': 'output',
+                },
             )
         except Exception as exc:
+            if isinstance(exc, ModelChainUnavailableError):
+                raise
             raise EngineeringFailureError(f'Rework rewriter failed: {exc}') from exc
         if not isinstance(payload, dict):
             raise EngineeringFailureError('Rework rewriter did not return a JSON object')
@@ -803,11 +836,21 @@ class UnitRunner:
                 ),
                 max_tokens=1000,
                 temperature=0.2,
+                monitor_context={
+                    'service': self._service,
+                    'project': project,
+                    'unit': self._service.get_unit(project.root_unit_id) or unit,
+                    'stage_id': stage.stage_id,
+                    'input_kind': 'input',
+                    'output_kind': 'output',
+                },
             )
             result = str(result or '').strip()
             if result:
                 return result
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, ModelChainUnavailableError):
+                raise
             pass
         return ' | '.join(result for result in verified_child_results if result).strip() or stage.objective_summary
     def _load_checkpoint(self, unit_id: str) -> dict[str, Any]:

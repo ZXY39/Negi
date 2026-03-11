@@ -31,6 +31,7 @@ from g3ku.runtime.multi_agent import (
 )
 from g3ku.runtime.model_bridge import LoopRuntimeContext, LoopRuntimeMiddleware, ModelExecutionBridge
 from g3ku.runtime.engine import AgentRuntimeEngine
+from g3ku.runtime.frontdoor import CeoExposureResolver, CeoFrontDoorRunner, CeoPromptBuilder
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.runtime.session_runtime import LegacyAgentSession
 from g3ku.runtime.turns import RunTurnRequest, RunTurnResult
@@ -62,6 +63,9 @@ __all__ = [
     "SessionRuntimeManager",
     "SessionSubscription",
     "build_channel_outbound_message",
+    "CeoExposureResolver",
+    "CeoFrontDoorRunner",
+    "CeoPromptBuilder",
     "ContextTransformRequest",
     "SessionControlBridge",
     "build_state_snapshot",

@@ -2,7 +2,7 @@
 
 import asyncio
 
-from g3ku.org_graph.errors import EngineeringFailureError, OrdinaryTaskFailureError, PermissionBlockedError
+from g3ku.org_graph.errors import EngineeringFailureError, ModelChainUnavailableError, OrdinaryTaskFailureError, PermissionBlockedError
 from g3ku.org_graph.execution.failure_reporter import FailureReporter
 from g3ku.org_graph.protocol import now_iso
 
@@ -99,7 +99,6 @@ class ProjectRunner:
             )
             await self._service.publish_notice(project.session_id, notice)
             await self._service.publish_summary(project)
-            await self._service.emitter.emit_terminal(session_id=project.session_id, project_id=project.project_id, payload=project.model_dump(mode="json"))
         except asyncio.CancelledError:
             project = self._service.get_project(project_id)
             user_canceled = await self._service.registry.is_canceled(project_id)
@@ -108,7 +107,6 @@ class ProjectRunner:
                 self._service.store.upsert_project(project)
                 await self._service.emit_event(project=project, scope="project", event_name="project.canceled", text="Project canceled", level="warn")
                 await self._service.publish_summary(project)
-                await self._service.emitter.emit_terminal(session_id=project.session_id, project_id=project.project_id, payload=project.model_dump(mode="json"))
             raise
         except PermissionBlockedError:
             project = self._service.get_project(project_id)
@@ -119,18 +117,39 @@ class ProjectRunner:
             project = self._service.get_project(project_id)
             if project is not None:
                 await self._failure_reporter.record_project_failure(project=project, error=exc, failure_kind="ordinary")
-                await self._service.emitter.emit_terminal(session_id=project.session_id, project_id=project.project_id, payload=self._service.get_project(project_id).model_dump(mode="json"))
+        except ModelChainUnavailableError as exc:
+            project = self._service.get_project(project_id)
+            if project is not None:
+                updated = project.model_copy(update={'status': 'blocked', 'updated_at': now_iso(), 'summary': 'Waiting for model availability', 'error_summary': ''})
+                self._service.store.upsert_project(updated)
+                root_unit = self._service.get_unit(updated.root_unit_id)
+                if root_unit is not None:
+                    self._service.monitor_service.ensure_node(project=updated, unit=root_unit)
+                    record = self._service.monitor_service._store.get_node(root_unit.unit_id)
+                    if record is not None:
+                        self._service.monitor_service._store.upsert_node(record.model_copy(update={'state': 'waiting', 'wait_reason': 'model_chain_unavailable', 'latest_progress_text': str(exc), 'updated_at': now_iso()}))
+                await self._service.emit_event(project=updated, scope="project", event_name="project.blocked", text=str(exc), level="warn", data={'failure_kind': 'model_chain_unavailable'})
+                await self._service.publish_summary(updated)
+                asyncio.create_task(self._retry_after_delay(project_id, delay_s=15))
         except EngineeringFailureError as exc:
             project = self._service.get_project(project_id)
             if project is not None:
                 await self._failure_reporter.record_project_failure(project=project, error=exc, failure_kind="engineering")
-                await self._service.emitter.emit_terminal(session_id=project.session_id, project_id=project.project_id, payload=self._service.get_project(project_id).model_dump(mode="json"))
         except Exception as exc:
             project = self._service.get_project(project_id)
             if project is not None:
                 wrapped = EngineeringFailureError(str(exc))
                 await self._failure_reporter.record_project_failure(project=project, error=wrapped, failure_kind="engineering")
-                await self._service.emitter.emit_terminal(session_id=project.session_id, project_id=project.project_id, payload=self._service.get_project(project_id).model_dump(mode="json"))
         finally:
             await self._service.registry.clear_task(project_id)
+
+    async def _retry_after_delay(self, project_id: str, *, delay_s: int) -> None:
+        await asyncio.sleep(max(5, int(delay_s or 15)))
+        project = self._service.get_project(project_id)
+        if project is None or project.status != 'blocked':
+            return
+        try:
+            await self.run(project_id)
+        except Exception:
+            return
 

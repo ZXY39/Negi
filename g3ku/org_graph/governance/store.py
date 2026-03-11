@@ -65,6 +65,13 @@ class GovernanceStore:
                 payload_json TEXT NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS governance_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
         ]
         with self._lock, self._conn:
             for statement in statements:
@@ -135,6 +142,19 @@ class GovernanceStore:
     def list_role_policies(self) -> list[RolePolicyMatrixRecord]:
         rows = self._fetchall("SELECT payload_json FROM role_policy_matrix ORDER BY actor_role, resource_kind, resource_id, action_id ASC")
         return [self._parse(row["payload_json"], RolePolicyMatrixRecord) for row in rows]
+
+    def get_meta(self, key: str) -> str | None:
+        row = self._fetchone("SELECT value FROM governance_meta WHERE key = ?", (str(key or ''),))
+        return str(row['value']) if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        stamp = now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO governance_meta (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (str(key or ''), str(value or ''), stamp),
+            )
 
     def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
         with self._lock:

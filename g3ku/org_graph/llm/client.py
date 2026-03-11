@@ -7,6 +7,7 @@ import json_repair
 from loguru import logger
 
 from g3ku.config.schema import Config
+from g3ku.org_graph.errors import ModelChainUnavailableError
 from g3ku.org_graph.llm.provider_factory import ProviderTarget, build_provider_from_model
 from g3ku.providers.fallback import is_retryable_model_error, response_requires_retry
 
@@ -58,14 +59,17 @@ class OrgGraphLLM:
         provider_model_chain: list[str] | None = None,
         max_tokens: int = 1600,
         temperature: float = 0.2,
+        monitor_context: dict[str, Any] | None = None,
     ) -> str:
         messages = [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': user_prompt},
         ]
+        self._record_monitor_input(monitor_context, system_prompt=system_prompt, user_prompt=user_prompt)
         targets = self._targets_for(provider_model=provider_model, provider_model_chain=provider_model_chain)
         last_error: Exception | None = None
         last_content = ""
+        retryable_unavailable = False
         for index, target in enumerate(targets):
             effective_max_tokens = max(1, min(int(max_tokens), int(target.max_tokens_limit))) if target.max_tokens_limit else max(1, int(max_tokens))
             effective_temperature = float(target.default_temperature) if target.default_temperature is not None else float(temperature)
@@ -80,20 +84,30 @@ class OrgGraphLLM:
                 )
             except Exception as exc:
                 last_error = exc
+                retryable_unavailable = is_retryable_model_error(exc, retry_on=target.retry_on)
                 if index < len(targets) - 1 and is_retryable_model_error(exc, retry_on=target.retry_on):
                     logger.warning("OrgGraphLLM fallback triggered for {}: {}", target.provider_ref, exc)
                     continue
+                if retryable_unavailable:
+                    raise ModelChainUnavailableError(str(exc)) from exc
                 raise
 
             content = str(response.content or '').strip()
             last_content = content
             if index < len(targets) - 1 and response_requires_retry(response, retry_on=target.retry_on):
+                retryable_unavailable = True
                 logger.warning("OrgGraphLLM fallback triggered for {}: {}", target.provider_ref, content or response.finish_reason)
                 continue
+            self._record_monitor_output(monitor_context, content)
             return content
 
         if last_error is not None:
+            if retryable_unavailable:
+                raise ModelChainUnavailableError(str(last_error)) from last_error
             raise last_error
+        if retryable_unavailable:
+            raise ModelChainUnavailableError(last_content or 'Model chain temporarily unavailable')
+        self._record_monitor_output(monitor_context, last_content)
         return last_content
 
     async def chat_json(
@@ -105,6 +119,7 @@ class OrgGraphLLM:
         provider_model_chain: list[str] | None = None,
         max_tokens: int = 2200,
         temperature: float = 0.1,
+        monitor_context: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         content = await self.chat_text(
             system_prompt=system_prompt,
@@ -113,6 +128,7 @@ class OrgGraphLLM:
             provider_model_chain=provider_model_chain,
             max_tokens=max_tokens,
             temperature=temperature,
+            monitor_context=monitor_context,
         )
         if not content:
             return None
@@ -144,3 +160,28 @@ class OrgGraphLLM:
         except Exception:
             return None
         return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _record_monitor_input(monitor_context: dict[str, Any] | None, *, system_prompt: str, user_prompt: str) -> None:
+        ctx = monitor_context if isinstance(monitor_context, dict) else {}
+        service = ctx.get('service')
+        project = ctx.get('project')
+        unit = ctx.get('unit')
+        if service is None or project is None or unit is None:
+            return
+        stage_id = ctx.get('stage_id')
+        kind = str(ctx.get('input_kind') or 'input')
+        content = json.dumps({'system_prompt': system_prompt, 'user_prompt': user_prompt}, ensure_ascii=False, indent=2)
+        service.monitor_service.record_input(project=project, unit=unit, content=content, stage_id=stage_id, kind=kind, meta={'source': 'org_graph_llm'})
+
+    @staticmethod
+    def _record_monitor_output(monitor_context: dict[str, Any] | None, content: str) -> None:
+        ctx = monitor_context if isinstance(monitor_context, dict) else {}
+        service = ctx.get('service')
+        project = ctx.get('project')
+        unit = ctx.get('unit')
+        if service is None or project is None or unit is None:
+            return
+        stage_id = ctx.get('stage_id')
+        kind = str(ctx.get('output_kind') or 'output')
+        service.monitor_service.record_output(project=project, unit=unit, content=str(content or ''), stage_id=stage_id, kind=kind, meta={'source': 'org_graph_llm'})

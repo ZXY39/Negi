@@ -1,11 +1,10 @@
 const MODEL_SCOPES = [
-    { key: "agent", label: "主 Agent" },
     { key: "ceo", label: "CEO" },
     { key: "execution", label: "执行" },
     { key: "inspection", label: "检验" },
 ];
 
-const EMPTY_MODEL_ROLES = () => ({ agent: [], ceo: [], execution: [], inspection: [] });
+const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
 const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
 
 const S = {
@@ -34,10 +33,10 @@ const S = {
         selectedModelKey: "",
         mode: "view",
         rolesDirty: false,
+        dragState: null,
     },
     tree: null,
     selectedUnitId: null,
-    events: [],
     skills: [],
     selectedSkill: null,
     skillFiles: [],
@@ -87,15 +86,15 @@ const U = {
     pdSummary: document.getElementById("pd-summary"),
     pdActiveCount: document.getElementById("pd-active-count"),
     tree: document.getElementById("org-tree-container"),
-    feed: document.getElementById("project-event-feed"),
     feedTitle: document.getElementById("feed-target-name"),
     detail: document.getElementById("agent-detail-view"),
     adRole: document.getElementById("ad-role"),
     adStatus: document.getElementById("ad-status"),
-    adObjective: document.getElementById("ad-objective"),
-    adPrompt: document.getElementById("ad-prompt"),
-    adResult: document.getElementById("ad-result"),
+    adInput: document.getElementById("ad-input"),
+    adOutput: document.getElementById("ad-output"),
+    adCheck: document.getElementById("ad-check"),
     adLogs: document.getElementById("ad-logs"),
+    nodeEmpty: document.getElementById("project-node-empty"),
     closeAgent: document.getElementById("close-agent-btn"),
     skillSearch: document.getElementById("skill-search-input"),
     skillRisk: document.getElementById("skill-risk-filter"),
@@ -121,7 +120,8 @@ const U = {
     toast: document.getElementById("app-toast"),
     toastTitle: document.getElementById("app-toast-title"),
     toastText: document.getElementById("app-toast-text"),
-    toastCountdown: document.getElementById("app-toast-countdown"),
+    toastProgress: document.getElementById("app-toast-progress"),
+    toastProgressBar: document.getElementById("app-toast-progress-bar"),
     toastClose: document.getElementById("app-toast-close"),
     confirmBackdrop: document.getElementById("confirm-backdrop"),
     confirmTitle: document.getElementById("confirm-title"),
@@ -173,37 +173,43 @@ function closeToast() {
     if (!U.toast) return;
     U.toast.hidden = true;
     U.toast.className = "app-toast";
+    if (U.toastClose) U.toastClose.hidden = false;
+    if (U.toastProgressBar) {
+        U.toastProgressBar.className = "app-toast-progress-bar";
+        U.toastProgressBar.style.transition = "none";
+        U.toastProgressBar.style.transform = "scaleX(1)";
+    }
 }
 
-function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000 } = {}) {
-    if (!U.toast || !U.toastTitle || !U.toastText || !U.toastCountdown) return;
+function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000, persistent = false } = {}) {
+    if (!U.toast || !U.toastTitle || !U.toastText || !U.toastProgress || !U.toastProgressBar || !U.toastClose) return;
     clearToastTimers();
-    S.toastState.remaining = Math.max(1, Math.ceil(durationMs / 1000));
+    const sticky = persistent || durationMs <= 0;
     U.toastTitle.textContent = title;
     U.toastText.textContent = text;
-    U.toastCountdown.textContent = String(S.toastState.remaining);
     U.toast.hidden = false;
+    U.toast.setAttribute("role", kind === "error" ? "alert" : "status");
+    U.toastClose.hidden = false;
+    U.toastProgress.hidden = false;
+    U.toastProgressBar.className = "app-toast-progress-bar";
+    U.toastProgressBar.style.transition = "none";
+    U.toastProgressBar.style.transform = "scaleX(1)";
+    if (sticky) {
+        U.toastProgressBar.classList.add("is-indeterminate");
+    } else {
+        window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(() => {
+                U.toastProgressBar.style.transition = `transform ${durationMs}ms linear`;
+                U.toastProgressBar.style.transform = "scaleX(0)";
+            });
+        });
+        S.toastState.timeoutId = window.setTimeout(closeToast, durationMs);
+    }
     U.toast.className = `app-toast is-open is-${kind}`;
-    S.toastState.intervalId = window.setInterval(() => {
-        S.toastState.remaining = Math.max(0, S.toastState.remaining - 1);
-        if (S.toastState.remaining > 0) U.toastCountdown.textContent = String(S.toastState.remaining);
-    }, 1000);
-    S.toastState.timeoutId = window.setTimeout(closeToast, durationMs);
     icons();
 }
 
-function queueResourceSave(kind) {
-    const timerKey = kind === "tool" ? "tool" : "skill";
-    const currentTimer = S.resourceSaveTimers?.[timerKey];
-    if (currentTimer) window.clearTimeout(currentTimer);
-    S.resourceSaveTimers[timerKey] = window.setTimeout(() => {
-        S.resourceSaveTimers[timerKey] = null;
-        if (timerKey === "tool") {
-            void saveTool();
-            return;
-        }
-        void saveSkill();
-    }, 320);
+function queueResourceSave(_kind) {
 }
 
 function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, returnFocus = null }) {
@@ -336,33 +342,48 @@ function renderModelHint() {
 
 function renderModelRoleEditors() {
     if (!U.modelRoleEditors) return;
+    const catalog = [...S.modelCatalog.catalog].sort((left, right) => String(left.key || "").localeCompare(String(right.key || "")));
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
         const chain = modelScopeChain(scope.key);
-        const options = S.modelCatalog.catalog.filter((item) => !chain.some((ref) => modelRefEquivalent(ref, item.key)));
-        const defaultText = scope.key === "agent"
-            ? "主流程调用链"
-            : (S.modelCatalog.defaults[scope.key] ? `当前首选 ${S.modelCatalog.defaults[scope.key]}` : "未配置当前首选");
+        const defaultText = S.modelCatalog.defaults[scope.key]
+            ? `???? ${S.modelCatalog.defaults[scope.key]}`
+            : "???????";
         const chainMarkup = chain.length
             ? chain.map((ref, index) => {
                 const item = modelRefItem(ref);
-                const badges = [index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ""];
-                if (item?.enabled === false) badges.push('<span class="policy-chip neutral">已禁用</span>');
-                if (!item) badges.push('<span class="policy-chip neutral">未托管</span>');
+                const modelKey = String(item?.key || ref).trim();
+                const badges = [index === 0 ? '<span class="policy-chip risk-low">??</span>' : ""];
+                if (item?.enabled === false) badges.push('<span class="policy-chip neutral">???</span>');
+                if (!item) badges.push('<span class="policy-chip neutral">???</span>');
                 return `
-                    <div class="model-chain-item">
-                        <div class="model-chain-item-main">
-                            <div class="resource-list-title">${esc(item?.key || ref)}</div>
-                            <div class="resource-list-subtitle">${esc(item?.provider_model || ref)}</div>
-                            <div class="model-inline-meta">${badges.join("")}</div>
-                        </div>
-                        <div class="model-chain-item-actions">
-                            <button type="button" class="toolbar-btn ghost small" data-model-chain-action="up" data-scope="${scope.key}" data-index="${index}" ${index === 0 ? "disabled" : ""}>上移</button>
-                            <button type="button" class="toolbar-btn ghost small" data-model-chain-action="down" data-scope="${scope.key}" data-index="${index}" ${index === chain.length - 1 ? "disabled" : ""}>下移</button>
-                            <button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>
-                        </div>
-                    </div>`;
+                    <article class="model-chain-slide" draggable="true" data-model-chain-ref="${esc(modelKey)}" data-scope="${scope.key}">
+                        <button type="button" class="model-chain-handle" aria-label="??????"><span class="model-chain-grip" aria-hidden="true">?</span></button>
+                        <button type="button" class="model-chain-main" data-model-open="${esc(modelKey)}">
+                            <span class="resource-list-title">${esc(modelKey)}</span>
+                            <span class="resource-list-subtitle">${esc(item?.provider_model || ref)}</span>
+                            <span class="model-inline-meta">${badges.join("")}</span>
+                        </button>
+                        <button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">??</button>
+                    </article>`;
             }).join("")
-            : '<div class="empty-state compact">未配置降级链</div>';
+            : '<div class="empty-state compact">??????</div>';
+
+        const availableMarkup = catalog.length
+            ? catalog.map((item) => {
+                const inChain = chain.some((ref) => modelRefEquivalent(ref, item.key));
+                const disabledAttr = inChain ? ' disabled' : '';
+                const dragAttr = inChain ? '' : ' draggable="true"';
+                return `
+                    <article class="model-available-item ${inChain ? "is-in-chain" : ""}"${dragAttr} data-model-available-key="${esc(item.key)}" data-scope="${scope.key}">
+                        <button type="button" class="model-available-main" data-model-open="${esc(item.key)}">
+                            <span class="resource-list-title">${esc(item.key)}</span>
+                            <span class="resource-list-subtitle">${esc(item.provider_model)}</span>
+                        </button>
+                        <button type="button" class="toolbar-btn ghost small" data-model-role-add-item="${scope.key}" data-model-key="${esc(item.key)}"${disabledAttr}>${inChain ? "????" : "??"}</button>
+                    </article>`;
+            }).join("")
+            : '<div class="empty-state compact">??????</div>';
+
         return `
             <section class="model-chain-card">
                 <div class="panel-header">
@@ -370,15 +391,15 @@ function renderModelRoleEditors() {
                         <h3>${esc(scope.label)}</h3>
                         <p class="subtitle">${esc(defaultText)}</p>
                     </div>
-                    <span class="policy-chip neutral">${chain.length} 个候选</span>
+                    <span class="policy-chip neutral">${chain.length} ???</span>
                 </div>
-                <div class="model-chain-list">${chainMarkup}</div>
-                <div class="model-chain-adder">
-                    <select class="resource-select" data-model-role-select="${scope.key}" ${!options.length ? "disabled" : ""}>
-                        <option value="">添加模型到该角色链</option>
-                        ${options.map((item) => `<option value="${esc(item.key)}">${esc(item.key)} · ${esc(item.provider_model)}</option>`).join("")}
-                    </select>
-                    <button type="button" class="toolbar-btn ghost" data-model-role-add="${scope.key}" ${!options.length ? "disabled" : ""}>添加</button>
+                <div class="model-role-section">
+                    <div class="model-role-section-title">?????</div>
+                    <div class="model-chain-list" data-model-chain-list="${scope.key}">${chainMarkup}</div>
+                </div>
+                <div class="model-role-section">
+                    <div class="model-role-section-title">????</div>
+                    <div class="model-available-list" data-model-available-list="${scope.key}">${availableMarkup}</div>
                 </div>
             </section>`;
     }).join("");
@@ -386,27 +407,7 @@ function renderModelRoleEditors() {
 
 function renderModelList() {
     if (!U.modelList) return;
-    const items = filterModels();
-    if (!items.length) {
-        U.modelList.innerHTML = `<div class="empty-state">${S.modelCatalog.search ? "没有匹配的模型。" : "还没有模型，请点击“添加模型”。"}</div>`;
-        return;
-    }
-    U.modelList.innerHTML = items.map((item) => {
-        const scopes = MODEL_SCOPES.filter((scope) => modelScopeContains(scope.key, item.key)).map((scope) => scope.label);
-        const meta = [item.enabled ? "已启用" : "已禁用", scopes.length ? scopes.join(" · ") : "未加入角色链"];
-        if (item.description) meta.push(item.description);
-        return `
-            <button type="button" class="resource-list-item${S.modelCatalog.mode !== "create" && S.modelCatalog.selectedModelKey === item.key ? " selected" : ""}" data-model-key="${esc(item.key)}">
-                <div class="resource-list-item-top">
-                    <div>
-                        <div class="resource-list-title">${esc(item.key)}</div>
-                        <div class="resource-list-subtitle">${esc(item.provider_model)}</div>
-                    </div>
-                    <span class="policy-chip ${item.enabled ? "risk-low" : "neutral"}">${item.enabled ? "已启用" : "已禁用"}</span>
-                </div>
-                <div class="resource-list-meta">${esc(meta.join(" · "))}</div>
-            </button>`;
-    }).join("");
+    U.modelList.innerHTML = "";
 }
 
 function renderModelDetail() {
@@ -541,6 +542,108 @@ function startCreateModel() {
     S.modelCatalog.mode = "create";
     S.modelCatalog.selectedModelKey = "";
     renderModelCatalog();
+}
+
+
+function clearModelDragDecorations() {
+    if (!U.modelRoleEditors) return;
+    U.modelRoleEditors.querySelectorAll('.is-drop-target').forEach((item) => item.classList.remove('is-drop-target'));
+    U.modelRoleEditors.querySelectorAll('.is-drop-zone').forEach((item) => item.classList.remove('is-drop-zone'));
+    U.modelRoleEditors.querySelectorAll('[data-model-drop-placeholder]').forEach((item) => item.remove());
+}
+
+function stopModelAutoScroll() {
+    const dragState = S.modelCatalog.dragState;
+    if (!dragState) return;
+    if (dragState.scrollFrameId) window.cancelAnimationFrame(dragState.scrollFrameId);
+    dragState.scrollFrameId = null;
+    dragState.scrollTarget = null;
+    dragState.scrollStep = 0;
+}
+
+function startModelAutoScroll(target, clientY) {
+    const dragState = S.modelCatalog.dragState;
+    if (!dragState || !target) return;
+    const rect = target.getBoundingClientRect();
+    const threshold = Math.min(48, rect.height / 4);
+    let step = 0;
+    if (clientY < rect.top + threshold) {
+        step = -Math.max(6, Math.round((rect.top + threshold - clientY) / 5));
+    } else if (clientY > rect.bottom - threshold) {
+        step = Math.max(6, Math.round((clientY - (rect.bottom - threshold)) / 5));
+    }
+    if (!step) {
+        if (dragState.scrollTarget === target) stopModelAutoScroll();
+        return;
+    }
+    dragState.scrollTarget = target;
+    dragState.scrollStep = step;
+    if (dragState.scrollFrameId) return;
+    const tick = () => {
+        const state = S.modelCatalog.dragState;
+        if (!state?.scrollTarget || !state.scrollStep) {
+            stopModelAutoScroll();
+            return;
+        }
+        state.scrollTarget.scrollTop += state.scrollStep;
+        state.scrollFrameId = window.requestAnimationFrame(tick);
+    };
+    dragState.scrollFrameId = window.requestAnimationFrame(tick);
+}
+
+function ensureModelDropPlaceholder(list, targetItem, clientY) {
+    if (!list) return null;
+    const placeholder = document.createElement('div');
+    placeholder.className = 'model-chain-drop-placeholder';
+    placeholder.dataset.modelDropPlaceholder = '1';
+    list.classList.add('is-drop-zone');
+    if (targetItem && targetItem.parentElement === list) {
+        targetItem.classList.add('is-drop-target');
+        const rect = targetItem.getBoundingClientRect();
+        const insertBefore = clientY < rect.top + (rect.height / 2);
+        placeholder.dataset.dropPosition = insertBefore ? 'before' : 'after';
+        targetItem.dataset.dropPosition = insertBefore ? 'before' : 'after';
+        list.insertBefore(placeholder, insertBefore ? targetItem : targetItem.nextSibling);
+    } else {
+        placeholder.dataset.dropPosition = 'append';
+        list.appendChild(placeholder);
+    }
+    return placeholder;
+}
+
+function highlightModelAvailableZone(list, targetItem = null) {
+    if (!list) return;
+    list.classList.add('is-drop-zone');
+    if (targetItem && targetItem.parentElement === list) {
+        targetItem.classList.add('is-drop-target');
+    }
+}
+
+function moveRoleChainItem(scope, fromRef, targetIndex = null) {
+    const chain = modelScopeChain(scope);
+    const sourceIndex = chain.findIndex((item) => modelRefEquivalent(item, fromRef));
+    if (sourceIndex < 0) return;
+    const nextChain = [...chain];
+    const [moving] = nextChain.splice(sourceIndex, 1);
+    const boundedIndex = targetIndex === null
+        ? nextChain.length
+        : Math.max(0, Math.min(Number(targetIndex), nextChain.length));
+    nextChain.splice(boundedIndex, 0, moving);
+    updateRoleChainDraft(scope, nextChain);
+}
+
+function insertRoleChainItem(scope, modelKey, targetIndex = null) {
+    const nextChain = modelScopeChain(scope).filter((item) => !modelRefEquivalent(item, modelKey));
+    const boundedIndex = targetIndex === null
+        ? nextChain.length
+        : Math.max(0, Math.min(Number(targetIndex), nextChain.length));
+    nextChain.splice(boundedIndex, 0, modelKey);
+    updateRoleChainDraft(scope, nextChain);
+}
+
+function removeRoleChainItem(scope, modelKey) {
+    const nextChain = modelScopeChain(scope).filter((item) => !modelRefEquivalent(item, modelKey));
+    updateRoleChainDraft(scope, nextChain);
 }
 
 function updateRoleChainDraft(scope, nextChain) {
@@ -848,8 +951,22 @@ function updateProjectToolbar() {
 }
 
 function setDrawerOpen(backdrop, drawer, open) {
+    const wasOpen = !!drawer?.classList.contains("is-open");
     backdrop?.classList.toggle("is-open", open);
     drawer?.classList.toggle("is-open", open);
+    backdrop?.setAttribute("aria-hidden", open ? "false" : "true");
+    drawer?.setAttribute("aria-hidden", open ? "false" : "true");
+    if (open && drawer && !wasOpen) {
+        drawer.__returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        window.requestAnimationFrame(() => {
+            const focusTarget = drawer.querySelector("[data-modal-close], button, input, select, textarea, [tabindex]:not([tabindex='-1'])");
+            focusTarget?.focus?.();
+        });
+        return;
+    }
+    if (!open && drawer && wasOpen) {
+        drawer.__returnFocus?.focus?.();
+    }
 }
 
 function syncActionButton(button, { idleLabel, busyLabel, busy, disabled }) {
@@ -1088,96 +1205,89 @@ async function runProjectBatchAction(action) {
 function resetProjectView() {
     S.tree = null;
     S.selectedUnitId = null;
-    S.events = [];
     U.tree.innerHTML = '<div class="empty-state">等待获取组织结构...</div>';
-    U.feed.innerHTML = "";
-    U.feedTitle.textContent = "项目全局动态 / 详情";
+    U.feedTitle.textContent = "节点详情";
+    if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
     hideAgent();
 }
 
-function eventType(evt) {
-    const name = String(evt.event_name || "");
-    if (name.startsWith("checker.")) return "checker";
-    if (name.startsWith("tool.")) return "tool";
-    if (name.startsWith("stage.")) return "stage";
-    if (name.startsWith("unit.")) return "unit";
-    return "info";
+function findTreeNode(node, nodeId) {
+    if (!node) return null;
+    if (String(node.node_id || "") === String(nodeId || "")) return node;
+    for (const child of (node.children || [])) {
+        const found = findTreeNode(child, nodeId);
+        if (found) return found;
+    }
+    return null;
 }
 
-function eventCard(evt) {
-    const type = eventType(evt);
-    const icon = { unit: "user", tool: "wrench", stage: "git-commit", checker: "shield-check", info: "hash" }[type];
-    const el = document.createElement("div");
-    el.className = `feed-card type-${type}`;
-    el.innerHTML = `<div class="card-header"><span style="display:flex; gap:4px; align-items:center;"><i data-lucide="${icon}" style="width:14px;height:14px;"></i>${esc(type.toUpperCase())}</span><span>${esc(new Date(evt.created_at || Date.now()).toLocaleTimeString())}</span></div><div class="card-title">${esc(evt.event_name || "project.event")}</div><div class="card-content">${esc(evt.text || "")}</div>`;
-    return el;
-}
-
-function renderFeed() {
-    U.feed.innerHTML = "";
-    const rows = S.selectedUnitId ? S.events.filter((evt) => String(evt.unit_id || "") === S.selectedUnitId || !evt.unit_id) : S.events;
-    rows.forEach((evt) => U.feed.appendChild(eventCard(evt)));
+function renderNodeLogs(rows) {
+    U.adLogs.innerHTML = "";
+    if (!Array.isArray(rows) || !rows.length) {
+        U.adLogs.innerHTML = '<div class="empty-state" style="padding: 10px;">暂无日志...</div>';
+        return;
+    }
+    rows.forEach((row) => {
+        const el = document.createElement("div");
+        el.className = "feed-card type-info";
+        const kind = String(row.kind || "log");
+        const ts = row.ts ? new Date(row.ts).toLocaleTimeString() : "";
+        el.innerHTML = `<div class="card-header"><span>${esc(kind.toUpperCase())}</span><span>${esc(ts)}</span></div><div class="card-content">${esc(String(row.content || ""))}</div>`;
+        U.adLogs.appendChild(el);
+    });
     icons();
-}
-
-function patchTreeUnit(unit) {
-    const visit = (node) => {
-        if (!node) return false;
-        if (node.unit_id === unit.unit_id) { Object.assign(node, unit); return true; }
-        return Array.isArray(node.children) && node.children.some(visit);
-    };
-    visit(S.tree);
 }
 
 function renderTree() {
     if (!S.tree) return;
-    const levels = [];
-    const walk = (node, depth) => {
-        if (!levels[depth]) levels[depth] = [];
-        levels[depth].push(node);
-        (node.children || []).forEach((child) => walk(child, depth + 1));
-    };
-    walk(S.tree, 0);
     const wrapper = document.createElement("div");
     wrapper.className = "tree-flow-wrapper";
-    levels.forEach((level) => {
-        const col = document.createElement("div");
-        col.className = "tree-level";
-        level.forEach((node) => {
-            const wrap = document.createElement("div");
-            wrap.className = `flow-node-wrapper${node.children?.length ? " has-children" : ""} line-status-${esc(node.status)}`;
-            const el = document.createElement("div");
-            el.className = `tree-node${S.selectedUnitId === node.unit_id ? " selected" : ""}`;
-            el.dataset.id = node.unit_id;
-            el.dataset.role = node.role_title || roleLabel(node.role_kind);
-            el.dataset.status = node.status;
-            el.dataset.objective = node.objective_summary || "";
-            el.dataset.prompt = node.prompt_preview || "";
-            el.dataset.result = node.result_summary || node.error_summary || "暂无结果";
-            el.innerHTML = `<div class="node-header"><span class="node-title">${esc(node.role_title || roleLabel(node.role_kind))}</span><span class="status-badge" data-status="${esc(node.status)}">${esc(String(node.status || "").toUpperCase())}</span></div><div class="node-desc">${esc(node.objective_summary || roleLabel(node.role_kind))}</div>`;
-            el.addEventListener("click", (e) => { e.stopPropagation(); S.selectedUnitId = node.unit_id; showAgent(el.dataset); renderTree(); renderFeed(); });
-            wrap.appendChild(el);
-            col.appendChild(wrap);
+
+    const walk = (node, parent, depth = 0) => {
+        const wrap = document.createElement("div");
+        wrap.className = `flow-node-wrapper line-status-${esc(node.state || "")}`;
+        wrap.style.marginLeft = `${depth * 18}px`;
+        const el = document.createElement("div");
+        el.className = `tree-node${S.selectedUnitId === node.node_id ? " selected" : ""}`;
+        el.dataset.id = node.node_id;
+        el.innerHTML = `<div class="node-header"><span class="node-title">${esc(node.node_id || "")}</span><span class="status-badge" data-status="${esc(node.state || "")}">${esc(String(node.state || "").toUpperCase())}</span></div>`;
+        el.addEventListener("click", (e) => {
+            e.stopPropagation();
+            S.selectedUnitId = node.node_id;
+            showAgent(node);
+            renderTree();
         });
-        wrapper.appendChild(col);
-    });
+        wrap.appendChild(el);
+        parent.appendChild(wrap);
+        (node.children || []).forEach((child) => walk(child, parent, depth + 1));
+    };
+    walk(S.tree, wrapper, 0);
     U.tree.innerHTML = "";
     U.tree.appendChild(wrapper);
+    if (S.selectedUnitId) {
+        const selected = findTreeNode(S.tree, S.selectedUnitId);
+        if (selected) {
+            showAgent(selected);
+        } else {
+            S.selectedUnitId = null;
+            if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
+            hideAgent();
+            U.feedTitle.textContent = "节点详情";
+        }
+    }
 }
 
-function showAgent(data) {
+function showAgent(node) {
     U.detail.style.display = "flex";
-    U.adRole.textContent = data.role || "执行";
-    U.adStatus.textContent = String(data.status || "").toUpperCase();
-    U.adStatus.dataset.status = data.status || "";
-    U.adObjective.textContent = data.objective || "-";
-    U.adPrompt.textContent = data.prompt || "-";
-    U.adResult.textContent = data.result || "-";
-    U.feedTitle.textContent = `限定视角: ${data.role || "执行"}`;
-    const logs = S.events.filter((evt) => String(evt.unit_id || "") === String(data.id || ""));
-    U.adLogs.innerHTML = logs.length ? "" : '<div class="empty-state" style="padding: 10px;">暂无动作日志...</div>';
-    logs.forEach((evt) => U.adLogs.appendChild(eventCard(evt)));
-    icons();
+    if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
+    U.adRole.textContent = node.node_id || "节点";
+    U.adStatus.textContent = String(node.state || "").toUpperCase();
+    U.adStatus.dataset.status = node.state || "";
+    U.adInput.textContent = node.input || "-";
+    U.adOutput.textContent = node.output || "-";
+    U.adCheck.textContent = node.check || "-";
+    U.feedTitle.textContent = `节点详情: ${node.node_id || ""}`;
+    renderNodeLogs(node.log || []);
 }
 
 function hideAgent() {
@@ -1190,7 +1300,7 @@ async function openProject(projectId) {
     resetProjectView();
     if (S.projectWs) { S.projectWs.close(); S.projectWs = null; }
     try {
-        const [meta, tree, events] = await Promise.all([ApiClient.getProjectDetails(projectId), ApiClient.getProjectTree(projectId), ApiClient.getProjectEvents(projectId, 0, 200)]);
+        const [meta, tree] = await Promise.all([ApiClient.getProjectDetails(projectId), ApiClient.getProjectTree(projectId)]);
         if (meta.project) {
             U.pdTitle.textContent = meta.project.title;
             U.pdStatus.textContent = String(meta.project.status || "").toUpperCase();
@@ -1199,10 +1309,7 @@ async function openProject(projectId) {
             U.pdActiveCount.textContent = String(meta.project.active_unit_count || 0);
         }
         if (tree.root) { S.tree = tree.root; renderTree(); }
-        S.events = Array.isArray(events) ? events : [];
-        renderFeed();
-        const afterSeq = S.events.reduce((max, evt) => Math.max(max, Number(evt.seq || 0)), 0);
-        S.projectWs = new WebSocket(ApiClient.getProjectWsUrl(projectId, afterSeq));
+        S.projectWs = new WebSocket(ApiClient.getProjectWsUrl(projectId));
         S.projectWs.onmessage = (ev) => handleProjectEvent(JSON.parse(ev.data));
     } catch (e) {
         U.tree.innerHTML = `<div class="empty-state error">初始化项目失败：${esc(e.message)}</div>`;
@@ -1221,23 +1328,6 @@ function handleProjectEvent(payload) {
     if (payload.type === "snapshot.tree") {
         S.tree = payload.data;
         return renderTree();
-    }
-    if (payload.type === "project.event") {
-        S.events.push(payload.data);
-        if (["unit.created", "unit.updated", "unit.completed", "unit.failed"].includes(payload.data?.event_name)) {
-            const unit = payload.data?.data?.unit;
-            if (unit && S.tree) patchTreeUnit(unit);
-            renderTree();
-        }
-        return renderFeed();
-    }
-    if (payload.type === "artifact.created") {
-        S.events.push({ event_name: "artifact.created", text: payload.data?.title || "新产物", created_at: new Date().toISOString(), seq: Date.now() });
-        return renderFeed();
-    }
-    if (payload.type === "project.finished") {
-        S.events.push({ event_name: "project.finished", text: payload.data?.final_result || "项目执行完成", created_at: new Date().toISOString(), seq: Date.now() });
-        return renderFeed();
     }
 }
 
@@ -1287,32 +1377,106 @@ function renderTools() {
     if (!items.length) return void (U.toolList.innerHTML = '<div class="empty-state">没有匹配的工具族。</div>');
     items.forEach((tool) => {
         const el = document.createElement("button");
-        el    U.skillDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header" style="display:flex; justify-content:space-between; align-items:flex-start;"><div><h2>${esc(S.selectedSkill.display_name)}</h2><p class="subtitle">${esc(S.selectedSkill.skill_id)}</p></div><div style="display:flex; gap:8px;"><button type="button" class="toolbar-btn ghost" id="skill-modal-close" style="padding: 4px 8px;">关闭</button><button type="button" class="toolbar-btn success" id="skill-modal-save" style="padding: 4px 16px;">保存</button></div></div><label class="role-toggle checked"><input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}><span>启用该技能</span></label><div class="resource-section"><h3>允许的角色</h3><div class="resource-filter-row">${roles.map((r) => `<label class="role-toggle ${allowedRoles.includes(r) ? "checked" : ""}"><input type="checkbox" class="skill-role" data-role="${r}" ${allowedRoles.includes(r) ? "checked" : ""}><span>${esc(roleLabel(r))}</span></label>`).join("")}</div></div><div class="resource-section"><h3>可编辑文件</h3><div class="resource-filter-row">${S.skillFiles.map((f) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === f.file_key ? "active" : ""}" data-file="${esc(f.file_key)}">${esc(f.file_key)}</button>`).join("")}</div><textarea id="skill-editor" rows="18" class="resource-editor">${esc(S.skillContents[S.selectedSkillFile] || "")}</textarea></div></article>`;
-    U.skillDetail.querySelector("#skill-modal-close")?.addEventListener("click", () => clearSkillSelection());
-    U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => saveSkill());
-    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => { S.selectedSkill.enabled = !!e.target.checked; queueResourceSave("skill"); });etDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
+        el.type = "button";
+        el.className = `resource-list-item${S.selectedTool?.tool_id === tool.tool_id ? " selected" : ""}`;
+        el.innerHTML = `<div class="resource-list-title">${esc(tool.display_name)}</div><div class="resource-list-subtitle">${esc(tool.tool_id)}</div><div class="resource-list-meta">${tool.enabled ? "已启用" : "已禁用"} · ${(tool.actions || []).length} 个动作</div>`;
+        el.addEventListener("click", () => openTool(tool.tool_id));
+        U.toolList.appendChild(el);
+    });
+}
+
+function toggleTheme() {
+    const html = document.documentElement;
+    const dark = html.getAttribute("data-theme") === "dark";
+    html.setAttribute("data-theme", dark ? "light" : "dark");
+    const darkIcon = U.theme.querySelector(".dark-icon");
+    const lightIcon = U.theme.querySelector(".light-icon");
+    if (darkIcon && lightIcon) {
+        darkIcon.style.display = dark ? "none" : "block";
+        lightIcon.style.display = dark ? "block" : "none";
+    }
+}
+
+function renderSkillDetail() {
+    if (!S.selectedSkill) {
+        U.skillEmpty.style.display = "block";
+        U.skillDetail.innerHTML = "";
+        setDrawerOpen(U.skillBackdrop, U.skillDrawer, false);
+        renderSkillActions();
+        return;
+    }
+    U.skillEmpty.style.display = "none";
+    setDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
     const roles = ["ceo", "execution", "inspection"];
     const allowedRoles = Array.isArray(S.selectedSkill.allowed_roles) ? S.selectedSkill.allowed_roles : [];
-    U.skillDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedSkill.display_name)}</h2><p class="subtitle">${esc(S.selectedSkill.skill_id)}</p></div></div><label class="role-toggle checked"><input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}><span>???</span></label><div class="resource-section"><h3>????</h3><div class="resource-filter-row">${roles.map((r) => `<label class="role-toggle ${allowedRoles.includes(r) ? "checked" : ""}"><input type="checkbox" class="skill-role" data-role="${r}" ${allowedRoles.includes(r) ? "checked" : ""}><span>${esc(roleLabel(r))}</span></label>`).join("")}</div></div><div class="resource-section"><h3>?????</h3><div class="resource-filter-row">${S.skillFiles.map((f) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === f.file_key ? "active" : ""}" data-file="${esc(f.file_key)}">${esc(f.file_key)}</button>`).join("")}</div><textarea id="skill-editor" rows="18" class="resource-editor">${esc(S.skillContents[S.selectedSkillFile] || "")}</textarea></div></article>`;
-    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => { S.selectedSkill.enabled = !!e.target.checked; queueResourceSave("skill"); });
-    U.skillDetail.querySelectorAll(".skill-role").forEach((cb) => cb.addEventListener("change", (e) => {
-        const set = new Set(allowedRoles);
-        if (e.target.checked) set.add(e.target.dataset.role);
-        else set.delete(e.target.dataset.role);
-        S.selectedSkill.allowed_roles = [...set];
+    const editorValue = esc(S.skillContents[S.selectedSkillFile] || "");
+    const fileTabs = S.skillFiles.length
+        ? S.skillFiles.map((file) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === file.file_key ? "active" : ""}" data-file="${esc(file.file_key)}">${esc(file.file_key)}</button>`).join("")
+        : '<span class="resource-empty-copy">暂无可编辑文件</span>';
+    U.skillDetail.innerHTML = `
+        <article class="resource-detail-card detail-modal-shell">
+            <div class="detail-modal-header">
+                <div class="detail-modal-title">
+                    <h2 id="skill-detail-title">${esc(S.selectedSkill.display_name)}</h2>
+                    <p class="subtitle">${esc(S.selectedSkill.skill_id)}</p>
+                </div>
+                <div class="detail-modal-actions">
+                    <button type="button" class="toolbar-btn ghost" id="skill-modal-close" data-modal-close>关闭</button>
+                    <button type="button" class="toolbar-btn success" id="skill-modal-save">保存</button>
+                </div>
+            </div>
+            <div class="detail-modal-body">
+                <label class="role-toggle ${S.selectedSkill.enabled ? "checked" : ""}">
+                    <input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}>
+                    <span>启用该技能</span>
+                </label>
+                <div class="resource-section">
+                    <h3>允许的角色</h3>
+                    <div class="resource-filter-row">
+                        ${roles.map((role) => `
+                            <label class="role-toggle ${allowedRoles.includes(role) ? "checked" : ""}">
+                                <input type="checkbox" class="skill-role" data-role="${role}" ${allowedRoles.includes(role) ? "checked" : ""}>
+                                <span>${esc(roleLabel(role))}</span>
+                            </label>
+                        `).join("")}
+                    </div>
+                </div>
+                <div class="resource-section">
+                    <h3>可编辑文件</h3>
+                    <div class="resource-filter-row">${fileTabs}</div>
+                    <textarea id="skill-editor" rows="18" class="resource-editor">${editorValue}</textarea>
+                </div>
+            </div>
+        </article>`;
+    U.skillDetail.querySelector("#skill-modal-close")?.addEventListener("click", clearSkillSelection);
+    U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => void saveSkill());
+    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => {
+        S.selectedSkill.enabled = !!e.target.checked;
+        e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
+        queueResourceSave("skill");
+    });
+    U.skillDetail.querySelectorAll(".skill-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
+        const nextRoles = new Set(allowedRoles);
+        if (e.target.checked) nextRoles.add(e.target.dataset.role);
+        else nextRoles.delete(e.target.dataset.role);
+        S.selectedSkill.allowed_roles = [...nextRoles];
         renderSkillDetail();
         queueResourceSave("skill");
     }));
-    U.skillDetail.querySelectorAll(".skill-file").forEach((btn) => btn.addEventListener("click", () => {
+    U.skillDetail.querySelectorAll(".skill-file").forEach((button) => button.addEventListener("click", () => {
         const editor = document.getElementById("skill-editor");
         if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
-        S.selectedSkillFile = btn.dataset.file;
+        S.selectedSkillFile = button.dataset.file;
         renderSkillDetail();
     }));
+    U.skillDetail.querySelector("#skill-editor")?.addEventListener("input", (e) => {
+        if (!S.selectedSkillFile) return;
+        S.skillContents[S.selectedSkillFile] = e.target.value;
+    });
     renderSkillActions();
 }
 
-async function loadSkills() {
+async function loadSkills({ renderDetail = true } = {}) {
     U.skillList.innerHTML = '<div class="empty-state">Loading skills...</div>';
     const selectedId = S.selectedSkill?.skill_id || "";
     try {
@@ -1323,7 +1487,7 @@ async function loadSkills() {
             else clearSkillSelection();
         }
         renderSkills();
-        renderSkillDetail();
+        if (renderDetail) renderSkillDetail();
     } catch (e) {
         U.skillList.innerHTML = `<div class="empty-state error">Failed to load skills: ${esc(e.message)}</div>`;
         addNotice({ kind: "resource_failed", title: "Skill load failed", text: e.message || "Unknown error" });
@@ -1359,6 +1523,7 @@ async function openSkill(skillId, quiet = false) {
 }
 
 async function saveSkill() {
+    if (S.skillBusy) return;
     if (S.resourceSaveTimers?.skill) {
         window.clearTimeout(S.resourceSaveTimers.skill);
         S.resourceSaveTimers.skill = null;
@@ -1374,11 +1539,31 @@ async function saveSkill() {
     }
     S.skillBusy = true;
     renderSkillActions();
-       U.toolDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header" style="display:flex; justify-content:space-between; align-items:flex-start;"><div><h2>${esc(S.selectedTool.display_name)}</h2><p class="subtitle">${esc(S.selectedTool.tool_id)}</p></div><div style="display:flex; gap:8px;"><button type="button" class="toolbar-btn ghost" id="tool-modal-close" style="padding: 4px 8px;">关闭</button><button type="button" class="toolbar-btn success" id="tool-modal-save" style="padding: 4px 16px;">保存</button></div></div><label class="role-toggle checked"><input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}><span>启用工具族</span></label><div class="resource-section"><h3>分配动作权限</h3><div class="matrix-table"><table><thead><tr><th>动作</th><th>风险</th>${roles.map((r) => `<th>${esc(roleLabel(r))}</th>`).join("")}</tr></thead><tbody>${(S.selectedTool.actions || []).map((a) => `<tr><td>${esc(a.label || a.action_id)}</td><td>${esc(a.risk_level || "medium")}</td>${roles.map((r) => `<td><input type="checkbox" class="tool-role" data-action="${esc(a.action_id)}" data-role="${r}" ${a.allowed_roles?.includes(r) ? "checked" : ""}></td>`).join("")}</tr>`).join("")}</tbody></table></div></div></article>`;
-    U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", () => clearToolSelection());
-    U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => saveTool());
-    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => { S.selectedTool.enabled = !!e.target.checked; queueResourceSave("tool"); });     S.skillBusy = false;
+    U.skillDetail.querySelector("#skill-modal-save")?.setAttribute("disabled", "true");
+    showToast({ title: "保存中", text: "正在保存 Skill，请稍候…", kind: "info", persistent: true });
+    try {
+        const editor = document.getElementById("skill-editor");
+        if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
+        for (const [fileKey, content] of Object.entries(S.skillContents)) {
+            await ApiClient.saveSkillFile(selectedId, fileKey, content);
+        }
+        await ApiClient.updateSkillPolicy(selectedId, {
+            enabled,
+            allowed_roles: allowedRoles,
+        });
+        await ApiClient.reloadResources();
+        await loadSkills({ renderDetail: false });
+        addNotice({ kind: "resource_saved", title: "Skill saved", text: displayName || selectedId });
+        showToast({ title: "保存成功", text: "Skill 配置已保存", kind: "success", durationMs: 2200 });
+        clearSkillSelection();
+    } catch (e) {
+        addNotice({ kind: "resource_failed", title: "Skill save failed", text: e.message || "Unknown error" });
+        showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
+        clearSkillSelection();
+    } finally {
+        S.skillBusy = false;
         renderSkillActions();
+        U.skillDetail.querySelector("#skill-modal-save")?.removeAttribute("disabled");
     }
 }
 
@@ -1393,21 +1578,79 @@ function renderToolDetail() {
     U.toolEmpty.style.display = "none";
     setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
     const roles = ["ceo", "execution", "inspection"];
-    U.toolDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedTool.display_name)}</h2><p class="subtitle">${esc(S.selectedTool.tool_id)}</p></div></div><label class="role-toggle checked"><input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}><span>???</span></label><div class="resource-section"><h3>????</h3><div class="matrix-table"><table><thead><tr><th>??</th><th>??</th>${roles.map((r) => `<th>${esc(roleLabel(r))}</th>`).join("")}</tr></thead><tbody>${(S.selectedTool.actions || []).map((a) => `<tr><td>${esc(a.label || a.action_id)}</td><td>${esc(a.risk_level || "medium")}</td>${roles.map((r) => `<td><input type="checkbox" class="tool-role" data-action="${esc(a.action_id)}" data-role="${r}" ${a.allowed_roles?.includes(r) ? "checked" : ""}></td>`).join("")}</tr>`).join("")}</tbody></table></div></div></article>`;
-    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => { S.selectedTool.enabled = !!e.target.checked; queueResourceSave("tool"); });
-    U.toolDetail.querySelectorAll(".tool-role").forEach((cb) => cb.addEventListener("change", (e) => {
+    const actions = Array.isArray(S.selectedTool.actions) ? S.selectedTool.actions : [];
+    U.toolDetail.innerHTML = `
+        <article class="resource-detail-card detail-modal-shell">
+            <div class="detail-modal-header">
+                <div class="detail-modal-title">
+                    <h2 id="tool-detail-title">${esc(S.selectedTool.display_name)}</h2>
+                    <p class="subtitle">${esc(S.selectedTool.tool_id)}</p>
+                </div>
+                <div class="detail-modal-actions">
+                    <button type="button" class="toolbar-btn ghost" id="tool-modal-close" data-modal-close>关闭</button>
+                    <button type="button" class="toolbar-btn success" id="tool-modal-save">保存</button>
+                </div>
+            </div>
+            <div class="detail-modal-body">
+                <label class="role-toggle ${S.selectedTool.enabled ? "checked" : ""}">
+                    <input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}>
+                    <span>启用工具族</span>
+                </label>
+                <div class="resource-section">
+                    <div class="tool-permission-heading">
+                        <h3>分配动作权限</h3>
+                        <p class="subtitle">以设置面板的方式逐项配置每个动作对 CEO、执行、检验角色的使用权限。</p>
+                    </div>
+                    <div class="tool-permission-grid">
+                        ${actions.length ? actions.map((action) => {
+                            const actionName = esc(action.label || action.action_id);
+                            const actionId = esc(action.action_id);
+                            const riskLevel = esc(action.risk_level || "medium");
+                            const riskClass = `risk-${String(action.risk_level || "medium").toLowerCase()}`;
+                            return `
+                                <article class="tool-permission-card">
+                                    <div class="tool-permission-card-head">
+                                        <div class="tool-action-meta">
+                                            <div class="tool-action-name">${actionName}</div>
+                                            <div class="tool-action-id">${actionId}</div>
+                                        </div>
+                                        <span class="risk-pill ${riskClass}">${riskLevel}</span>
+                                    </div>
+                                    <div class="tool-role-toggle-group">
+                                        ${roles.map((role) => `
+                                            <label class="role-toggle tool-role-toggle ${action.allowed_roles?.includes(role) ? "checked" : ""}">
+                                                <input type="checkbox" class="tool-role tool-role-input" data-action="${actionId}" data-role="${role}" aria-label="${actionName} - ${esc(roleLabel(role))}" ${action.allowed_roles?.includes(role) ? "checked" : ""}>
+                                                <span>${esc(roleLabel(role))}</span>
+                                            </label>
+                                        `).join("")}
+                                    </div>
+                                </article>`;
+                        }).join("") : `<div class="tool-empty-card">暂无可配置动作</div>`}
+                    </div>
+                </div>
+            </div>
+        </article>`;
+    U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
+    U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => void saveTool());
+    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => {
+        S.selectedTool.enabled = !!e.target.checked;
+        e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
+        queueResourceSave("tool");
+    });
+    U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
         if (!action) return;
         const set = new Set(action.allowed_roles || []);
         if (e.target.checked) set.add(e.target.dataset.role);
         else set.delete(e.target.dataset.role);
         action.allowed_roles = [...set];
+        e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
         queueResourceSave("tool");
     }));
     renderToolActions();
 }
 
-async function loadTools() {
+async function loadTools({ renderDetail = true } = {}) {
     U.toolList.innerHTML = '<div class="empty-state">Loading tools...</div>';
     const selectedId = S.selectedTool?.tool_id || "";
     try {
@@ -1418,7 +1661,7 @@ async function loadTools() {
             else clearToolSelection();
         }
         renderTools();
-        renderToolDetail();
+        if (renderDetail) renderToolDetail();
     } catch (e) {
         U.toolList.innerHTML = `<div class="empty-state error">Failed to load tools: ${esc(e.message)}</div>`;
         addNotice({ kind: "resource_failed", title: "Tool load failed", text: e.message || "Unknown error" });
@@ -1446,6 +1689,7 @@ async function openTool(toolId, quiet = false) {
 }
 
 async function saveTool() {
+    if (S.toolBusy) return;
     if (S.resourceSaveTimers?.tool) {
         window.clearTimeout(S.resourceSaveTimers.tool);
         S.resourceSaveTimers.tool = null;
@@ -1466,22 +1710,26 @@ async function saveTool() {
     }
     S.toolBusy = true;
     renderToolActions();
+    U.toolDetail.querySelector("#tool-modal-save")?.setAttribute("disabled", "true");
+    showToast({ title: "保存中", text: "正在保存工具权限，请稍候…", kind: "info", persistent: true });
     try {
         await ApiClient.updateToolPolicy(selectedId, {
             enabled,
             actions,
         });
         await ApiClient.reloadResources();
-        await loadTools();
-        await openTool(selectedId, true);
+        await loadTools({ renderDetail: false });
         addNotice({ kind: "resource_saved", title: "Tool saved", text: displayName || selectedId });
-        showToast({ title: "保存成功", text: "工具权限已保存", kind: "success" });
+        showToast({ title: "保存成功", text: "工具权限已保存", kind: "success", durationMs: 2200 });
+        clearToolSelection();
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Tool save failed", text: e.message || "Unknown error" });
-        showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error" });
+        showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
+        clearToolSelection();
     } finally {
         S.toolBusy = false;
         renderToolActions();
+        U.toolDetail.querySelector("#tool-modal-save")?.removeAttribute("disabled");
     }
 }
 
@@ -1568,6 +1816,11 @@ function bind() {
         openModel(button.dataset.modelKey);
     });
     U.modelRoleEditors?.addEventListener("click", (e) => {
+        const open = e.target.closest("[data-model-open]");
+        if (open) {
+            openModel(open.dataset.modelOpen);
+            return;
+        }
         const action = e.target.closest("[data-model-chain-action]");
         if (action) {
             const scope = String(action.dataset.scope || "");
@@ -1576,22 +1829,112 @@ function bind() {
             if (!scope || index < 0 || index >= chain.length) return;
             if (action.dataset.modelChainAction === "remove") {
                 chain.splice(index, 1);
-            } else if (action.dataset.modelChainAction === "up" && index > 0) {
-                [chain[index - 1], chain[index]] = [chain[index], chain[index - 1]];
-            } else if (action.dataset.modelChainAction === "down" && index < chain.length - 1) {
-                [chain[index], chain[index + 1]] = [chain[index + 1], chain[index]];
+                updateRoleChainDraft(scope, chain);
             }
-            updateRoleChainDraft(scope, chain);
             return;
         }
-        const add = e.target.closest("[data-model-role-add]");
+        const add = e.target.closest("[data-model-role-add-item]");
         if (!add) return;
-        const scope = String(add.dataset.modelRoleAdd || "");
-        const select = U.modelRoleEditors.querySelector(`[data-model-role-select="${scope}"]`);
-        const value = String(select?.value || "").trim();
-        if (!scope || !value) return;
-        updateRoleChainDraft(scope, [...modelScopeChain(scope), value]);
-        select.value = "";
+        const scope = String(add.dataset.modelRoleAddItem || "");
+        const modelKey = String(add.dataset.modelKey || "").trim();
+        if (!scope || !modelKey) return;
+        if (modelScopeChain(scope).some((item) => modelRefEquivalent(item, modelKey))) return;
+        insertRoleChainItem(scope, modelKey);
+    });
+    U.modelRoleEditors?.addEventListener("dragstart", (e) => {
+        const chainItem = e.target.closest("[data-model-chain-ref]");
+        const availableItem = e.target.closest("[data-model-available-key]");
+        const item = chainItem || availableItem;
+        if (!item) return;
+        const isChain = !!chainItem;
+        S.modelCatalog.dragState = {
+            scope: String(item.dataset.scope || ""),
+            ref: String(isChain ? item.dataset.modelChainRef || "" : item.dataset.modelAvailableKey || ""),
+            source: isChain ? "chain" : "available",
+            scrollFrameId: null,
+            scrollTarget: null,
+            scrollStep: 0,
+        };
+        item.classList.add("is-dragging");
+        clearModelDragDecorations();
+        e.dataTransfer.effectAllowed = isChain ? "move" : "copyMove";
+        e.dataTransfer.setData("text/plain", S.modelCatalog.dragState.ref);
+    });
+    U.modelRoleEditors?.addEventListener("dragover", (e) => {
+        const dragState = S.modelCatalog.dragState;
+        if (!dragState?.ref) return;
+        const chainList = e.target.closest("[data-model-chain-list]");
+        if (chainList) {
+            const scope = String(chainList.dataset.modelChainList || "");
+            if (!scope || scope !== dragState.scope) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = dragState.source === "chain" ? "move" : "copy";
+            clearModelDragDecorations();
+            let targetItem = e.target.closest("[data-model-chain-ref]");
+            if (targetItem && dragState.source === "chain" && String(targetItem.dataset.modelChainRef || "") === dragState.ref) {
+                targetItem = null;
+            }
+            ensureModelDropPlaceholder(chainList, targetItem, e.clientY);
+            startModelAutoScroll(chainList, e.clientY);
+            return;
+        }
+        const availableList = e.target.closest("[data-model-available-list]");
+        if (!availableList) return;
+        const scope = String(availableList.dataset.modelAvailableList || "");
+        if (!scope || scope !== dragState.scope) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = dragState.source === "chain" ? "move" : "none";
+        clearModelDragDecorations();
+        const targetItem = e.target.closest("[data-model-available-key]");
+        highlightModelAvailableZone(availableList, targetItem);
+        startModelAutoScroll(availableList, e.clientY);
+    });
+    U.modelRoleEditors?.addEventListener("drop", (e) => {
+        const dragState = S.modelCatalog.dragState;
+        if (!dragState?.ref) return;
+        const chainList = e.target.closest("[data-model-chain-list]");
+        if (chainList) {
+            const scope = String(chainList.dataset.modelChainList || "");
+            if (!scope || scope !== dragState.scope) return;
+            e.preventDefault();
+            const placeholder = chainList.querySelector('[data-model-drop-placeholder]');
+            const children = [...chainList.children];
+            const placeholderIndex = children.indexOf(placeholder);
+            const targetIndex = placeholderIndex < 0
+                ? children.filter((child) => child.matches?.('[data-model-chain-ref]') && String(child.dataset.modelChainRef || '') !== dragState.ref).length
+                : children.slice(0, placeholderIndex).filter((child) => child.matches?.('[data-model-chain-ref]') && String(child.dataset.modelChainRef || '') !== dragState.ref).length;
+            clearModelDragDecorations();
+            stopModelAutoScroll();
+            if (dragState.source === "chain") moveRoleChainItem(scope, dragState.ref, targetIndex);
+            else insertRoleChainItem(scope, dragState.ref, targetIndex);
+            return;
+        }
+        const availableList = e.target.closest("[data-model-available-list]");
+        if (!availableList) return;
+        const scope = String(availableList.dataset.modelAvailableList || "");
+        if (!scope || scope !== dragState.scope) return;
+        e.preventDefault();
+        clearModelDragDecorations();
+        stopModelAutoScroll();
+        if (dragState.source === "chain") {
+            removeRoleChainItem(scope, dragState.ref);
+        }
+    });
+    U.modelRoleEditors?.addEventListener("dragleave", (e) => {
+        const dragState = S.modelCatalog.dragState;
+        if (!dragState?.ref) return;
+        const zone = e.target.closest("[data-model-chain-list], [data-model-available-list]");
+        if (!zone) return;
+        const related = e.relatedTarget;
+        if (related && zone.contains(related)) return;
+        clearModelDragDecorations();
+        stopModelAutoScroll();
+    });
+    U.modelRoleEditors?.addEventListener("dragend", () => {
+        S.modelCatalog.dragState = null;
+        U.modelRoleEditors?.querySelectorAll(".model-chain-slide.is-dragging, .model-available-item.is-dragging").forEach((item) => item.classList.remove("is-dragging"));
+        clearModelDragDecorations();
+        stopModelAutoScroll();
     });
     U.modelDetail?.addEventListener("submit", (e) => {
         if (e.target?.id !== "model-detail-form") return;
@@ -1633,10 +1976,10 @@ function bind() {
     }));
     U.closeAgent?.addEventListener("click", () => {
         S.selectedUnitId = null;
-        U.feedTitle.textContent = "项目全局动态 / 详情";
+        U.feedTitle.textContent = "节点详情";
+        if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
         hideAgent();
         renderTree();
-        renderFeed();
     });
     [U.skillSearch, U.skillRisk, U.skillStatus, U.skillLegacy].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderSkills));
     U.skillRefresh?.addEventListener("click", () => void refreshSkills());

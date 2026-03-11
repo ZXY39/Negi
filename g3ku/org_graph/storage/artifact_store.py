@@ -49,6 +49,22 @@ class ArtifactStore:
     def list_artifacts(self, project_id: str) -> list[ProjectArtifactRecord]:
         return self._project_store.list_artifacts(project_id)
 
+    def delete_artifacts_for_units(self, project_id: str, unit_ids: list[str]) -> None:
+        values = {str(item or '').strip() for item in unit_ids if str(item or '').strip()}
+        if not values:
+            return
+        artifacts = [item for item in self.list_artifacts(project_id) if str(item.unit_id or '') in values]
+        for artifact in artifacts:
+            path = Path(artifact.path) if artifact.path else None
+            if path and path.exists():
+                try:
+                    path.unlink()
+                except IsADirectoryError:
+                    shutil.rmtree(path, ignore_errors=True)
+                except FileNotFoundError:
+                    pass
+        self._project_store.delete_artifacts_for_units(list(values))
+
     def _project_dir(self, project_id: str) -> Path:
         safe_project_id = project_id.replace(':', '_').replace('/', '_').replace('\\', '_')
         return self._artifact_dir / safe_project_id

@@ -103,35 +103,39 @@ class OrgGraphResourceRegistry:
         return merged
 
     def _inject_manual_actions(self, families: dict[str, ToolFamilyRecord]) -> None:
-        filesystem = families.get('filesystem')
-        if filesystem is None:
-            filesystem = ToolFamilyRecord(
-                tool_id='filesystem',
-                display_name='Filesystem',
-                description='Workspace file and directory operations.',
-                enabled=True,
-                available=True,
-                source_path=str(self._local_skills_dir.parent),
-                actions=[],
-                metadata={},
-            )
-            families['filesystem'] = filesystem
-        action_map = {action.action_id: action for action in filesystem.actions}
-        for tool_name in ('delete_file', 'propose_file_patch', 'patch_apply'):
-            governance = DEFAULT_TOOL_FAMILIES.get(tool_name)
-            if governance is None:
-                continue
+        for tool_name, governance in DEFAULT_TOOL_FAMILIES.items():
+            tool_id = str(governance.get('tool_id') or tool_name)
+            family = families.get(tool_id)
+            if family is None:
+                family = ToolFamilyRecord(
+                    tool_id=tool_id,
+                    display_name=str(governance.get('display_name') or tool_id),
+                    description=str(governance.get('description') or tool_id),
+                    enabled=True,
+                    available=True,
+                    source_path=str(self._local_skills_dir.parent),
+                    actions=[],
+                    metadata={'manual_injected': True},
+                )
+            action_map = {action.action_id: action for action in family.actions}
             for action in governance.get('actions') or []:
                 action_id = str(action.get('id') or '')
-                if not action_id or action_id in action_map:
+                if not action_id:
                     continue
-                action_map[action_id] = ToolActionRecord(
-                    action_id=action_id,
-                    label=str(action.get('label') or action_id),
-                    risk_level=str(action.get('risk_level') or 'medium'),
-                    destructive=bool(action.get('destructive', False)),
-                    allowed_roles=[str(role) for role in (action.get('allowed_roles') or DEFAULT_ALLOWED_ROLES)],
-                    executor_names=[tool_name],
-                )
-        families['filesystem'] = filesystem.model_copy(update={'actions': list(action_map.values())})
+                existing = action_map.get(action_id)
+                if existing is None:
+                    action_map[action_id] = ToolActionRecord(
+                        action_id=action_id,
+                        label=str(action.get('label') or action_id),
+                        risk_level=str(action.get('risk_level') or 'medium'),
+                        destructive=bool(action.get('destructive', False)),
+                        allowed_roles=[str(role) for role in (action.get('allowed_roles') or DEFAULT_ALLOWED_ROLES)],
+                        executor_names=[tool_name],
+                    )
+                else:
+                    executors = list(existing.executor_names)
+                    if tool_name not in executors:
+                        executors.append(tool_name)
+                    action_map[action_id] = existing.model_copy(update={'executor_names': executors})
+            families[tool_id] = family.model_copy(update={'actions': list(action_map.values())})
 

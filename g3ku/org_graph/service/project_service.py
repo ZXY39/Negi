@@ -25,26 +25,24 @@ from g3ku.agent.rag_memory import MemoryManager
 from g3ku.org_graph.public_roles import to_public_actor_role, to_public_allowed_roles, to_public_model_defaults
 from g3ku.org_graph.storage.artifact_store import ArtifactStore
 from g3ku.org_graph.storage.checkpoint_store import CheckpointStore
-from g3ku.org_graph.storage.event_store import EventStore
 from g3ku.org_graph.storage.project_store import ProjectStore
-from g3ku.org_graph.tracing.emitter import TraceEmitter
-from g3ku.org_graph.tracing.tree_builder import TreeBuilder
+from g3ku.org_graph.storage.task_monitor_store import TaskMonitorStore
+from g3ku.org_graph.service.task_monitor_service import TaskMonitorService
 
 
 class ProjectService:
     def __init__(self, config: ResolvedOrgGraphConfig):
         self.config = config
         self.store = ProjectStore(config.project_store_path)
-        self.event_store = EventStore(config.event_store_path)
         self.checkpoint_store = CheckpointStore(config.checkpoint_store_path)
+        self.task_monitor_store = TaskMonitorStore(config.task_monitor_store_path)
         self.governance_store = GovernanceStore(config.governance_store_path)
         self.registry = ProjectRegistry()
         self.notice_service = NoticeService(self.store)
         self.llm = OrgGraphLLM.from_config(config.raw, default_model=config.execution_model)
         self.memory_manager = self._build_memory_manager()
         self.artifact_store = ArtifactStore(artifact_dir=config.artifact_dir, project_store=self.store)
-        self.tree_builder = TreeBuilder()
-        self.emitter = TraceEmitter(event_store=self.event_store, registry=self.registry)
+        self.monitor_service = TaskMonitorService(self, self.task_monitor_store)
         self.resource_registry = OrgGraphResourceRegistry(config, self.governance_store)
         self.policy_engine = GovernancePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
         self.approval_service = GovernanceApprovalService(
@@ -56,7 +54,6 @@ class ProjectService:
         if config.governance_enabled:
             self.resource_registry.refresh()
             self.policy_engine.sync_default_role_policies()
-        from g3ku.org_graph.execution.ceo_runner import CEORunner
         from g3ku.org_graph.execution.hybrid_scheduler import HybridScheduler
         from g3ku.org_graph.execution.project_runner import ProjectRunner
         from g3ku.org_graph.execution.checker_runner import CheckerRunner
@@ -67,9 +64,9 @@ class ProjectService:
         self.checker_runner = CheckerRunner(self)
         self.unit_runner = UnitRunner(self)
         self.project_runner = ProjectRunner(self)
-        self.ceo_runner = CEORunner(self)
         self._startup_lock = asyncio.Lock()
         self._started = False
+        self._closed = False
 
     def _build_memory_manager(self):
         if not bool(getattr(self.config.raw.tools.memory, 'enabled', False)):
@@ -313,9 +310,32 @@ class ProjectService:
                 return
             if self.config.governance_enabled:
                 self.resource_registry.refresh()
+                self.seed_ceo_governance_defaults()
                 self.policy_engine.sync_default_role_policies()
             await self._recover_active_projects()
+            self.monitor_service.startup_backfill()
             self._started = True
+
+    def seed_ceo_governance_defaults(self) -> None:
+        marker = self.governance_store.get_meta('ceo_role_seed_v1')
+        if marker == 'done':
+            return
+        stamp = self.now()
+        for record in self.governance_store.list_skill_resources():
+            if 'ceo' in set(record.allowed_roles or []):
+                continue
+            updated = record.model_copy(update={'allowed_roles': to_public_allowed_roles([*list(record.allowed_roles or []), 'ceo'])})
+            self.governance_store.upsert_skill_resource(updated, updated_at=stamp)
+        for family in self.governance_store.list_tool_families():
+            changed = False
+            actions = []
+            for action in family.actions:
+                roles = to_public_allowed_roles([*list(action.allowed_roles or []), 'ceo'])
+                changed = changed or roles != list(action.allowed_roles or [])
+                actions.append(action.model_copy(update={'allowed_roles': roles}))
+            if changed:
+                self.governance_store.upsert_tool_family(family.model_copy(update={'actions': actions}), updated_at=stamp)
+        self.governance_store.set_meta('ceo_role_seed_v1', 'done')
 
     async def _recover_active_projects(self) -> None:
         for project in self.list_projects():
@@ -437,6 +457,8 @@ class ProjectService:
         )
         self.store.upsert_project(project)
         self.store.upsert_unit(root_unit)
+        self.monitor_service.ensure_project(project)
+        self.monitor_service.ensure_node(project=project, unit=root_unit)
         await self.emit_event(project=project, scope='project', event_name='project.created', text='Project created')
         notice = self.notice_service.create(session_id=session_id, project_id=project.project_id, kind='project_created', title='Project created', text=f'Project {project.title} has been created.')
         await self.publish_notice(session_id, notice)
@@ -456,7 +478,7 @@ class ProjectService:
         provider_model: str | None = None,
         mutation_allowed: bool = False,
     ) -> UnitAgentRecord:
-        return UnitAgentRecord(
+        unit = UnitAgentRecord(
             unit_id=new_unit_id('execution'),
             project_id=project.project_id,
             parent_unit_id=parent.unit_id,
@@ -481,9 +503,31 @@ class ProjectService:
             mutation_allowed=bool(mutation_allowed),
             metadata={},
         )
+        self.monitor_service.ensure_node(project=project, unit=unit)
+        return unit
 
     async def emit_event(self, *, project: ProjectRecord, scope: str, event_name: str, text: str, unit_id: str | None = None, stage_id: str | None = None, level: str = 'info', data: dict[str, Any] | None = None):
-        return await self.emitter.emit_event(session_id=project.session_id, project_id=project.project_id, scope=scope, event_name=event_name, text=text, unit_id=unit_id, stage_id=stage_id, level=level, data=data)
+        unit = self.get_unit(unit_id) if unit_id else None
+        if unit is not None:
+            self.monitor_service.ensure_node(project=project, unit=unit)
+            self.monitor_service.append_log(
+                project_id=project.project_id,
+                node_id=unit.node_id if hasattr(unit, 'node_id') else unit.unit_id,
+                kind='lifecycle',
+                content=f'{event_name}: {text}',
+                stage_id=stage_id,
+                meta={'scope': scope, 'level': level, 'data': dict(data or {})},
+            )
+        if event_name == 'notice.raised' or (level == 'error' and 'engineering' in str((data or {}).get('failure_kind') or '').lower()):
+            self.monitor_service.record_engineering_exception(project=project, text=text, node_id=unit_id)
+        elif level == 'warn' and str((data or {}).get('failure_kind') or '').lower() == 'model_chain_unavailable':
+            self.monitor_service.record_engineering_exception(project=project, text=text, node_id=unit_id, wait_reason='model_chain_unavailable')
+        else:
+            self.monitor_service.record_progress(project=project, text=text, node_id=unit_id)
+        if event_name in {'project.running', 'project.completed', 'project.canceled', 'project.archived'}:
+            self.monitor_service.clear_engineering_exception(project.project_id)
+        await self.publish_tree_snapshot(project.project_id)
+        return {'seq': self._project_seq(project.project_id)}
 
     async def emit_unit_event(
         self,
@@ -496,10 +540,11 @@ class ProjectService:
         level: str = 'info',
         extra_data: dict[str, Any] | None = None,
     ):
+        self.monitor_service.ensure_node(project=project, unit=unit)
         payload = {'unit': unit.model_dump(mode='json')}
         if extra_data:
             payload.update(extra_data)
-        return await self.emit_event(
+        await self.emit_event(
             project=project,
             scope='unit',
             event_name=event_name,
@@ -509,6 +554,8 @@ class ProjectService:
             level=level,
             data=payload,
         )
+        self.monitor_service.recompute_project(project.project_id)
+        return {'ok': True}
 
     async def publish_notice(self, session_id: str, notice) -> None:
         await self.registry.publish_ceo(
@@ -525,10 +572,14 @@ class ProjectService:
         await self.registry.publish_project(
             project.session_id,
             project.project_id,
-            build_envelope(channel='project', session_id=project.session_id, project_id=project.project_id, seq=self.event_store.latest_seq(project.project_id), type='project.summary.changed', data=summary_payload),
+            build_envelope(channel='project', session_id=project.session_id, project_id=project.project_id, seq=self._project_seq(project.project_id), type='snapshot.project', data=summary_payload),
         )
 
-    async def publish_artifact(self, project: ProjectRecord, artifact) -> None:
+    async def publish_tree_snapshot(self, project_id: str) -> None:
+        project = self.get_project(project_id)
+        if project is None:
+            return
+        tree = self.get_tree(project_id)
         await self.registry.publish_project(
             project.session_id,
             project.project_id,
@@ -536,17 +587,24 @@ class ProjectService:
                 channel='project',
                 session_id=project.session_id,
                 project_id=project.project_id,
-                seq=self.event_store.latest_seq(project.project_id),
-                type='artifact.created',
-                data=artifact.model_dump(mode='json'),
+                seq=self._project_seq(project.project_id),
+                type='snapshot.tree',
+                data=(tree.model_dump(mode='json') if tree is not None else {}),
             ),
         )
 
+    async def publish_artifact(self, project: ProjectRecord, artifact) -> None:
+        _ = project, artifact
+        return None
+
+    def _project_seq(self, project_id: str) -> int:
+        record = self.task_monitor_store.get_project(project_id)
+        if record is None:
+            return 0
+        return max(int(record.latest_progress_rev or 0), int(record.latest_engineering_rev or 0))
+
     def refresh_project_governance_summary(self, project_id: str) -> ProjectRecord | None:
         return self.get_project(project_id)
-
-    async def handle_ceo_message(self, session_id: str, text: str) -> str:
-        return await self.ceo_runner.handle_message(session_id, text)
 
     @staticmethod
     def _legacy_project_status(status: str) -> str:
@@ -672,17 +730,40 @@ class ProjectService:
     def list_skill_resources(self):
         return self.resource_registry.list_skill_resources()
 
+    def list_visible_skill_resources(self, *, actor_role: str, session_id: str) -> list:
+        subject = self.build_policy_subject(session_id=session_id, actor_role=actor_role)
+        visible = []
+        for item in self.resource_registry.list_skill_resources():
+            decision = self.policy_engine.evaluate_skill_access(subject=subject, skill_id=item.skill_id)
+            if decision.allowed:
+                visible.append(item)
+        return visible
+
     def get_skill_resource(self, skill_id: str):
         return self.resource_registry.get_skill_resource(skill_id)
 
     def list_tool_resources(self):
         return self.resource_registry.list_tool_families()
 
+    def list_visible_tool_families(self, *, actor_role: str, session_id: str) -> list:
+        subject = self.build_policy_subject(session_id=session_id, actor_role=actor_role)
+        visible = []
+        for family in self.resource_registry.list_tool_families():
+            actions = []
+            for action in family.actions:
+                decision = self.policy_engine.evaluate_tool_action(subject=subject, tool_id=family.tool_id, action_id=action.action_id)
+                if decision.allowed:
+                    actions.append(action)
+            if actions:
+                visible.append(family.model_copy(update={'actions': actions}))
+        return visible
+
     def get_tool_resource(self, tool_id: str):
         return self.resource_registry.get_tool_family(tool_id)
 
     def list_events(self, project_id: str, after_seq: int = 0, limit: int = 200):
-        return self.event_store.list_after(project_id, after_seq=after_seq, limit=min(limit, self.config.event_replay_limit))
+        _ = project_id, after_seq, limit
+        return []
 
     def list_artifacts(self, project_id: str):
         return self.store.list_artifacts(project_id)
@@ -722,10 +803,46 @@ class ProjectService:
         return self.notice_service.ack(notice_id)
 
     def get_tree(self, project_id: str):
+        return self.monitor_service.get_tree(project_id)
+
+    def delete_execution_subtree(self, *, project_id: str, root_unit_id: str) -> list[str]:
         project = self.get_project(project_id)
         if project is None:
-            return None
-        return self.tree_builder.build(units=self.list_units(project_id), root_unit_id=project.root_unit_id)
+            return []
+        units = self.list_units(project_id)
+        if not units:
+            return []
+        by_parent: dict[str, list[str]] = {}
+        by_id = {unit.unit_id: unit for unit in units}
+        for unit in units:
+            parent_id = str(unit.parent_unit_id or '').strip()
+            if not parent_id:
+                continue
+            by_parent.setdefault(parent_id, []).append(unit.unit_id)
+        root_id = str(root_unit_id or '').strip()
+        if not root_id or root_id not in by_id:
+            return []
+        deleted: list[str] = []
+        stack = [root_id]
+        while stack:
+            current = stack.pop()
+            if current in deleted:
+                continue
+            deleted.append(current)
+            stack.extend(reversed(by_parent.get(current, [])))
+        self.checkpoint_store.delete_many(deleted)
+        self.store.delete_stages_for_units(deleted)
+        self.artifact_store.delete_artifacts_for_units(project_id, deleted)
+        self.store.delete_units(deleted)
+        self.monitor_service.delete_nodes(project_id=project_id, node_ids=deleted)
+        self.store.recount_project_units(project_id)
+        parent_id = by_id[root_id].parent_unit_id
+        if parent_id:
+            parent = self.get_unit(parent_id)
+            if parent is not None:
+                remaining = [unit for unit in self.list_units(project_id) if unit.parent_unit_id == parent.unit_id]
+                self.store.upsert_unit(parent.model_copy(update={'child_count': len(remaining), 'updated_at': self.now()}))
+        return deleted
 
     def list_skill_files(self, skill_id: str) -> dict[str, str]:
         return {key: str(path) for key, path in self.resource_registry.skill_file_map(skill_id).items()}
@@ -790,6 +907,7 @@ class ProjectService:
 
     async def reload_resources(self, *, session_id: str = 'web:shared', decided_by: str = 'manual_policy'):
         skills, tools = self.resource_registry.refresh()
+        self.seed_ceo_governance_defaults()
         self.policy_engine.sync_default_role_policies()
         return {'skills': len(skills), 'tools': len(tools)}
 
@@ -832,7 +950,6 @@ class ProjectService:
         notice = self.notice_service.create(session_id=updated.session_id, project_id=updated.project_id, kind='project_canceled', title='Project canceled', text=f'Project {updated.title} has been canceled.')
         await self.publish_notice(updated.session_id, notice)
         await self.publish_summary(updated)
-        await self.emitter.emit_terminal(session_id=updated.session_id, project_id=updated.project_id, payload=updated.model_dump(mode='json'))
         return updated
 
     async def archive_project(self, project_id: str):
@@ -859,7 +976,7 @@ class ProjectService:
             await self.registry.clear_task(project_id)
 
         self.checkpoint_store.delete_many(unit_ids)
-        self.event_store.delete_project(project_id)
+        self.task_monitor_store.delete_project(project_id)
         self.artifact_store.delete_project_artifacts(project_id, artifacts)
         self.store.delete_project(project_id)
         await self.registry.purge_project(
@@ -875,15 +992,18 @@ class ProjectService:
         return {'project_id': project_id}
 
     async def close(self) -> None:
+        if self._closed:
+            return
         self._started = False
+        self._closed = True
         await self.registry.close()
         if self.memory_manager is not None:
             try:
                 self.memory_manager.close()
             except Exception:
                 pass
+        self.task_monitor_store.close()
         self.checkpoint_store.close()
-        self.event_store.close()
         self.governance_store.close()
         self.store.close()
 

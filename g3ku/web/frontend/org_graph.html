@@ -160,8 +160,8 @@
                         <div id="skill-list" class="resource-list"></div>
                     </aside>
 
-                    <div id="skill-detail-backdrop" class="detail-backdrop"></div>
-                    <section class="resource-detail-panel skill-detail-panel detail-drawer">
+                    <div id="skill-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+                    <section class="resource-detail-panel skill-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="skill-detail-title" tabindex="-1">
                         <div id="skill-detail-empty" class="empty-state resource-empty">请选择一个 Skill 查看详情。</div>
                         <div id="skill-detail-content"></div>
                     </section>
@@ -203,8 +203,8 @@
                         <div id="tool-list" class="resource-list"></div>
                     </aside>
 
-                    <div id="tool-detail-backdrop" class="detail-backdrop"></div>
-                    <section class="resource-detail-panel tool-detail-panel detail-drawer">
+                    <div id="tool-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+                    <section class="resource-detail-panel tool-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="tool-detail-title" tabindex="-1">
                         <div id="tool-detail-empty" class="empty-state resource-empty">请选择一个工具族查看详情。</div>
                         <div id="tool-detail-content"></div>
                     </section>
@@ -212,43 +212,29 @@
             </section>
 
             <section id="view-models" class="view-section" style="display: none;">
-                <header class="content-header resource-header">
+                <header class="content-header resource-header model-page-header">
                     <div>
                         <h1>模型配置</h1>
-                        <p class="subtitle">直接维护 <code>models.catalog</code> 和 <code>models.roles</code>，管理模型目录、参数、启用状态，以及按顺序降级的角色模型链。</p>
+                        <p class="subtitle">统一管理 CEO、执行、检验三条角色链与可用模型。</p>
                         <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载模型配置...</p>
                     </div>
-                    <div class="resource-header-actions">
+                    <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                         <button id="model-create-btn" class="toolbar-btn" type="button">添加模型</button>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button">保存角色链</button>
                     </div>
                 </header>
 
-                <div class="model-admin-shell">
-                    <section class="resource-list-panel model-routing-panel">
-                        <div class="panel-header">
-                            <div>
-                                <h2>角色模型链</h2>
-                                <p class="subtitle">可为主 Agent、CEO、执行、检验分别配置多个模型；当触发限制时会按链路顺序自动降级。</p>
-                            </div>
+                <div class="resource-layout model-simple-layout">
+                    <section class="resource-detail-panel model-detail-panel">
+                        <div class="model-role-summary-panel">
+                            <div id="model-role-editors" class="model-routing-grid"></div>
                         </div>
-                        <div id="model-role-editors" class="model-routing-grid"></div>
-                    </section>
-
-                    <div class="resource-layout model-admin-layout">
-                        <aside class="resource-list-panel model-list-panel">
-                            <div class="resource-controls">
-                                <input id="model-search-input" class="resource-search" type="search" placeholder="搜索模型 key、provider:model、说明">
-                            </div>
-                            <div id="model-list" class="resource-list"></div>
-                        </aside>
-
-                        <section class="resource-detail-panel model-detail-panel">
-                            <div id="model-detail-empty" class="empty-state resource-empty">请选择一个模型，或点击“添加模型”。</div>
+                        <div class="model-detail-body">
+                            <div id="model-detail-empty" class="empty-state resource-empty">点击角色链中的模型即可查看详情，或点击“添加模型”。</div>
                             <div id="model-detail-content" class="resource-detail-shell"></div>
-                        </section>
-                    </div>
+                        </div>
+                    </section>
                 </div>
             </section>
 
@@ -284,34 +270,34 @@
 
                     <div class="feed-panel panel">
                         <div class="panel-header">
-                            <h2 id="feed-target-name">项目全局动态 / 详情</h2>
+                            <h2 id="feed-target-name">节点详情</h2>
                         </div>
 
                         <div id="agent-detail-view" class="agent-detail-view" style="display: none;">
                             <div class="agent-detail-header">
-                                <h3 id="ad-role">角色名称</h3>
+                                <h3 id="ad-role">节点</h3>
                                 <span class="status-badge" id="ad-status">STATUS</span>
                                 <button class="btn-secondary" id="close-agent-btn" type="button"
                                     style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--bg-panel); color: var(--text-primary);">返回全局</button>
                             </div>
 
                             <div class="agent-detail-section">
-                                <h4><i data-lucide="target"></i> 任务目标</h4>
-                                <p id="ad-objective" class="text-secondary">-</p>
+                                <h4><i data-lucide="arrow-down-to-line"></i> 输入</h4>
+                                <div class="code-block" id="ad-input">-</div>
                             </div>
 
                             <div class="agent-detail-section">
-                                <h4><i data-lucide="terminal-square"></i> 系统提示摘要</h4>
-                                <div class="code-block" id="ad-prompt">-</div>
+                                <h4><i data-lucide="arrow-up-from-line"></i> 输出</h4>
+                                <div class="code-block" id="ad-output">-</div>
                             </div>
 
                             <div class="agent-detail-section">
-                                <h4><i data-lucide="check-circle-2"></i> 执行结果</h4>
-                                <p id="ad-result" class="text-secondary">-</p>
+                                <h4><i data-lucide="shield-check"></i> 检验</h4>
+                                <div class="code-block" id="ad-check">-</div>
                             </div>
 
                             <div class="agent-detail-section">
-                                <h4><i data-lucide="activity"></i> 节点执行日志</h4>
+                                <h4><i data-lucide="activity"></i> 日志</h4>
                                 <div id="ad-logs"
                                     style="max-height: 250px; overflow-y: auto; background: var(--bg-app); border-radius: var(--radius-md); padding: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2);">
                                     <div class="empty-state" style="padding: 10px;">暂无动作...</div>
@@ -319,22 +305,24 @@
                             </div>
                         </div>
 
-                        <div class="event-feed" id="project-event-feed"></div>
+                        <div id="project-node-empty" class="empty-state" style="padding: 16px;">点击左侧树节点查看输入、输出、检验和日志。</div>
                     </div>
                 </div>
             </section>
 
             <div id="app-toast-viewport" class="app-toast-viewport" aria-live="polite" aria-atomic="true">
                 <div id="app-toast" class="app-toast" hidden>
-                    <div class="app-toast-copy">
-                        <div id="app-toast-title" class="app-toast-title">&#25805;&#20316;&#25104;&#21151;</div>
-                        <div id="app-toast-text" class="app-toast-text">&#20462;&#25913;&#24050;&#29983;&#25928;</div>
-                    </div>
-                    <div class="app-toast-side">
-                        <span id="app-toast-countdown" class="app-toast-countdown">3</span>
-                        <button id="app-toast-close" class="icon-btn app-toast-close" type="button" aria-label="close toast">
+                    <div class="app-toast-main">
+                        <div class="app-toast-copy">
+                            <div id="app-toast-title" class="app-toast-title">&#25805;&#20316;&#25104;&#21151;</div>
+                            <div id="app-toast-text" class="app-toast-text">&#20462;&#25913;&#24050;&#29983;&#25928;</div>
+                        </div>
+                        <button id="app-toast-close" class="icon-btn app-toast-close" type="button" aria-label="关闭提示">
                             <i data-lucide="x"></i>
                         </button>
+                    </div>
+                    <div id="app-toast-progress" class="app-toast-progress" aria-hidden="true">
+                        <span id="app-toast-progress-bar" class="app-toast-progress-bar"></span>
                     </div>
                 </div>
             </div>

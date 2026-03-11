@@ -49,10 +49,10 @@ class ApiClient {
         return `${protocol}//${host}/api/ws/ceo?session_id=${DEFAULT_SESSION_ID}`;
     }
 
-    static getProjectWsUrl(projectId, afterSeq = 0) {
+    static getProjectWsUrl(projectId) {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;
-        return `${protocol}//${host}/api/ws/projects/${projectId}?session_id=${DEFAULT_SESSION_ID}&after_seq=${afterSeq}`;
+        return `${protocol}//${host}/api/ws/projects/${projectId}?session_id=${DEFAULT_SESSION_ID}`;
     }
 
     static async getProjects(offset = 0, limit = 50) {
@@ -109,11 +109,6 @@ class ApiClient {
 
     static async getProjectTree(projectId) {
         return this.get(`/api/projects/${projectId}/tree`);
-    }
-
-    static async getProjectEvents(projectId, afterSeq = 0, limit = 200) {
-        const data = await this.get(`/api/projects/${projectId}/events`, { after_seq: afterSeq, limit });
-        return data.items || [];
     }
 
     static async getSkills(offset = 0, limit = 200) {

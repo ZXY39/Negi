@@ -19,6 +19,15 @@ from g3ku.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool,
 from g3ku.agent.tools.memory_search import MemorySearchTool
 from g3ku.agent.tools.message import MessageTool
 from g3ku.agent.tools.model_config import ModelConfigTool
+from g3ku.agent.tools.orggraph import (
+    LoadSkillContextTool,
+    OrgGraphControlProjectTool,
+    OrgGraphCreateProjectTool,
+    TaskMonitorEngineeringExceptionsTool,
+    TaskMonitorListTool,
+    TaskMonitorProgressTool,
+    TaskMonitorSummaryTool,
+)
 from g3ku.agent.tools.picture_washing import PictureWashingTool
 from g3ku.agent.tools.shell import ExecTool
 from g3ku.agent.tools.web import WebFetchTool, WebSearchTool
@@ -38,7 +47,10 @@ from g3ku.runtime.multi_agent.dynamic import (
     ModelChainExecutor,
     OrchestratorRunner,
 )
+from g3ku.runtime.frontdoor import CeoFrontDoorRunner
 from g3ku.runtime.multi_agent.blackboard import BlackboardStore
+from g3ku.org_graph.config import resolve_org_graph_config
+from g3ku.org_graph.service.project_service import ProjectService
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
 
 
@@ -117,68 +129,103 @@ class RuntimeBootstrapBridge:
         self._loop.background_task_store = None
         self._loop.dynamic_subagent_controller = None
         self._loop.background_pool = None
-        if cfg is None:
+        if cfg is not None:
+            try:
+                blackboard_root = resolve_path_in_workspace(getattr(cfg, "blackboard_dir", ".g3ku/blackboard"), self._loop.workspace)
+                ensure_dir(blackboard_root)
+                self._loop.blackboard_store = BlackboardStore(blackboard_root)
+                session_store_path = resolve_path_in_workspace(getattr(cfg, "session_store_path", ".g3ku/dynamic-subagents.sqlite3"), self._loop.workspace)
+                background_store_path = resolve_path_in_workspace(getattr(cfg, "background_store_path", ".g3ku/background-tasks.sqlite3"), self._loop.workspace)
+                self._loop.dynamic_subagent_session_store = DynamicSubagentSessionStore(session_store_path)
+                self._loop.background_task_store = BackgroundTaskStore(background_store_path)
+                category_resolver = CategoryResolver(loop=self._loop, config=cfg)
+                prompt_builder = DynamicPromptBuilder(loop=self._loop)
+                model_chain_executor = ModelChainExecutor(loop=self._loop)
+                controller = DynamicSubagentController(
+                    loop=self._loop,
+                    session_store=self._loop.dynamic_subagent_session_store,
+                    category_resolver=category_resolver,
+                    prompt_builder=prompt_builder,
+                    model_chain_executor=model_chain_executor,
+                    freeze_ttl_seconds=int(getattr(cfg, "freeze_ttl_seconds", 86400) or 86400),
+                    repeated_action_window=int(getattr(cfg, "repeated_action_window", 3) or 3),
+                    repeated_action_threshold=int(getattr(cfg, "repeated_action_threshold", 3) or 3),
+                )
+                self._loop.dynamic_subagent_controller = controller
+                self._loop.background_pool = BackgroundPool(
+                    controller=controller,
+                    store=self._loop.background_task_store,
+                    max_parallel_tasks=int(getattr(cfg, "max_parallel_background_tasks", 8) or 8),
+                )
+                controller.set_background_pool(self._loop.background_pool)
+                logger.info(
+                    "Dynamic background runtime initialized (session_store={}, background_store={}, blackboard={})",
+                    session_store_path,
+                    background_store_path,
+                    blackboard_root,
+                )
+            except Exception as exc:
+                self._loop.blackboard_store = None
+                self._loop.dynamic_subagent_session_store = None
+                self._loop.background_task_store = None
+                self._loop.dynamic_subagent_controller = None
+                self._loop.background_pool = None
+                logger.warning("Dynamic background runtime init failed: {}", exc)
+        self._loop.multi_agent_runner = CeoFrontDoorRunner(loop=self._loop)
+
+    def init_org_graph_runtime(self) -> None:
+        current = getattr(self._loop, 'org_graph_service', None)
+        if current is not None:
+            self._loop.org_graph_monitor_service = getattr(current, 'monitor_service', None)
+            return
+        config = getattr(self._loop, 'app_config', None)
+        if config is None or not bool(getattr(config.org_graph, 'enabled', True)):
+            self._loop.org_graph_service = None
+            self._loop.org_graph_monitor_service = None
             return
         try:
-            blackboard_root = resolve_path_in_workspace(getattr(cfg, "blackboard_dir", ".g3ku/blackboard"), self._loop.workspace)
-            ensure_dir(blackboard_root)
-            self._loop.blackboard_store = BlackboardStore(blackboard_root)
-            session_store_path = resolve_path_in_workspace(getattr(cfg, "session_store_path", ".g3ku/dynamic-subagents.sqlite3"), self._loop.workspace)
-            background_store_path = resolve_path_in_workspace(getattr(cfg, "background_store_path", ".g3ku/background-tasks.sqlite3"), self._loop.workspace)
-            self._loop.dynamic_subagent_session_store = DynamicSubagentSessionStore(session_store_path)
-            self._loop.background_task_store = BackgroundTaskStore(background_store_path)
-            category_resolver = CategoryResolver(loop=self._loop, config=cfg)
-            prompt_builder = DynamicPromptBuilder(loop=self._loop)
-            model_chain_executor = ModelChainExecutor(loop=self._loop)
-            controller = DynamicSubagentController(
-                loop=self._loop,
-                session_store=self._loop.dynamic_subagent_session_store,
-                category_resolver=category_resolver,
-                prompt_builder=prompt_builder,
-                model_chain_executor=model_chain_executor,
-                freeze_ttl_seconds=int(getattr(cfg, "freeze_ttl_seconds", 86400) or 86400),
-                repeated_action_window=int(getattr(cfg, "repeated_action_window", 3) or 3),
-                repeated_action_threshold=int(getattr(cfg, "repeated_action_threshold", 3) or 3),
-            )
-            self._loop.dynamic_subagent_controller = controller
-            self._loop.background_pool = BackgroundPool(
-                controller=controller,
-                store=self._loop.background_task_store,
-                max_parallel_tasks=int(getattr(cfg, "max_parallel_background_tasks", 8) or 8),
-            )
-            controller.set_background_pool(self._loop.background_pool)
-            self._loop.multi_agent_runner = OrchestratorRunner(
-                loop=self._loop,
-                controller=controller,
-                config=cfg,
-            )
-            logger.info(
-                "Dynamic multi-agent runtime initialized (session_store={}, background_store={}, blackboard={})",
-                session_store_path,
-                background_store_path,
-                blackboard_root,
-            )
+            service = ProjectService(resolve_org_graph_config(config))
+            self._loop.org_graph_service = service
+            self._loop.org_graph_monitor_service = getattr(service, 'monitor_service', None)
         except Exception as exc:
-            self._loop.multi_agent_runner = None
-            self._loop.blackboard_store = None
-            self._loop.dynamic_subagent_session_store = None
-            self._loop.background_task_store = None
-            self._loop.dynamic_subagent_controller = None
-            self._loop.background_pool = None
-            logger.warning("Dynamic multi-agent runtime init failed: {}", exc)
+            self._loop.org_graph_service = None
+            self._loop.org_graph_monitor_service = None
+            logger.warning('org-graph runtime init failed: {}', exc)
 
     def register_default_tools(self) -> None:
+        self.init_org_graph_runtime()
         if self._loop.capability_loader is not None:
             try:
                 loaded = self._loop.capability_loader.build_tools(loop=self._loop)
                 loaded = [tool for tool in loaded if tool.name not in {"spawn", "enter_deep_mode", "deep_mode_status", "deep_mode_pause", "deep_mode_resume", "deep_mode_cancel"}]
                 for tool in loaded:
                     self._loop.tools.register(tool)
+                self.register_frontdoor_tools()
                 logger.info("Registered {} tools via capability registry", len(loaded))
                 return
             except Exception as exc:
                 logger.warning("Capability-based tool registration failed, using legacy wiring: {}", exc)
         self.register_legacy_tools()
+        self.register_frontdoor_tools()
+
+    def register_frontdoor_tools(self) -> None:
+        service = getattr(self._loop, 'org_graph_service', None)
+        if service is None:
+            return
+
+        def _service_getter():
+            return getattr(self._loop, 'org_graph_service', service)
+
+        for tool in (
+            OrgGraphCreateProjectTool(_service_getter),
+            OrgGraphControlProjectTool(_service_getter),
+            TaskMonitorSummaryTool(_service_getter),
+            TaskMonitorListTool(_service_getter),
+            TaskMonitorProgressTool(_service_getter),
+            TaskMonitorEngineeringExceptionsTool(_service_getter),
+            LoadSkillContextTool(_service_getter),
+        ):
+            self._loop.tools.register(tool)
 
     def register_legacy_tools(self) -> None:
         allowed_dir = self._loop.workspace if self._loop.restrict_to_workspace else None

@@ -62,12 +62,8 @@ def _paginate(items, *, offset: int, limit: int) -> tuple[list, int, int, int]:
 
 @router.post('/projects')
 async def create_project(request: ProjectCreateRequest):
-    service = get_org_graph_service()
-    try:
-        project = await service.create_project(request)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return JSONResponse({'ok': True, 'project': project.model_dump(mode='json')})
+    _ = request
+    raise HTTPException(status_code=403, detail='use_ceo_frontdoor')
 
 
 @router.get('/projects')
@@ -245,15 +241,6 @@ async def list_stages(project_id: str, offset: int = Query(0, ge=0), limit: int 
     return JSONResponse({'ok': True, 'items': page, 'total': total, 'offset': offset, 'limit': limit})
 
 
-@router.get('/projects/{project_id}/events')
-async def list_events(project_id: str, after_seq: int = Query(0), limit: int = Query(200)):
-    service = get_org_graph_service()
-    if service.get_project(project_id) is None:
-        raise HTTPException(status_code=404, detail='project_not_found')
-    items = [item.model_dump(mode='json') for item in service.list_events(project_id, after_seq=after_seq, limit=limit)]
-    return JSONResponse({'ok': True, 'items': items})
-
-
 @router.get('/projects/{project_id}/artifacts')
 async def list_artifacts(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500)):
     service = get_org_graph_service()
@@ -429,4 +416,33 @@ async def ack_notice(notice_id: str):
     if notice is None:
         raise HTTPException(status_code=404, detail='notice_not_found')
     return JSONResponse({'ok': True, 'notice': notice.model_dump(mode='json')})
+
+
+@router.get('/monitor/summary')
+async def monitor_summary(session_id: str = Query('web:shared')):
+    service = get_org_graph_service()
+    return JSONResponse({'ok': True, **service.monitor_service.summary(session_id)})
+
+
+@router.get('/monitor/tasks')
+async def monitor_list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1), mark_read: bool = Query(False)):
+    service = get_org_graph_service()
+    payload = service.monitor_service.list_tasks(session_id, int(scope), mark_read=bool(mark_read))
+    return JSONResponse({'ok': True, **payload})
+
+
+@router.get('/monitor/tasks/{task_id}')
+async def monitor_task_progress(task_id: str, mark_read_progress: bool = Query(False)):
+    service = get_org_graph_service()
+    payload = service.monitor_service.progress(task_id, mark_read=bool(mark_read_progress))
+    if payload is None:
+        raise HTTPException(status_code=404, detail='project_not_found')
+    return JSONResponse({'ok': True, **payload})
+
+
+@router.get('/monitor/exceptions')
+async def monitor_engineering_exceptions(session_id: str = Query('web:shared'), mark_read: bool = Query(False)):
+    service = get_org_graph_service()
+    payload = service.monitor_service.engineering_exceptions(session_id, mark_read=bool(mark_read))
+    return JSONResponse({'ok': True, **payload})
 

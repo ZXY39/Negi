@@ -6,6 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from g3ku.org_graph.integration.web_bridge import get_org_graph_service
 from g3ku.org_graph.protocol import build_envelope
+from g3ku.shells.web import get_agent, get_runtime_manager
 
 router = APIRouter()
 
@@ -14,7 +15,10 @@ router = APIRouter()
 async def ceo_websocket(websocket: WebSocket):
     await websocket.accept()
     session_id = str(websocket.query_params.get('session_id') or 'web:shared')
+    agent = get_agent()
+    runtime_manager = get_runtime_manager(agent)
     service = get_org_graph_service()
+    await service.startup()
     queue = await service.registry.subscribe_ceo(session_id)
 
     async def sender() -> None:
@@ -32,7 +36,12 @@ async def ceo_websocket(websocket: WebSocket):
             text = str(data.get('text') or '').strip()
             if not text:
                 continue
-            reply = await service.handle_ceo_message(session_id, text)
+            if ':' in session_id:
+                channel, chat_id = session_id.split(':', 1)
+            else:
+                channel, chat_id = 'web', session_id
+            result = await runtime_manager.prompt(text, session_key=session_id, channel=channel or 'web', chat_id=chat_id or 'shared')
+            reply = str(result.output or '')
             await websocket.send_json(build_envelope(channel='ceo', session_id=session_id, type='ceo.reply.final', data={'text': reply}))
     except WebSocketDisconnect:
         pass

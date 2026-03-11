@@ -12,13 +12,14 @@ class FailureReporter:
         failure_kind = str(failure_kind or 'engineering')
         metadata = dict(unit.metadata or {})
         metadata['failure_kind'] = failure_kind
+        engineering = failure_kind == 'engineering'
         updated_unit = unit.model_copy(
             update={
-                'status': 'failed',
+                'status': 'blocked' if engineering else 'failed',
                 'error_summary': error_text,
-                'current_action': '',
+                'current_action': 'Waiting for engineering resolution' if engineering else '',
                 'updated_at': self._service.now(),
-                'finished_at': self._service.now(),
+                'finished_at': None if engineering else self._service.now(),
                 'metadata': metadata,
             }
         )
@@ -28,17 +29,17 @@ class FailureReporter:
             if stage is not None and stage.status not in {'completed', 'failed', 'canceled'}:
                 failed_stage = stage.model_copy(
                     update={
-                        'status': 'failed',
+                        'status': 'blocked' if engineering else 'failed',
                         'error_summary': error_text,
-                        'finished_at': self._service.now(),
+                        'finished_at': None if engineering else self._service.now(),
                     }
                 )
                 self._service.store.upsert_stage(failed_stage)
                 await self._service.emit_event(
                     project=project,
                     scope='stage',
-                    event_name='stage.failed',
-                    text=f'{failed_stage.title} failed: {error_text}',
+                    event_name='stage.blocked' if engineering else 'stage.failed',
+                    text=f'{failed_stage.title} blocked: {error_text}' if engineering else f'{failed_stage.title} failed: {error_text}',
                     unit_id=updated_unit.unit_id,
                     stage_id=failed_stage.stage_id,
                     level='error',
@@ -47,12 +48,12 @@ class FailureReporter:
         await self._service.emit_unit_event(
             project=project,
             unit=updated_unit,
-            event_name='unit.failed',
-            text=f'{unit.role_title} failed: {error_text}',
+            event_name='unit.blocked' if engineering else 'unit.failed',
+            text=f'{unit.role_title} blocked: {error_text}' if engineering else f'{unit.role_title} failed: {error_text}',
             level='error',
             extra_data={'failure_kind': failure_kind},
         )
-        if failure_kind != 'engineering':
+        if not engineering:
             return
         await self._service.emit_event(
             project=project,
@@ -78,25 +79,26 @@ class FailureReporter:
     async def record_project_failure(self, *, project, error: Exception | str, failure_kind: str) -> None:
         error_text = str(error)
         failure_kind = str(failure_kind or 'engineering')
+        engineering = failure_kind == 'engineering'
         updated = project.model_copy(
             update={
-                'status': 'failed',
+                'status': 'blocked' if engineering else 'failed',
                 'error_summary': error_text,
                 'updated_at': self._service.now(),
-                'finished_at': self._service.now(),
-                'summary': error_text,
+                'finished_at': None if engineering else self._service.now(),
+                'summary': f'Project blocked: {error_text}' if engineering else error_text,
             }
         )
         self._service.store.upsert_project(updated)
         await self._service.emit_event(
             project=updated,
             scope='project',
-            event_name='project.failed',
+            event_name='project.blocked' if engineering else 'project.failed',
             text=error_text,
             level='error',
             data={'failure_kind': failure_kind},
         )
-        if failure_kind == 'engineering':
+        if engineering:
             await self._service.emit_event(
                 project=updated,
                 scope='project',
@@ -108,8 +110,8 @@ class FailureReporter:
             notice = self._service.notice_service.create(
                 session_id=project.session_id,
                 project_id=project.project_id,
-                kind='project_failed',
-                title='Project failed',
+                kind='project_blocked',
+                title='Project blocked',
                 text=EscalationHelper.project_failed_text(project_title=project.title, error=error_text),
             )
             await self._service.publish_notice(project.session_id, notice)

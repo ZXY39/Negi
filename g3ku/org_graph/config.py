@@ -11,8 +11,8 @@ from g3ku.config.schema import Config
 class ResolvedOrgGraphConfig:
     raw: Config
     project_store_path: Path
-    event_store_path: Path
     checkpoint_store_path: Path
+    task_monitor_store_path: Path
     governance_store_path: Path
     artifact_dir: Path
     ceo_model: str
@@ -49,13 +49,13 @@ def resolve_org_graph_config(config: Config | None = None) -> ResolvedOrgGraphCo
     if governance_raw == '.g3ku/org-graph/governance.sqlite3' and org.project_store_path != '.g3ku/org-graph/projects.sqlite3':
         governance_raw = str(Path(org.project_store_path).expanduser().with_name('governance.sqlite3'))
     project_store_path = _resolve_path(org.project_store_path)
-    event_store_path = _resolve_path(org.event_store_path)
     checkpoint_store_path = _resolve_path(org.checkpoint_store_path)
+    task_monitor_store_path = _resolve_path(getattr(org, 'task_monitor_store_path', '.g3ku/org-graph/task-monitor.sqlite3'))
     governance_store_path = _resolve_path(governance_raw)
     artifact_dir = _resolve_path(org.artifact_dir)
     project_store_path.parent.mkdir(parents=True, exist_ok=True)
-    event_store_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_store_path.parent.mkdir(parents=True, exist_ok=True)
+    task_monitor_store_path.parent.mkdir(parents=True, exist_ok=True)
     governance_store_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     fallback_model = cfg.agents.defaults.model
@@ -65,8 +65,8 @@ def resolve_org_graph_config(config: Config | None = None) -> ResolvedOrgGraphCo
     return ResolvedOrgGraphConfig(
         raw=cfg,
         project_store_path=project_store_path,
-        event_store_path=event_store_path,
         checkpoint_store_path=checkpoint_store_path,
+        task_monitor_store_path=task_monitor_store_path,
         governance_store_path=governance_store_path,
         artifact_dir=artifact_dir,
         ceo_model=(ceo_model_chain[0] if ceo_model_chain else (org.ceo_model or fallback_model)),
