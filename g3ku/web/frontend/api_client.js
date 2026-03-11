@@ -148,6 +148,10 @@ class ApiClient {
     static async disableTool(toolId) {
         return this.post(`/api/resources/tools/${toolId}/disable`, {}, { session_id: DEFAULT_SESSION_ID });
     }
+
+    static async reloadResources() {
+        return this.post("/api/resources/reload", {}, { session_id: DEFAULT_SESSION_ID });
+    }
 }
 
 window.ApiClient = ApiClient;

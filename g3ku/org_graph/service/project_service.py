@@ -118,31 +118,61 @@ class ProjectService:
         )
 
     def default_node_provider_models(self) -> dict[str, str]:
+        fallback = self._first_ready_provider_model()
         return to_public_model_defaults(
             {
-                'ceo': str(self.config.ceo_model or '').strip(),
-                'execution': str(self.config.execution_model or '').strip(),
-                'inspection': str(self.config.inspection_model or '').strip(),
+                'ceo': self._effective_provider_model(str(self.config.ceo_model or '').strip(), fallback=fallback),
+                'execution': self._effective_provider_model(str(self.config.execution_model or '').strip(), fallback=fallback),
+                'inspection': self._effective_provider_model(str(self.config.inspection_model or '').strip(), fallback=fallback),
             }
         )
 
-    def list_available_provider_models(self) -> list[str]:
-        candidates = [
+    def _provider_model_candidates(self) -> list[str]:
+        return [
             self.config.raw.agents.defaults.model,
             self.config.raw.agents.multi_agent.orchestrator_model,
             self.config.raw.org_graph.ceo_model,
             self.config.raw.org_graph.execution_model,
             self.config.raw.org_graph.inspection_model,
         ]
+
+    def _provider_model_is_ready(self, provider_model: str) -> bool:
+        candidate = str(provider_model or '').strip()
+        if not candidate:
+            return False
+        try:
+            from g3ku.org_graph.llm.provider_factory import build_provider_from_model
+
+            build_provider_from_model(self.config.raw, candidate)
+        except Exception:
+            return False
+        return True
+
+    def _first_ready_provider_model(self) -> str:
+        for candidate in self._provider_model_candidates():
+            provider_model = str(candidate or '').strip()
+            if provider_model and self._provider_model_is_ready(provider_model):
+                return provider_model
+        return ''
+
+    def _effective_provider_model(self, provider_model: str, *, fallback: str = '') -> str:
+        candidate = str(provider_model or '').strip()
+        if candidate and self._provider_model_is_ready(candidate):
+            return candidate
+        return str(fallback or '').strip()
+
+    def list_available_provider_models(self) -> list[str]:
         seen: set[str] = set()
         models: list[str] = []
-        for candidate in candidates:
+        for candidate in self._provider_model_candidates():
             provider_model = str(candidate or '').strip()
             if not provider_model or provider_model in seen:
                 continue
             try:
                 self.config.raw.parse_provider_model(provider_model)
             except Exception:
+                continue
+            if not self._provider_model_is_ready(provider_model):
                 continue
             seen.add(provider_model)
             models.append(provider_model)
@@ -167,8 +197,16 @@ class ProjectService:
 
     def resolve_project_provider_model(self, *, project: ProjectRecord | None, node_type: str) -> str:
         normalized_type = 'inspection' if node_type in {'inspection', 'checker'} else 'execution' if node_type in {'execution', 'execution', 'execution'} else 'ceo'
+        raw_defaults = {
+            'ceo': str(self.config.ceo_model or '').strip(),
+            'execution': str(self.config.execution_model or '').strip(),
+            'inspection': str(self.config.inspection_model or '').strip(),
+        }
         defaults = self.default_node_provider_models()
-        return defaults[normalized_type]
+        resolved = str(defaults.get(normalized_type) or '').strip()
+        if resolved:
+            return resolved
+        return raw_defaults[normalized_type]
 
     async def update_default_provider_models(self, payload: dict[str, Any]) -> dict[str, str]:
         normalized = self.validate_default_provider_models(payload)

@@ -1447,7 +1447,8 @@ textarea {
 }
 
 .resource-list-item:hover,
-.resource-list-item.active {
+.resource-list-item.active,
+.resource-list-item.selected {
     border-color: var(--brand-primary);
     box-shadow: var(--shadow-sm);
     background-color: color-mix(in srgb, var(--bg-app) 60%, var(--brand-primary) 8%);

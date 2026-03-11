@@ -596,6 +596,12 @@ class UnitRunner:
                         ensure_ascii=False,
                     )
                 else:
+                    message = str(exc)
+                    if 'not configured with an API key' in message:
+                        raise EngineeringFailureError(
+                            f'Local execution requires a configured provider model. Current model: {provider_model}. '
+                            'Configure the provider API key or pick a ready model in the sidebar.'
+                        ) from exc
                     raise EngineeringFailureError(f'Local execution LLM failed: {exc}') from exc
         payload = self._parse_worker_payload(result_text)
         await self._service.emit_event(

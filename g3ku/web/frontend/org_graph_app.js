@@ -15,8 +15,10 @@ const S = {
     skillFiles: [],
     skillContents: {},
     selectedSkillFile: "",
+    skillBusy: false,
     tools: [],
     selectedTool: null,
+    toolBusy: false,
 };
 
 const U = {
@@ -31,6 +33,7 @@ const U = {
     viewProjects: document.getElementById("view-projects-list"),
     viewSkills: document.getElementById("view-skills"),
     viewTools: document.getElementById("view-tools"),
+    viewModels: document.getElementById("view-models"),
     viewProjectDetails: document.getElementById("view-project-details"),
     modelHint: document.getElementById("sidebar-model-hint"),
     modelCeo: document.getElementById("sidebar-model-ceo"),
@@ -68,6 +71,8 @@ const U = {
     skillList: document.getElementById("skill-list"),
     skillEmpty: document.getElementById("skill-detail-empty"),
     skillDetail: document.getElementById("skill-detail-content"),
+    skillBackdrop: document.getElementById("skill-detail-backdrop"),
+    skillDrawer: document.querySelector(".skill-detail-panel"),
     skillRefresh: document.getElementById("skill-refresh-btn"),
     skillSave: document.getElementById("skill-save-btn"),
     toolSearch: document.getElementById("tool-search-input"),
@@ -76,6 +81,8 @@ const U = {
     toolList: document.getElementById("tool-list"),
     toolEmpty: document.getElementById("tool-detail-empty"),
     toolDetail: document.getElementById("tool-detail-content"),
+    toolBackdrop: document.getElementById("tool-detail-backdrop"),
+    toolDrawer: document.querySelector(".tool-detail-panel"),
     toolRefresh: document.getElementById("tool-refresh-btn"),
     toolSave: document.getElementById("tool-save-btn"),
 };
@@ -224,6 +231,62 @@ function updateProjectToolbar() {
     U.projectSummary.textContent = `已选择 ${selected.length} 项`;
     U.pauseBatch.disabled = S.projectBusy || !selected.some((p) => canPause(p.status));
     U.resumeBatch.disabled = S.projectBusy || !selected.some((p) => canResume(p.status));
+}
+
+function setDrawerOpen(backdrop, drawer, open) {
+    backdrop?.classList.toggle("is-open", open);
+    drawer?.classList.toggle("is-open", open);
+}
+
+function syncActionButton(button, { idleLabel, busyLabel, busy, disabled }) {
+    if (!button) return;
+    button.disabled = disabled;
+    button.textContent = busy ? busyLabel : idleLabel;
+}
+
+function renderSkillActions() {
+    syncActionButton(U.skillRefresh, {
+        idleLabel: "刷新",
+        busyLabel: "处理中...",
+        busy: S.skillBusy,
+        disabled: S.skillBusy,
+    });
+    syncActionButton(U.skillSave, {
+        idleLabel: "保存",
+        busyLabel: "保存中...",
+        busy: S.skillBusy,
+        disabled: S.skillBusy || !S.selectedSkill,
+    });
+}
+
+function renderToolActions() {
+    syncActionButton(U.toolRefresh, {
+        idleLabel: "刷新",
+        busyLabel: "处理中...",
+        busy: S.toolBusy,
+        disabled: S.toolBusy,
+    });
+    syncActionButton(U.toolSave, {
+        idleLabel: "保存",
+        busyLabel: "保存中...",
+        busy: S.toolBusy,
+        disabled: S.toolBusy || !S.selectedTool,
+    });
+}
+
+function clearSkillSelection() {
+    S.selectedSkill = null;
+    S.skillFiles = [];
+    S.skillContents = {};
+    S.selectedSkillFile = "";
+    renderSkills();
+    renderSkillDetail();
+}
+
+function clearToolSelection() {
+    S.selectedTool = null;
+    renderTools();
+    renderToolDetail();
 }
 
 function renderProjects() {
@@ -581,15 +644,16 @@ function toggleTheme() {
 }
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, projects: U.viewProjects, skills: U.viewSkills, tools: U.viewTools, "project-details": U.viewProjectDetails };
+    const map = { ceo: U.viewCeo, projects: U.viewProjects, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, "project-details": U.viewProjectDetails };
     const navView = view === "project-details" ? "projects" : view;
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
-    Object.entries(map).forEach(([key, el]) => { if (el) el.style.display = key === view ? (key === "ceo" || key === "project-details" ? "flex" : "block") : "none"; });
+    Object.entries(map).forEach(([key, el]) => { if (el) el.style.display = key === view ? (key === "ceo" || key === "project-details" || key === "models" ? "flex" : "block") : "none"; });
     if (view !== "project-details" && S.projectWs) { S.projectWs.close(); S.projectWs = null; }
     S.view = view;
     if (view === "projects") void loadProjects();
     if (view === "skills") void loadSkills();
     if (view === "tools") void loadTools();
+    if (view === "models") void loadModels();
 }
 
 function bind() {
@@ -617,6 +681,341 @@ function bind() {
 function init() {
     bind();
     icons();
+    void loadModels();
+    void loadNotices();
+    initCeoWs();
+}
+
+function renderSkillDetail() {
+    if (!S.selectedSkill) {
+        U.skillEmpty.style.display = "block";
+        U.skillDetail.innerHTML = "";
+        setDrawerOpen(U.skillBackdrop, U.skillDrawer, false);
+        renderSkillActions();
+        return;
+    }
+    U.skillEmpty.style.display = "none";
+    setDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
+    const roles = ["ceo", "execution", "inspection"];
+    const allowedRoles = Array.isArray(S.selectedSkill.allowed_roles) ? S.selectedSkill.allowed_roles : [];
+    U.skillDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedSkill.display_name)}</h2><p class="subtitle">${esc(S.selectedSkill.skill_id)}</p></div></div><label class="role-toggle checked"><input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}><span>已启用</span></label><div class="resource-section"><h3>允许角色</h3><div class="resource-filter-row">${roles.map((r) => `<label class="role-toggle ${allowedRoles.includes(r) ? "checked" : ""}"><input type="checkbox" class="skill-role" data-role="${r}" ${allowedRoles.includes(r) ? "checked" : ""}><span>${esc(roleLabel(r))}</span></label>`).join("")}</div></div><div class="resource-section"><h3>可编辑文件</h3><div class="resource-filter-row">${S.skillFiles.map((f) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === f.file_key ? "active" : ""}" data-file="${esc(f.file_key)}">${esc(f.file_key)}</button>`).join("")}</div><textarea id="skill-editor" rows="18" class="resource-editor">${esc(S.skillContents[S.selectedSkillFile] || "")}</textarea></div></article>`;
+    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => { S.selectedSkill.enabled = !!e.target.checked; });
+    U.skillDetail.querySelectorAll(".skill-role").forEach((cb) => cb.addEventListener("change", (e) => {
+        const set = new Set(allowedRoles);
+        if (e.target.checked) set.add(e.target.dataset.role);
+        else set.delete(e.target.dataset.role);
+        S.selectedSkill.allowed_roles = [...set];
+        renderSkillDetail();
+    }));
+    U.skillDetail.querySelectorAll(".skill-file").forEach((btn) => btn.addEventListener("click", () => {
+        const editor = document.getElementById("skill-editor");
+        if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
+        S.selectedSkillFile = btn.dataset.file;
+        renderSkillDetail();
+    }));
+    renderSkillActions();
+}
+
+async function loadSkills() {
+    U.skillList.innerHTML = '<div class="empty-state">Loading skills...</div>';
+    try {
+        S.skills = await ApiClient.getSkills(0, 300);
+        if (S.selectedSkill) {
+            const next = S.skills.find((skill) => skill.skill_id === S.selectedSkill.skill_id);
+            if (next) S.selectedSkill = next;
+            else clearSkillSelection();
+        }
+        renderSkills();
+        renderSkillDetail();
+    } catch (e) {
+        U.skillList.innerHTML = `<div class="empty-state error">Failed to load skills: ${esc(e.message)}</div>`;
+        addNotice({ kind: "resource_failed", title: "Skill load failed", text: e.message || "Unknown error" });
+    } finally {
+        renderSkillActions();
+    }
+}
+
+async function openSkill(skillId) {
+    setDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
+    U.skillEmpty.style.display = "none";
+    U.skillDetail.innerHTML = '<div class="empty-state">Loading skill details...</div>';
+    try {
+        const [skill, files] = await Promise.all([ApiClient.getSkill(skillId), ApiClient.getSkillFiles(skillId)]);
+        S.selectedSkill = skill;
+        S.skillFiles = files;
+        S.selectedSkillFile = files[0]?.file_key || "";
+        S.skillContents = {};
+        await Promise.all(files.map(async (file) => {
+            const data = await ApiClient.getSkillFile(skillId, file.file_key);
+            S.skillContents[file.file_key] = data.content || "";
+        }));
+        renderSkills();
+        renderSkillDetail();
+    } catch (e) {
+        U.skillDetail.innerHTML = `<div class="empty-state error">Failed to load skill details: ${esc(e.message)}</div>`;
+        addNotice({ kind: "resource_failed", title: "Skill detail failed", text: e.message || "Unknown error" });
+    } finally {
+        renderSkillActions();
+    }
+}
+
+async function saveSkill() {
+    if (!S.selectedSkill) {
+        addNotice({ kind: "resource_failed", title: "No skill selected", text: "Select a skill before saving." });
+        return;
+    }
+    S.skillBusy = true;
+    renderSkillActions();
+    try {
+        const editor = document.getElementById("skill-editor");
+        if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
+        for (const [key, content] of Object.entries(S.skillContents)) {
+            await ApiClient.saveSkillFile(S.selectedSkill.skill_id, key, content);
+        }
+        await ApiClient.updateSkillPolicy(S.selectedSkill.skill_id, {
+            enabled: !!S.selectedSkill.enabled,
+            allowed_roles: S.selectedSkill.allowed_roles || [],
+        });
+        const selectedId = S.selectedSkill.skill_id;
+        await loadSkills();
+        await openSkill(selectedId);
+        addNotice({ kind: "resource_saved", title: "Skill saved", text: S.selectedSkill.display_name || selectedId });
+    } catch (e) {
+        addNotice({ kind: "resource_failed", title: "Skill save failed", text: e.message || "Unknown error" });
+    } finally {
+        S.skillBusy = false;
+        renderSkillActions();
+    }
+}
+
+function renderToolDetail() {
+    if (!S.selectedTool) {
+        U.toolEmpty.style.display = "block";
+        U.toolDetail.innerHTML = "";
+        setDrawerOpen(U.toolBackdrop, U.toolDrawer, false);
+        renderToolActions();
+        return;
+    }
+    U.toolEmpty.style.display = "none";
+    setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
+    const roles = ["ceo", "execution", "inspection"];
+    U.toolDetail.innerHTML = `<article class="resource-detail-card"><div class="panel-header"><div><h2>${esc(S.selectedTool.display_name)}</h2><p class="subtitle">${esc(S.selectedTool.tool_id)}</p></div></div><label class="role-toggle checked"><input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}><span>已启用</span></label><div class="resource-section"><h3>动作矩阵</h3><div class="matrix-table"><table><thead><tr><th>动作</th><th>风险</th>${roles.map((r) => `<th>${esc(roleLabel(r))}</th>`).join("")}</tr></thead><tbody>${(S.selectedTool.actions || []).map((a) => `<tr><td>${esc(a.label || a.action_id)}</td><td>${esc(a.risk_level || "medium")}</td>${roles.map((r) => `<td><input type="checkbox" class="tool-role" data-action="${esc(a.action_id)}" data-role="${r}" ${a.allowed_roles?.includes(r) ? "checked" : ""}></td>`).join("")}</tr>`).join("")}</tbody></table></div></div></article>`;
+    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => { S.selectedTool.enabled = !!e.target.checked; });
+    U.toolDetail.querySelectorAll(".tool-role").forEach((cb) => cb.addEventListener("change", (e) => {
+        const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
+        if (!action) return;
+        const set = new Set(action.allowed_roles || []);
+        if (e.target.checked) set.add(e.target.dataset.role);
+        else set.delete(e.target.dataset.role);
+        action.allowed_roles = [...set];
+    }));
+    renderToolActions();
+}
+
+async function loadTools() {
+    U.toolList.innerHTML = '<div class="empty-state">Loading tools...</div>';
+    try {
+        S.tools = await ApiClient.getTools(0, 300);
+        if (S.selectedTool) {
+            const next = S.tools.find((tool) => tool.tool_id === S.selectedTool.tool_id);
+            if (next) S.selectedTool = next;
+            else clearToolSelection();
+        }
+        renderTools();
+        renderToolDetail();
+    } catch (e) {
+        U.toolList.innerHTML = `<div class="empty-state error">Failed to load tools: ${esc(e.message)}</div>`;
+        addNotice({ kind: "resource_failed", title: "Tool load failed", text: e.message || "Unknown error" });
+    } finally {
+        renderToolActions();
+    }
+}
+
+async function openTool(toolId) {
+    setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
+    U.toolEmpty.style.display = "none";
+    U.toolDetail.innerHTML = '<div class="empty-state">Loading tool details...</div>';
+    try {
+        S.selectedTool = await ApiClient.getTool(toolId);
+        renderTools();
+        renderToolDetail();
+    } catch (e) {
+        U.toolDetail.innerHTML = `<div class="empty-state error">Failed to load tool details: ${esc(e.message)}</div>`;
+        addNotice({ kind: "resource_failed", title: "Tool detail failed", text: e.message || "Unknown error" });
+    } finally {
+        renderToolActions();
+    }
+}
+
+async function saveTool() {
+    if (!S.selectedTool) {
+        addNotice({ kind: "resource_failed", title: "No tool selected", text: "Select a tool before saving." });
+        return;
+    }
+    S.toolBusy = true;
+    renderToolActions();
+    try {
+        await ApiClient.updateToolPolicy(S.selectedTool.tool_id, {
+            enabled: !!S.selectedTool.enabled,
+            actions: (S.selectedTool.actions || []).map((a) => ({
+                action_id: a.action_id,
+                allowed_roles: a.allowed_roles || [],
+            })),
+        });
+        const selectedId = S.selectedTool.tool_id;
+        await loadTools();
+        await openTool(selectedId);
+        addNotice({ kind: "resource_saved", title: "Tool saved", text: S.selectedTool.display_name || selectedId });
+    } catch (e) {
+        addNotice({ kind: "resource_failed", title: "Tool save failed", text: e.message || "Unknown error" });
+    } finally {
+        S.toolBusy = false;
+        renderToolActions();
+    }
+}
+
+async function refreshSkills() {
+    const selectedId = S.selectedSkill?.skill_id || "";
+    S.skillBusy = true;
+    renderSkillActions();
+    try {
+        await ApiClient.reloadResources();
+        await loadSkills();
+        if (selectedId && S.skills.some((skill) => skill.skill_id === selectedId)) {
+            await openSkill(selectedId);
+        }
+        addNotice({ kind: "resource_refreshed", title: "Skills refreshed", text: "Resource registry reloaded." });
+    } catch (e) {
+        addNotice({ kind: "resource_failed", title: "Skill refresh failed", text: e.message || "Unknown error" });
+    } finally {
+        S.skillBusy = false;
+        renderSkillActions();
+    }
+}
+
+async function refreshTools() {
+    const selectedId = S.selectedTool?.tool_id || "";
+    S.toolBusy = true;
+    renderToolActions();
+    try {
+        await ApiClient.reloadResources();
+        await loadTools();
+        if (selectedId && S.tools.some((tool) => tool.tool_id === selectedId)) {
+            await openTool(selectedId);
+        }
+        addNotice({ kind: "resource_refreshed", title: "Tools refreshed", text: "Resource registry reloaded." });
+    } catch (e) {
+        addNotice({ kind: "resource_failed", title: "Tool refresh failed", text: e.message || "Unknown error" });
+    } finally {
+        S.toolBusy = false;
+        renderToolActions();
+    }
+}
+
+function renderModelCatalog() {
+    const controls = { ceo: U.modelCeo, execution: U.modelExecution, inspection: U.modelInspection };
+    const items = S.modelCatalog.items;
+    const defaults = S.modelCatalog.defaults;
+    const disabled = S.modelCatalog.loading || S.modelCatalog.saving || !items.length;
+    Object.entries(controls).forEach(([key, select]) => {
+        select.innerHTML = "";
+        const base = document.createElement("option");
+        base.value = "";
+        base.textContent = `使用当前默认 (${defaults[key] || "未配置"})`;
+        select.appendChild(base);
+        items.forEach((m) => {
+            const option = document.createElement("option");
+            option.value = m;
+            option.textContent = m;
+            select.appendChild(option);
+        });
+        select.disabled = disabled;
+    });
+    if (S.modelCatalog.loading) return hint("正在加载全局默认模型...");
+    if (S.modelCatalog.saving) return hint("正在保存全局默认模型...");
+    if (S.modelCatalog.error) return hint(`模型配置错误: ${S.modelCatalog.error}`, true);
+    if (!items.length) return hint("当前没有可用模型。请先配置 Provider API key，然后刷新页面。", true);
+    hint("修改后点击“保存默认模型”生效。");
+}
+
+function switchView(view) {
+    const map = { ceo: U.viewCeo, projects: U.viewProjects, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, "project-details": U.viewProjectDetails };
+    const navView = view === "project-details" ? "projects" : view;
+    U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
+    Object.entries(map).forEach(([key, el]) => {
+        if (el) el.style.display = key === view ? (key === "ceo" || key === "project-details" || key === "models" ? "flex" : "block") : "none";
+    });
+    if (view !== "project-details" && S.projectWs) {
+        S.projectWs.close();
+        S.projectWs = null;
+    }
+    if (view !== "skills") setDrawerOpen(U.skillBackdrop, U.skillDrawer, false);
+    if (view !== "tools") setDrawerOpen(U.toolBackdrop, U.toolDrawer, false);
+    S.view = view;
+    if (view === "projects") void loadProjects();
+    if (view === "skills") void loadSkills();
+    if (view === "tools") void loadTools();
+    if (view === "models") void loadModels();
+}
+
+function bind() {
+    U.theme?.addEventListener("click", toggleTheme);
+    U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
+    U.backToProjects?.addEventListener("click", () => switchView("projects"));
+    U.ceoSend?.addEventListener("click", sendCeoMessage);
+    U.ceoInput?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendCeoMessage();
+        }
+    });
+    U.modelSave?.addEventListener("click", () => void saveModels());
+    U.modelReset?.addEventListener("click", resetModels);
+    U.selectActive?.addEventListener("click", () => {
+        S.selectedProjects = new Set(S.projects.filter((p) => canPause(p.status)).map((p) => p.project_id));
+        renderProjects();
+    });
+    U.selectBlocked?.addEventListener("click", () => {
+        S.selectedProjects = new Set(S.projects.filter((p) => canResume(p.status)).map((p) => p.project_id));
+        renderProjects();
+    });
+    U.selectClear?.addEventListener("click", () => {
+        S.selectedProjects.clear();
+        renderProjects();
+    });
+    U.pauseBatch?.addEventListener("click", async () => {
+        for (const id of [...S.selectedProjects]) await runProjectAction(id, "pause");
+    });
+    U.resumeBatch?.addEventListener("click", async () => {
+        for (const id of [...S.selectedProjects]) await runProjectAction(id, "resume");
+    });
+    U.closeAgent?.addEventListener("click", () => {
+        S.selectedUnitId = null;
+        U.feedTitle.textContent = "项目全局动态 / 详情";
+        hideAgent();
+        renderTree();
+        renderFeed();
+    });
+    [U.skillSearch, U.skillRisk, U.skillStatus, U.skillLegacy].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderSkills));
+    U.skillRefresh?.addEventListener("click", () => void refreshSkills());
+    U.skillSave?.addEventListener("click", () => void saveSkill());
+    [U.toolSearch, U.toolStatus, U.toolRisk].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderTools));
+    U.toolRefresh?.addEventListener("click", () => void refreshTools());
+    U.toolSave?.addEventListener("click", () => void saveTool());
+    U.skillBackdrop?.addEventListener("click", clearSkillSelection);
+    U.toolBackdrop?.addEventListener("click", clearToolSelection);
+    document.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape") return;
+        if (S.selectedSkill) clearSkillSelection();
+        if (S.selectedTool) clearToolSelection();
+    });
+}
+
+function init() {
+    bind();
+    icons();
+    renderSkillActions();
+    renderToolActions();
     void loadModels();
     void loadNotices();
     initCeoWs();

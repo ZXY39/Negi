@@ -35,38 +35,10 @@
                 <span>工具管理</span>
             </button>
 
-            <section class="ceo-model-panel sidebar-model-panel">
-                <div class="ceo-model-panel-header">
-                    <div>
-                        <div class="ceo-model-panel-title">模型配置</div>
-                        <p id="sidebar-model-hint" class="ceo-model-panel-hint">正在加载全局默认模型...</p>
-                    </div>
-                </div>
-                <div class="ceo-model-grid">
-                    <label class="ceo-model-field" for="sidebar-model-ceo">
-                        <span>CEO</span>
-                        <select id="sidebar-model-ceo" class="ceo-model-select" disabled>
-                            <option value="">正在加载...</option>
-                        </select>
-                    </label>
-                    <label class="ceo-model-field" for="sidebar-model-execution">
-                        <span>执行</span>
-                        <select id="sidebar-model-execution" class="ceo-model-select" disabled>
-                            <option value="">正在加载...</option>
-                        </select>
-                    </label>
-                    <label class="ceo-model-field" for="sidebar-model-inspection">
-                        <span>检验</span>
-                        <select id="sidebar-model-inspection" class="ceo-model-select" disabled>
-                            <option value="">正在加载...</option>
-                        </select>
-                    </label>
-                </div>
-                <div class="project-toolbar-group project-toolbar-actions">
-                    <button id="sidebar-model-reset-btn" class="toolbar-btn ghost" type="button">重置</button>
-                    <button id="sidebar-model-save-btn" class="toolbar-btn success" type="button">保存默认模型</button>
-                </div>
-            </section>
+            <button class="nav-item" data-view="models" type="button">
+                <i data-lucide="cpu"></i>
+                <span>模型配置</span>
+            </button>
 
             <div class="sidebar-spacer"></div>
 
@@ -223,6 +195,49 @@
                         <div id="tool-detail-empty" class="empty-state resource-empty">请选择一个工具族查看详情。</div>
                         <div id="tool-detail-content"></div>
                     </section>
+                </div>
+            </section>
+
+            <section id="view-models" class="view-section" style="display: none;">
+                <header class="content-header resource-header">
+                    <div>
+                        <h1>模型配置</h1>
+                        <p class="subtitle">统一管理系统各角色的全局默认模型。</p>
+                        <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载全局默认模型...</p>
+                    </div>
+                    <div class="resource-header-actions">
+                        <button id="sidebar-model-reset-btn" class="toolbar-btn ghost" type="button">重置</button>
+                        <button id="sidebar-model-save-btn" class="toolbar-btn success" type="button">保存默认模型</button>
+                    </div>
+                </header>
+
+                <div class="resource-layout" style="padding: var(--space-6) var(--space-8); overflow-y: auto;">
+                    <div class="model-config-container" style="max-width: 600px; display: flex; flex-direction: column; gap: var(--space-6);">
+                        <div class="model-form-group">
+                            <label class="ceo-model-field" for="sidebar-model-ceo" style="display: flex; flex-direction: column; gap: 8px;">
+                                <span style="font-weight: 600; font-size: 1rem;">CEO 模型</span>
+                                <select id="sidebar-model-ceo" class="ceo-model-select" style="padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); background: var(--bg-app); color: var(--text-primary); font-size: 0.95rem; cursor: pointer;" disabled>
+                                    <option value="">正在加载...</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="model-form-group">
+                            <label class="ceo-model-field" for="sidebar-model-execution" style="display: flex; flex-direction: column; gap: 8px;">
+                                <span style="font-weight: 600; font-size: 1rem;">执行模型</span>
+                                <select id="sidebar-model-execution" class="ceo-model-select" style="padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); background: var(--bg-app); color: var(--text-primary); font-size: 0.95rem; cursor: pointer;" disabled>
+                                    <option value="">正在加载...</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="model-form-group">
+                            <label class="ceo-model-field" for="sidebar-model-inspection" style="display: flex; flex-direction: column; gap: 8px;">
+                                <span style="font-weight: 600; font-size: 1rem;">检验模型</span>
+                                <select id="sidebar-model-inspection" class="ceo-model-select" style="padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); background: var(--bg-app); color: var(--text-primary); font-size: 0.95rem; cursor: pointer;" disabled>
+                                    <option value="">正在加载...</option>
+                                </select>
+                            </label>
+                        </div>
+                    </div>
                 </div>
             </section>
 
