@@ -1,36 +1,36 @@
-# Skill Creator
+# 技能创建者 (Skill Creator)
 
-Create or update root-level resources under `skills/` and `tools/`.
+创建或更新 `skills/` 和 `tools/` 下的顶级资源。
 
-## What To Build
+## 何时构建
 
-Use this skill when the task is to add, revise, or migrate:
-- a skill in `skills/<skill_id>/`
-- a tool in `tools/<tool_id>/`
-- a tool's bundled usage guide in `toolskills/`
+当任务是添加、修订或迁移以下内容时，使用此技能：
+- `skills/<skill_id>/` 中的一个技能
+- `tools/<tool_id>/` 中的一个工具
+- `toolskills/` 中捆绑的工具使用指南
 
-The unified resource system reads metadata from `resource.yaml`, not from Markdown frontmatter.
+统一资源系统直接从 `resource.yaml` 读取元数据，而不是从 Markdown 的 Frontmatter 读取。
 
-## Canonical Layout
+## 标准布局
 
-### Skill layout
+### 技能布局 (Skill layout)
 
 ```text
 skills/
   <skill_id>/
     resource.yaml
     SKILL.md
-    references/    # optional
-    scripts/       # optional
-    assets/        # optional
+    references/    # 可选
+    scripts/       # 可选
+    assets/        # 可选
 ```
 
-Rules:
-- `resource.yaml` is the single metadata source.
-- `SKILL.md` is plain Markdown only. Do not add YAML frontmatter.
-- Put long reference material in `references/`, executable helpers in `scripts/`, and output assets in `assets/`.
+规则：
+- `resource.yaml` 是唯一的元数据源。
+- `SKILL.md` 仅包含普通 Markdown 内容。不要添加 YAML frontmatter。
+- 将长篇参考材料放入 `references/`，可执行的辅助程序放入 `scripts/`，输出资产放入 `assets/`。
 
-### Tool layout
+### 工具布局 (Tool layout)
 
 ```text
 tools/
@@ -38,88 +38,88 @@ tools/
     resource.yaml
     toolskills/
       SKILL.md
-      references/  # optional
-      scripts/     # optional
-      assets/      # optional
+      references/  # 可选
+      scripts/     # 可选
+      assets/      # 可选
     main/
       tool.py
       ...
 ```
 
-Rules:
-- Tool root may contain only `resource.yaml`, `toolskills/`, and `main/`.
-- `toolskills/` does not get its own `resource.yaml`.
-- `main/tool.py` is the fixed entrypoint. Do not invent extra manifest entrypoint fields.
-- Put the user-facing usage guide in `toolskills/SKILL.md`, not in `README.md`.
+规则：
+- 工具根目录只能包含 `resource.yaml`、`toolskills/` 和 `main/`。
+- `toolskills/` 不需要自己的 `resource.yaml`。
+- `main/tool.py` 是固定的入口点。不要随意添加其他的入口点字段。
+- 将面向用户的用法指南放入 `toolskills/SKILL.md`，而不是 `README.md`。
 
-## Creation Workflow
+## 创建流程
 
-1. Inspect nearby resources first.
-   - Reuse existing `resource.yaml` structure, parameter style, and phrasing from similar skills or tools.
-   - For tools, inspect both `resource.yaml` and `main/tool.py`.
+1. **先检查附近的资源**。
+   - 复用现有相似技能或工具的 `resource.yaml` 结构、参数样式和措辞。
+   - 对于工具，同时检查 `resource.yaml` 和 `main/tool.py`。
 
-2. Choose the resource id carefully.
-   - Use lowercase letters, digits, and hyphens for skill ids.
-   - Use lowercase letters, digits, and underscores for tool ids when matching existing tool naming.
-   - Keep ids stable when updating an existing resource.
+2. **仔细选择资源 ID**。
+   - 技能 ID 使用小写字母、数字和连字符 (`-`)。
+   - 工具 ID 使用小写字母、数字和下划线 (`_`)，以匹配现有的工具命名。
+   - 更新现有资源时，请保持 ID 稳定。
 
-3. Write `resource.yaml` before writing content.
-   - Put trigger and discovery metadata here.
-   - For skills, include `trigger`, `requires`, `content`, and `exposure`.
-   - For tools, include `description`, `parameters`, `permissions`, `requires`, `config_namespace`, `exposure`, and `toolskill.enabled`.
+3. **在编写内容之前先编写 `resource.yaml`**。
+   - 在此处放置触发和发现元数据。
+   - 技能：包含 `trigger`、`requires`、`content` 和 `exposure`。
+   - 工具：包含 `description`、`parameters`、`permissions`、`requires`、`config_namespace`、`exposure` 和 `toolskill.enabled`。
 
-4. Write the body content.
-   - For skills, keep `SKILL.md` procedural and concise.
-   - For tools, write `toolskills/SKILL.md` so another agent knows when to call the tool, what each parameter means, and what pitfalls to avoid.
+4. **编写主体内容**。
+   - 技能：保持 `SKILL.md` 具有操作性且简洁。
+   - 工具：编写 `toolskills/SKILL.md`，务必让另一个 Agent 知道何时调用该工具、每个参数的含义以及要避免的陷阱。
 
-5. Implement code only when creating or updating a tool.
-   - `main/tool.py` must expose either `build(runtime)` or `execute(...)`.
-   - Prefer `build(runtime)` when the tool needs services, config slices, workspace paths, or other runtime objects.
-   - Use `runtime.services`, `runtime.workspace`, `runtime.resource_root`, `runtime.main_root`, and `runtime.toolskills_root` instead of hardcoded paths.
+5. **仅在创建或更新工具时实现代码**。
+   - `main/tool.py` 必须暴露 `build(runtime)` 或 `execute(...)`。
+   - 当工具需要服务、配置切片、工作空间路径或其他运行时对象时，首选 `build(runtime)`。
+   - 使用 `runtime.services`、`runtime.workspace`、`runtime.resource_root`、`runtime.main_root` 和 `runtime.toolskills_root` 代替硬编码路径。
 
-6. Validate the result.
-   - Confirm the resource can be discovered from root `skills/` or root `tools/`.
-   - Confirm tool roots do not contain legacy `README.md`, `research/`, `tool.yaml`, or `capability.yaml`.
-   - When possible, run a targeted smoke test or `ResourceManager` reload path.
+6. **验证结果**。
+   - 确认资源可以从根目录 `skills/` 或 `tools/` 被发现。
+   - 确认工具根目录不包含过时的 `README.md`、`research/`、`tool.yaml` 或 `capability.yaml`。
+   - 如果可能，运行针对性的冒烟测试或通过 `ResourceManager` 重新加载路径进行验证。
 
-## Authoring Guidelines
+## 编写准则
 
-### Metadata first
+### 元数据优先
 
-Discovery depends on `resource.yaml`, so write descriptions there as if they were the trigger contract.
+资源发现依赖于 `resource.yaml`，因此请像编写触发合同一样在其中编写描述。
 
-For skills:
-- Put "what it does" and "when to use it" in `resource.yaml -> description`.
-- Keep `trigger.keywords` minimal and specific.
+技能：
+- 在 `resource.yaml -> description` 中说明“它做什么”以及“何时使用它”。
+- 保持 `trigger.keywords` 最小化且具体。
 
-For tools:
-- Make `description` clear enough for tool selection.
-- Keep parameter names stable and descriptions concrete.
+工具：
+- 确保 `description` 足够清晰，以便系统能够正确选择工具。
+- 保持参数名称稳定且描述具体。
 
-### Keep Markdown lean
+### 保持 Markdown 简洁
 
-- Put only the operational workflow in `SKILL.md` or `toolskills/SKILL.md`.
-- Move long schemas, examples, and vendor docs into `references/`.
-- Do not duplicate the same detailed content across body and references.
+- 仅在 `SKILL.md` 或 `toolskills/SKILL.md` 中放入操作流程。
+- 将长篇 schema、示例和供应商文档移动到 `references/` 中。
+- 不要跨主体和参考资料重复相同的详细内容。
 
-### Avoid legacy patterns
+### 避免遗留模式
 
-Do not introduce or preserve:
-- YAML frontmatter in `SKILL.md`
+不要引入或保留：
+- `SKILL.md` 中的 YAML frontmatter
 - `capability.yaml`
 - `tool.yaml`
-- root-level `README.md` as the authoritative tool guide
-- root-level `research/` as the authoritative tool guide
+- 将根目录下的 `README.md` 作为权威的工具指南
+- 将根目录下的 `research/` 作为权威的工具指南
 
-Migrate those into:
+将这些内容迁移到：
 - `resource.yaml`
 - `SKILL.md`
 - `toolskills/SKILL.md`
 - `references/`
 
-## Minimal Templates
+## 最小模板
 
-### Skill `resource.yaml`
+### 技能 `resource.yaml`
 
 ```yaml
 schema_version: 1
@@ -142,7 +142,7 @@ exposure:
   org_graph: true
 ```
 
-### Tool `resource.yaml`
+### 工具 `resource.yaml`
 
 ```yaml
 schema_version: 1
@@ -167,17 +167,17 @@ toolskill:
   enabled: true
 ```
 
-## Update Workflow
+## 更新工作流
 
-When updating an existing resource:
-- preserve the existing id unless a rename is explicitly required
-- inspect current `resource.yaml` and body files before editing
-- migrate lingering legacy wording such as "capability" when it refers to a root resource
-- keep changes scoped to the real trigger, workflow, or runtime contract
+更新现有资源时：
+- 除非明确要求重命名，否则保留现有 ID。
+- 在编辑前，检查当前的 `resource.yaml` 和主体文件。
+- 当“能力 (capability)”指代根资源时，迁移过时的术语。
+- 保持变更范围限于实际的触发器、工作流或运行时合同。
 
-When migrating an old builtin or legacy resource:
-- move metadata into `resource.yaml`
-- move skill content into `SKILL.md`
-- move tool guidance into `toolskills/SKILL.md`
-- move implementation into `main/tool.py`
-- delete the legacy parallel entrypoints after the new path works
+迁移旧的内置或遗留资源时：
+- 将元数据移入 `resource.yaml`
+- 将技能内容移入 `SKILL.md`
+- 将工具指南移入 `toolskills/SKILL.md`
+- 将实现代码移入 `main/tool.py`
+- 在新路径运行正常后，删除旧的并行入口点。

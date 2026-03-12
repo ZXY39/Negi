@@ -1,10 +1,10 @@
 # web_search
 
-Search the web. Returns titles, URLs, and snippets.
+网页搜索。返回标题、URL 和摘要。
 
-## Parameters
-- `query`: Search query
-- `count`: Results (1-10)
+## 参数 (Parameters)
+- `query`: 搜索关键词
+- `count`: 结果数量 (1-10)
 
-## Usage
-Use `web_search` only when it is the most direct way to complete the task.
+## 用法 (Usage)
+仅在 `web_search` 是完成任务最直接的方式时才使用它。

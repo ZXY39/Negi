@@ -1,9 +1,9 @@
 # read_file
 
-Read the contents of a file at the given path.
+读取给定路径的文件内容。
 
-## Parameters
-- `path`: The file path to read
+## 参数 (Parameters)
+- `path`: 要读取的文件路径
 
-## Usage
-Use `read_file` only when it is the most direct way to complete the task.
+## 用法 (Usage)
+仅在 `read_file` 是完成任务最直接的方式时才使用它。

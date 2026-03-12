@@ -1,7 +1,7 @@
-# Web Research
+# 网页调研
 
-Use web_search to discover relevant pages and web_fetch to inspect them.
+使用 `web_search` 发现相关页面，并使用 `web_fetch` 进行查看。
 
-Rules:
-- Prefer evidence-backed findings with links or explicit source hints when possible.
-- Keep findings concise and structured.
+规则：
+- 尽可能提供有链接支持的发现，或明确的来源提示。
+- 保持发现结果简洁且结构化。

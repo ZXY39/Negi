@@ -1,25 +1,25 @@
-# Memory
+# 核心记忆 (Memory)
 
-## Structure
+## 结构
 
-- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
-- `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep. Each entry starts with [YYYY-MM-DD HH:MM].
+- `memory/MEMORY.md` — 长期事实（偏好、项目背景、关系）。始终加载到您的上下文中。
+- `memory/HISTORY.md` — 仅追加的事件日志。**不**加载到上下文中。请使用 grep 进行搜索。每个条目都以 [YYYY-MM-DD HH:MM] 开头。
 
-## Search Past Events
+## 搜索过去发生的事件
 
 ```bash
-grep -i "keyword" memory/HISTORY.md
+grep -i "关键词" memory/HISTORY.md
 ```
 
-Use the `exec` tool to run grep. Combine patterns: `grep -iE "meeting|deadline" memory/HISTORY.md`
+使用 `exec` 工具运行 grep。组合模式：`grep -iE "会议|截止日期" memory/HISTORY.md`
 
-## When to Update MEMORY.md
+## 何时更新 MEMORY.md
 
-Write important facts immediately using `edit_file` or `write_file`:
-- User preferences ("I prefer dark mode")
-- Project context ("The API uses OAuth2")
-- Relationships ("Alice is the project lead")
+立即使用 `edit_file` 或 `write_file` 记录重要事实：
+- 用户偏好（"我更喜欢深色模式"）
+- 项目背景（"API 使用 OAuth2"）
+- 人际关系（"Alice 是项目负责人"）
 
-## Auto-consolidation
+## 自动整合
 
-Old conversations are automatically summarized and appended to HISTORY.md when the session grows large. Long-term facts are extracted to MEMORY.md. You don't need to manage this.
+当会话内容过多时，旧的对话会自动总结并追加到 `HISTORY.md` 中。长期事实会被提取到 `MEMORY.md`。您不需要手动管理这个过程。

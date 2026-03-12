@@ -352,8 +352,20 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
             ? rolesPayload[key].map((item) => String(item || "").trim()).filter(Boolean)
             : [];
     });
+    const rawCatalog = Array.isArray(payload.catalog) ? payload.catalog : [];
+    const normalizedCatalog = [];
+    const seenCatalog = new Set();
+    rawCatalog.forEach((item) => {
+        if (!item || typeof item !== "object") return;
+        const key = String(item.key || "").trim();
+        const providerModel = String(item.provider_model || "").trim();
+        const dedupeKey = key || providerModel;
+        if (!dedupeKey || seenCatalog.has(dedupeKey)) return;
+        seenCatalog.add(dedupeKey);
+        normalizedCatalog.push({ ...item });
+    });
     S.modelCatalog.items = Array.isArray(payload.items) ? payload.items.map((item) => String(item || "").trim()).filter(Boolean) : [];
-    S.modelCatalog.catalog = Array.isArray(payload.catalog) ? payload.catalog.map((item) => ({ ...item })) : [];
+    S.modelCatalog.catalog = normalizedCatalog;
     S.modelCatalog.roles = normalizeAllModelRoles(nextRoles);
     if (preserveRoleDrafts && S.modelCatalog.roleEditing) {
         S.modelCatalog.roleDrafts = normalizeAllModelRoles(S.modelCatalog.roleDrafts);
@@ -460,7 +472,7 @@ function renderModelList() {
     U.modelList.innerHTML = catalog.map((item) => {
         const usedScopes = MODEL_SCOPES.filter((scope) => modelScopeContains(scope.key, item.key));
         const usageMarkup = usedScopes.length
-            ? usedScopes.map((scope) => `<span class="policy-chip neutral">${esc(scope.label)}</span>`).join("")
+            ? '<span class="policy-chip neutral">已加入角色链</span>'
             : '<span class="policy-chip neutral">未加入角色链</span>';
         const stateChips = [usageMarkup];
         if (item.enabled === false) stateChips.push('<span class="policy-chip neutral">已禁用</span>');
@@ -1465,7 +1477,9 @@ function renderSkills() {
         const el = document.createElement("button");
         el.type = "button";
         el.className = `resource-list-item${S.selectedSkill?.skill_id === skill.skill_id ? " selected" : ""}`;
-        el.innerHTML = `<div class="resource-list-title">${esc(skill.display_name)}</div><div class="resource-list-subtitle">${esc(skill.skill_id)}</div><div class="resource-list-meta">${esc(skill.risk_level)} · ${skill.enabled ? "已启用" : "已禁用"}</div>`;
+        const desc = (skill.description || "").trim();
+        const subtitle = desc ? (desc.length > 50 ? desc.slice(0, 47) + "..." : desc) : skill.skill_id;
+        el.innerHTML = `<div class="resource-list-title">${esc(skill.display_name)}</div><div class="resource-list-subtitle">${esc(subtitle)}</div><div class="resource-list-meta">${esc(skill.risk_level)} · ${skill.enabled ? "已启用" : "已禁用"}</div>`;
         el.addEventListener("click", () => openSkill(skill.skill_id));
         U.skillList.appendChild(el);
     });
@@ -1491,7 +1505,9 @@ function renderTools() {
         const el = document.createElement("button");
         el.type = "button";
         el.className = `resource-list-item${S.selectedTool?.tool_id === tool.tool_id ? " selected" : ""}`;
-        el.innerHTML = `<div class="resource-list-title">${esc(tool.display_name)}</div><div class="resource-list-subtitle">${esc(tool.tool_id)}</div><div class="resource-list-meta">${tool.enabled ? "已启用" : "已禁用"} · ${(tool.actions || []).length} 个动作</div>`;
+        const desc = (tool.description || "").trim();
+        const subtitle = desc ? (desc.length > 50 ? desc.slice(0, 47) + "..." : desc) : tool.tool_id;
+        el.innerHTML = `<div class="resource-list-title">${esc(tool.display_name)}</div><div class="resource-list-subtitle">${esc(subtitle)}</div><div class="resource-list-meta">${tool.enabled ? "已启用" : "已禁用"} · ${(tool.actions || []).length} 个动作</div>`;
         el.addEventListener("click", () => openTool(tool.tool_id));
         U.toolList.appendChild(el);
     });

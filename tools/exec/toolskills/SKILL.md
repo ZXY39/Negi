@@ -1,10 +1,10 @@
 # exec
 
-Execute a shell command and return its output. Use with caution.
+执行 Shell 命令并返回其输出。请谨慎使用。
 
-## Parameters
-- `command`: The shell command to execute
-- `working_dir`: Optional working directory for the command
+## 参数 (Parameters)
+- `command`: 要执行的 Shell 命令
+- `working_dir`: 可选，命令执行的工作目录
 
-## Usage
-Use `exec` only when it is the most direct way to complete the task.
+## 用法 (Usage)
+仅在 `exec` 是完成任务最直接的方式时才使用它。

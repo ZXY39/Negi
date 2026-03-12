@@ -1,9 +1,9 @@
 # list_dir
 
-List the contents of a directory.
+列出目录的内容。
 
-## Parameters
-- `path`: The directory path to list
+## 参数 (Parameters)
+- `path`: 要列出的目录路径
 
-## Usage
-Use `list_dir` only when it is the most direct way to complete the task.
+## 用法 (Usage)
+仅在 `list_dir` 是完成任务最直接的方式时才使用它。

@@ -1,5 +1,5 @@
 {
-  "generation": 267,
+  "generation": 584,
   "tools": [
     {
       "name": "agent_browser",
@@ -228,39 +228,7 @@
   ],
   "skills": [
     {
-      "name": "agent-browser",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
       "name": "batch-web-planning",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "browser-operation",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "browser-orchestration",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "cron",
       "available": true,
       "busy": false,
       "pendingDelete": false,
