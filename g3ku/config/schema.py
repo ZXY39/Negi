@@ -8,9 +8,6 @@ from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
 ROLE_SCOPE_ALIASES = {
-    "agent": "agent",
-    "main": "agent",
-    "default": "agent",
     "ceo": "ceo",
     "org_graph.ceo": "ceo",
     "org_graph_ceo": "ceo",
@@ -23,7 +20,7 @@ ROLE_SCOPE_ALIASES = {
     "org_graph_inspection": "inspection",
 }
 
-REQUIRED_MODEL_ROLES = ("agent", "ceo", "execution", "inspection")
+REQUIRED_MODEL_ROLES = ("ceo", "execution", "inspection")
 
 
 def normalize_role_scope(value: str) -> str:
@@ -386,12 +383,11 @@ class ManagedModelConfig(Base):
 class RoleModelRoutingConfig(Base):
     """Ordered model references for each runtime scope."""
 
-    agent: list[str] = Field(default_factory=list)
     ceo: list[str] = Field(default_factory=list)
     execution: list[str] = Field(default_factory=list)
     inspection: list[str] = Field(default_factory=list)
 
-    @field_validator("agent", "ceo", "execution", "inspection", mode="before")
+    @field_validator("ceo", "execution", "inspection", mode="before")
     @classmethod
     def _normalize_chain(cls, value: Any) -> list[str]:
         items = value if isinstance(value, list) else []
@@ -783,14 +779,6 @@ class Config(BaseSettings):
                     raise ValueError(f"models.roles.{scope} references unknown model key: {model_key}")
                 if not item.enabled:
                     raise ValueError(f"models.roles.{scope} references disabled model key: {model_key}")
-
-        orchestrator_model_key = str(self.agents.multi_agent.orchestrator_model_key or "").strip()
-        if orchestrator_model_key:
-            item = catalog_by_key.get(orchestrator_model_key)
-            if item is None:
-                raise ValueError(f"agents.multi_agent.orchestrator_model_key references unknown model key: {orchestrator_model_key}")
-            if not item.enabled:
-                raise ValueError(f"agents.multi_agent.orchestrator_model_key references disabled model key: {orchestrator_model_key}")
 
         return self
 

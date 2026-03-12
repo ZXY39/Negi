@@ -167,6 +167,7 @@ class CeoFrontDoorRunner:
             {
                 'on_progress': on_progress,
                 'emit_lifecycle': True,
+                'main_agent_project_dispatch_count': 0,
                 'session_key': session.state.session_key,
                 'channel': getattr(session, '_channel', 'cli'),
                 'chat_id': getattr(session, '_chat_id', session.state.session_key),

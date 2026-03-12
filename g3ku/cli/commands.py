@@ -867,7 +867,7 @@ def status():
     if config_path.exists():
         from g3ku.providers.registry import PROVIDERS
 
-        console.print(f"CEO Model: {config.resolve_role_model_key('ceo')}")
+        console.print(f"主Agent Model: {config.resolve_role_model_key('ceo')}")
         console.print(f"Execution Model: {config.resolve_role_model_key('execution')}")
         console.print(f"Inspection Model: {config.resolve_role_model_key('inspection')}")
         console.print(f"Runtime: {config.agents.defaults.runtime}")

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from typing import Any, Callable
@@ -10,6 +10,16 @@ from g3ku.org_graph.models import ProjectCreateRequest
 def _runtime_session_key(runtime: dict[str, Any] | None) -> str:
     payload = runtime if isinstance(runtime, dict) else {}
     return str(payload.get('session_key') or 'web:shared').strip() or 'web:shared'
+
+
+def _consume_project_dispatch_slot(runtime: dict[str, Any] | None) -> None:
+    payload = runtime if isinstance(runtime, dict) else None
+    if payload is None:
+        return
+    used = int(payload.get('main_agent_project_dispatch_count') or 0)
+    if used >= 1:
+        raise ValueError('main_agent_single_project_dispatch_only')
+    payload['main_agent_project_dispatch_count'] = used + 1
 
 
 class _ProjectServiceTool(Tool):
@@ -29,7 +39,7 @@ class OrgGraphCreateProjectTool(_ProjectServiceTool):
 
     @property
     def description(self) -> str:
-        return 'Create a new org-graph background project for long-running or multi-step work.'
+        return 'Create a new org-graph background project for long-running or multi-step work handled by one execution lead.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -44,6 +54,10 @@ class OrgGraphCreateProjectTool(_ProjectServiceTool):
         }
 
     async def execute(self, prompt: str, preferred_title: str | None = None, output_target: str = 'chat', __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+        try:
+            _consume_project_dispatch_slot(__g3ku_runtime)
+        except ValueError as exc:
+            return f'Error: {exc}'
         service = await self._service()
         project = await service.create_project(
             ProjectCreateRequest(
@@ -59,7 +73,7 @@ class OrgGraphCreateProjectTool(_ProjectServiceTool):
             'title': project.title,
             'status': project.status,
             'summary': project.summary,
-            'text': f'已创建后台项目 {project.project_id}（{project.title}），可使用任务监控工具继续跟进。',
+            'text': f'Created background project {project.project_id} ({project.title}); the main agent handed this request to the project lead execution node.',
         }
         return json.dumps(payload, ensure_ascii=False)
 
@@ -199,7 +213,7 @@ class LoadSkillContextTool(_ProjectServiceTool):
 
     @property
     def description(self) -> str:
-        return 'Load the detailed body of a currently visible skill so the CEO can use it.'
+        return 'Load the detailed body of a currently visible skill so the 主Agent can use it.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -217,7 +231,7 @@ class LoadSkillContextTool(_ProjectServiceTool):
         visible = {item.skill_id: item for item in service.list_visible_skill_resources(actor_role='ceo', session_id=session_id)}
         record = visible.get(str(skill_id or '').strip())
         if record is None:
-            return json.dumps({'ok': False, 'error': f'Skill not visible for CEO: {skill_id}'}, ensure_ascii=False)
+            return json.dumps({'ok': False, 'error': f'Skill not visible for 主Agent: {skill_id}'}, ensure_ascii=False)
         content = ''
         if record.skill_doc_path:
             content = __import__('pathlib').Path(record.skill_doc_path).read_text(encoding='utf-8')
@@ -231,7 +245,7 @@ class LoadToolContextTool(_ProjectServiceTool):
 
     @property
     def description(self) -> str:
-        return 'Load the detailed usage guide for a currently visible tool so the CEO can use it correctly.'
+        return 'Load the detailed usage guide for a currently visible tool so the 主Agent can use it correctly.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -249,7 +263,7 @@ class LoadToolContextTool(_ProjectServiceTool):
         tool_name = str(tool_id or '').strip()
         visible = set(service.list_effective_tool_names(session_id=session_id, actor_role='ceo'))
         if tool_name not in visible:
-            return json.dumps({'ok': False, 'error': f'Tool not visible for CEO: {tool_id}'}, ensure_ascii=False)
+            return json.dumps({'ok': False, 'error': f'Tool not visible for 主Agent: {tool_id}'}, ensure_ascii=False)
         manager = getattr(service, 'resource_manager', None)
         if manager is None:
             return json.dumps({'ok': False, 'error': 'Resource manager unavailable'}, ensure_ascii=False)
@@ -258,4 +272,5 @@ class LoadToolContextTool(_ProjectServiceTool):
         except FileNotFoundError:
             content = ''
         return json.dumps({'ok': True, 'tool_id': tool_name, 'content': content}, ensure_ascii=False)
+
 

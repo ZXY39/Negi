@@ -7,18 +7,7 @@ from loguru import logger
 from g3ku.agent.file_vault import FileVault
 from g3ku.agent.session_commit import SessionCommitService
 from g3ku.resources import get_shared_resource_manager
-from g3ku.runtime.multi_agent.dynamic import (
-    BackgroundPool,
-    BackgroundTaskStore,
-    CategoryResolver,
-    DynamicPromptBuilder,
-    DynamicSubagentController,
-    DynamicSubagentSessionStore,
-    ModelChainExecutor,
-    OrchestratorRunner,
-)
 from g3ku.runtime.frontdoor import CeoFrontDoorRunner
-from g3ku.runtime.multi_agent.blackboard import BlackboardStore
 from g3ku.org_graph.config import resolve_org_graph_config
 from g3ku.org_graph.service.project_service import ProjectService
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
@@ -85,47 +74,11 @@ class RuntimeBootstrapBridge:
         self._loop.dynamic_subagent_controller = None
         self._loop.background_pool = None
         if cfg is not None:
-            try:
-                blackboard_root = resolve_path_in_workspace(getattr(cfg, "blackboard_dir", ".g3ku/blackboard"), self._loop.workspace)
-                ensure_dir(blackboard_root)
-                self._loop.blackboard_store = BlackboardStore(blackboard_root)
-                session_store_path = resolve_path_in_workspace(getattr(cfg, "session_store_path", ".g3ku/dynamic-subagents.sqlite3"), self._loop.workspace)
-                background_store_path = resolve_path_in_workspace(getattr(cfg, "background_store_path", ".g3ku/background-tasks.sqlite3"), self._loop.workspace)
-                self._loop.dynamic_subagent_session_store = DynamicSubagentSessionStore(session_store_path)
-                self._loop.background_task_store = BackgroundTaskStore(background_store_path)
-                category_resolver = CategoryResolver(loop=self._loop, config=cfg)
-                prompt_builder = DynamicPromptBuilder(loop=self._loop)
-                model_chain_executor = ModelChainExecutor(loop=self._loop)
-                controller = DynamicSubagentController(
-                    loop=self._loop,
-                    session_store=self._loop.dynamic_subagent_session_store,
-                    category_resolver=category_resolver,
-                    prompt_builder=prompt_builder,
-                    model_chain_executor=model_chain_executor,
-                    freeze_ttl_seconds=int(getattr(cfg, "freeze_ttl_seconds", 86400) or 86400),
-                    repeated_action_window=int(getattr(cfg, "repeated_action_window", 3) or 3),
-                    repeated_action_threshold=int(getattr(cfg, "repeated_action_threshold", 3) or 3),
+            default_cfg = type(cfg)()
+            if cfg.model_dump(mode="python") != default_cfg.model_dump(mode="python"):
+                logger.warning(
+                    "agents.multiAgent settings are deprecated and ignored; top-level split mode is disabled. Use orggraph_create_project for complex work."
                 )
-                self._loop.dynamic_subagent_controller = controller
-                self._loop.background_pool = BackgroundPool(
-                    controller=controller,
-                    store=self._loop.background_task_store,
-                    max_parallel_tasks=int(getattr(cfg, "max_parallel_background_tasks", 8) or 8),
-                )
-                controller.set_background_pool(self._loop.background_pool)
-                logger.info(
-                    "Dynamic background runtime initialized (session_store={}, background_store={}, blackboard={})",
-                    session_store_path,
-                    background_store_path,
-                    blackboard_root,
-                )
-            except Exception as exc:
-                self._loop.blackboard_store = None
-                self._loop.dynamic_subagent_session_store = None
-                self._loop.background_task_store = None
-                self._loop.dynamic_subagent_controller = None
-                self._loop.background_pool = None
-                logger.warning("Dynamic background runtime init failed: {}", exc)
         self._loop.multi_agent_runner = CeoFrontDoorRunner(loop=self._loop)
 
     def init_org_graph_runtime(self) -> None:

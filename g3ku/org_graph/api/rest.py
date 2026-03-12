@@ -155,7 +155,8 @@ async def update_model_role_chain(scope: str, body: ModelRoleChainBody):
     try:
         result = await service.update_model_role_chain(scope, body.model_keys)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = 'unsupported_scope' if str(scope or '').strip().lower() == 'agent' else str(exc)
+        raise HTTPException(status_code=400, detail=detail) from exc
     return JSONResponse({'ok': True, 'result': result, **service.list_model_catalog()})
 
 
@@ -403,7 +404,10 @@ async def put_skill_file(skill_id: str, file_key: str, body: SkillFileBody, sess
 @router.put('/resources/skills/{skill_id}/policy')
 async def put_skill_policy(skill_id: str, body: ResourcePolicyBody, session_id: str = Query('web:shared')):
     service = get_org_graph_service()
-    item = await service.update_skill_policy(skill_id, session_id=session_id, enabled=body.enabled, allowed_roles=body.allowed_roles)
+    try:
+        item = await service.update_skill_policy(skill_id, session_id=session_id, enabled=body.enabled, allowed_roles=body.allowed_roles)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if item is None:
         raise HTTPException(status_code=404, detail='skill_not_found')
     return JSONResponse({'ok': True, 'skill': item.model_dump(mode='json')})
@@ -446,7 +450,10 @@ async def get_tool_resource(tool_id: str):
 @router.put('/resources/tools/{tool_id}/policy')
 async def put_tool_policy(tool_id: str, body: ResourcePolicyBody, session_id: str = Query('web:shared')):
     service = get_org_graph_service()
-    item = await service.update_tool_policy(tool_id, session_id=session_id, enabled=body.enabled, actions=body.actions)
+    try:
+        item = await service.update_tool_policy(tool_id, session_id=session_id, enabled=body.enabled, actions=body.actions)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if item is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
     return JSONResponse({'ok': True, 'tool': item.model_dump(mode='json')})

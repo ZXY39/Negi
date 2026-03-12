@@ -23,12 +23,26 @@ from g3ku.org_graph.prompt_loader import load_prompt_preview
 from g3ku.org_graph.service.notice_service import NoticeService
 from g3ku.org_graph.service.project_registry import ProjectRegistry
 from g3ku.agent.rag_memory import MemoryManager
-from g3ku.org_graph.public_roles import to_public_actor_role, to_public_allowed_roles, to_public_model_defaults
+from g3ku.org_graph.public_roles import MAIN_ACTOR_ROLE, to_public_actor_role, to_public_allowed_roles, to_public_model_defaults
 from g3ku.org_graph.storage.artifact_store import ArtifactStore
 from g3ku.org_graph.storage.checkpoint_store import CheckpointStore
 from g3ku.org_graph.storage.project_store import ProjectStore
 from g3ku.org_graph.storage.task_monitor_store import TaskMonitorStore
 from g3ku.org_graph.service.task_monitor_service import TaskMonitorService
+
+
+ROOT_EXECUTION_ROLE_TITLE = '项目主管'
+
+
+def _normalize_model_role(role: str) -> str:
+    raw = str(role or '').strip().lower()
+    if raw in {'inspection', 'checker'}:
+        return 'inspection'
+    if raw == 'execution':
+        return 'execution'
+    if raw == MAIN_ACTOR_ROLE:
+        return MAIN_ACTOR_ROLE
+    raise ValueError(f"Unsupported model role: {role}")
 
 
 class ProjectService:
@@ -139,12 +153,12 @@ class ProjectService:
 
     def resolve_role_model_key(self, role: str) -> str:
         self.ensure_runtime_config_current(force=False, reason="resolve_role_model_key")
-        normalized = 'inspection' if role in {'inspection', 'checker'} else 'execution' if role in {'execution'} else 'ceo' if role in {'ceo'} else 'agent'
+        normalized = _normalize_model_role(role)
         return self.config.raw.resolve_role_model_key(normalized)
 
     def resolve_role_model_chain(self, role: str) -> list[str]:
         self.ensure_runtime_config_current(force=False, reason="resolve_role_model_chain")
-        normalized = 'inspection' if role in {'inspection', 'checker'} else 'execution' if role in {'execution'} else 'ceo' if role in {'ceo'} else 'agent'
+        normalized = _normalize_model_role(role)
         return self.config.raw.get_role_model_keys(normalized)
 
     def resolve_bound_model_key(self, role: str, model_binding: str, model_key: str | None) -> str:
@@ -178,12 +192,11 @@ class ProjectService:
             "items": [str(item.get('key') or '').strip() for item in catalog if str(item.get('key') or '').strip()],
             "catalog": catalog,
             "roles": {
-                "agent": list(manager.config.models.roles.agent),
                 "ceo": list(manager.config.models.roles.ceo),
                 "execution": list(manager.config.models.roles.execution),
                 "inspection": list(manager.config.models.roles.inspection),
             },
-            "scopes": ["agent", "ceo", "execution", "inspection"],
+            "scopes": ["ceo", "execution", "inspection"],
             "defaults": self.default_node_provider_models(),
         }
 
@@ -249,7 +262,6 @@ class ProjectService:
         fallback = self._first_ready_provider_model()
         return to_public_model_defaults(
             {
-                'agent': self._effective_provider_model(self.resolve_role_model_key('agent'), fallback=fallback),
                 'ceo': self._effective_provider_model(self.resolve_role_model_key('ceo'), fallback=fallback),
                 'execution': self._effective_provider_model(self.resolve_role_model_key('execution'), fallback=fallback),
                 'inspection': self._effective_provider_model(self.resolve_role_model_key('inspection'), fallback=fallback),
@@ -258,14 +270,12 @@ class ProjectService:
 
     def _provider_model_candidates(self) -> list[str]:
         role_refs = [
-            *self.config.raw.models.roles.agent,
             *self.config.raw.models.roles.ceo,
             *self.config.raw.models.roles.execution,
             *self.config.raw.models.roles.inspection,
         ]
         catalog_refs = [item.key for item in self.config.raw.models.catalog]
         return [
-            self.config.raw.agents.multi_agent.orchestrator_model_key,
             *catalog_refs,
             *role_refs,
         ]
@@ -427,7 +437,7 @@ class ProjectService:
                     root_unit_id=project.root_unit_id,
                     level=0,
                     role_kind='execution',
-                    role_title='执行单元',
+                    role_title=ROOT_EXECUTION_ROLE_TITLE,
                     objective_summary=project.user_request,
                     prompt_preview='围绕用户目标规划阶段并协调执行',
                     status='pending',
@@ -516,7 +526,7 @@ class ProjectService:
             root_unit_id=root_unit_id,
             level=0,
             role_kind='execution',
-            role_title='执行单元',
+            role_title=ROOT_EXECUTION_ROLE_TITLE,
             objective_summary=request.prompt,
             prompt_preview='围绕用户目标规划阶段并协调执行',
             status='pending',

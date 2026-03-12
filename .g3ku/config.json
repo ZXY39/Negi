@@ -38,9 +38,6 @@
       }
     ],
     "roles": {
-      "agent": [
-        "ceo_primary"
-      ],
       "ceo": [
         "ceo_primary"
       ],

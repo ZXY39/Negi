@@ -103,6 +103,16 @@ def _ensure_no_legacy_model_fields(raw_data: dict) -> None:
         )
 
 
+def _ensure_no_removed_role_scopes(raw_data: dict) -> None:
+    models = raw_data.get("models") if isinstance(raw_data.get("models"), dict) else None
+    roles = models.get("roles") if isinstance(models, dict) else None
+    if isinstance(roles, dict) and "agent" in roles:
+        raise ValueError(
+            "models.roles.agent has been removed. "
+            f"Move its model chain to models.roles.ceo in {get_config_path()} and delete models.roles.agent."
+        )
+
+
 def _referenced_provider_names(cfg: Config) -> list[str]:
     names: set[str] = set()
     values = []
@@ -137,7 +147,6 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
         for item in cfg.models.catalog
     ]
     routes = {
-        "agent": list(cfg.models.roles.agent),
         "ceo": list(cfg.models.roles.ceo),
         "execution": list(cfg.models.roles.execution),
         "inspection": list(cfg.models.roles.inspection),
@@ -384,6 +393,7 @@ def load_config(config_path: Path | None = None) -> Config:
         raise ValueError(f"Config must be loaded from {expected_path}, got {path}")
     raw_data = _load_json_file(expected_path)
     _ensure_no_legacy_model_fields(raw_data)
+    _ensure_no_removed_role_scopes(raw_data)
     org_graph_raw = raw_data.get('orgGraph') if isinstance(raw_data.get('orgGraph'), dict) else raw_data.get('org_graph')
     if isinstance(org_graph_raw, dict):
         if 'taskMonitorStorePath' not in org_graph_raw and 'task_monitor_store_path' not in org_graph_raw:

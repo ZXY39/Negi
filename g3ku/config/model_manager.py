@@ -6,15 +6,12 @@ from typing import Any
 from g3ku.config.loader import get_config_path, load_config, save_config
 from g3ku.config.schema import Config, ManagedModelConfig
 
-VALID_SCOPES = ("agent", "ceo", "execution", "inspection")
+VALID_SCOPES = ("ceo", "execution", "inspection")
 
 
 def _normalize_scope(value: str) -> str:
     raw = str(value or "").strip().lower().replace("-", "_")
     mapping = {
-        "agent": "agent",
-        "main": "agent",
-        "default": "agent",
         "ceo": "ceo",
         "org_graph.ceo": "ceo",
         "org_graph_ceo": "ceo",

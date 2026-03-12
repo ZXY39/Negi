@@ -1,12 +1,11 @@
-const MODEL_SCOPES = [
-    { key: "agent", label: "Agent" },
-    { key: "ceo", label: "CEO" },
+﻿const MODEL_SCOPES = [
+    { key: "ceo", label: "主Agent" },
     { key: "execution", label: "执行" },
     { key: "inspection", label: "检验" },
 ];
 
-const EMPTY_MODEL_ROLES = () => ({ agent: [], ceo: [], execution: [], inspection: [] });
-const DEFAULT_MODEL_DEFAULTS = () => ({ agent: "", ceo: "", execution: "", inspection: "" });
+const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
+const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -20,6 +19,7 @@ const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
 const S = {
     view: "ceo",
     ceoWs: null,
+    ceoPendingTurns: [],
     projectWs: null,
     currentProjectId: null,
     projects: [],
@@ -148,7 +148,7 @@ const U = {
 const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const icons = () => window.lucide && lucide.createIcons();
 const roleKey = (v) => (["ceo", "inspection", "checker"].includes(String(v).toLowerCase()) ? (String(v).toLowerCase() === "ceo" ? "ceo" : "inspection") : "execution");
-const roleLabel = (v) => ({ ceo: "CEO", execution: "执行", inspection: "检验" }[roleKey(v)]);
+const roleLabel = (v) => ({ ceo: "主Agent", execution: "执行", inspection: "检验" }[roleKey(v)]);
 const pStatus = (v) => String(v || "").trim().toLowerCase();
 const canPause = (v) => ["queued", "planning", "running", "checking"].includes(pStatus(v));
 const canResume = (v) => pStatus(v) === "blocked";
@@ -167,17 +167,119 @@ function addMsg(text, role) {
     U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
 }
 
+function scrollCeoFeedToBottom() {
+    if (!U.ceoFeed) return;
+    U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
+}
+
+function createPendingCeoTurn() {
+    if (!U.ceoFeed) return null;
+    const el = document.createElement("div");
+    el.className = "message system ceo-turn-message";
+    el.innerHTML = `
+        <div class="avatar"><i data-lucide="cpu"></i></div>
+        <div class="msg-content ceo-turn-content">
+            <div class="assistant-text pending">Working...</div>
+            <details class="interaction-flow" open hidden>
+                <summary class="interaction-flow-summary">
+                    <span class="interaction-flow-title">Interaction Flow</span>
+                    <span class="interaction-flow-meta">Waiting for tool calls...</span>
+                </summary>
+                <div class="interaction-flow-list" role="list"></div>
+            </details>
+        </div>
+    `;
+    U.ceoFeed.appendChild(el);
+    const turn = {
+        el,
+        textEl: el.querySelector(".assistant-text"),
+        flowEl: el.querySelector(".interaction-flow"),
+        metaEl: el.querySelector(".interaction-flow-meta"),
+        listEl: el.querySelector(".interaction-flow-list"),
+        steps: 0,
+        hasError: false,
+        finalized: false,
+    };
+    icons();
+    scrollCeoFeedToBottom();
+    return turn;
+}
+
+function getActiveCeoTurn() {
+    return S.ceoPendingTurns.find((turn) => !turn.finalized) || null;
+}
+
+function ensureActiveCeoTurn() {
+    const existing = getActiveCeoTurn();
+    if (existing) return existing;
+    const created = createPendingCeoTurn();
+    if (created) S.ceoPendingTurns.push(created);
+    return created;
+}
+
+function updateCeoTurnMeta(turn, stateLabel) {
+    if (!turn?.metaEl) return;
+    const stepLabel = turn.steps > 0 ? `${turn.steps} steps` : "Waiting for tool calls...";
+    turn.metaEl.textContent = stateLabel ? `${stepLabel} - ${stateLabel}` : stepLabel;
+}
+
+function appendCeoToolEvent(event = {}) {
+    const turn = ensureActiveCeoTurn();
+    if (!turn?.listEl || !turn.flowEl) return;
+    const status = String(event.status || "running").trim().toLowerCase();
+    const toolName = String(event.tool_name || "tool").trim() || "tool";
+    const detail = String(event.text || "").trim();
+    const statusLabel = ({ running: "Running", success: "Done", error: "Error" })[status] || "Update";
+    const item = document.createElement("div");
+    item.className = `interaction-step ${status}`;
+    item.setAttribute("role", "listitem");
+    item.innerHTML = `
+        <div class="interaction-step-header">
+            <span class="interaction-step-title">${esc(toolName)}</span>
+            <span class="interaction-step-status">${esc(statusLabel)}</span>
+        </div>
+        <div class="interaction-step-detail">${esc(detail || `${toolName} ${statusLabel}`)}</div>
+    `;
+    turn.flowEl.hidden = false;
+    turn.flowEl.open = true;
+    turn.listEl.appendChild(item);
+    turn.steps += 1;
+    turn.hasError = turn.hasError || status === "error";
+    updateCeoTurnMeta(turn, status === "running" ? "In progress" : status === "error" ? "Has errors" : "Processing");
+    icons();
+    scrollCeoFeedToBottom();
+}
+
+function finalizeCeoTurn(text) {
+    const turn = S.ceoPendingTurns.shift();
+    if (!turn?.textEl || !turn.flowEl) {
+        addMsg(text, "system");
+        return;
+    }
+    turn.finalized = true;
+    turn.textEl.textContent = String(text || "").trim() || "Done.";
+    turn.textEl.classList.remove("pending");
+    if (turn.steps > 0) {
+        turn.flowEl.hidden = false;
+        turn.flowEl.open = false;
+        updateCeoTurnMeta(turn, turn.hasError ? "Completed with errors" : "Completed");
+    } else {
+        turn.flowEl.hidden = true;
+    }
+    scrollCeoFeedToBottom();
+}
+
 async function loadCeoHistory() {
     if (!U.ceoFeed) return;
     try {
         const items = await ApiClient.getCeoHistory(200);
+        S.ceoPendingTurns = [];
         U.ceoFeed.innerHTML = "";
         items.forEach((item) => addMsg(item.text || "", item.role === "user" ? "user" : "system"));
     } catch (e) {
-        console.error("加载 CEO 历史失败:", e);
+        console.error("Failed to load CEO history:", e);
     }
 }
-
 function addNotice(notice, bump = true) {
     const li = document.createElement("li");
     li.className = `notice-item ${String(notice.kind || "").includes("fail") ? "error" : "success"}`;
@@ -1046,7 +1148,8 @@ function initCeoWs() {
     S.ceoWs = new WebSocket(ApiClient.getCeoWsUrl());
     S.ceoWs.onmessage = (ev) => {
         const payload = JSON.parse(ev.data);
-        if (payload.type === "ceo.reply.final") addMsg(payload.data?.text || "", "system");
+        if (payload.type === "ceo.agent.tool") appendCeoToolEvent(payload.data || {});
+        if (payload.type === "ceo.reply.final") finalizeCeoTurn(payload.data?.text || "");
         if (payload.type === "project.notice") addNotice(payload.data || {});
     };
     S.ceoWs.onclose = () => window.setTimeout(() => S.view === "ceo" && initCeoWs(), 1000);
@@ -1058,13 +1161,19 @@ function sendCeoMessage() {
     addMsg(text, "user");
     U.ceoInput.value = "";
     if (!S.ceoWs || S.ceoWs.readyState !== WebSocket.OPEN) {
-        addMsg("连接尚未建立，请稍后重试。", "system");
+        addMsg("Connection is not ready yet. Please try again in a moment.", "system");
         initCeoWs();
         return;
     }
-    S.ceoWs.send(JSON.stringify({ type: "client.user_message", session_id: "web:shared", text }));
+    try {
+        S.ceoWs.send(JSON.stringify({ type: "client.user_message", session_id: "web:shared", text }));
+        const turn = createPendingCeoTurn();
+        if (turn) S.ceoPendingTurns.push(turn);
+    } catch (e) {
+        addMsg(`Failed to send message: ${e.message || "unknown error"}`, "system");
+        initCeoWs();
+    }
 }
-
 const canDeleteSingle = () => true;
 const canDeleteBatch = (v) => ["blocked", "completed", "failed", "canceled", "archived"].includes(pStatus(v));
 
@@ -1815,7 +1924,7 @@ function renderToolDetail() {
                 <div class="resource-section">
                     <div class="tool-permission-heading">
                         <h3>分配动作权限</h3>
-                        <p class="subtitle">以设置面板的方式逐项配置每个动作对 CEO、执行、检验角色的使用权限。</p>
+                        <p class="subtitle">以设置面板的方式逐项配置每个动作对主Agent、执行、检验角色的使用权限。</p>
                     </div>
                     <div class="tool-permission-grid">
                         ${actions.length ? actions.map((action) => {
@@ -2281,5 +2390,6 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
 
 
