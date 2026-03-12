@@ -1,5 +1,5 @@
 {
-  "generation": 120,
+  "generation": 1331,
   "tools": [
     {
       "name": "agent_browser",
@@ -227,6 +227,14 @@
     }
   ],
   "skills": [
+    {
+      "name": "add-tool",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
     {
       "name": "batch-web-planning",
       "available": true,

@@ -25,6 +25,7 @@ class ResponsesProvider(LLMProvider):
     NETWORK_RETRY_LIMIT = 10
     NETWORK_RETRY_DELAY_SECONDS = 1.0
     NETWORK_FALLBACK_MESSAGE = "Network is unstable right now. Please retry shortly."
+    RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
     def __init__(self, api_key: str, api_base: str, default_model: str = "gpt-5.3-codex"):
         super().__init__(api_key=api_key, api_base=api_base)
@@ -91,7 +92,10 @@ class ResponsesProvider(LLMProvider):
                         async with client.stream("POST", url, headers=headers, json=body) as response:
                             if response.status_code != 200:
                                 text = await response.aread()
-                                raise RuntimeError(_friendly_error(response.status_code, text.decode("utf-8", "ignore")))
+                                detail = _friendly_error(response.status_code, text.decode("utf-8", "ignore"))
+                                if response.status_code in self.RETRYABLE_STATUS_CODES:
+                                    raise _RetryableResponsesError(detail)
+                                raise RuntimeError(detail)
                             content, tool_calls, finish_reason = await _consume_sse(response)
                             return LLMResponse(
                                 content=content,
@@ -134,6 +138,8 @@ class ResponsesProvider(LLMProvider):
 
     @staticmethod
     def _is_retryable_network_error(exc: Exception) -> bool:
+        if isinstance(exc, _RetryableResponsesError):
+            return True
         if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
             return True
         text = str(exc).strip().lower()
@@ -156,4 +162,8 @@ class ResponsesProvider(LLMProvider):
         if isinstance(exc, httpx.NetworkError):
             return f"Network error when connecting to {url} ({message})"
         return message
+
+
+class _RetryableResponsesError(RuntimeError):
+    """Transient upstream failure that should be retried quietly."""
 

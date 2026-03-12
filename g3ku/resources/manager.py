@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import threading
 from pathlib import Path
@@ -78,6 +80,8 @@ class ResourceManager:
 
     def close(self) -> None:
         self._reloader.stop()
+        for instance in list(self._snapshot.tool_instances.values()):
+            self._close_tool_instance(instance)
         self._started = False
 
     def list_tools(self) -> list[ToolResourceDescriptor]:
@@ -143,10 +147,12 @@ class ResourceManager:
 
     def reload_now(self, *, trigger: str = "manual") -> ResourceSnapshot:
         with self._lock:
+            old_snapshot = self._snapshot
             discovery = self._registry.discover()
             snapshot = self._merge_discovery(discovery)
             self._snapshot = snapshot
             self._persist_state(snapshot)
+        self._cleanup_stale_tool_instances(old_snapshot, snapshot)
         for callback in list(self._callbacks):
             try:
                 callback(snapshot)
@@ -219,6 +225,34 @@ class ResourceManager:
                 self._locks.unregister_path(ResourceKind.TOOL, name)
 
         return ResourceSnapshot(generation=generation, tools=new_tools, skills=new_skills, tool_instances=new_tool_instances)
+
+    def _cleanup_stale_tool_instances(
+        self,
+        old_snapshot: ResourceSnapshot,
+        new_snapshot: ResourceSnapshot,
+    ) -> None:
+        active_instances = {id(instance) for instance in new_snapshot.tool_instances.values()}
+        for instance in old_snapshot.tool_instances.values():
+            if id(instance) in active_instances:
+                continue
+            self._close_tool_instance(instance)
+
+    @staticmethod
+    def _close_tool_instance(instance: Any) -> None:
+        if instance is None or not hasattr(instance, "close"):
+            return
+        try:
+            result = instance.close()
+            if not inspect.isawaitable(result):
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(result)
+                return
+            loop.create_task(result)
+        except Exception as exc:
+            logger.debug("tool instance close skipped: {}", exc)
 
     def _persist_state(self, snapshot: ResourceSnapshot) -> None:
         try:

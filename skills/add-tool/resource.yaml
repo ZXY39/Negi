@@ -1,0 +1,25 @@
+schema_version: 1
+kind: skill
+name: add-tool
+description: 新增或改造工具时，按 MCP 协议、热插拔资源布局和 toolskill 规范创建工具。
+trigger:
+  keywords:
+    - 添加工具
+    - 新增工具
+    - 创建工具
+    - MCP 工具
+    - toolskill
+  always: false
+requires:
+  tools:
+    - read_file
+    - write_file
+    - edit_file
+    - list_dir
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  org_graph: true

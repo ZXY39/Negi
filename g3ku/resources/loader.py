@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.resources.embedded_mcp import EmbeddedMCPTool
 from g3ku.resources.models import ToolResourceDescriptor
 
 
@@ -84,6 +85,12 @@ class ResourceLoader:
         )
 
     def load_tool(self, descriptor: ToolResourceDescriptor, *, services: dict[str, Any] | None = None) -> Tool | None:
+        if str(descriptor.protocol or "mcp").strip().lower() != "mcp":
+            raise RuntimeError(f"unsupported tool protocol for {descriptor.name}: {descriptor.protocol}")
+        if str(descriptor.mcp_transport or "embedded").strip().lower() != "embedded":
+            raise RuntimeError(
+                f"unsupported MCP transport for {descriptor.name}: {descriptor.mcp_transport}"
+            )
         entrypoint = descriptor.entrypoint_path
         if entrypoint is None or not entrypoint.exists():
             return None
@@ -100,9 +107,9 @@ class ResourceLoader:
                 raise TypeError(f"tool build() must be synchronous: {descriptor.name}")
             if built is None:
                 return None
-            return ManifestBackedTool(descriptor, built)
+            return EmbeddedMCPTool(descriptor, built)
         if hasattr(module, "execute"):
-            return ManifestBackedTool(descriptor, getattr(module, "execute"))
+            return EmbeddedMCPTool(descriptor, getattr(module, "execute"))
         raise RuntimeError(f"tool module missing build()/execute(): {entrypoint}")
 
     def _module_name(self, descriptor: ToolResourceDescriptor) -> str:

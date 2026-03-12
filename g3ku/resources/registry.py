@@ -127,6 +127,8 @@ class ResourceRegistry:
             main_root=main_root if main_root.exists() else None,
             entrypoint_path=entrypoint if entrypoint.exists() else None,
             entrypoint_hash=self._file_hash(entrypoint) if entrypoint.exists() else "",
+            protocol=str(data.get("protocol") or "mcp").strip().lower() or "mcp",
+            mcp_transport=str(((data.get("mcp") or {}).get("transport") or "embedded")).strip().lower() or "embedded",
             toolskills_root=toolskills_root if toolskills_root.exists() else None,
             toolskills_main_path=toolskills_main if toolskills_main.exists() else None,
             toolskills_references_root=(toolskills_root / "references") if (toolskills_root / "references").exists() else None,
@@ -149,6 +151,16 @@ class ResourceRegistry:
         if manifest_error:
             descriptor.available = False
             descriptor.errors.append(manifest_error)
+        if descriptor.protocol != "mcp":
+            descriptor.available = False
+            descriptor.errors.append(
+                f"unsupported protocol '{descriptor.protocol}': only 'mcp' is allowed"
+            )
+        if descriptor.mcp_transport != "embedded":
+            descriptor.available = False
+            descriptor.errors.append(
+                f"unsupported mcp.transport '{descriptor.mcp_transport}': only 'embedded' is allowed"
+            )
         allowed_children = {self.manifest_name, "toolskills", "main"}
         extra_children = [path.name for path in root.iterdir() if path.name not in allowed_children]
         if extra_children:

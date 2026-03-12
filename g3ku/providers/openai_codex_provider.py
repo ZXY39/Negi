@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import json
+import re
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -357,5 +359,56 @@ def _map_finish_reason(status: str | None) -> str:
 def _friendly_error(status_code: int, raw: str) -> str:
     if status_code == 429:
         return "ChatGPT usage quota exceeded or rate limit triggered. Please try again later."
-    return f"HTTP {status_code}: {raw}"
+    detail = _summarize_error_payload(raw)
+    if status_code >= 500:
+        if detail:
+            return f"Upstream service temporarily unavailable (HTTP {status_code}: {detail}). Please retry shortly."
+        return f"Upstream service temporarily unavailable (HTTP {status_code}). Please retry shortly."
+    if detail:
+        return f"HTTP {status_code}: {detail}"
+    return f"HTTP {status_code}"
+
+
+def _summarize_error_payload(raw: str) -> str:
+    payload = str(raw or "").strip()
+    if not payload:
+        return ""
+
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            for key in ("message", "detail", "code", "type"):
+                value = str(error.get(key) or "").strip()
+                if value:
+                    return _truncate_error_text(value)
+        for key in ("message", "detail", "error"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return _truncate_error_text(value)
+
+    lowered = payload.lower()
+    if "<!doctype html" in lowered or "<html" in lowered:
+        title_match = re.search(r"<title>(.*?)</title>", payload, flags=re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title = html.unescape(title_match.group(1))
+            title = re.sub(r"\s+", " ", title).strip(" :-")
+            if title:
+                return _truncate_error_text(title)
+        if "bad gateway" in lowered:
+            return "Bad gateway"
+        return "HTML error page returned by upstream gateway"
+
+    return _truncate_error_text(re.sub(r"\s+", " ", payload))
+
+
+def _truncate_error_text(text: str, limit: int = 180) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
 

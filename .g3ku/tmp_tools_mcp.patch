@@ -1,0 +1,2150 @@
+﻿*** Begin Patch
+*** Update File: tools/agent_browser/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: agent_browser
+description: �����ⲿ agent-browser CLI ��������Զ������ߡ����û�Ҫ�����վ�������������������¼����ȡҳ���ı�����ͼ�������ļ�ʱʹ�á���ҳ����� snapshot �ٽ����������� DOM �仯��Ҫ���� snapshot���û���ȷҪ��ɼ��������ۿ�����ʱ�� headless=false����̨̽���Ĭ������ headless=true��
+config_namespace: tools.agent_browser
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    command:
+      type: string
+      description: ��������� open��snapshot��click��fill��get��wait��cookies��storage��screenshot��state��close��
+    args:
+      type: array
+      items:
+        type: string
+      description: �����λ�ò������顣ʾ����command=get��args=[text, @e1]��
+    session:
+      type: string
+      description: ��ѡ��������Ự����ֵ��Ĭ�ϵ�ǰ Nano �Ự��
+    headless:
+      type: boolean
+      description: �Ƿ��̨ģʽ���û�ϣ���������������ʱʹ�� false��
+    timeout_s:
+      type: integer
+      minimum: 10
+      maximum: 3600
+      description: ��ѡ�����ʱʱ�䣨�룩��
+  required:
+  - command
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: agent_browser
+description: �����ⲿ agent-browser CLI ��������Զ������ߡ����û�Ҫ�����վ�������������������¼����ȡҳ���ı�����ͼ�������ļ�ʱʹ�á���ҳ����� snapshot �ٽ����������� DOM �仯��Ҫ���� snapshot���û���ȷҪ��ɼ��������ۿ�����ʱ�� headless=false����̨̽���Ĭ������ headless=true��
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: tools.agent_browser
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    command:
+      type: string
+      description: ��������� open��snapshot��click��fill��get��wait��cookies��storage��screenshot��state��close��
+    args:
+      type: array
+      items:
+        type: string
+      description: �����λ�ò������顣ʾ����command=get��args=[text, @e1]��
+    session:
+      type: string
+      description: ��ѡ��������Ự����ֵ��Ĭ�ϵ�ǰ Nano �Ự��
+    headless:
+      type: boolean
+      description: �Ƿ��̨ģʽ���û�ϣ���������������ʱʹ�� false��
+    timeout_s:
+      type: integer
+      minimum: 10
+      maximum: 3600
+      description: ��ѡ�����ʱʱ�䣨�룩��
+  required:
+  - command
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/cron/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: cron
+description: �������Ѻ��������񡣶�����add��list��remove��
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - add
+      - list
+      - remove
+      description: Ҫִ�еĶ���
+    message:
+      type: string
+      description: ������Ϣ������ add��
+    every_seconds:
+      type: integer
+      description: ��������ļ������
+    cron_expr:
+      type: string
+      description: Cron ���ʽ������ '0 9 * * *'����ʱ����
+    tz:
+      type: string
+      description: Cron ���ʽ�� IANA ʱ�������� 'America/Vancouver'��
+    at:
+      type: string
+      description: һ����ִ�е� ISO datetime������ '2026-02-12T10:30:00'��
+    job_id:
+      type: string
+      description: ���� ID������ remove��
+  required:
+  - action
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: cron
+description: �������Ѻ��������񡣶�����add��list��remove��
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - add
+      - list
+      - remove
+      description: Ҫִ�еĶ���
+    message:
+      type: string
+      description: ������Ϣ������ add��
+    every_seconds:
+      type: integer
+      description: ��������ļ������
+    cron_expr:
+      type: string
+      description: Cron ���ʽ������ '0 9 * * *'����ʱ����
+    tz:
+      type: string
+      description: Cron ���ʽ�� IANA ʱ�������� 'America/Vancouver'��
+    at:
+      type: string
+      description: һ����ִ�е� ISO datetime������ '2026-02-12T10:30:00'��
+    job_id:
+      type: string
+      description: ���� ID������ remove��
+  required:
+  - action
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/delete_file/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: delete_file
+description: ɾ��ָ��·�����ļ���
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫɾ�����ļ�·��
+  required:
+  - path
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: delete_file
+description: ɾ��ָ��·�����ļ���
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫɾ�����ļ�·��
+  required:
+  - path
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/edit_file/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: edit_file
+description: ͨ���� old_text �滻Ϊ new_text ���༭�ļ���old_text �������ļ���Ψһƥ�䡣
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫ�༭���ļ�·��
+    old_text:
+      type: string
+      description: Ҫ��ȷƥ�䲢�滻���ı�
+    new_text:
+      type: string
+      description: �滻����ı�
+  required:
+  - path
+  - old_text
+  - new_text
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: edit_file
+description: ͨ���� old_text �滻Ϊ new_text ���༭�ļ���old_text �������ļ���Ψһƥ�䡣
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫ�༭���ļ�·��
+    old_text:
+      type: string
+      description: Ҫ��ȷƥ�䲢�滻���ı�
+    new_text:
+      type: string
+      description: �滻����ı�
+  required:
+  - path
+  - old_text
+  - new_text
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/exec/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: exec
+description: ִ�� shell �����������������ʹ�á�
+config_namespace: tools.exec
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    command:
+      type: string
+      description: Ҫִ�е� shell ����
+    working_dir:
+      type: string
+      description: ��ѡ������Ĺ���Ŀ¼
+  required:
+  - command
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: exec
+description: ִ�� shell �����������������ʹ�á�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: tools.exec
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    command:
+      type: string
+      description: Ҫִ�е� shell ����
+    working_dir:
+      type: string
+      description: ��ѡ������Ĺ���Ŀ¼
+  required:
+  - command
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/file_vault_cleanup/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: file_vault_cleanup
+description: ִ���ļ��������������ʹ�� dry_run=true Ԥ��ɾ�����ݡ�
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    dry_run:
+      type: boolean
+      description: ��Ԥ������ɾ���ļ���
+    target_pct:
+      type: integer
+      minimum: 1
+      maximum: 95
+      description: ��ѡ�������Ŀ��ռ�ðٷֱȡ�
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: file_vault_cleanup
+description: ִ���ļ��������������ʹ�� dry_run=true Ԥ��ɾ�����ݡ�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    dry_run:
+      type: boolean
+      description: ��Ԥ������ɾ���ļ���
+    target_pct:
+      type: integer
+      minimum: 1
+      maximum: 95
+      description: ��ѡ�������Ŀ��ռ�ðٷֱȡ�
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/file_vault_lookup/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: file_vault_lookup
+description: 'ͨ��ռλ�����ļ��������������Ĳ������ϴ��ļ��������������ĺ�ѡ�
+
+  ������ã����û�����֮ǰ�ϴ����ļ���ͼƬ�����硰�ϴ�/֮ǰ/�Ǹ��ļ�/����ͼ/������ͼ/֮ǰ�ϴ���ͼƬ/��Ʒͼ/���ͼ�������ҵ�ǰ�غ�δ����Ŀ���ļ�ʱ��
+
+  ������ã�Ŀ���ļ����ڵ�ǰ�غ��ϴ��ҿ�ֱ�Ӵ���ʱ��'
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: �����ļ����������Ĺؼ��ʵļ����ʡ�
+    session:
+      type: string
+      description: ��ѡ���Ự key ����ֵ��
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 20
+      description: ��ѡ������ޡ�
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: file_vault_lookup
+description: 'ͨ��ռλ�����ļ��������������Ĳ������ϴ��ļ��������������ĺ�ѡ�
+protocol: mcp
+mcp:
+  transport: embedded
+
+  ������ã����û�����֮ǰ�ϴ����ļ���ͼƬ�����硰�ϴ�/֮ǰ/�Ǹ��ļ�/����ͼ/������ͼ/֮ǰ�ϴ���ͼƬ/��Ʒͼ/���ͼ�������ҵ�ǰ�غ�δ����Ŀ���ļ�ʱ��
+
+  ������ã�Ŀ���ļ����ڵ�ǰ�غ��ϴ��ҿ�ֱ�Ӵ���ʱ��'
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: �����ļ����������Ĺؼ��ʵļ����ʡ�
+    session:
+      type: string
+      description: ��ѡ���Ự key ����ֵ��
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 20
+      description: ��ѡ������ޡ�
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/file_vault_read/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: file_vault_read
+description: 'ͨ��ռλ����ȡ���ϴ��ļ����ݡ�
+
+  ��ͼƬ��֧�ֵ��ļ����ͣ������߿���ֱ�ӷ��ض�ģ̬���ݿ��ģ�͡�
+
+  ������ã�����֪ռλ���һش���Ҫʵ���ļ�����ʱ�����������Ķ���ʹ����Щռλ������ȡ�ļ�����Ⱥ�����ͼ��
+
+  ��Ҫ���Ժ��ٶ��������ǰ�غ��Ѿ�֪��ռλ�������ڱ��غϵ��á�
+
+  ������ã�����ȷ�ϴ���/�б������Ҫ��ȡ����ʱ��'
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    placeholder:
+      type: string
+      description: �淶�����ļ�ռλ����
+    mode:
+      type: string
+      enum:
+      - auto
+      - text
+      - binary_meta
+      description: ��ȡģʽ��
+    max_chars:
+      type: integer
+      minimum: 256
+      maximum: 200000
+      description: �ı�ģʽ�·��ص�����ַ�����
+  required:
+  - placeholder
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: file_vault_read
+description: 'ͨ��ռλ����ȡ���ϴ��ļ����ݡ�
+protocol: mcp
+mcp:
+  transport: embedded
+
+  ��ͼƬ��֧�ֵ��ļ����ͣ������߿���ֱ�ӷ��ض�ģ̬���ݿ��ģ�͡�
+
+  ������ã�����֪ռλ���һش���Ҫʵ���ļ�����ʱ�����������Ķ���ʹ����Щռλ������ȡ�ļ�����Ⱥ�����ͼ��
+
+  ��Ҫ���Ժ��ٶ��������ǰ�غ��Ѿ�֪��ռλ�������ڱ��غϵ��á�
+
+  ������ã�����ȷ�ϴ���/�б������Ҫ��ȡ����ʱ��'
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    placeholder:
+      type: string
+      description: �淶�����ļ�ռλ����
+    mode:
+      type: string
+      enum:
+      - auto
+      - text
+      - binary_meta
+      description: ��ȡģʽ��
+    max_chars:
+      type: integer
+      minimum: 256
+      maximum: 200000
+      description: �ı�ģʽ�·��ص�����ַ�����
+  required:
+  - placeholder
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/file_vault_set_policy/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: file_vault_set_policy
+description: �����ļ������洢��������ֵ�������û���ȷҪ���������ʱ���á�
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    max_storage_gb:
+      type: number
+      minimum: 0.1
+      maximum: 1024
+      description: �µ����洢��GB����
+    threshold_pct:
+      type: integer
+      minimum: 10
+      maximum: 95
+      description: �����������ֵ�ٷֱȡ�
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: file_vault_set_policy
+description: �����ļ������洢��������ֵ�������û���ȷҪ���������ʱ���á�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    max_storage_gb:
+      type: number
+      minimum: 0.1
+      maximum: 1024
+      description: �µ����洢��GB����
+    threshold_pct:
+      type: integer
+      minimum: 10
+      maximum: 95
+      description: �����������ֵ�ٷֱȡ�
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/file_vault_stats/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: file_vault_stats
+description: �����ļ���������ʹ�������ռ�������ļ���
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    top_n:
+      type: integer
+      minimum: 1
+      maximum: 50
+      description: ����ռ������ļ���������
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: file_vault_stats
+description: �����ļ���������ʹ�������ռ�������ļ���
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    top_n:
+      type: integer
+      minimum: 1
+      maximum: 50
+      description: ����ռ������ļ���������
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/list_dir/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: list_dir
+description: �г�ָ��Ŀ¼�����ݡ�
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫ�г���Ŀ¼·��
+  required:
+  - path
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: list_dir
+description: �г�ָ��Ŀ¼�����ݡ�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫ�г���Ŀ¼·��
+  required:
+  - path
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/load_skill_context/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: load_skill_context
+description: ���ص�ǰ�ɼ����ܵ���ϸ���ģ����� CEO ʹ�á�
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    skill_id:
+      type: string
+      description: Ҫ���ص� skill id��
+  required:
+  - skill_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: load_skill_context
+description: ���ص�ǰ�ɼ����ܵ���ϸ���ģ����� CEO ʹ�á�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    skill_id:
+      type: string
+      description: Ҫ���ص� skill id��
+  required:
+  - skill_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/load_tool_context/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: load_tool_context
+description: ���ص�ǰ�ɼ����ߵ���ϸʹ��˵�������� CEO ��ȷʹ�á�
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    tool_id:
+      type: string
+      description: Ҫ���ص� tool id��
+  required:
+  - tool_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: load_tool_context
+description: ���ص�ǰ�ɼ����ߵ���ϸʹ��˵�������� CEO ��ȷʹ�á�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    tool_id:
+      type: string
+      description: Ҫ���ص� tool id��
+  required:
+  - tool_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/memory_search/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: memory_search
+description: '�������ڼ��䲢���ؽṹ��������� context ���ͣ�memory/resource/skill�����飬���ṩͳһ������ͼ��
+
+  ������ã����ش�������ǰ��δ��������ʷ�û�/��Ŀ��ʵʱ������ƫ�á����о��ߡ�Լ����δ����������֡�֮ǰ˵��/�ǵá������á�
+
+  ������ã������ָ�д/����/��ʽ������ʶ�ʴ𡢼��ʺ򣬻�ǰ���Ѱ���ȫ��������ʵ��
+
+  ����Ƶ�ʣ�ͨ��ÿ�����һ�Σ�������������µ�ʵ������Ҫ���μ���ʱ�ٵ��á�
+
+  ��ѯд������������ʵ������ͼ����/��Ŀ/����/���ߣ������⡰����һ��/�Ǹ�����������ģ��������'
+config_namespace: tools.memory
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: ����ʵ������ͼ����ȷ�����ʣ�����ģ��������
+    limit:
+      type: integer
+      description: ͳһ��ͼ�����������
+      minimum: 1
+      maximum: 20
+    context_type:
+      type: string
+      enum:
+      - memory
+      - resource
+      - skill
+      description: ��ѡ��������ĳһ�� context��
+    include_l2:
+      type: boolean
+      description: ���� L2 Ԥ��Ƭ�Σ�����ã���
+    session:
+      type: string
+      description: ��ѡ���Ự key ����ֵ������ cli:direct��
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: memory_search
+description: '�������ڼ��䲢���ؽṹ��������� context ���ͣ�memory/resource/skill�����飬���ṩͳһ������ͼ��
+protocol: mcp
+mcp:
+  transport: embedded
+
+  ������ã����ش�������ǰ��δ��������ʷ�û�/��Ŀ��ʵʱ������ƫ�á����о��ߡ�Լ����δ����������֡�֮ǰ˵��/�ǵá������á�
+
+  ������ã������ָ�д/����/��ʽ������ʶ�ʴ𡢼��ʺ򣬻�ǰ���Ѱ���ȫ��������ʵ��
+
+  ����Ƶ�ʣ�ͨ��ÿ�����һ�Σ�������������µ�ʵ������Ҫ���μ���ʱ�ٵ��á�
+
+  ��ѯд������������ʵ������ͼ����/��Ŀ/����/���ߣ������⡰����һ��/�Ǹ�����������ģ��������'
+config_namespace: tools.memory
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: ����ʵ������ͼ����ȷ�����ʣ�����ģ��������
+    limit:
+      type: integer
+      description: ͳһ��ͼ�����������
+      minimum: 1
+      maximum: 20
+    context_type:
+      type: string
+      enum:
+      - memory
+      - resource
+      - skill
+      description: ��ѡ��������ĳһ�� context��
+    include_l2:
+      type: boolean
+      description: ���� L2 Ԥ��Ƭ�Σ�����ã���
+    session:
+      type: string
+      description: ��ѡ���Ự key ����ֵ������ cli:direct��
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/message/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: message
+description: ���û�������Ϣ����Ҫ���ⲿ������ͨʱʹ�á�
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    content:
+      type: string
+      description: Ҫ���͵���Ϣ����
+    channel:
+      type: string
+      description: ��ѡ��Ŀ��������telegram��discord �ȣ�
+    chat_id:
+      type: string
+      description: ��ѡ��Ŀ������/�û� ID
+    media:
+      type: array
+      items:
+        type: string
+      description: ��ѡ��Ҫ���ӵ��ļ�·���б��ͼƬ����Ƶ���ĵ���
+  required:
+  - content
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: message
+description: ���û�������Ϣ����Ҫ���ⲿ������ͨʱʹ�á�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    content:
+      type: string
+      description: Ҫ���͵���Ϣ����
+    channel:
+      type: string
+      description: ��ѡ��Ŀ��������telegram��discord �ȣ�
+    chat_id:
+      type: string
+      description: ��ѡ��Ŀ������/�û� ID
+    media:
+      type: array
+      items:
+        type: string
+      description: ��ѡ��Ҫ���ӵ��ļ�·���б��ͼƬ����Ƶ���ĵ���
+  required:
+  - content
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/model_config/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: model_config
+description: ���� .g3ku/config.json ��ģ��Ŀ¼���ɫģ������֧���г�ģ�͡����/���¡�����/���ã��Լ����� ceo/execution/inspection �������������
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - list_models
+      - get_model
+      - add_model
+      - update_model
+      - enable_model
+      - disable_model
+      - set_scope_chain
+      description: Ҫִ�е�ģ�����ö�����
+    key:
+      type: string
+      description: �ܹ�ģ�� key��
+    provider_model:
+      type: string
+      description: Provider:model ��ʶ�����ܹ�ģ�����á�
+    api_key:
+      type: string
+      description: add/update ������ API key��
+    api_base:
+      type: string
+      description: add/update ������ API base URL��
+    extra_headers:
+      type: object
+      description: ��ѡ����ģ�͵Ķ�������ͷ��
+    enabled:
+      type: boolean
+      description: ��ѡ��add/update �� enabled ��ǡ�
+    max_tokens:
+      type: integer
+      description: ��ѡ����ģ�͵������� token ���ޡ�
+    temperature:
+      type: number
+      description: ��ѡ����ģ��Ĭ�� temperature��
+    reasoning_effort:
+      type: string
+      description: ��ѡ������ǿ�ȸ���ֵ��
+    retry_on:
+      type: array
+      items:
+        type: string
+      description: ���Դ����������� network��429��5xx��
+    description:
+      type: string
+      description: ��ѡ������ɶ���������
+    scopes:
+      type: array
+      items:
+        type: string
+      description: add_model ������������ ceo��execution��inspection��
+    scope:
+      type: string
+      description: set_scope_chain ��Ŀ��������
+    model_keys:
+      type: array
+      items:
+        type: string
+      description: set_scope_chain ������ģ�� key �б��
+  required:
+  - action
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: model_config
+description: ���� .g3ku/config.json ��ģ��Ŀ¼���ɫģ������֧���г�ģ�͡����/���¡�����/���ã��Լ����� ceo/execution/inspection �������������
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - list_models
+      - get_model
+      - add_model
+      - update_model
+      - enable_model
+      - disable_model
+      - set_scope_chain
+      description: Ҫִ�е�ģ�����ö�����
+    key:
+      type: string
+      description: �ܹ�ģ�� key��
+    provider_model:
+      type: string
+      description: Provider:model ��ʶ�����ܹ�ģ�����á�
+    api_key:
+      type: string
+      description: add/update ������ API key��
+    api_base:
+      type: string
+      description: add/update ������ API base URL��
+    extra_headers:
+      type: object
+      description: ��ѡ����ģ�͵Ķ�������ͷ��
+    enabled:
+      type: boolean
+      description: ��ѡ��add/update �� enabled ��ǡ�
+    max_tokens:
+      type: integer
+      description: ��ѡ����ģ�͵������� token ���ޡ�
+    temperature:
+      type: number
+      description: ��ѡ����ģ��Ĭ�� temperature��
+    reasoning_effort:
+      type: string
+      description: ��ѡ������ǿ�ȸ���ֵ��
+    retry_on:
+      type: array
+      items:
+        type: string
+      description: ���Դ����������� network��429��5xx��
+    description:
+      type: string
+      description: ��ѡ������ɶ���������
+    scopes:
+      type: array
+      items:
+        type: string
+      description: add_model ������������ ceo��execution��inspection��
+    scope:
+      type: string
+      description: set_scope_chain ��Ŀ��������
+    model_keys:
+      type: array
+      items:
+        type: string
+      description: set_scope_chain ������ģ�� key �б��
+  required:
+  - action
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/orggraph_control_project/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: orggraph_control_project
+description: ��ͣ��������ȡ����鵵���е� org-graph ��Ŀ��
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    project_id:
+      type: string
+      description: Ҫ���Ƶ���Ŀ id��
+    action:
+      type: string
+      enum:
+      - pause
+      - resume
+      - cancel
+      - archive
+      description: Ҫִ�еĿ��ƶ�����
+  required:
+  - project_id
+  - action
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: orggraph_control_project
+description: ��ͣ��������ȡ����鵵���е� org-graph ��Ŀ��
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    project_id:
+      type: string
+      description: Ҫ���Ƶ���Ŀ id��
+    action:
+      type: string
+      enum:
+      - pause
+      - resume
+      - cancel
+      - archive
+      description: Ҫִ�еĿ��ƶ�����
+  required:
+  - project_id
+  - action
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/orggraph_create_project/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: orggraph_create_project
+description: ���� org-graph ��̨��Ŀ�����ڳ�ʱ���ಽ������
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    prompt:
+      type: string
+      description: Ҫ�ں�ִ̨�е���Ŀ����
+    preferred_title:
+      type: string
+      description: ��ѡ����Ŀ�̱��⡣
+    output_target:
+      type: string
+      description: ��ѡ�����Ŀ���ʶ��
+  required:
+  - prompt
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: orggraph_create_project
+description: ���� org-graph ��̨��Ŀ�����ڳ�ʱ���ಽ������
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    prompt:
+      type: string
+      description: Ҫ�ں�ִ̨�е���Ŀ����
+    preferred_title:
+      type: string
+      description: ��ѡ����Ŀ�̱��⡣
+    output_target:
+      type: string
+      description: ��ѡ�����Ŀ���ʶ��
+  required:
+  - prompt
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/picture_washing/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: picture_washing
+description: ͨ�����ü��� DOUBAO �� POST /v1/images/generations �ӿ�����ϴͼ����������ò���δ�ṩ base_url/authorization ʱʹ������Ĭ��ֵ��authorization ȱʧʱ��ͨ�� agent_browser �Զ�̽�� session cookie ����װ Bearer token��
+config_namespace: tools.picture_washing
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    base_url:
+      type: string
+      description: ��ѡ���ǡ�DOUBAO ���� base URL������ http://localhost:8000��δ�ṩʱʹ������ tools.pictureWashing.baseUrl��
+    authorization:
+      type: string
+      description: ��ѡ���ǡ�Bearer token ��ԭʼ sessionid��δ�ṩʱʹ������ tools.pictureWashing.authorization����������ʱͨ�� agent_browser �Զ�̽�� session cookie��
+    authorization_probe_url:
+      type: string
+      description: ��ѡ���ǡ��� authorization ȱʧʱ agent_browser ʹ�õ� URL��δ�ṩʱʹ�� tools.pictureWashing.authorizationProbeUrl ��� base_url �ƶϡ�
+    auto_probe_authorization:
+      type: boolean
+      description: ��ѡ���ǣ��Ƿ�������Ȩ�Զ�̽�⡣
+    prompt:
+      type: string
+      description: ���պϹ��ͼƬ��ʾ�ʡ�
+    image:
+      type: string
+      description: ��ƷͼƬ URL �� data:image/...;base64,...
+    ratio:
+      type: string
+      description: Ŀ����������� 1:1��3:4��4:3��16:9��9:16��
+    style:
+      type: string
+      description: ��ѡ�����ɷ�񸲸�ֵ��
+    model:
+      type: string
+      description: ��ѡ������ģ�͸���ֵ��
+    stream:
+      type: boolean
+      description: ��ѡ����ʽ�������ֵ��
+    timeout_s:
+      type: integer
+      description: ��ѡ��HTTP ��ʱʱ�䣨�룩��
+      minimum: 10
+      maximum: 600
+  required:
+  - prompt
+  - image
+  - ratio
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: picture_washing
+description: ͨ�����ü��� DOUBAO �� POST /v1/images/generations �ӿ�����ϴͼ����������ò���δ�ṩ base_url/authorization ʱʹ������Ĭ��ֵ��authorization ȱʧʱ��ͨ�� agent_browser �Զ�̽�� session cookie ����װ Bearer token��
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: tools.picture_washing
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    base_url:
+      type: string
+      description: ��ѡ���ǡ�DOUBAO ���� base URL������ http://localhost:8000��δ�ṩʱʹ������ tools.pictureWashing.baseUrl��
+    authorization:
+      type: string
+      description: ��ѡ���ǡ�Bearer token ��ԭʼ sessionid��δ�ṩʱʹ������ tools.pictureWashing.authorization����������ʱͨ�� agent_browser �Զ�̽�� session cookie��
+    authorization_probe_url:
+      type: string
+      description: ��ѡ���ǡ��� authorization ȱʧʱ agent_browser ʹ�õ� URL��δ�ṩʱʹ�� tools.pictureWashing.authorizationProbeUrl ��� base_url �ƶϡ�
+    auto_probe_authorization:
+      type: boolean
+      description: ��ѡ���ǣ��Ƿ�������Ȩ�Զ�̽�⡣
+    prompt:
+      type: string
+      description: ���պϹ��ͼƬ��ʾ�ʡ�
+    image:
+      type: string
+      description: ��ƷͼƬ URL �� data:image/...;base64,...
+    ratio:
+      type: string
+      description: Ŀ����������� 1:1��3:4��4:3��16:9��9:16��
+    style:
+      type: string
+      description: ��ѡ�����ɷ�񸲸�ֵ��
+    model:
+      type: string
+      description: ��ѡ������ģ�͸���ֵ��
+    stream:
+      type: boolean
+      description: ��ѡ����ʽ�������ֵ��
+    timeout_s:
+      type: integer
+      description: ��ѡ��HTTP ��ʱʱ�䣨�룩��
+      minimum: 10
+      maximum: 600
+  required:
+  - prompt
+  - image
+  - ratio
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/propose_file_patch/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: propose_file_patch
+description: ����ͳһ diff ���Ĳ�����������ֱ���޸�Ŀ���ļ�����Ҫ�����ı��ʱʹ�á�
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫ�򲹶����ļ�·����
+    old_text:
+      type: string
+      description: Ҫ�滻�ľ�ȷ�ı�������Ψһƥ�䡣
+    new_text:
+      type: string
+      description: �滻�ı���
+    summary:
+      type: string
+      description: ��ѡ������ժҪ��
+  required:
+  - path
+  - old_text
+  - new_text
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: propose_file_patch
+description: ����ͳһ diff ���Ĳ�����������ֱ���޸�Ŀ���ļ�����Ҫ�����ı��ʱʹ�á�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫ�򲹶����ļ�·����
+    old_text:
+      type: string
+      description: Ҫ�滻�ľ�ȷ�ı�������Ψһƥ�䡣
+    new_text:
+      type: string
+      description: �滻�ı���
+    summary:
+      type: string
+      description: ��ѡ������ժҪ��
+  required:
+  - path
+  - old_text
+  - new_text
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/read_file/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: read_file
+description: ��ȡָ��·�����ļ����ݡ�
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫ��ȡ���ļ�·��
+  required:
+  - path
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: read_file
+description: ��ȡָ��·�����ļ����ݡ�
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫ��ȡ���ļ�·��
+  required:
+  - path
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/task_monitor_engineering_exceptions/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: task_monitor_engineering_exceptions
+description: ���ص�ǰ����δ��������쳣������ id �б��
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: task_monitor_engineering_exceptions
+description: ���ص�ǰ����δ��������쳣������ id �б��
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/task_monitor_list/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: task_monitor_list
+description: �г�ȫ��/������/ʧ��/δ�������񼰼�Ҫ˵����
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    scope:
+      type: integer
+      enum:
+      - 1
+      - 2
+      - 3
+      - 4
+      description: 1=ȫ����2=�����У�3=ʧ�ܣ�4=δ������
+  required:
+  - scope
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: task_monitor_list
+description: �г�ȫ��/������/ʧ��/δ�������񼰼�Ҫ˵����
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    scope:
+      type: integer
+      enum:
+      - 1
+      - 2
+      - 3
+      - 4
+      description: 1=ȫ����2=�����У�3=ʧ�ܣ�4=δ������
+  required:
+  - scope
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/task_monitor_progress/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: task_monitor_progress
+description: �鿴�����������飬����״̬�����ı����ڵ��������־�����¼�������
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    task_id:
+      type: string
+      description: Ŀ������/��Ŀ ID��
+  required:
+  - task_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: task_monitor_progress
+description: �鿴�����������飬����״̬�����ı����ڵ��������־�����¼�������
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    task_id:
+      type: string
+      description: Ŀ������/��Ŀ ID��
+  required:
+  - task_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/task_monitor_summary/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: task_monitor_summary
+description: ����δ�����ȡ������쳣�����������������������ʧ������
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: task_monitor_summary
+description: ����δ�����ȡ������쳣�����������������������ʧ������
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/web_fetch/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: web_fetch
+description: ץȡ URL ����ȡ�ɶ����ݣ�HTML ת markdown/text����
+config_namespace: tools.web
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    url:
+      type: string
+      description: Ҫץȡ�� URL
+    extractMode:
+      type: string
+      enum:
+      - markdown
+      - text
+      default: markdown
+    maxChars:
+      type: integer
+      minimum: 100
+  required:
+  - url
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: web_fetch
+description: ץȡ URL ����ȡ�ɶ����ݣ�HTML ת markdown/text����
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: tools.web
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    url:
+      type: string
+      description: Ҫץȡ�� URL
+    extractMode:
+      type: string
+      enum:
+      - markdown
+      - text
+      default: markdown
+    maxChars:
+      type: integer
+      minimum: 100
+  required:
+  - url
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/web_search/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: web_search
+description: ��ҳ���������ر��⡢URL ��ժҪ��
+config_namespace: tools.web
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: �����ؼ���
+    count:
+      type: integer
+      description: ���ؽ��������1-10��
+      minimum: 1
+      maximum: 10
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: web_search
+description: ��ҳ���������ر��⡢URL ��ժҪ��
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: tools.web
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: �����ؼ���
+    count:
+      type: integer
+      description: ���ؽ��������1-10��
+      minimum: 1
+      maximum: 10
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** Update File: tools/write_file/resource.yaml
+@@
+schema_version: 1
+kind: tool
+name: write_file
+description: ������д��ָ��·���ļ�����Ҫʱ������Ŀ¼��
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫд����ļ�·��
+    content:
+      type: string
+      description: Ҫд�������
+  required:
+  - path
+  - content
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+@@
+schema_version: 1
+kind: tool
+name: write_file
+description: ������д��ָ��·���ļ�����Ҫʱ������Ŀ¼��
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Ҫд����ļ�·��
+    content:
+      type: string
+      description: Ҫд�������
+  required:
+  - path
+  - content
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true
+
+*** End Patch

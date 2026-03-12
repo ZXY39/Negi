@@ -55,6 +55,8 @@ class ToolResourceDescriptor(BaseResourceDescriptor):
     main_root: Path | None = None
     entrypoint_path: Path | None = None
     entrypoint_hash: str = ""
+    protocol: str = "mcp"
+    mcp_transport: str = "embedded"
     toolskills_root: Path | None = None
     toolskills_main_path: Path | None = None
     toolskills_references_root: Path | None = None
