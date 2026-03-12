@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import difflib
@@ -13,13 +13,40 @@ _METADATA_START = '### G3KU_PATCH_METADATA ###'
 _DIFF_START = '### G3KU_PATCH_DIFF ###'
 
 
+def _runtime_project_id(runtime: dict[str, Any] | None, default: str | None = None) -> str:
+    payload = runtime if isinstance(runtime, dict) else {}
+    project_id = str(payload.get('project_id') or '').strip()
+    if project_id:
+        return project_id
+    session_key = str(payload.get('session_key') or '').strip() or 'shared'
+    fallback = str(default or '').strip()
+    return fallback or f'adhoc:{session_key}'
+
+
+def _runtime_unit_id(runtime: dict[str, Any] | None, default: str | None = None) -> str | None:
+    payload = runtime if isinstance(runtime, dict) else {}
+    unit_id = str(payload.get('unit_id') or '').strip()
+    if unit_id:
+        return unit_id
+    fallback = str(default or '').strip()
+    return fallback or None
+
+
 class ProposeFilePatchTool(Tool):
-    def __init__(self, *, artifact_store: Any, project_id: str, unit_id: str | None, workspace: Path | None = None, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        *,
+        artifact_store: Any,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        default_project_id: str | None = None,
+        default_unit_id: str | None = None,
+    ):
         self._artifact_store = artifact_store
-        self._project_id = project_id
-        self._unit_id = unit_id
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._default_project_id = default_project_id
+        self._default_unit_id = default_unit_id
 
     @property
     def name(self) -> str:
@@ -45,7 +72,15 @@ class ProposeFilePatchTool(Tool):
             'required': ['path', 'old_text', 'new_text'],
         }
 
-    async def execute(self, path: str, old_text: str, new_text: str, summary: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        path: str,
+        old_text: str,
+        new_text: str,
+        summary: str | None = None,
+        __g3ku_runtime: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if not file_path.exists():
@@ -56,7 +91,10 @@ class ProposeFilePatchTool(Tool):
             if old_text not in original:
                 return json.dumps({'success': False, 'error': f'old_text not found in {path}'}, ensure_ascii=False)
             if original.count(old_text) > 1:
-                return json.dumps({'success': False, 'error': f'old_text appears multiple times in {path}; provide a more specific match'}, ensure_ascii=False)
+                return json.dumps(
+                    {'success': False, 'error': f'old_text appears multiple times in {path}; provide a more specific match'},
+                    ensure_ascii=False,
+                )
             updated = original.replace(old_text, new_text, 1)
             diff_lines = list(
                 difflib.unified_diff(
@@ -77,8 +115,8 @@ class ProposeFilePatchTool(Tool):
             }
             artifact_body = f"{_METADATA_START}\n{json.dumps(metadata, ensure_ascii=False)}\n{_DIFF_START}\n{patch_text}\n"
             artifact = self._artifact_store.create_text_artifact(
-                project_id=self._project_id,
-                unit_id=self._unit_id,
+                project_id=_runtime_project_id(__g3ku_runtime, self._default_project_id),
+                unit_id=_runtime_unit_id(__g3ku_runtime, self._default_unit_id),
                 kind='patch',
                 title=title,
                 content=artifact_body,
@@ -110,4 +148,3 @@ def parse_patch_artifact(content: str) -> tuple[dict[str, Any], str]:
     metadata = json.loads(metadata_block.strip())
     diff_text = diff_block.strip()
     return metadata, diff_text
-

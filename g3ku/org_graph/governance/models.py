@@ -23,7 +23,7 @@ class PermissionSubject(Model):
 
 class SkillResourceRecord(Model):
     skill_id: str
-    capability_name: str | None = None
+    resource_name: str | None = Field(default=None, validation_alias='capability_name')
     display_name: str
     description: str
     version: str | None = None

@@ -8,12 +8,12 @@ from g3ku.config.model_manager import ModelManager
 from g3ku.org_graph.config import ResolvedOrgGraphConfig
 from g3ku.org_graph.errors import PermissionDeniedError
 from g3ku.org_graph.governance.approval_service import GovernanceApprovalService
-from g3ku.org_graph.governance.capability_filter import list_effective_skill_ids, list_effective_tool_names
+from g3ku.org_graph.governance.resource_filter import list_effective_skill_ids, list_effective_tool_names
 from g3ku.org_graph.governance.policy_engine import GovernancePolicyEngine
 from g3ku.org_graph.governance.resource_registry import OrgGraphResourceRegistry
 from g3ku.org_graph.governance.store import GovernanceStore
 from g3ku.org_graph.ids import new_project_id, new_unit_id
-from g3ku.org_graph.execution.propose_patch_tool import parse_patch_artifact
+from g3ku.agent.tools.propose_patch import parse_patch_artifact
 from g3ku.org_graph.llm.client import OrgGraphLLM
 from g3ku.org_graph.models import ProjectCreateRequest, ProjectRecord, UnitAgentRecord
 from g3ku.org_graph.planning.depth_policy import can_delegate, clamp_max_depth

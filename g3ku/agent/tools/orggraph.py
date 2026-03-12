@@ -246,16 +246,16 @@ class LoadToolContextTool(_ProjectServiceTool):
     async def execute(self, tool_id: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         service = await self._service()
         session_id = _runtime_session_key(__g3ku_runtime)
-        visible = {item.tool_id: item for item in service.list_visible_tool_families(actor_role='ceo', session_id=session_id)}
-        record = visible.get(str(tool_id or '').strip())
-        if record is None:
+        tool_name = str(tool_id or '').strip()
+        visible = set(service.list_effective_tool_names(session_id=session_id, actor_role='ceo'))
+        if tool_name not in visible:
             return json.dumps({'ok': False, 'error': f'Tool not visible for CEO: {tool_id}'}, ensure_ascii=False)
         manager = getattr(service, 'resource_manager', None)
         if manager is None:
             return json.dumps({'ok': False, 'error': 'Resource manager unavailable'}, ensure_ascii=False)
         try:
-            content = manager.load_toolskill_body(record.tool_id)
+            content = manager.load_toolskill_body(tool_name)
         except FileNotFoundError:
             content = ''
-        return json.dumps({'ok': True, 'tool_id': record.tool_id, 'content': content}, ensure_ascii=False)
+        return json.dumps({'ok': True, 'tool_id': tool_name, 'content': content}, ensure_ascii=False)
 

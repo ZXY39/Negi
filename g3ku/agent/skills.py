@@ -75,7 +75,7 @@ class SkillsLoader:
         lines.append("</skills>")
         return "\n".join(lines)
 
-    def build_capability_summary(self) -> str:
+    def build_resource_summary(self) -> str:
         return ""
 
     def get_always_skills(self) -> list[str]:

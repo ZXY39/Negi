@@ -1,7 +1,8 @@
 schema_version: 1
 kind: skill
 name: skill-creator
-description: Create or update AgentSkills
+description: Create or update root-level skills and tools using the unified resource
+  layout under skills/ and tools/.
 trigger:
   keywords: []
   always: false

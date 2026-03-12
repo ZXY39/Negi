@@ -28,7 +28,7 @@ def build_skill_resources(
         items.append(
             SkillResourceRecord(
                 skill_id=descriptor.name,
-                capability_name=None,
+                resource_name=None,
                 display_name=str(descriptor.metadata.get('display_name') or descriptor.name),
                 description=descriptor.description,
                 version=str(descriptor.generation or ''),

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from g3ku.org_graph.governance.action_mapper import DEFAULT_ALLOWED_ROLES, DEFAULT_TOOL_FAMILIES
-from g3ku.org_graph.governance.capability_bridge import build_skill_resources, build_tool_families
+from g3ku.org_graph.governance.resource_bridge import build_skill_resources, build_tool_families
 from g3ku.org_graph.governance.models import SkillResourceRecord, ToolActionRecord, ToolFamilyRecord
 from g3ku.org_graph.protocol import now_iso
 from g3ku.resources import ResourceManager, get_shared_resource_manager

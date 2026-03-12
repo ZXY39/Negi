@@ -1,0 +1,38 @@
+schema_version: 1
+kind: tool
+name: propose_file_patch
+description: Propose a unified-diff style patch artifact without modifying the target
+  file. Use this when a reviewable patch is safer than directly writing the file.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: File path to patch.
+    old_text:
+      type: string
+      description: Exact text to replace. Must match uniquely.
+    new_text:
+      type: string
+      description: Replacement text.
+    summary:
+      type: string
+      description: Optional short patch summary.
+  required:
+  - path
+  - old_text
+  - new_text
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

@@ -19,7 +19,7 @@ PLANNER_SYSTEM_PROMPT = '\n\n'.join(
     [
         load_prompt('execution_planning.md'),
         load_prompt('execution_delegation.md'),
-        load_prompt('capability_planning.md'),
+        load_prompt('resource_planning.md'),
     ]
 )
 DEFAULT_ACCEPTANCE_TEMPLATE = '该子项输出必须直接满足本子项 objective_summary，并且可被父节点后续汇总使用。'

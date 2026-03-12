@@ -1,5 +1,5 @@
 {
-  "generation": 2,
+  "generation": 267,
   "tools": [
     {
       "name": "agent_browser",
@@ -147,6 +147,14 @@
     },
     {
       "name": "picture_washing",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "propose_file_patch",
       "available": true,
       "busy": false,
       "pendingDelete": false,

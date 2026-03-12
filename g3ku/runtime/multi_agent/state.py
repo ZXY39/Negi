@@ -55,8 +55,8 @@ class CompiledAgentRole:
     label: str
     description: str
     role_type: str
-    capability_name: str
-    capability_version: str
+    resource_name: str
+    resource_version: str
     manifest_path: Path
     root: Path
     prompt_path: Path

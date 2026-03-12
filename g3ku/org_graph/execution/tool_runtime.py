@@ -1,14 +1,14 @@
 ﻿from __future__ import annotations
 
 import json
+import inspect
 from collections import deque
 import os
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.org_graph.errors import EngineeringFailureError
-from g3ku.org_graph.execution.propose_patch_tool import ProposeFilePatchTool
-from g3ku.org_graph.governance.capability_filter import list_effective_tool_names
+from g3ku.org_graph.governance.resource_filter import list_effective_tool_names
 from g3ku.org_graph.governance.action_mapper import resolve_tool_action
 from g3ku.org_graph.llm.provider_factory import build_provider_from_model
 from g3ku.org_graph.prompt_loader import load_prompt
@@ -41,32 +41,22 @@ class OrgGraphToolRuntime:
         self._service = service
 
     def supported_tool_names(self) -> list[str]:
-        names = ['propose_file_patch']
         resource_manager = getattr(self._service, 'resource_manager', None)
-        if resource_manager is not None:
-            names.extend(
-                descriptor.name
-                for descriptor in resource_manager.list_tools()
-                if bool(getattr(descriptor, 'available', False))
-            )
-        return sorted(set(names))
+        if resource_manager is None:
+            return []
+        return sorted(resource_manager.tool_instances().keys())
 
-    def _build_tools(self, *, effective_tools: list[str], allow_mutation: bool, project_id: str, unit_id: str | None) -> dict[str, Tool]:
+    def _build_tools(self, *, effective_tools: list[str], allow_mutation: bool) -> dict[str, Tool]:
         tools: dict[str, Tool] = {}
         resource_manager = getattr(self._service, 'resource_manager', None)
-        if resource_manager is not None:
-            for tool_name in effective_tools:
-                if not allow_mutation and tool_name in {'write_file', 'edit_file', 'delete_file'}:
-                    continue
-                if tool_name == 'propose_file_patch':
-                    continue
-                tool = resource_manager.get_tool(tool_name)
-                if tool is not None:
-                    tools[tool_name] = tool
-        if 'propose_file_patch' in effective_tools:
-            workspace = self._service.config.raw.workspace_path
-            allowed_dir = workspace if self._service.config.raw.tools.restrict_to_workspace else None
-            tools['propose_file_patch'] = ProposeFilePatchTool(artifact_store=self._service.artifact_store, project_id=project_id, unit_id=unit_id, workspace=workspace, allowed_dir=allowed_dir)
+        if resource_manager is None:
+            return tools
+        for tool_name in effective_tools:
+            if not allow_mutation and tool_name in {'write_file', 'edit_file', 'delete_file'}:
+                continue
+            tool = resource_manager.get_tool(tool_name)
+            if tool is not None:
+                tools[tool_name] = tool
         return tools
 
     async def _run_tool_loop(
@@ -133,7 +123,16 @@ class OrgGraphToolRuntime:
                                 stage_id=stage.stage_id,
                                 data={'arguments': call.arguments, 'origin': event_origin},
                             )
-                            tool_result = await tool.execute(**call.arguments)
+                            execute_kwargs = dict(call.arguments)
+                            if self._accepts_runtime_context(tool):
+                                execute_kwargs['__g3ku_runtime'] = {
+                                    'session_key': project.session_id,
+                                    'project_id': project.project_id,
+                                    'unit_id': unit.unit_id,
+                                    'stage_id': stage.stage_id,
+                                    'actor_role': unit.role_kind,
+                                }
+                            tool_result = await tool.execute(**execute_kwargs)
                             await self._service.emit_event(
                                 project=project,
                                 scope='tool',
@@ -240,8 +239,6 @@ class OrgGraphToolRuntime:
         tools = self._build_tools(
             effective_tools=effective_tools,
             allow_mutation=bool(unit.mutation_allowed),
-            project_id=project.project_id,
-            unit_id=unit.unit_id,
         )
         if not tools:
             return None
@@ -312,8 +309,6 @@ class OrgGraphToolRuntime:
         tools = self._build_tools(
             effective_tools=effective_tools,
             allow_mutation=True,
-            project_id=project.project_id,
-            unit_id=unit.unit_id,
         )
         available_tool_names = sorted(tools.keys())
         messages: list[dict[str, Any]] = [
@@ -415,5 +410,12 @@ class OrgGraphToolRuntime:
             kind=kind,
             meta={'source': 'tool_runtime'},
         )
+
+    @staticmethod
+    def _accepts_runtime_context(tool: Tool) -> bool:
+        sig = inspect.signature(tool.execute)
+        if '__g3ku_runtime' in sig.parameters:
+            return True
+        return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
 
 
