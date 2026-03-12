@@ -27,8 +27,8 @@ def get_agent() -> AgentLoop:
     global _global_agent, _global_bus, _global_runtime_manager
     if not _global_agent:
         config = load_config()
-        provider_name, model_name = config.get_model_target()
-        provider = _make_provider(config)
+        provider_name, model_name = config.get_scope_model_target("ceo")
+        provider = _make_provider(config, scope="ceo")
         middlewares = []
         try:
             from g3ku.agent.middleware import build_middlewares

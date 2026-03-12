@@ -22,12 +22,21 @@ from g3ku.providers.responses_provider import ResponsesProvider
 _SPECIAL_PROVIDER_BRIDGES = {"openai_codex", "responses", "github_copilot"}
 
 
-def build_chat_model(config: Config) -> BaseChatModel:
-    """Build a BaseChatModel for the configured agent model chain."""
-    chain = [target.provider_model for target in config.get_scope_model_chain("agent")]
-    default_ref = str(chain[0] if chain else config.agents.defaults.model or "").strip()
+def build_chat_model(
+    config: Config,
+    *,
+    scope: str = "ceo",
+    provider_model: str | None = None,
+) -> BaseChatModel:
+    """Build a BaseChatModel for a configured runtime scope or explicit model."""
+    if provider_model is not None:
+        default_ref = str(provider_model or "").strip()
+        chain = [default_ref] if default_ref else []
+    else:
+        chain = [target.provider_model for target in config.get_scope_model_chain(scope)]
+        default_ref = str(chain[0] if chain else config.resolve_scope_model_reference(scope)).strip()
     if not default_ref:
-        raise ValueError("No model configured for agent scope.")
+        raise ValueError(f"No model configured for scope '{scope}'.")
 
     provider = FallbackProvider(config=config, model_chain=chain or [default_ref], default_model_ref=default_ref)
     return ProviderChatModelAdapter(

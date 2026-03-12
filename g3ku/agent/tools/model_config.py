@@ -18,7 +18,7 @@ class ModelConfigTool(Tool):
         return (
             "Manage .g3ku/config.json model catalog and role model chains. "
             "Supports listing models, adding/updating models, enabling/disabling models, "
-            "and setting ordered fallback chains for agent/ceo/execution/inspection scopes."
+            "and setting ordered fallback chains for ceo/execution/inspection scopes."
         )
 
     @property
@@ -57,7 +57,7 @@ class ModelConfigTool(Tool):
                 "scopes": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Scopes for add_model, e.g. agent, ceo, execution, inspection.",
+                    "description": "Scopes for add_model, e.g. ceo, execution, inspection.",
                 },
                 "scope": {"type": "string", "description": "Target scope for set_scope_chain."},
                 "model_keys": {
@@ -146,13 +146,17 @@ class ModelConfigTool(Tool):
 
             config = load_config()
             loop.app_config = config
-            loop.model_client = build_chat_model(config)
-            provider_name, model_id = config.get_model_target(config.agents.defaults.model)
+            loop.model_client = build_chat_model(config, scope="ceo")
+            provider_name, model_id = config.get_scope_model_target("ceo")
             loop.provider_name = provider_name
             loop.model = model_id
             loop.temperature = config.agents.defaults.temperature
             loop.max_tokens = config.agents.defaults.max_tokens
             loop.reasoning_effort = config.agents.defaults.reasoning_effort
+            if hasattr(loop, "_ceo_model_chain_cache_key"):
+                loop._ceo_model_chain_cache_key = None
+            if hasattr(loop, "_ceo_model_client_cache"):
+                loop._ceo_model_client_cache = None
         except Exception:
             # File save succeeded; runtime refresh is best-effort.
             return

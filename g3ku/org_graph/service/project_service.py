@@ -129,12 +129,11 @@ class ProjectService:
             "items": [str(item.get('key') or '').strip() for item in catalog if str(item.get('key') or '').strip()],
             "catalog": catalog,
             "roles": {
-                "agent": list(manager.config.models.roles.agent),
                 "ceo": list(manager.config.models.roles.ceo),
                 "execution": list(manager.config.models.roles.execution),
                 "inspection": list(manager.config.models.roles.inspection),
             },
-            "scopes": ["agent", "ceo", "execution", "inspection"],
+            "scopes": ["ceo", "execution", "inspection"],
             "defaults": self.default_node_provider_models(),
         }
 
@@ -198,7 +197,6 @@ class ProjectService:
 
     def _provider_model_candidates(self) -> list[str]:
         role_refs = [
-            *self.config.raw.models.roles.agent,
             *self.config.raw.models.roles.ceo,
             *self.config.raw.models.roles.execution,
             *self.config.raw.models.roles.inspection,

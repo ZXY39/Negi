@@ -677,6 +677,20 @@ class Config(BaseSettings):
         resolved = self.resolve_provider_model_reference(model or self.agents.defaults.model)
         return self.parse_provider_model(resolved)
 
+    def resolve_scope_model_reference(self, scope: str) -> str:
+        """Resolve the primary model reference configured for a runtime scope."""
+        refs = self.get_scope_model_refs(scope)
+        if refs:
+            return str(refs[0]).strip()
+        fallback = str(self.agents.defaults.model or "").strip()
+        if fallback:
+            return fallback
+        raise ValueError(f"No model configured for scope '{scope}'.")
+
+    def get_scope_model_target(self, scope: str) -> tuple[str, str]:
+        """Get parsed (provider_id, model_id) for a runtime scope."""
+        return self.get_model_target(self.resolve_scope_model_reference(scope))
+
     def get_managed_model(self, ref: str | None = None) -> ManagedModelConfig | None:
         key = str(ref or "").strip()
         if not key:

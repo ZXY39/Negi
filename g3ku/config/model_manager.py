@@ -214,6 +214,8 @@ class ModelManager:
         inspection_chain = self._scope_list("inspection")
         if agent_chain:
             self.config.agents.defaults.model = self._first_enabled_ref(agent_chain)
+        elif ceo_chain:
+            self.config.agents.defaults.model = self._first_enabled_ref(ceo_chain)
         if ceo_chain:
             self.config.org_graph.ceo_model = self._first_enabled_ref(ceo_chain)
         if execution_chain:

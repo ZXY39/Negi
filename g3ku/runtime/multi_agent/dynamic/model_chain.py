@@ -46,10 +46,7 @@ class ModelChainExecutor:
         app_config = getattr(self._loop, "app_config", None)
         if app_config is None:
             return self._loop.model_client
-        copied = app_config.model_copy(deep=True)
-        copied.agents.defaults.model = provider_model
-        copied.models.roles.agent = [provider_model]
-        return build_chat_model(copied)
+        return build_chat_model(app_config, provider_model=provider_model)
 
     def _default_provider_model(self) -> str:
         provider_name = str(getattr(self._loop, "provider_name", "") or "").strip()

@@ -255,12 +255,12 @@ def onboard(
         console.print("  3. Commit [cyan].g3ku/config.json[/cyan] and [cyan]memory/[/cyan] for cross-machine sync")
     console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/g3ku#-chat-apps[/dim]")
 
-def _make_provider(config: Config):
-    """Create the configured BaseChatModel from strict provider:model config."""
+def _make_provider(config: Config, *, scope: str = "ceo"):
+    """Create the configured BaseChatModel for a runtime scope."""
     from g3ku.providers.chatmodels import build_chat_model
 
     try:
-        return build_chat_model(config)
+        return build_chat_model(config, scope=scope)
     except (ValueError, RuntimeError) as exc:
         console.print("[red]Configuration error:[/red]")
         console.print(str(exc))
@@ -370,7 +370,7 @@ def _make_agent_loop(
 
     _memory_startup_self_check(config)
 
-    provider_name, model_id = config.get_model_target()
+    provider_name, model_id = config.get_scope_model_target("ceo")
 
     return AgentLoop(
         bus=bus,
@@ -867,7 +867,9 @@ def status():
     if config_path.exists():
         from g3ku.providers.registry import PROVIDERS
 
-        console.print(f"Model: {config.agents.defaults.model}")
+        console.print(f"CEO Model: {config.resolve_scope_model_reference('ceo')}")
+        console.print(f"Execution Model: {config.resolve_scope_model_reference('execution')}")
+        console.print(f"Inspection Model: {config.resolve_scope_model_reference('inspection')}")
         console.print(f"Runtime: {config.agents.defaults.runtime}")
         mem_cfg = config.tools.memory
         console.print(f"Memory Mode: {mem_cfg.mode} ({'enabled' if mem_cfg.enabled else 'disabled'})")

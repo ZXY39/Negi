@@ -177,7 +177,7 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
         return key
 
     for scope, refs in {
-        "agent": [cfg.agents.defaults.model],
+        "agent": [],
         "ceo": [cfg.org_graph.ceo_model or cfg.agents.defaults.model],
         "execution": [cfg.org_graph.execution_model or cfg.agents.defaults.model],
         "inspection": [cfg.org_graph.inspection_model or cfg.org_graph.execution_model or cfg.agents.defaults.model],
@@ -193,10 +193,17 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
 
 def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     catalog, routes = _managed_models_payload(cfg)
-    default_model = str((routes["agent"][0] if routes["agent"] else cfg.agents.defaults.model) or "")
+    default_model = str((routes["ceo"][0] if routes["ceo"] else cfg.agents.defaults.model) or "")
     org_ceo_model = str((routes["ceo"][0] if routes["ceo"] else (cfg.org_graph.ceo_model or default_model)) or "")
     org_execution_model = str((routes["execution"][0] if routes["execution"] else (cfg.org_graph.execution_model or default_model)) or "")
     org_inspection_model = str((routes["inspection"][0] if routes["inspection"] else (cfg.org_graph.inspection_model or org_execution_model)) or "")
+    runtime_routes = {
+        "ceo": list(routes.get("ceo", [])),
+        "execution": list(routes.get("execution", [])),
+        "inspection": list(routes.get("inspection", [])),
+    }
+    if routes.get("agent"):
+        runtime_routes["agent"] = list(routes["agent"])
 
     providers = {
         provider_name: _provider_payload(cfg, provider_name)
@@ -225,7 +232,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         },
         "models": {
             "catalog": catalog,
-            "roles": routes,
+            "roles": runtime_routes,
         },
         "providers": providers,
         "gateway": {
