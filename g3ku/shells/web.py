@@ -67,7 +67,7 @@ def get_agent() -> AgentLoop:
             exec_config=config.tools.exec,
             memory_config=config.tools.memory,
             file_vault_config=config.tools.file_vault,
-            capability_config=config.tools.capabilities,
+            resource_config=config.resources,
             restrict_to_workspace=config.tools.restrict_to_workspace,
             mcp_servers=config.tools.mcp_servers,
             channels_config=config.channels,

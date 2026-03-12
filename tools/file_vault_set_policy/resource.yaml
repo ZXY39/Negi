@@ -1,0 +1,31 @@
+schema_version: 1
+kind: tool
+name: file_vault_set_policy
+description: Update file vault max storage and cleanup threshold. Only call when user
+  explicitly asks to adjust storage policy.
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    max_storage_gb:
+      type: number
+      minimum: 0.1
+      maximum: 1024
+      description: New max storage in GB.
+    threshold_pct:
+      type: integer
+      minimum: 10
+      maximum: 95
+      description: Cleanup trigger threshold percentage.
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

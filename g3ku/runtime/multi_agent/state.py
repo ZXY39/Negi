@@ -2,13 +2,9 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
-
-if TYPE_CHECKING:
-    from g3ku.capabilities.models import AgentRoleDescriptor
-
 
 CoordinationPattern = Literal["direct", "router", "supervisor", "orchestrator_worker", "handoff"]
 
@@ -74,7 +70,7 @@ class CompiledAgentRole:
     output_policy: dict[str, Any] = field(default_factory=dict)
     execution: dict[str, Any] = field(default_factory=dict)
     result_schema_path: Path | None = None
-    descriptor: AgentRoleDescriptor | None = None
+    descriptor: Any = None
     runtime_loop: Any = None
 
 

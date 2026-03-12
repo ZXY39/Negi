@@ -223,3 +223,39 @@ class LoadSkillContextTool(_ProjectServiceTool):
             content = __import__('pathlib').Path(record.skill_doc_path).read_text(encoding='utf-8')
         return json.dumps({'ok': True, 'skill_id': record.skill_id, 'content': content}, ensure_ascii=False)
 
+
+class LoadToolContextTool(_ProjectServiceTool):
+    @property
+    def name(self) -> str:
+        return 'load_tool_context'
+
+    @property
+    def description(self) -> str:
+        return 'Load the detailed usage guide for a currently visible tool so the CEO can use it correctly.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'tool_id': {'type': 'string', 'description': 'The tool id to load.'},
+            },
+            'required': ['tool_id'],
+        }
+
+    async def execute(self, tool_id: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+        service = await self._service()
+        session_id = _runtime_session_key(__g3ku_runtime)
+        visible = {item.tool_id: item for item in service.list_visible_tool_families(actor_role='ceo', session_id=session_id)}
+        record = visible.get(str(tool_id or '').strip())
+        if record is None:
+            return json.dumps({'ok': False, 'error': f'Tool not visible for CEO: {tool_id}'}, ensure_ascii=False)
+        manager = getattr(service, 'resource_manager', None)
+        if manager is None:
+            return json.dumps({'ok': False, 'error': 'Resource manager unavailable'}, ensure_ascii=False)
+        try:
+            content = manager.load_toolskill_body(record.tool_id)
+        except FileNotFoundError:
+            content = ''
+        return json.dumps({'ok': True, 'tool_id': record.tool_id, 'content': content}, ensure_ascii=False)
+

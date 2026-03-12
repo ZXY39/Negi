@@ -1,0 +1,18 @@
+schema_version: 1
+kind: skill
+name: browser-operation
+description: Browser Operation
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools: []
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+  references: references
+  scripts: scripts
+exposure:
+  agent: true
+  org_graph: true

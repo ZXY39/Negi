@@ -21,6 +21,7 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: dict[str, Tool] = {}
+        self._dynamic_tools: dict[str, Tool] = {}
         self._langchain_tools: dict[str, BaseTool] = {}
         self._runtime_context: contextvars.ContextVar[dict[str, Any] | None] = (
             contextvars.ContextVar("tool_runtime_context", default=None)
@@ -30,18 +31,25 @@ class ToolRegistry:
         """Register a tool."""
         self._tools[tool.name] = tool
 
+    def replace_dynamic_tools(self, tools: dict[str, Tool]) -> None:
+        """Replace dynamically discovered resource-backed tools."""
+        self._dynamic_tools = dict(tools)
+
     def unregister(self, name: str) -> None:
         """Unregister a tool by name."""
         self._tools.pop(name, None)
+        self._dynamic_tools.pop(name, None)
         self._langchain_tools.pop(name, None)
 
     def get(self, name: str) -> Tool | None:
         """Get a tool by name."""
-        return self._tools.get(name)
+        return self._dynamic_tools.get(name) or self._tools.get(name)
 
     def list_tools(self) -> list[Tool]:
         """Return registered native tools in registration order."""
-        return list(self._tools.values())
+        merged = dict(self._tools)
+        merged.update(self._dynamic_tools)
+        return list(merged.values())
 
     def register_langchain_tool(self, tool: BaseTool) -> None:
         """Register an already-built BaseTool (official LangChain tool)."""
@@ -49,17 +57,17 @@ class ToolRegistry:
 
     def has(self, name: str) -> bool:
         """Check if a tool is registered."""
-        return name in self._tools
+        return name in self._dynamic_tools or name in self._tools
 
     def get_definitions(self) -> list[dict[str, Any]]:
         """Get all tool definitions in OpenAI format."""
-        return [tool.to_schema() for tool in self._tools.values()]
+        return [tool.to_schema() for tool in self.list_tools()]
 
     async def execute(self, name: str, params: dict[str, Any]) -> Any:
         """Execute a tool by name with given parameters."""
         _hint = "\n\n[Analyze the error above and try a different approach.]"
 
-        tool = self._tools.get(name)
+        tool = self.get(name)
         if not tool:
             return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
 
@@ -114,7 +122,7 @@ class ToolRegistry:
     def to_langchain_tools(self) -> list[BaseTool]:
         """Convert registered tools to official BaseTool instances."""
         tools: list[BaseTool] = []
-        for tool in self._tools.values():
+        for tool in self.list_tools():
             args_schema = self._build_args_schema(tool)
             coroutine = self._build_tool_coroutine(tool.name)
             tools.append(
@@ -133,7 +141,7 @@ class ToolRegistry:
         """Convert only the selected registered tools to official BaseTool instances."""
         visible = {str(name or '').strip() for name in (allowed_names or []) if str(name or '').strip()}
         tools: list[BaseTool] = []
-        for tool in self._tools.values():
+        for tool in self.list_tools():
             if tool.name not in visible:
                 continue
             args_schema = self._build_args_schema(tool)
@@ -209,11 +217,11 @@ class ToolRegistry:
     @property
     def tool_names(self) -> list[str]:
         """Get list of registered tool names."""
-        return list(self._tools.keys()) + list(self._langchain_tools.keys())
+        return list(dict.fromkeys([*self._tools.keys(), *self._dynamic_tools.keys(), *self._langchain_tools.keys()]))
 
     def __len__(self) -> int:
-        return len(self._tools) + len(self._langchain_tools)
+        return len(set(self._tools.keys()) | set(self._dynamic_tools.keys()) | set(self._langchain_tools.keys()))
 
     def __contains__(self, name: str) -> bool:
-        return name in self._tools or name in self._langchain_tools
+        return name in self._tools or name in self._dynamic_tools or name in self._langchain_tools
 

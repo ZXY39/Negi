@@ -1,0 +1,67 @@
+schema_version: 1
+kind: tool
+name: picture_washing
+description: Generate images for picture-washing by calling a DOUBAO-compatible POST
+  /v1/images/generations endpoint. Use config-injected defaults for base_url/authorization
+  when not provided by call args. When authorization is missing, auto-probe session
+  cookie via agent_browser and compose Bearer token.
+config_namespace: tools.picture_washing
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    base_url:
+      type: string
+      description: Optional override. DOUBAO service base URL, e.g. http://localhost:8000.
+        If omitted, use tools.pictureWashing.baseUrl from config.
+    authorization:
+      type: string
+      description: Optional override. Bearer token or raw sessionid string. If omitted,
+        use tools.pictureWashing.authorization from config, or auto-probe session
+        cookie via agent_browser if enabled.
+    authorization_probe_url:
+      type: string
+      description: Optional override. URL used by agent_browser when authorization
+        is missing. If omitted, use tools.pictureWashing.authorizationProbeUrl or
+        infer from base_url.
+    auto_probe_authorization:
+      type: boolean
+      description: Optional override to enable/disable authorization auto-probing.
+    prompt:
+      type: string
+      description: Final compliant image prompt.
+    image:
+      type: string
+      description: Product image URL or data:image/...;base64,...
+    ratio:
+      type: string
+      description: Target ratio, e.g. 1:1, 3:4, 4:3, 16:9, 9:16.
+    style:
+      type: string
+      description: Optional generation style override.
+    model:
+      type: string
+      description: Optional generation model override.
+    stream:
+      type: boolean
+      description: Optional stream override.
+    timeout_s:
+      type: integer
+      description: Optional HTTP timeout override in seconds.
+      minimum: 10
+      maximum: 600
+  required:
+  - prompt
+  - image
+  - ratio
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

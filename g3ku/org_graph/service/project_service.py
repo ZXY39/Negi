@@ -31,7 +31,7 @@ from g3ku.org_graph.service.task_monitor_service import TaskMonitorService
 
 
 class ProjectService:
-    def __init__(self, config: ResolvedOrgGraphConfig):
+    def __init__(self, config: ResolvedOrgGraphConfig, resource_manager=None):
         self.config = config
         self.store = ProjectStore(config.project_store_path)
         self.checkpoint_store = CheckpointStore(config.checkpoint_store_path)
@@ -43,7 +43,8 @@ class ProjectService:
         self.memory_manager = self._build_memory_manager()
         self.artifact_store = ArtifactStore(artifact_dir=config.artifact_dir, project_store=self.store)
         self.monitor_service = TaskMonitorService(self, self.task_monitor_store)
-        self.resource_registry = OrgGraphResourceRegistry(config, self.governance_store)
+        self.resource_manager = resource_manager
+        self.resource_registry = OrgGraphResourceRegistry(config, self.governance_store, resource_manager=resource_manager)
         self.policy_engine = GovernancePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
         self.approval_service = GovernanceApprovalService(
             self,
@@ -67,6 +68,10 @@ class ProjectService:
         self._startup_lock = asyncio.Lock()
         self._started = False
         self._closed = False
+
+    def bind_resource_manager(self, resource_manager) -> None:
+        self.resource_manager = resource_manager
+        self.resource_registry.bind_resource_manager(resource_manager)
 
     def _build_memory_manager(self):
         if not bool(getattr(self.config.raw.tools.memory, 'enabled', False)):

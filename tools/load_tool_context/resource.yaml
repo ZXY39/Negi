@@ -1,0 +1,26 @@
+schema_version: 1
+kind: tool
+name: load_tool_context
+description: Load the detailed usage guide for a currently visible tool so the CEO
+  can use it correctly.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    tool_id:
+      type: string
+      description: The tool id to load.
+  required:
+  - tool_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

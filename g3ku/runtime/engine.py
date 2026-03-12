@@ -39,7 +39,7 @@ class AgentRuntimeEngine:
         exec_config=None,
         memory_config=None,
         file_vault_config=None,
-        capability_config=None,
+        resource_config=None,
         multi_agent_config=None,
         app_config: Any | None = None,
         cron_service=None,
@@ -71,7 +71,7 @@ class AgentRuntimeEngine:
         self.exec_config = exec_config
         self.memory_config = memory_config
         self.file_vault_config = file_vault_config
-        self.capability_config = capability_config
+        self.resource_config = resource_config
         self.multi_agent_config = multi_agent_config
         self.app_config = app_config
         self.cron_service = cron_service
@@ -109,12 +109,7 @@ class AgentRuntimeEngine:
         self.memory_manager = None
         self.file_vault = None
         self.commit_service = None
-        self.capability_registry = None
-        self.capability_source_registry = None
-        self.capability_index_registry = None
-        self.capability_loader = None
-        self.capability_installer = None
-        self.capability_validator = None
+        self.resource_manager = None
         self.multi_agent_role_registry = None
         self.multi_agent_runner = None
         self.blackboard_store = None
@@ -152,7 +147,6 @@ class AgentRuntimeEngine:
             self.model_client = None
 
         self._bootstrap = RuntimeBootstrapBridge(self)
-        self._bootstrap.init_capability_runtime()
         self._bootstrap.init_file_vault()
         self._bootstrap.init_memory_runtime()
         self._bootstrap.init_commit_service()

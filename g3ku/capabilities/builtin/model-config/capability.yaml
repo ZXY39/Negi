@@ -1,7 +1,0 @@
-name: model-config
-version: 1.0.0
-description: Manage model catalog entries and ordered role model chains.
-tools:
-  - model_config
-dependencies:
-  g3ku_core: ">=1.0.0,<2.0.0"

@@ -1,0 +1,29 @@
+schema_version: 1
+kind: tool
+name: exec
+description: Execute a shell command and return its output. Use with caution.
+config_namespace: tools.exec
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    command:
+      type: string
+      description: The shell command to execute
+    working_dir:
+      type: string
+      description: Optional working directory for the command
+  required:
+  - command
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

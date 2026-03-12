@@ -1,0 +1,21 @@
+schema_version: 1
+kind: tool
+name: task_monitor_summary
+description: Summarize unread progress, engineering exceptions, total tasks, active
+  tasks, and failed tasks.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

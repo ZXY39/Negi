@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import inspect
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+from g3ku.agent.tools.base import Tool
+from g3ku.resources.models import ToolResourceDescriptor
+
+
+def _resolve_config_slice(config: Any, namespace: str) -> Any:
+    current = config
+    for part in [item for item in str(namespace or "").split(".") if item]:
+        if current is None:
+            return None
+        if isinstance(current, dict):
+            current = current.get(part)
+            continue
+        current = getattr(current, part, None)
+    return current
+
+
+class ManifestBackedTool(Tool):
+    def __init__(self, descriptor: ToolResourceDescriptor, handler: Any):
+        self._descriptor = descriptor
+        self._handler = handler
+
+    @property
+    def name(self) -> str:
+        return self._descriptor.name
+
+    @property
+    def description(self) -> str:
+        return self._descriptor.description
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return self._descriptor.parameters or {"type": "object", "properties": {}, "required": []}
+
+    def set_context(self, *args: Any, **kwargs: Any) -> Any:
+        if hasattr(self._handler, "set_context"):
+            return self._handler.set_context(*args, **kwargs)
+        return None
+
+    async def execute(self, **kwargs: Any) -> Any:
+        if isinstance(self._handler, Tool):
+            return await self._handler.execute(**kwargs)
+        if hasattr(self._handler, "execute"):
+            result = self._handler.execute(**kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        if callable(self._handler):
+            result = self._handler(**kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        raise TypeError(f"Unsupported tool handler for {self.name}: {type(self._handler).__name__}")
+
+
+class ResourceLoader:
+    def __init__(self, workspace: Path, app_config: Any = None):
+        self.workspace = Path(workspace)
+        self.app_config = app_config
+
+    def build_runtime_context(self, descriptor: ToolResourceDescriptor, services: dict[str, Any] | None = None) -> Any:
+        services = dict(services or {})
+        loop = services.get("loop")
+        app_config = services.get("app_config", self.app_config)
+        return SimpleNamespace(
+            workspace=self.workspace,
+            loop=loop,
+            app_config=app_config,
+            resource_manifest=dict(descriptor.metadata or {}),
+            resource_root=descriptor.root,
+            main_root=descriptor.main_root,
+            toolskills_root=descriptor.toolskills_root,
+            config_slice=_resolve_config_slice(app_config, descriptor.config_namespace),
+            services=SimpleNamespace(**services),
+            resource_descriptor=descriptor,
+        )
+
+    def load_tool(self, descriptor: ToolResourceDescriptor, *, services: dict[str, Any] | None = None) -> Tool | None:
+        entrypoint = descriptor.entrypoint_path
+        if entrypoint is None or not entrypoint.exists():
+            return None
+        module_name = self._module_name(descriptor)
+        spec = importlib.util.spec_from_file_location(module_name, entrypoint)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"failed to load module spec for {entrypoint}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        runtime_context = self.build_runtime_context(descriptor, services=services)
+        if hasattr(module, "build"):
+            built = module.build(runtime_context)
+            if inspect.isawaitable(built):
+                raise TypeError(f"tool build() must be synchronous: {descriptor.name}")
+            if built is None:
+                return None
+            return ManifestBackedTool(descriptor, built)
+        if hasattr(module, "execute"):
+            return ManifestBackedTool(descriptor, getattr(module, "execute"))
+        raise RuntimeError(f"tool module missing build()/execute(): {entrypoint}")
+
+    def _module_name(self, descriptor: ToolResourceDescriptor) -> str:
+        digest = descriptor.entrypoint_hash or hashlib.sha256(str(descriptor.entrypoint_path).encode("utf-8")).hexdigest()
+        safe_name = descriptor.name.replace("-", "_")
+        return f"g3ku_runtime_tools_{safe_name}_{digest[:12]}_{descriptor.generation}"

@@ -26,7 +26,6 @@ from g3ku.runtime.message_adapter import (
 from g3ku.runtime.multi_agent import (
     CompiledAgentRole,
     IntentGateDecision,
-    MultiAgentRoleRegistry,
     MultiAgentRunner,
 )
 from g3ku.runtime.model_bridge import LoopRuntimeContext, LoopRuntimeMiddleware, ModelExecutionBridge
@@ -54,7 +53,6 @@ __all__ = [
     "LoopRuntimeMiddleware",
     "CompiledAgentRole",
     "IntentGateDecision",
-    "MultiAgentRoleRegistry",
     "MultiAgentRunner",
     "ModelExecutionBridge",
     "SessionMemoryConsolidationService",

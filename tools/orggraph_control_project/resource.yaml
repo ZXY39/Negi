@@ -1,0 +1,34 @@
+schema_version: 1
+kind: tool
+name: orggraph_control_project
+description: Pause, resume, cancel, or archive an existing org-graph project.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    project_id:
+      type: string
+      description: The project id to control.
+    action:
+      type: string
+      enum:
+      - pause
+      - resume
+      - cancel
+      - archive
+      description: Control action to perform.
+  required:
+  - project_id
+  - action
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

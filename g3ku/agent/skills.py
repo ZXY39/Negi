@@ -1,63 +1,51 @@
-﻿"""Skills loader for agent capabilities."""
+"""Skill loader backed by the unified root-level resource system."""
 
-import json
+from __future__ import annotations
+
 import os
-import re
 import shutil
 from pathlib import Path
 
-from g3ku.capabilities.registry import CapabilityRegistry
-
-# Default builtin skills directory (relative to this file)
-BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
+from g3ku.resources import ResourceManager, get_shared_resource_manager
 
 
 class SkillsLoader:
-    """Loader for agent skills with capability-pack support and legacy fallback."""
+    """Load skills from the shared workspace resource manager."""
 
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
-        self.workspace = workspace
-        self.workspace_skills = workspace / "skills"
-        self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
-        self.registry = CapabilityRegistry(workspace)
-
-    def _refresh_registry(self) -> None:
-        self.registry.refresh()
+    def __init__(self, workspace: Path, resource_manager: ResourceManager | None = None, app_config=None):
+        self.workspace = Path(workspace)
+        self.resource_manager = resource_manager or get_shared_resource_manager(self.workspace, app_config=app_config)
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
-        self._refresh_registry()
         skills = []
-        for descriptor in self.registry.list_skills():
+        for descriptor in self.resource_manager.list_skills():
             if filter_unavailable and not descriptor.available:
                 continue
             skills.append(
                 {
                     "name": descriptor.name,
                     "path": str(descriptor.main_path),
-                    "source": descriptor.capability_name,
+                    "source": str(descriptor.root),
                 }
             )
         return skills
 
     def load_skill(self, name: str) -> str | None:
-        self._refresh_registry()
-        descriptor = self.registry.resolve_skill(name)
-        if descriptor and descriptor.main_path.exists():
-            return descriptor.main_path.read_text(encoding="utf-8")
-        return None
+        try:
+            return self.resource_manager.load_skill_body(name)
+        except FileNotFoundError:
+            return None
 
     def load_skills_for_context(self, skill_names: list[str]) -> str:
         parts = []
         for name in skill_names:
             content = self.load_skill(name)
             if content:
-                content = self._strip_frontmatter(content)
-                parts.append(f"### Skill: {name}\n\n{content}")
+                parts.append(f"### Skill: {name}\n\n{content.strip()}")
         return "\n\n---\n\n".join(parts) if parts else ""
 
     def build_skills_summary(self) -> str:
-        self._refresh_registry()
-        all_skills = self.registry.list_skills()
+        all_skills = self.resource_manager.list_skills()
         if not all_skills:
             return ""
 
@@ -73,10 +61,10 @@ class SkillsLoader:
             if not descriptor.available:
                 missing = []
                 for tool_name in descriptor.requires_tools:
-                    if self.registry.resolve_tool(tool_name) is None:
+                    if self.resource_manager.get_tool_descriptor(tool_name) is None:
                         missing.append(f"tool:{tool_name}")
                 for bin_name in descriptor.requires_bins:
-                    if not shutil.which(bin_name):
+                    if shutil.which(bin_name) is None:
                         missing.append(f"CLI:{bin_name}")
                 for env_name in descriptor.requires_env:
                     if not os.environ.get(env_name):
@@ -88,152 +76,20 @@ class SkillsLoader:
         return "\n".join(lines)
 
     def build_capability_summary(self) -> str:
-        self._refresh_registry()
-        capabilities = self.registry.list_capabilities()
-        if not capabilities:
-            return ""
-
-        def escape_xml(value: str) -> str:
-            return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-        lines = ["<capabilities>"]
-        for descriptor in capabilities:
-            lines.append(
-                "  <capability "
-                f"enabled=\"{str(descriptor.enabled).lower()}\" "
-                f"available=\"{str(descriptor.available).lower()}\" "
-                f"source=\"{escape_xml(descriptor.source.type)}\">"
-            )
-            lines.append(f"    <name>{escape_xml(descriptor.name)}</name>")
-            tool_states = []
-            for tool_name in descriptor.exported_tools:
-                tool = self.registry.resolve_tool(tool_name)
-                if tool is None:
-                    tool_states.append(f"{tool_name}[missing]")
-                    continue
-                tool_states.append(
-                    f"{tool.name}[enabled={str(tool.enabled).lower()},available={str(tool.available).lower()}]"
-                )
-            skill_states = []
-            for skill_name in descriptor.exported_skills:
-                skill = self.registry.resolve_skill(skill_name)
-                if skill is None:
-                    skill_states.append(f"{skill_name}[missing]")
-                    continue
-                skill_states.append(
-                    f"{skill.name}[enabled={str(skill.enabled).lower()},available={str(skill.available).lower()}]"
-                )
-            lines.append(
-                f"    <tools>{escape_xml(', '.join(tool_states) or '-')}</tools>"
-            )
-            lines.append(
-                f"    <skills>{escape_xml(', '.join(skill_states) or '-')}</skills>"
-            )
-            issues = list(dict.fromkeys([*descriptor.errors, *descriptor.warnings]))
-            if issues:
-                lines.append(f"    <issues>{escape_xml('; '.join(issues))}</issues>")
-            lines.append("  </capability>")
-        lines.append("</capabilities>")
-        return "\n".join(lines)
-
-    def _get_missing_requirements(self, skill_meta: dict) -> str:
-        missing = []
-        requires = skill_meta.get("requires", {})
-        for b in requires.get("bins", []):
-            if not shutil.which(b):
-                missing.append(f"CLI: {b}")
-        for env in requires.get("env", []):
-            if not os.environ.get(env):
-                missing.append(f"ENV: {env}")
-        for tool_name in requires.get("tools", []):
-            if self.registry.resolve_tool(tool_name) is None:
-                missing.append(f"tool: {tool_name}")
-        return ", ".join(missing)
-
-    def _get_skill_description(self, name: str) -> str:
-        meta = self.get_skill_metadata(name)
-        if meta and meta.get("description"):
-            return str(meta["description"])
-        descriptor = self.registry.resolve_skill(name)
-        if descriptor and descriptor.description:
-            return descriptor.description
-        return name
-
-    def _strip_frontmatter(self, content: str) -> str:
-        if content.startswith("---"):
-            match = re.match(r"^---\n.*?\n---\n", content, re.DOTALL)
-            if match:
-                return content[match.end():].strip()
-        return content
-
-    def _parse_g3ku_metadata(self, raw: str) -> dict:
-        try:
-            data = json.loads(raw)
-            return data.get("g3ku", data.get("openclaw", {})) if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            return {}
-
-    def _check_requirements(self, skill_meta: dict) -> bool:
-        requires = skill_meta.get("requires", {})
-        for b in requires.get("bins", []):
-            if not shutil.which(b):
-                return False
-        for env in requires.get("env", []):
-            if not os.environ.get(env):
-                return False
-        for tool_name in requires.get("tools", []):
-            descriptor = self.registry.resolve_tool(tool_name)
-            if descriptor is None or not descriptor.available:
-                return False
-        return True
-
-    def _get_skill_meta(self, name: str) -> dict:
-        meta = self.get_skill_metadata(name) or {}
-        if "metadata" in meta:
-            return self._parse_g3ku_metadata(meta.get("metadata", ""))
-        requires = {
-            "tools": meta.get("requires_tools", []),
-            "bins": meta.get("requires_bins", []),
-            "env": meta.get("requires_env", []),
-        }
-        return {"requires": requires, "always": meta.get("always", False)}
+        return ""
 
     def get_always_skills(self) -> list[str]:
-        self._refresh_registry()
-        result = []
-        for descriptor in self.registry.list_skills():
-            if descriptor.always and descriptor.available:
-                result.append(descriptor.name)
-        return result
+        return [descriptor.name for descriptor in self.resource_manager.list_skills() if descriptor.always and descriptor.available]
 
     def get_skill_metadata(self, name: str) -> dict | None:
-        self._refresh_registry()
-        descriptor = self.registry.resolve_skill(name)
+        descriptor = self.resource_manager.get_skill(name)
         if descriptor is None:
             return None
-        if not descriptor.legacy:
-            metadata = dict(descriptor.metadata)
-            metadata.setdefault("name", descriptor.name)
-            metadata.setdefault("description", descriptor.description)
-            metadata.setdefault("always", descriptor.always)
-            metadata.setdefault("requires_tools", descriptor.requires_tools)
-            metadata.setdefault("requires_bins", descriptor.requires_bins)
-            metadata.setdefault("requires_env", descriptor.requires_env)
-            return metadata
-
-        content = descriptor.main_path.read_text(encoding="utf-8")
-        if content.startswith("---"):
-            match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-            if match:
-                metadata = {}
-                for line in match.group(1).split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        metadata[key.strip()] = value.strip().strip('"\'')
-                metadata.setdefault("description", descriptor.description)
-                metadata.setdefault("always", descriptor.always)
-                metadata.setdefault("requires_bins", descriptor.requires_bins)
-                metadata.setdefault("requires_env", descriptor.requires_env)
-                return metadata
-        return {"description": descriptor.description, "always": descriptor.always}
-
+        metadata = dict(descriptor.metadata)
+        metadata.setdefault("name", descriptor.name)
+        metadata.setdefault("description", descriptor.description)
+        metadata.setdefault("always", descriptor.always)
+        metadata.setdefault("requires_tools", descriptor.requires_tools)
+        metadata.setdefault("requires_bins", descriptor.requires_bins)
+        metadata.setdefault("requires_env", descriptor.requires_env)
+        return metadata

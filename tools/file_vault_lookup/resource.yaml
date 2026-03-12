@@ -1,0 +1,40 @@
+schema_version: 1
+kind: tool
+name: file_vault_lookup
+description: 'Find uploaded files by placeholder, filename, or prior-turn context
+  and return ranked candidates.
+
+  MUST CALL: when user references previously uploaded files or images (e.g., ''上次/之前/那个文件/那张图/那三张图/之前上传的图片/商品图/风格图'')
+  and current turn does not include the target file.
+
+  AVOID CALL: when target file is already uploaded in current turn and can be handled
+  directly.'
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: Lookup query with filename or context keywords.
+    session:
+      type: string
+      description: Optional session key override.
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 20
+      description: Max candidates.
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

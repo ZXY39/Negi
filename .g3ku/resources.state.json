@@ -1,0 +1,333 @@
+{
+  "generation": 2,
+  "tools": [
+    {
+      "name": "agent_browser",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "cron",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "delete_file",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "edit_file",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "exec",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "file_vault_cleanup",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "file_vault_lookup",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "file_vault_read",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "file_vault_set_policy",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "file_vault_stats",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "list_dir",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "load_skill_context",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "load_tool_context",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "memory_search",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "message",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "model_config",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "orggraph_control_project",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "orggraph_create_project",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "picture_washing",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "read_file",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "task_monitor_engineering_exceptions",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "task_monitor_list",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "task_monitor_progress",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "task_monitor_summary",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "web_fetch",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "web_search",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "write_file",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    }
+  ],
+  "skills": [
+    {
+      "name": "agent-browser",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "batch-web-planning",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "browser-operation",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "browser-orchestration",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "cron",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "github",
+      "available": false,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [
+        "missing required bins"
+      ],
+      "errors": []
+    },
+    {
+      "name": "memory",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "picture-washing",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "skill-creator",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "summarize",
+      "available": false,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [
+        "missing required bins"
+      ],
+      "errors": []
+    },
+    {
+      "name": "tmux",
+      "available": false,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [
+        "missing required bins"
+      ],
+      "errors": []
+    },
+    {
+      "name": "weather",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "web-research",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    }
+  ]
+}

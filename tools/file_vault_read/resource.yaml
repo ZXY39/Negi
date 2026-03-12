@@ -1,0 +1,49 @@
+schema_version: 1
+kind: tool
+name: file_vault_read
+description: 'Read uploaded file content by placeholder.
+
+  For images and supported files, this tool can return native multimodal content blocks
+  back to the model.
+
+  MUST CALL: when placeholder is known and answer requires actual file content; this
+  includes follow-up intents like continue reading, use these placeholders, read the
+  file itself, or ??????.
+
+  DO NOT promise to read later when the needed placeholder is already known in the
+  conversation; call file_vault_read in this turn.
+
+  AVOID CALL: when only existence/list confirmation is needed without reading content.'
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    placeholder:
+      type: string
+      description: Canonical file placeholder.
+    mode:
+      type: string
+      enum:
+      - auto
+      - text
+      - binary_meta
+      description: Read mode.
+    max_chars:
+      type: integer
+      minimum: 256
+      maximum: 200000
+      description: Max returned chars in text mode.
+  required:
+  - placeholder
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

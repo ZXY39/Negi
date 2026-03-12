@@ -22,7 +22,6 @@ from g3ku.runtime.multi_agent.dynamic import (
     trace_payload,
 )
 from g3ku.runtime.multi_agent.dynamic.orchestrator import MultiAgentRunner
-from g3ku.runtime.multi_agent.registry import MultiAgentRoleRegistry
 from g3ku.runtime.multi_agent.state import CompiledAgentRole, IntentGateDecision
 
 __all__ = [
@@ -39,7 +38,6 @@ __all__ = [
     "DynamicSubagentSessionRecord",
     "DynamicSubagentSessionStore",
     "ModelChainExecutor",
-    "MultiAgentRoleRegistry",
     "ModelFallbackTarget",
     "MultiAgentRunner",
     "OrchestratorRunner",

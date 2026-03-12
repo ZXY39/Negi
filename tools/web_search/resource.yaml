@@ -1,0 +1,30 @@
+schema_version: 1
+kind: tool
+name: web_search
+description: Search the web. Returns titles, URLs, and snippets.
+config_namespace: tools.web
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: Search query
+    count:
+      type: integer
+      description: Results (1-10)
+      minimum: 1
+      maximum: 10
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

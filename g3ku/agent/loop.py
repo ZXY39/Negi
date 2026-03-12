@@ -19,12 +19,12 @@ if TYPE_CHECKING:
 
     from g3ku.bus.queue import MessageBus
     from g3ku.config.schema import (
-        CapabilityToolsConfig,
         ChannelsConfig,
         MultiAgentConfig,
         ExecToolConfig,
         FileVaultConfig,
         MemoryToolsConfig,
+        ResourceRuntimeConfig,
     )
     from g3ku.cron.service import CronService
 
@@ -49,7 +49,7 @@ class AgentLoop(AgentRuntimeEngine):
         exec_config: 'ExecToolConfig | None' = None,
         memory_config: 'MemoryToolsConfig | None' = None,
         file_vault_config: 'FileVaultConfig | None' = None,
-        capability_config: 'CapabilityToolsConfig | None' = None,
+        resource_config: 'ResourceRuntimeConfig | None' = None,
         multi_agent_config: 'MultiAgentConfig | None' = None,
         app_config: Any | None = None,
         cron_service: 'CronService | None' = None,
@@ -78,7 +78,7 @@ class AgentLoop(AgentRuntimeEngine):
             exec_config=exec_config,
             memory_config=memory_config,
             file_vault_config=file_vault_config,
-            capability_config=capability_config,
+            resource_config=resource_config,
             multi_agent_config=multi_agent_config,
             app_config=app_config,
             cron_service=cron_service,

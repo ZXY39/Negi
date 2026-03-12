@@ -1,0 +1,58 @@
+schema_version: 1
+kind: tool
+name: memory_search
+description: 'Search long-term memory and return structured results grouped by context
+  type (memory/resource/skill) plus a unified ranked view.
+
+  MUST CALL: when the answer depends on prior user/project facts not fully present
+  in current turn, including remembered preferences, previous decisions, constraints,
+  unresolved action items, or references like ''as discussed before''/''remember''.
+
+  AVOID CALL: for pure single-turn transformations (rewrite/translate/format), general
+  world knowledge, simple greetings, or when current-turn content already contains
+  all required facts.
+
+  CALL LIMIT: normally call at most once per user turn; call again only if tool outputs
+  introduce new entities that require a second targeted lookup.
+
+  QUERY WRITING: include concrete entities and intent (person/project/date/decision),
+  avoid vague queries like ''help me'' or ''that thing''.'
+config_namespace: tools.memory
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    query:
+      type: string
+      description: Concrete lookup query with entities/intent. Avoid vague text.
+    limit:
+      type: integer
+      description: Max number of unified results.
+      minimum: 1
+      maximum: 20
+    context_type:
+      type: string
+      enum:
+      - memory
+      - resource
+      - skill
+      description: 'Optional: restrict search to one context type.'
+    include_l2:
+      type: boolean
+      description: Include L2 preview snippets when available.
+    session:
+      type: string
+      description: Optional session key override, e.g. cli:direct.
+  required:
+  - query
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

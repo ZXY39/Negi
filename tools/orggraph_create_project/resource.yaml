@@ -1,0 +1,32 @@
+schema_version: 1
+kind: tool
+name: orggraph_create_project
+description: Create a new org-graph background project for long-running or multi-step
+  work.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    prompt:
+      type: string
+      description: The project request to execute in the background.
+    preferred_title:
+      type: string
+      description: Optional short project title.
+    output_target:
+      type: string
+      description: Optional output target label.
+  required:
+  - prompt
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

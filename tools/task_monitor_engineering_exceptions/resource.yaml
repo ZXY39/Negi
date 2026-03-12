@@ -1,0 +1,20 @@
+schema_version: 1
+kind: tool
+name: task_monitor_engineering_exceptions
+description: Return task ids that currently have unresolved engineering exceptions.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

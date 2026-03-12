@@ -390,7 +390,7 @@ def _make_agent_loop(
         exec_config=config.tools.exec,
         memory_config=config.tools.memory,
         file_vault_config=config.tools.file_vault,
-        capability_config=config.tools.capabilities,
+        resource_config=config.resources,
         cron_service=cron_service,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
@@ -916,10 +916,10 @@ from g3ku.shells.provider_cli import build_provider_app
 provider_app = build_provider_app(console, _logo())
 app.add_typer(provider_app, name="provider")
 
-from g3ku.shells.capability_cli import build_capability_app
+from g3ku.shells.resource_cli import build_resource_app
 
-capability_app = build_capability_app(console)
-app.add_typer(capability_app, name="capability")
+resource_app = build_resource_app(console)
+app.add_typer(resource_app, name="resource")
 
 if __name__ == "__main__":
     app()

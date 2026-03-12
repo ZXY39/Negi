@@ -3,17 +3,17 @@
 from collections import OrderedDict
 from typing import Any
 
-from g3ku.capabilities.models import SkillDescriptor, ToolDescriptor
 from g3ku.org_graph.governance.action_mapper import DEFAULT_ALLOWED_ROLES, get_default_tool_governance
 from g3ku.org_graph.governance.models import SkillResourceRecord, ToolActionRecord, ToolFamilyRecord
 from g3ku.org_graph.public_roles import to_public_allowed_roles
+from g3ku.resources.models import SkillResourceDescriptor, ToolResourceDescriptor
 
 
 ALL_ROLES = list(DEFAULT_ALLOWED_ROLES)
 
 
 def build_skill_resources(
-    skill_descriptors: list[SkillDescriptor],
+    skill_descriptors: list[SkillResourceDescriptor],
     *,
     default_risk_level: str,
     exclude_names: set[str] | None = None,
@@ -28,11 +28,11 @@ def build_skill_resources(
         items.append(
             SkillResourceRecord(
                 skill_id=descriptor.name,
-                capability_name=descriptor.capability_name,
+                capability_name=None,
                 display_name=str(descriptor.metadata.get('display_name') or descriptor.name),
                 description=descriptor.description,
-                version=descriptor.capability_version,
-                legacy=bool(descriptor.legacy),
+                version=str(descriptor.generation or ''),
+                legacy=False,
                 enabled=bool(governance.get('enabled_by_default', descriptor.enabled)),
                 available=bool(descriptor.available),
                 allowed_roles=to_public_allowed_roles([str(role) for role in (governance.get('allowed_roles') or ALL_ROLES)]),
@@ -42,7 +42,7 @@ def build_skill_resources(
                 source_path=str(descriptor.root),
                 manifest_path=str(descriptor.manifest_path),
                 skill_doc_path=str(descriptor.main_path),
-                openai_yaml_path=str(descriptor.root / 'agents' / 'openai.yaml') if (descriptor.root / 'agents' / 'openai.yaml').exists() else None,
+                openai_yaml_path=None,
                 metadata={
                     'trigger_keywords': list(descriptor.trigger_keywords),
                     'content': content,
@@ -56,7 +56,7 @@ def build_skill_resources(
     return items
 
 
-def build_tool_families(tool_descriptors: list[ToolDescriptor]) -> list[ToolFamilyRecord]:
+def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[ToolFamilyRecord]:
     grouped: OrderedDict[str, dict[str, Any]] = OrderedDict()
     for descriptor in tool_descriptors:
         governance = _tool_governance(descriptor)
@@ -67,19 +67,19 @@ def build_tool_families(tool_descriptors: list[ToolDescriptor]) -> list[ToolFami
             tool_id,
             {
                 'tool_id': tool_id,
-                'display_name': str(governance.get('display_name') or descriptor.label or tool_id),
+                'display_name': str(governance.get('display_name') or descriptor.name or tool_id),
                 'description': str(governance.get('description') or descriptor.description),
                 'enabled': bool(descriptor.enabled),
                 'available': bool(descriptor.available),
                 'source_path': str(descriptor.root),
                 'actions': OrderedDict(),
-                'metadata': {'capabilities': [descriptor.capability_name], 'warnings': list(descriptor.warnings), 'errors': list(descriptor.errors)},
+                'metadata': {'sources': [descriptor.root.name], 'warnings': list(descriptor.warnings), 'errors': list(descriptor.errors)},
             },
         )
         family['enabled'] = bool(family['enabled']) and bool(descriptor.enabled)
         family['available'] = bool(family['available']) or bool(descriptor.available)
-        if descriptor.capability_name not in family['metadata']['capabilities']:
-            family['metadata']['capabilities'].append(descriptor.capability_name)
+        if descriptor.root.name not in family['metadata']['sources']:
+            family['metadata']['sources'].append(descriptor.root.name)
         for action in list(governance.get('actions') or []):
             action_id = str(action.get('id') or '').strip()
             if not action_id:
@@ -117,12 +117,12 @@ def build_tool_families(tool_descriptors: list[ToolDescriptor]) -> list[ToolFami
     return items
 
 
-def _tool_governance(descriptor: ToolDescriptor) -> dict[str, Any] | None:
+def _tool_governance(descriptor: ToolResourceDescriptor) -> dict[str, Any] | None:
     governance = dict(descriptor.metadata.get('governance') or {})
     if governance.get('family'):
         return {
             'tool_id': str(governance.get('family')),
-            'display_name': str(governance.get('display_name') or descriptor.label or descriptor.name),
+            'display_name': str(governance.get('display_name') or descriptor.name),
             'description': str(governance.get('description') or descriptor.description),
             'actions': list(governance.get('actions') or []),
         }

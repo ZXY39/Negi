@@ -1,41 +1,40 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
 
-from g3ku.capabilities.registry import CapabilityRegistry
 from g3ku.org_graph.governance.action_mapper import DEFAULT_ALLOWED_ROLES, DEFAULT_TOOL_FAMILIES
 from g3ku.org_graph.governance.capability_bridge import build_skill_resources, build_tool_families
-from g3ku.org_graph.governance.legacy_skill_adapter import discover_local_skills
 from g3ku.org_graph.governance.models import SkillResourceRecord, ToolActionRecord, ToolFamilyRecord
 from g3ku.org_graph.protocol import now_iso
+from g3ku.resources import ResourceManager, get_shared_resource_manager
 
 
 class OrgGraphResourceRegistry:
-    def __init__(self, config, store):
+    def __init__(self, config, store, resource_manager: ResourceManager | None = None):
         self._config = config
         self._store = store
-        self._capability_registry = CapabilityRegistry(config.raw.workspace_path)
-        self._local_skills_dir = Path(__file__).resolve().parents[2] / 'skills'
+        self._resource_manager = resource_manager or get_shared_resource_manager(
+            config.raw.workspace_path,
+            app_config=config.raw,
+        )
+        self._workspace_root = Path(config.raw.workspace_path)
+
+    def bind_resource_manager(self, resource_manager: ResourceManager) -> None:
+        self._resource_manager = resource_manager
 
     def refresh(self) -> tuple[list[SkillResourceRecord], list[ToolFamilyRecord]]:
-        self._capability_registry.refresh()
+        self._resource_manager.reload_now(trigger="org_graph")
         existing_skills = {item.skill_id: item for item in self._store.list_skill_resources()}
         existing_tools = {item.tool_id: item for item in self._store.list_tool_families()}
-        local_skills = discover_local_skills(
-            self._local_skills_dir,
-            default_risk_level=self._config.default_risk_level_for_legacy_skill,
+        discovered_skills = build_skill_resources(
+            self._resource_manager.list_skills(),
+            default_risk_level='medium',
+            exclude_names=set(),
         )
-        local_names = {item.skill_id for item in local_skills}
-        capability_skills = build_skill_resources(
-            self._capability_registry.list_skills(),
-            default_risk_level=self._config.default_risk_level_for_legacy_skill,
-            exclude_names=local_names,
-        )
-        merged_skills = [self._merge_skill(existing_skills.get(item.skill_id), item) for item in [*local_skills, *capability_skills]]
+        merged_skills = [self._merge_skill(existing_skills.get(item.skill_id), item) for item in discovered_skills]
         merged_tools = self._merge_tool_families(
             existing_tools=existing_tools,
-            discovered=build_tool_families(self._capability_registry.list_tools()),
+            discovered=build_tool_families(self._resource_manager.list_tools()),
         )
         refreshed_at = now_iso()
         self._store.replace_skill_resources(merged_skills, updated_at=refreshed_at)
@@ -91,7 +90,6 @@ class OrgGraphResourceRegistry:
             if existing is None:
                 merged.append(record)
                 continue
-            action_map = {action.action_id: action for action in record.actions}
             merged_actions: list[ToolActionRecord] = []
             for action in record.actions:
                 old = next((candidate for candidate in existing.actions if candidate.action_id == action.action_id), None)
@@ -113,7 +111,7 @@ class OrgGraphResourceRegistry:
                     description=str(governance.get('description') or tool_id),
                     enabled=True,
                     available=True,
-                    source_path=str(self._local_skills_dir.parent),
+                    source_path=str(self._workspace_root),
                     actions=[],
                     metadata={'manual_injected': True},
                 )
@@ -138,4 +136,3 @@ class OrgGraphResourceRegistry:
                         executors.append(tool_name)
                     action_map[action_id] = existing.model_copy(update={'executor_names': executors})
             families[tool_id] = family.model_copy(update={'actions': list(action_map.values())})
-

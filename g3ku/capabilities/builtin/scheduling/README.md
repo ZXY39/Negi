@@ -1,4 +1,0 @@
-﻿# Scheduling
-
-Builtin capability pack.
-

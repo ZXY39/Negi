@@ -1,0 +1,28 @@
+schema_version: 1
+kind: tool
+name: file_vault_cleanup
+description: Run file vault cleanup. Use dry_run=true first to preview deletions.
+config_namespace: tools.file_vault
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    dry_run:
+      type: boolean
+      description: Preview only without deleting files.
+    target_pct:
+      type: integer
+      minimum: 1
+      maximum: 95
+      description: Optional target usage percent after cleanup.
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

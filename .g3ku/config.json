@@ -211,18 +211,6 @@
       "cleanupTargetPct": 55,
       "recentProtectHours": 24
     },
-    "capabilities": {
-      "enabled": true,
-      "adminEnabled": false,
-      "workspaceDir": "capabilities",
-      "statePath": ".g3ku/capabilities.lock.json",
-      "stagingDir": ".g3ku/capability-staging",
-      "backupsDir": ".g3ku/capability-backups",
-      "allowLocal": true,
-      "allowGit": true,
-      "allowedGitHosts": [],
-      "indexPaths": []
-    },
     "pictureWashing": {
       "baseUrl": "",
       "authorization": "",
@@ -258,10 +246,26 @@
     "eventReplayLimit": 1000,
     "governance": {
       "enabled": true,
-      "governanceStorePath": ".g3ku/org-graph/governance.sqlite3",
-      "autoReloadOnWrite": true,
-      "defaultRiskLevelForLegacySkill": "medium",
-      "resourceReloadCacheTtlS": 5
+      "governanceStorePath": ".g3ku/org-graph/governance.sqlite3"
     }
+  },
+  "resources": {
+    "enabled": true,
+    "skillsDir": "skills",
+    "toolsDir": "tools",
+    "manifestName": "resource.yaml",
+    "reload": {
+      "enabled": true,
+      "pollIntervalMs": 1000,
+      "debounceMs": 400,
+      "lazyReloadOnAccess": true,
+      "keepLastGoodVersion": true
+    },
+    "locks": {
+      "lockDir": ".g3ku/resource-locks",
+      "logicalDeleteGuard": true,
+      "windowsFsLock": true
+    },
+    "statePath": ".g3ku/resources.state.json"
   }
 }

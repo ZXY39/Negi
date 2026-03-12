@@ -431,5 +431,24 @@
     "baseurl": "https://cc.sub.258000.sbs/v1/responses",
     "apikey": "sk-1997aeced7cf12e6b3ee91bcdd2babe3caebbec64808feb2906ce81cd7b98bc5",
     "model": "gpt-5.3-codex"
+  },
+  "resources": {
+    "enabled": true,
+    "skillsDir": "skills",
+    "toolsDir": "tools",
+    "manifestName": "resource.yaml",
+    "reload": {
+      "enabled": true,
+      "pollIntervalMs": 1000,
+      "debounceMs": 400,
+      "lazyReloadOnAccess": true,
+      "keepLastGoodVersion": true
+    },
+    "locks": {
+      "lockDir": ".g3ku/resource-locks",
+      "logicalDeleteGuard": true,
+      "windowsFsLock": true
+    },
+    "statePath": ".g3ku/resources.state.json"
   }
 }

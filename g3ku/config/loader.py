@@ -344,18 +344,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "cleanupTargetPct": cfg.tools.file_vault.cleanup_target_pct,
                 "recentProtectHours": cfg.tools.file_vault.recent_protect_hours,
             },
-            "capabilities": {
-                "enabled": cfg.tools.capabilities.enabled,
-                "adminEnabled": cfg.tools.capabilities.admin_enabled,
-                "workspaceDir": cfg.tools.capabilities.workspace_dir,
-                "statePath": cfg.tools.capabilities.state_path,
-                "stagingDir": cfg.tools.capabilities.staging_dir,
-                "backupsDir": cfg.tools.capabilities.backups_dir,
-                "allowLocal": cfg.tools.capabilities.allow_local,
-                "allowGit": cfg.tools.capabilities.allow_git,
-                "allowedGitHosts": cfg.tools.capabilities.allowed_git_hosts,
-                "indexPaths": cfg.tools.capabilities.index_paths,
-            },
             "pictureWashing": {
                 "baseUrl": cfg.tools.picture_washing.base_url,
                 "authorization": cfg.tools.picture_washing.authorization,
@@ -373,6 +361,25 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 for name, server in cfg.tools.mcp_servers.items()
             },
             "restrictToWorkspace": cfg.tools.restrict_to_workspace,
+        },
+        "resources": {
+            "enabled": cfg.resources.enabled,
+            "skillsDir": cfg.resources.skills_dir,
+            "toolsDir": cfg.resources.tools_dir,
+            "manifestName": cfg.resources.manifest_name,
+            "reload": {
+                "enabled": cfg.resources.reload.enabled,
+                "pollIntervalMs": cfg.resources.reload.poll_interval_ms,
+                "debounceMs": cfg.resources.reload.debounce_ms,
+                "lazyReloadOnAccess": cfg.resources.reload.lazy_reload_on_access,
+                "keepLastGoodVersion": cfg.resources.reload.keep_last_good_version,
+            },
+            "locks": {
+                "lockDir": cfg.resources.locks.lock_dir,
+                "logicalDeleteGuard": cfg.resources.locks.logical_delete_guard,
+                "windowsFsLock": cfg.resources.locks.windows_fs_lock,
+            },
+            "statePath": cfg.resources.state_path,
         },
         "orgGraph": {
             "enabled": cfg.org_graph.enabled,
@@ -392,9 +399,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "governance": {
                 "enabled": cfg.org_graph.governance.enabled,
                 "governanceStorePath": cfg.org_graph.governance.governance_store_path,
-                "autoReloadOnWrite": cfg.org_graph.governance.auto_reload_on_write,
-                "defaultRiskLevelForLegacySkill": cfg.org_graph.governance.default_risk_level_for_legacy_skill,
-                "resourceReloadCacheTtlS": cfg.org_graph.governance.resource_reload_cache_ttl_s,
             },
         },
     }

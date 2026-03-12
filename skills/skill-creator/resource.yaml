@@ -1,0 +1,23 @@
+schema_version: 1
+kind: skill
+name: skill-creator
+description: Create or update AgentSkills
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools:
+  - read_file
+  - write_file
+  - edit_file
+  - list_dir
+  - exec
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+  references: references
+  scripts: scripts
+exposure:
+  agent: true
+  org_graph: true

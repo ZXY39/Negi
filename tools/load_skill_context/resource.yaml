@@ -1,0 +1,26 @@
+schema_version: 1
+kind: tool
+name: load_skill_context
+description: Load the detailed body of a currently visible skill so the CEO can use
+  it.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    skill_id:
+      type: string
+      description: The skill id to load.
+  required:
+  - skill_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

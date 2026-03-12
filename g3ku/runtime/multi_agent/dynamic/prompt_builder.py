@@ -53,17 +53,16 @@ class DynamicPromptBuilder:
         return fallback
 
     def _load_skill_sections(self, names: list[str]) -> str:
-        registry = getattr(self._loop, 'capability_registry', None)
-        loader = getattr(self._loop, 'capability_loader', None)
-        if registry is None or loader is None:
+        manager = getattr(self._loop, 'resource_manager', None)
+        if manager is None:
             return ''
         blocks: list[str] = []
         for name in names:
-            descriptor = registry.resolve_skill(name)
+            descriptor = manager.get_skill(name)
             if descriptor is None:
                 continue
             try:
-                body = loader.load_skill_body(descriptor).strip()
+                body = manager.load_skill_body(name).strip()
             except Exception:
                 continue
             if body:
@@ -71,15 +70,20 @@ class DynamicPromptBuilder:
         return '\n\n'.join(block for block in blocks if block)
 
     def _load_reference_sections(self, names: list[str]) -> str:
-        registry = getattr(self._loop, 'capability_registry', None)
-        if registry is None:
+        manager = getattr(self._loop, 'resource_manager', None)
+        if manager is None:
             return ''
         blocks: list[str] = []
         for name in names:
-            descriptor = registry.resolve_skill(name)
+            descriptor = manager.get_skill(name)
             if descriptor is None:
                 continue
-            for path in descriptor.reference_paths[:3]:
+            reference_root = getattr(descriptor, 'references_root', None)
+            if reference_root is None or not reference_root.exists():
+                continue
+            for path in sorted(reference_root.rglob('*'))[:3]:
+                if path.is_dir():
+                    continue
                 try:
                     text = path.read_text(encoding='utf-8').strip()
                 except Exception:

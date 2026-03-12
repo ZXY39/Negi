@@ -552,20 +552,28 @@ class MCPServerConfig(Base):
     tool_timeout: int = 30  # Seconds before a tool call is cancelled
 
 
-
-class CapabilityToolsConfig(Base):
-    """Capability pack platform configuration."""
-
+class ResourceReloadConfig(Base):
     enabled: bool = True
-    admin_enabled: bool = False
-    workspace_dir: str = "capabilities"
-    state_path: str = ".g3ku/capabilities.lock.json"
-    staging_dir: str = ".g3ku/capability-staging"
-    backups_dir: str = ".g3ku/capability-backups"
-    allow_local: bool = True
-    allow_git: bool = True
-    allowed_git_hosts: list[str] = Field(default_factory=list)
-    index_paths: list[str] = Field(default_factory=list)
+    poll_interval_ms: int = 1000
+    debounce_ms: int = 400
+    lazy_reload_on_access: bool = True
+    keep_last_good_version: bool = True
+
+
+class ResourceLocksConfig(Base):
+    lock_dir: str = ".g3ku/resource-locks"
+    logical_delete_guard: bool = True
+    windows_fs_lock: bool = True
+
+
+class ResourceRuntimeConfig(Base):
+    enabled: bool = True
+    skills_dir: str = "skills"
+    tools_dir: str = "tools"
+    manifest_name: str = "resource.yaml"
+    reload: ResourceReloadConfig = Field(default_factory=ResourceReloadConfig)
+    locks: ResourceLocksConfig = Field(default_factory=ResourceLocksConfig)
+    state_path: str = ".g3ku/resources.state.json"
 
 class ToolsConfig(Base):
     """Tools configuration."""
@@ -574,7 +582,6 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     memory: MemoryToolsConfig = Field(default_factory=MemoryToolsConfig)
     file_vault: FileVaultConfig = Field(default_factory=FileVaultConfig)
-    capabilities: CapabilityToolsConfig = Field(default_factory=CapabilityToolsConfig)
     picture_washing: PictureWashingToolConfig = Field(default_factory=PictureWashingToolConfig)
     agent_browser: AgentBrowserToolConfig = Field(default_factory=AgentBrowserToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
@@ -588,9 +595,6 @@ class OrgGraphGovernanceConfig(Base):
 
     enabled: bool = True
     governance_store_path: str = ".g3ku/org-graph/governance.sqlite3"
-    auto_reload_on_write: bool = True
-    default_risk_level_for_legacy_skill: str = "medium"
-    resource_reload_cache_ttl_s: int = 5
 
 
 class OrgGraphConfig(Base):
@@ -621,6 +625,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
     org_graph: OrgGraphConfig = Field(default_factory=OrgGraphConfig)
 
     @property

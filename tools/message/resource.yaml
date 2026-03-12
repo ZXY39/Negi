@@ -1,0 +1,36 @@
+schema_version: 1
+kind: tool
+name: message
+description: Send a message to the user. Use this when you want to communicate something.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    content:
+      type: string
+      description: The message content to send
+    channel:
+      type: string
+      description: 'Optional: target channel (telegram, discord, etc.)'
+    chat_id:
+      type: string
+      description: 'Optional: target chat/user ID'
+    media:
+      type: array
+      items:
+        type: string
+      description: 'Optional: list of file paths to attach (images, audio, documents)'
+  required:
+  - content
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

@@ -98,12 +98,8 @@ include = [
     "g3ku/web/frontend/**/*.css",
     "g3ku/web/frontend/**/*.js",
     "g3ku/templates/**/*.md",
-    "g3ku/skills/**/*.md",
-    "g3ku/skills/**/*.sh",
-    "g3ku/capabilities/**/*.py",
-    "g3ku/capabilities/**/*.yaml",
-    "g3ku/capabilities/**/*.json",
-    "g3ku/capabilities/**/*.md",
+    "skills/**/*",
+    "tools/**/*",
 ]
 
 [tool.hatch.build.targets.sdist]

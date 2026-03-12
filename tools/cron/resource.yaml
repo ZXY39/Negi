@@ -1,0 +1,47 @@
+schema_version: 1
+kind: tool
+name: cron
+description: 'Schedule reminders and recurring tasks. Actions: add, list, remove.'
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+      - add
+      - list
+      - remove
+      description: Action to perform
+    message:
+      type: string
+      description: Reminder message (for add)
+    every_seconds:
+      type: integer
+      description: Interval in seconds (for recurring tasks)
+    cron_expr:
+      type: string
+      description: Cron expression like '0 9 * * *' (for scheduled tasks)
+    tz:
+      type: string
+      description: IANA timezone for cron expressions (e.g. 'America/Vancouver')
+    at:
+      type: string
+      description: ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')
+    job_id:
+      type: string
+      description: Job ID (for remove)
+  required:
+  - action
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

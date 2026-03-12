@@ -28,9 +28,6 @@ class ResolvedOrgGraphConfig:
     project_notice_retention: int
     event_replay_limit: int
     governance_enabled: bool
-    auto_reload_on_write: bool
-    default_risk_level_for_legacy_skill: str
-    resource_reload_cache_ttl_s: int
 
 
 
@@ -82,8 +79,5 @@ def resolve_org_graph_config(config: Config | None = None) -> ResolvedOrgGraphCo
         project_notice_retention=org.project_notice_retention,
         event_replay_limit=org.event_replay_limit,
         governance_enabled=org.governance.enabled,
-        auto_reload_on_write=org.governance.auto_reload_on_write,
-        default_risk_level_for_legacy_skill=org.governance.default_risk_level_for_legacy_skill,
-        resource_reload_cache_ttl_s=org.governance.resource_reload_cache_ttl_s,
     )
 

@@ -1,0 +1,25 @@
+schema_version: 1
+kind: skill
+name: picture-washing
+description: Progressive competitor picture-washing workflow for e-commerce image
+  generation
+trigger:
+  keywords:
+  - 洗图
+  - 竞品图
+  - 商品图生成
+  - picture washing
+  - 亚马逊图片生成
+  always: false
+requires:
+  tools:
+  - picture_washing
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+  references: references
+  scripts: scripts
+exposure:
+  agent: true
+  org_graph: true

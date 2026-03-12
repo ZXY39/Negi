@@ -49,15 +49,6 @@ class ContextBuilder:
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
 
-        capability_summary = self.skills.build_capability_summary()
-        if capability_summary:
-            parts.append(
-                "# Capability Inventory\n\n"
-                "Dynamic runtime summary of capability packs, exported tools/skills, "
-                "and dependency availability.\n\n"
-                f"{capability_summary}"
-            )
-
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
             parts.append(
@@ -89,6 +80,7 @@ class ContextBuilder:
             f"- Long-term memory: {workspace_path}/memory/MEMORY.md\n"
             f"- History log: {workspace_path}/memory/HISTORY.md\n"
             f"- Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md\n\n"
+            f"- Custom tools: {workspace_path}/tools/{{tool-name}}/resource.yaml\n\n"
             "## Operating Rules\n"
             "- Explain intent before using tools, but do not claim results before seeing them.\n"
             "- Read files before editing them. Do not assume files or directories exist.\n"

@@ -1,0 +1,26 @@
+schema_version: 1
+kind: tool
+name: task_monitor_progress
+description: Inspect one task in detail, including status, tree text, node output,
+  logs, and latest checker output.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    task_id:
+      type: string
+      description: The target project/task id.
+  required:
+  - task_id
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

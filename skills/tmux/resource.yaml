@@ -1,0 +1,20 @@
+schema_version: 1
+kind: skill
+name: tmux
+description: Remote-control tmux sessions for interactive CLIs
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools:
+  - exec
+  bins:
+  - tmux
+  env: []
+content:
+  main: SKILL.md
+  references: references
+  scripts: scripts
+exposure:
+  agent: true
+  org_graph: true

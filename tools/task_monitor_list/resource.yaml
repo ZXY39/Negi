@@ -1,0 +1,30 @@
+schema_version: 1
+kind: tool
+name: task_monitor_list
+description: List all, in-progress, failed, or unread tasks with short descriptions.
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    scope:
+      type: integer
+      enum:
+      - 1
+      - 2
+      - 3
+      - 4
+      description: 1=all, 2=in_progress, 3=failed, 4=unread_progress
+  required:
+  - scope
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

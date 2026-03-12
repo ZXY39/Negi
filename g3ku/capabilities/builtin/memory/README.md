@@ -1,4 +1,0 @@
-﻿# Memory
-
-Builtin capability pack.
-

@@ -6,37 +6,7 @@ from loguru import logger
 
 from g3ku.agent.file_vault import FileVault
 from g3ku.agent.session_commit import SessionCommitService
-from g3ku.agent.tools.agent_browser import AgentBrowserTool
-from g3ku.agent.tools.cron import CronTool
-from g3ku.agent.tools.file_vault import (
-    FileVaultCleanupTool,
-    FileVaultLookupTool,
-    FileVaultReadTool,
-    FileVaultSetPolicyTool,
-    FileVaultStatsTool,
-)
-from g3ku.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
-from g3ku.agent.tools.memory_search import MemorySearchTool
-from g3ku.agent.tools.message import MessageTool
-from g3ku.agent.tools.model_config import ModelConfigTool
-from g3ku.agent.tools.orggraph import (
-    LoadSkillContextTool,
-    OrgGraphControlProjectTool,
-    OrgGraphCreateProjectTool,
-    TaskMonitorEngineeringExceptionsTool,
-    TaskMonitorListTool,
-    TaskMonitorProgressTool,
-    TaskMonitorSummaryTool,
-)
-from g3ku.agent.tools.picture_washing import PictureWashingTool
-from g3ku.agent.tools.shell import ExecTool
-from g3ku.agent.tools.web import WebFetchTool, WebSearchTool
-from g3ku.capabilities.index_registry import CapabilityIndexRegistry
-from g3ku.capabilities.installer import CapabilityInstaller
-from g3ku.capabilities.loader import CapabilityLoader
-from g3ku.capabilities.registry import CapabilityRegistry
-from g3ku.capabilities.source_registry import CapabilitySourcePolicy, CapabilitySourceRegistry
-from g3ku.capabilities.validator import CapabilityValidator
+from g3ku.resources import get_shared_resource_manager
 from g3ku.runtime.multi_agent.dynamic import (
     BackgroundPool,
     BackgroundTaskStore,
@@ -74,51 +44,36 @@ class RuntimeBootstrapBridge:
         else:
             logger.info("Memory self-check: tools.memory.mode='rag'.")
 
-    def init_capability_runtime(self) -> None:
-        cfg = self._loop.capability_config
+    def init_resource_runtime(self) -> None:
+        cfg = getattr(self._loop, "resource_config", None)
         if cfg is None or not bool(getattr(cfg, "enabled", True)):
             return
         try:
-            state_path = resolve_path_in_workspace(getattr(cfg, "state_path", ".g3ku/capabilities.lock.json"), self._loop.workspace)
-            workspace_dir = resolve_path_in_workspace(getattr(cfg, "workspace_dir", "capabilities"), self._loop.workspace)
-            self._loop.capability_registry = CapabilityRegistry(
+            self.init_org_graph_runtime()
+            manager = get_shared_resource_manager(
                 self._loop.workspace,
-                workspace_dir=workspace_dir,
-                state_path=state_path,
-                admin_enabled=bool(getattr(cfg, "admin_enabled", False)),
+                app_config=getattr(self._loop, "app_config", None),
+                service_getter=self._resource_services,
+                on_change=self._on_resource_snapshot,
             )
-            self._loop.capability_source_registry = CapabilitySourceRegistry(
-                CapabilitySourcePolicy(
-                    allow_local=bool(getattr(cfg, "allow_local", True)),
-                    allow_git=bool(getattr(cfg, "allow_git", True)),
-                    allowed_git_hosts=[str(item) for item in (getattr(cfg, "allowed_git_hosts", []) or [])],
-                )
-            )
-            index_paths = []
-            for raw_path in (getattr(cfg, "index_paths", []) or []):
-                candidate = Path(raw_path).expanduser()
-                index_paths.append(candidate if candidate.is_absolute() else resolve_path_in_workspace(candidate, self._loop.workspace))
-            self._loop.capability_index_registry = CapabilityIndexRegistry(self._loop.workspace, index_paths=index_paths)
-            self._loop.capability_loader = CapabilityLoader(self._loop.capability_registry)
-            self._loop.capability_installer = CapabilityInstaller(
-                self._loop.capability_registry,
-                source_registry=self._loop.capability_source_registry,
-                index_registry=self._loop.capability_index_registry,
-            )
-            self._loop.capability_validator = CapabilityValidator(self._loop.capability_registry)
+            self._loop.resource_manager = manager
+            manager.start()
+            self._on_resource_snapshot(manager.reload_now(trigger="bootstrap"))
+            service = getattr(self._loop, "org_graph_service", None)
+            if service is not None and hasattr(service, "bind_resource_manager"):
+                service.bind_resource_manager(manager)
+                try:
+                    service.resource_registry.refresh()
+                except Exception as refresh_exc:
+                    logger.debug("org-graph resource refresh after bind skipped: {}", refresh_exc)
             logger.info(
-                "Capability registry enabled (capabilities={}, tools={}, skills={}, agents={})",
-                len(self._loop.capability_registry.list_capabilities()),
-                len(self._loop.capability_registry.list_tools()),
-                len(self._loop.capability_registry.list_skills()),
-                len(self._loop.capability_registry.list_agents()),
+                "Resource runtime initialized (skills_dir={}, tools_dir={})",
+                cfg.skills_dir,
+                cfg.tools_dir,
             )
         except Exception as exc:
-            self._loop.capability_registry = None
-            self._loop.capability_loader = None
-            self._loop.capability_installer = None
-            self._loop.capability_validator = None
-            logger.warning("Capability runtime init failed, falling back to legacy registration: {}", exc)
+            self._loop.resource_manager = None
+            logger.warning("Resource runtime init failed: {}", exc)
 
     def init_multi_agent_runtime(self) -> None:
         cfg = getattr(self._loop, "multi_agent_config", None)
@@ -176,6 +131,9 @@ class RuntimeBootstrapBridge:
     def init_org_graph_runtime(self) -> None:
         current = getattr(self._loop, 'org_graph_service', None)
         if current is not None:
+            resource_manager = getattr(self._loop, 'resource_manager', None)
+            if resource_manager is not None and hasattr(current, 'bind_resource_manager'):
+                current.bind_resource_manager(resource_manager)
             self._loop.org_graph_monitor_service = getattr(current, 'monitor_service', None)
             return
         config = getattr(self._loop, 'app_config', None)
@@ -193,89 +151,22 @@ class RuntimeBootstrapBridge:
             logger.warning('org-graph runtime init failed: {}', exc)
 
     def register_default_tools(self) -> None:
-        self.init_org_graph_runtime()
-        if self._loop.capability_loader is not None:
-            try:
-                loaded = self._loop.capability_loader.build_tools(loop=self._loop)
-                loaded = [tool for tool in loaded if tool.name not in {"spawn", "enter_deep_mode", "deep_mode_status", "deep_mode_pause", "deep_mode_resume", "deep_mode_cancel"}]
-                for tool in loaded:
-                    self._loop.tools.register(tool)
-                self.register_frontdoor_tools()
-                logger.info("Registered {} tools via capability registry", len(loaded))
-                return
-            except Exception as exc:
-                logger.warning("Capability-based tool registration failed, using legacy wiring: {}", exc)
-        self.register_legacy_tools()
-        self.register_frontdoor_tools()
+        self.init_resource_runtime()
 
-    def register_frontdoor_tools(self) -> None:
-        service = getattr(self._loop, 'org_graph_service', None)
-        if service is None:
-            return
+    def _resource_services(self) -> dict[str, object]:
+        return {
+            "loop": self._loop,
+            "app_config": getattr(self._loop, "app_config", None),
+            "bus": getattr(self._loop, "bus", None),
+            "cron_service": getattr(self._loop, "cron_service", None),
+            "file_vault": getattr(self._loop, "file_vault", None),
+            "memory_manager": getattr(self._loop, "memory_manager", None),
+            "org_graph_service": getattr(self._loop, "org_graph_service", None),
+            "temp_dir": getattr(self._loop, "temp_dir", None),
+        }
 
-        def _service_getter():
-            return getattr(self._loop, 'org_graph_service', service)
-
-        for tool in (
-            OrgGraphCreateProjectTool(_service_getter),
-            OrgGraphControlProjectTool(_service_getter),
-            TaskMonitorSummaryTool(_service_getter),
-            TaskMonitorListTool(_service_getter),
-            TaskMonitorProgressTool(_service_getter),
-            TaskMonitorEngineeringExceptionsTool(_service_getter),
-            LoadSkillContextTool(_service_getter),
-        ):
-            self._loop.tools.register(tool)
-
-    def register_legacy_tools(self) -> None:
-        allowed_dir = self._loop.workspace if self._loop.restrict_to_workspace else None
-        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
-            self._loop.tools.register(cls(workspace=self._loop.workspace, allowed_dir=allowed_dir))
-        self._loop.tools.register(
-            ExecTool(
-                working_dir=str(self._loop.workspace),
-                timeout=self._loop.exec_config.timeout,
-                restrict_to_workspace=self._loop.restrict_to_workspace,
-                path_append=self._loop.exec_config.path_append,
-            )
-        )
-        self._loop.tools.register(WebSearchTool(api_key=self._loop.brave_api_key, proxy=self._loop.web_proxy))
-        self._loop.tools.register(WebFetchTool(proxy=self._loop.web_proxy))
-        self._loop.tools.register(
-            PictureWashingTool(
-                defaults=self._loop.picture_washing_config,
-                agent_browser_defaults=self._loop.agent_browser_config,
-            )
-        )
-        try:
-            self._loop.tools.register(AgentBrowserTool(defaults=self._loop.agent_browser_config))
-        except Exception as exc:
-            logger.debug("AgentBrowserTool unavailable, skipping registration: {}", exc)
-        self._loop.tools.register(MessageTool(send_callback=self._loop.bus.publish_outbound))
-        self._loop.tools.register(ModelConfigTool())
-        if self._loop.cron_service:
-            self._loop.tools.register(CronTool(self._loop.cron_service))
-
-        if self._loop.memory_manager and self._loop._store_enabled:
-            try:
-                self._loop.tools.register(
-                    MemorySearchTool(
-                        manager=self._loop.memory_manager,
-                        default_limit=self._loop.memory_config.retrieval.context_top_k if self._loop.memory_config else 8,
-                    )
-                )
-            except Exception as exc:
-                logger.warning("memory_search tool disabled: {}", exc)
-
-        if self._loop.file_vault is not None:
-            try:
-                self._loop.tools.register(FileVaultLookupTool(vault=self._loop.file_vault))
-                self._loop.tools.register(FileVaultReadTool(vault=self._loop.file_vault))
-                self._loop.tools.register(FileVaultStatsTool(vault=self._loop.file_vault))
-                self._loop.tools.register(FileVaultSetPolicyTool(vault=self._loop.file_vault))
-                self._loop.tools.register(FileVaultCleanupTool(vault=self._loop.file_vault))
-            except Exception as exc:
-                logger.warning("file vault tools disabled: {}", exc)
+    def _on_resource_snapshot(self, snapshot) -> None:
+        self._loop.tools.replace_dynamic_tools(snapshot.tool_instances)
 
 
     def init_file_vault(self) -> None:

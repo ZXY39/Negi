@@ -396,7 +396,12 @@ class ToolExecutionBridge:
             }
         )
         try:
-            result = await self._loop.tools.execute(tool_name, tool_args)
+            resource_manager = getattr(self._loop, 'resource_manager', None)
+            if resource_manager is not None and resource_manager.get_tool_descriptor(tool_name) is not None:
+                with resource_manager.acquire_tool(tool_name):
+                    result = await self._loop.tools.execute(tool_name, tool_args)
+            else:
+                result = await self._loop.tools.execute(tool_name, tool_args)
             result = await self.apply_after_middlewares(
                 name=tool_name,
                 arguments=tool_args,

@@ -4,11 +4,14 @@ from functools import lru_cache
 
 from g3ku.org_graph.config import resolve_org_graph_config
 from g3ku.org_graph.service.project_service import ProjectService
+from g3ku.resources import get_shared_resource_manager
 
 
 @lru_cache(maxsize=1)
 def _fallback_service() -> ProjectService:
-    return ProjectService(resolve_org_graph_config())
+    config = resolve_org_graph_config()
+    manager = get_shared_resource_manager(config.raw.workspace_path, app_config=config.raw)
+    return ProjectService(config, resource_manager=manager)
 
 
 def get_org_graph_service() -> ProjectService:

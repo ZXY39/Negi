@@ -5,11 +5,7 @@ from collections import deque
 import os
 from typing import Any
 
-from g3ku.agent.tools.agent_browser import AgentBrowserTool
 from g3ku.agent.tools.base import Tool
-from g3ku.agent.tools.filesystem import DeleteFileTool, EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
-from g3ku.agent.tools.memory_search import MemorySearchTool
-from g3ku.agent.tools.web import WebFetchTool, WebSearchTool
 from g3ku.org_graph.errors import EngineeringFailureError
 from g3ku.org_graph.execution.propose_patch_tool import ProposeFilePatchTool
 from g3ku.org_graph.governance.capability_filter import list_effective_tool_names
@@ -45,38 +41,32 @@ class OrgGraphToolRuntime:
         self._service = service
 
     def supported_tool_names(self) -> list[str]:
-        names = ['list_dir', 'propose_file_patch', 'read_file', 'web_fetch', 'web_search', 'write_file', 'edit_file', 'delete_file']
-        if bool(getattr(self._service.config.raw.tools.agent_browser, 'enabled', False)):
-            names.append('agent_browser')
-        if self._service.memory_manager is not None:
-            names.append('memory_search')
+        names = ['propose_file_patch']
+        resource_manager = getattr(self._service, 'resource_manager', None)
+        if resource_manager is not None:
+            names.extend(
+                descriptor.name
+                for descriptor in resource_manager.list_tools()
+                if bool(getattr(descriptor, 'available', False))
+            )
         return sorted(set(names))
 
     def _build_tools(self, *, effective_tools: list[str], allow_mutation: bool, project_id: str, unit_id: str | None) -> dict[str, Tool]:
-        workspace = self._service.config.raw.workspace_path
-        allowed_dir = workspace if self._service.config.raw.tools.restrict_to_workspace else None
-        web_cfg = self._service.config.raw.tools.web
         tools: dict[str, Tool] = {}
-        if 'web_search' in effective_tools:
-            tools['web_search'] = WebSearchTool(api_key=web_cfg.search.api_key or None, max_results=web_cfg.search.max_results, proxy=web_cfg.proxy or None)
-        if 'web_fetch' in effective_tools:
-            tools['web_fetch'] = WebFetchTool(proxy=web_cfg.proxy or None)
-        if 'agent_browser' in effective_tools and bool(getattr(self._service.config.raw.tools.agent_browser, 'enabled', False)):
-            tools['agent_browser'] = AgentBrowserTool(defaults=self._service.config.raw.tools.agent_browser.model_dump())
-        if 'read_file' in effective_tools:
-            tools['read_file'] = ReadFileTool(workspace=workspace, allowed_dir=allowed_dir)
-        if 'list_dir' in effective_tools:
-            tools['list_dir'] = ListDirTool(workspace=workspace, allowed_dir=allowed_dir)
-        if 'memory_search' in effective_tools and self._service.memory_manager is not None:
-            tools['memory_search'] = MemorySearchTool(manager=self._service.memory_manager, default_limit=self._service.config.raw.tools.memory.retrieval.context_top_k)
+        resource_manager = getattr(self._service, 'resource_manager', None)
+        if resource_manager is not None:
+            for tool_name in effective_tools:
+                if not allow_mutation and tool_name in {'write_file', 'edit_file', 'delete_file'}:
+                    continue
+                if tool_name == 'propose_file_patch':
+                    continue
+                tool = resource_manager.get_tool(tool_name)
+                if tool is not None:
+                    tools[tool_name] = tool
         if 'propose_file_patch' in effective_tools:
+            workspace = self._service.config.raw.workspace_path
+            allowed_dir = workspace if self._service.config.raw.tools.restrict_to_workspace else None
             tools['propose_file_patch'] = ProposeFilePatchTool(artifact_store=self._service.artifact_store, project_id=project_id, unit_id=unit_id, workspace=workspace, allowed_dir=allowed_dir)
-        if allow_mutation and 'write_file' in effective_tools:
-            tools['write_file'] = WriteFileTool(workspace=workspace, allowed_dir=allowed_dir)
-        if allow_mutation and 'edit_file' in effective_tools:
-            tools['edit_file'] = EditFileTool(workspace=workspace, allowed_dir=allowed_dir)
-        if allow_mutation and 'delete_file' in effective_tools:
-            tools['delete_file'] = DeleteFileTool(workspace=workspace, allowed_dir=allowed_dir)
         return tools
 
     async def _run_tool_loop(
