@@ -141,22 +141,9 @@ class ModelConfigTool(Tool):
         if loop is None:
             return
         try:
-            from g3ku.config.loader import load_config
-            from g3ku.providers.chatmodels import build_chat_model
+            from g3ku.shells.web import refresh_web_agent_runtime
 
-            config = load_config()
-            loop.app_config = config
-            loop.model_client = build_chat_model(config, scope="ceo")
-            provider_name, model_id = config.get_scope_model_target("ceo")
-            loop.provider_name = provider_name
-            loop.model = model_id
-            loop.temperature = config.agents.defaults.temperature
-            loop.max_tokens = config.agents.defaults.max_tokens
-            loop.reasoning_effort = config.agents.defaults.reasoning_effort
-            if hasattr(loop, "_ceo_model_chain_cache_key"):
-                loop._ceo_model_chain_cache_key = None
-            if hasattr(loop, "_ceo_model_client_cache"):
-                loop._ceo_model_client_cache = None
+            await refresh_web_agent_runtime(force=True, reason="model_config_tool")
         except Exception:
             # File save succeeded; runtime refresh is best-effort.
             return

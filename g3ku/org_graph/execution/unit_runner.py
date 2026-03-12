@@ -67,15 +67,15 @@ class UnitRunner:
                     event_name='unit.updated',
                     text=f'{unit.role_title} is building a stage plan',
                 )
-                provider_model = str(unit.provider_model or self._service.config.execution_model)
-                provider_model_chain = [provider_model] if unit.provider_model else self._service.resolve_project_model_chain(project=project, node_type='execution')
+                model_key = self._service.resolve_bound_model_key('execution', unit.model_binding, unit.model_key)
+                model_chain = self._service.resolve_bound_model_chain('execution', unit.model_binding, unit.model_key)
                 plan = await build_execution_plan(
                     unit.objective_summary,
                     level=unit.level,
                     effective_max_depth=project.effective_max_depth,
                     llm=self._service.llm,
-                    provider_model=provider_model,
-                    provider_model_chain=provider_model_chain,
+                    model_key=model_key,
+                    model_chain=model_chain,
                     local_available_tools=self._service.list_effective_tool_names(
                         session_id=project.session_id,
                         actor_role=unit.role_kind,
@@ -422,13 +422,18 @@ class UnitRunner:
                 if child_unit_id:
                     child = self._service.get_unit(child_unit_id)
                 if child is None:
+                    fixed_model_key = (
+                        str(work_state.get('model_key') or '').strip() or None
+                        if str(work_state.get('model_binding') or 'live_role') == 'fixed_key'
+                        else None
+                    )
                     child = self._service.create_child_unit(
                         project=project,
                         parent=unit,
                         role_title=str(work_state.get('role_title') or 'Execution Unit'),
                         objective=str(work_state.get('objective_summary') or ''),
                         prompt_preview=str(work_state.get('prompt_preview') or work_state.get('objective_summary') or ''),
-                        provider_model=str(work_state.get('provider_model') or '') or None,
+                        model_key=fixed_model_key,
                         mutation_allowed=bool(work_state.get('mutation_allowed', False)),
                     )
                     parent_record = self._service.get_unit(unit.unit_id) or unit
@@ -565,8 +570,8 @@ class UnitRunner:
             await self._service.emit_unit_event(project=project, unit=unit, event_name='unit.updated', text=f'{unit.role_title}: {action}', stage_id=stage.stage_id)
             await self._service.emit_event(project=project, scope='tool', event_name='tool.updated', text=action, unit_id=unit.unit_id, stage_id=stage.stage_id)
             await asyncio.sleep(0.05)
-        provider_model = str(unit.provider_model or self._service.config.execution_model)
-        provider_model_chain = [provider_model] if unit.provider_model else self._service.resolve_project_model_chain(project=project, node_type='execution')
+        model_key = self._service.resolve_bound_model_key('execution', unit.model_binding, unit.model_key)
+        model_chain = self._service.resolve_bound_model_chain('execution', unit.model_binding, unit.model_key)
         result_text = None
         try:
             result_text = await self._service.tool_runtime.run(
@@ -583,8 +588,8 @@ class UnitRunner:
         if not result_text:
             try:
                 result_text = await self._service.llm.chat_text(
-                    provider_model=provider_model,
-                    provider_model_chain=provider_model_chain,
+                    provider_model=model_key,
+                    provider_model_chain=model_chain,
                     system_prompt=LOCAL_EXECUTION_SYSTEM_PROMPT,
                     user_prompt=(
                         f'Project: {project.title}\n'
@@ -623,7 +628,7 @@ class UnitRunner:
                     message = str(exc)
                     if 'not configured with an API key' in message:
                         raise EngineeringFailureError(
-                            f'Local execution requires a configured provider model. Current model: {provider_model}. '
+                            f'Local execution requires a configured provider model. Current model key: {model_key}. '
                             'Configure the provider API key or pick a ready model in the sidebar.'
                         ) from exc
                     raise EngineeringFailureError(f'Local execution LLM failed: {exc}') from exc
@@ -661,7 +666,13 @@ class UnitRunner:
             retry_count = int(work_state.get('retry_count') or 0)
             if retry_count >= MAX_ORDINARY_RETRY_COUNT:
                 raise OrdinaryTaskFailureError(str(failure.get('reason') or f"{work_state.get('role_title') or 'Work item'} exceeded retry limit"))
-            rewritten = await self._rewrite_single_work_item(work_state, reason=str(failure.get('reason') or ''))
+            rewritten = await self._rewrite_single_work_item(
+                project=project,
+                unit=unit,
+                stage=stage,
+                work_state=work_state,
+                reason=str(failure.get('reason') or ''),
+            )
             profile_id = self._next_validation_profile_id(stage_state)
             stage_state.setdefault('validation_profiles', []).append(
                 {
@@ -726,12 +737,22 @@ class UnitRunner:
             data={'failed_work_item_indexes': failed_indexes},
         )
 
-    async def _rewrite_single_work_item(self, work_state: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    async def _rewrite_single_work_item(self, *, project, unit: UnitAgentRecord, stage: UnitStageRecord, work_state: dict[str, Any], reason: str) -> dict[str, Any]:
         payload = None
         try:
+            model_key = self._service.resolve_bound_model_key(
+                'execution',
+                str(work_state.get('model_binding') or 'live_role'),
+                str(work_state.get('model_key') or '') or None,
+            )
+            model_chain = self._service.resolve_bound_model_chain(
+                'execution',
+                str(work_state.get('model_binding') or 'live_role'),
+                str(work_state.get('model_key') or '') or None,
+            )
             payload = await self._service.llm.chat_json(
-                provider_model=str(work_state.get('provider_model') or self._service.config.execution_model),
-                provider_model_chain=[str(work_state.get('provider_model') or self._service.config.execution_model)],
+                provider_model=model_key,
+                provider_model_chain=model_chain,
                 system_prompt=REWORK_REWRITER_SYSTEM_PROMPT,
                 user_prompt=json.dumps(
                     {
@@ -821,9 +842,10 @@ class UnitRunner:
 
     async def _synthesize_stage_result(self, project, stage: UnitStageRecord, verified_child_results: list[str]) -> str:
         try:
+            stage_unit = self._service.get_unit(stage.unit_id) or self._service.get_unit(project.root_unit_id)
             result = await self._service.llm.chat_text(
-                provider_model=self._service.resolve_project_provider_model(project=project, node_type='inspection'),
-                provider_model_chain=self._service.resolve_project_model_chain(project=project, node_type='inspection'),
+                provider_model=self._service.resolve_role_model_key('inspection'),
+                provider_model_chain=self._service.resolve_role_model_chain('inspection'),
                 system_prompt=STAGE_SYNTHESIS_SYSTEM_PROMPT,
                 user_prompt=json.dumps(
                     {
@@ -836,13 +858,13 @@ class UnitRunner:
                 ),
                 max_tokens=1000,
                 temperature=0.2,
-                monitor_context={
-                    'service': self._service,
-                    'project': project,
-                    'unit': self._service.get_unit(project.root_unit_id) or unit,
-                    'stage_id': stage.stage_id,
-                    'input_kind': 'input',
-                    'output_kind': 'output',
+                    monitor_context={
+                        'service': self._service,
+                        'project': project,
+                        'unit': stage_unit,
+                        'stage_id': stage.stage_id,
+                        'input_kind': 'input',
+                        'output_kind': 'output',
                 },
             )
             result = str(result or '').strip()
@@ -925,7 +947,8 @@ class UnitRunner:
             'objective_summary': work.objective_summary,
             'prompt_preview': work.prompt_preview,
             'mode': work.mode,
-            'provider_model': work.provider_model,
+            'model_key': work.model_key,
+            'model_binding': 'fixed_key' if work.model_key else 'live_role',
             'mutation_allowed': bool(work.mutation_allowed),
             'validation_profile_id': profile_id,
             'acceptance_criteria': str(profile.get('acceptance_criteria') or ''),
@@ -948,7 +971,8 @@ class UnitRunner:
     def _overlay_local_capabilities(self, unit: UnitAgentRecord, work_state: dict[str, Any]) -> UnitAgentRecord:
         return unit.model_copy(
             update={
-                'provider_model': str(work_state.get('provider_model') or unit.provider_model or self._service.config.execution_model),
+                'model_key': str(work_state.get('model_key') or unit.model_key or '') or None,
+                'model_binding': str(work_state.get('model_binding') or unit.model_binding or 'live_role'),
                 'mutation_allowed': bool(work_state.get('mutation_allowed', unit.mutation_allowed)),
             }
         )
@@ -1078,6 +1102,11 @@ class UnitRunner:
             self._ensure_work_state_defaults(item)
 
     def _ensure_work_state_defaults(self, item: dict[str, Any]) -> None:
+        legacy_model_key = str(item.get('provider_model') or '').strip() or None
+        if 'model_key' not in item and legacy_model_key is not None:
+            item['model_key'] = legacy_model_key
+        if 'model_binding' not in item:
+            item['model_binding'] = 'fixed_key' if str(item.get('model_key') or '').strip() else 'live_role'
         item.setdefault('validation_profile_id', str(item.get('validation_profile_id') or f"vp_{item.get('index') or 1}"))
         item.setdefault('acceptance_criteria', f"Work item output must directly satisfy this objective: {item.get('objective_summary') or ''}")
         item['validation_tools'] = self._normalize_validation_tools(item.get('validation_tools') or [])

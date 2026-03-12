@@ -25,23 +25,29 @@ _SPECIAL_PROVIDER_BRIDGES = {"openai_codex", "responses", "github_copilot"}
 def build_chat_model(
     config: Config,
     *,
-    scope: str = "ceo",
-    provider_model: str | None = None,
+    role: str | None = None,
+    model_key: str | None = None,
 ) -> BaseChatModel:
-    """Build a BaseChatModel for a configured runtime scope or explicit model."""
-    if provider_model is not None:
-        default_ref = str(provider_model or "").strip()
-        chain = [default_ref] if default_ref else []
-    else:
-        chain = [target.provider_model for target in config.get_scope_model_chain(scope)]
-        default_ref = str(chain[0] if chain else config.resolve_scope_model_reference(scope)).strip()
-    if not default_ref:
-        raise ValueError(f"No model configured for scope '{scope}'.")
+    """Build a BaseChatModel for a configured runtime role or explicit model key."""
+    role_name = str(role or "").strip()
+    direct_model_key = str(model_key or "").strip()
+    if bool(role_name) == bool(direct_model_key):
+        raise ValueError("build_chat_model requires exactly one of role or model_key")
 
-    provider = FallbackProvider(config=config, model_chain=chain or [default_ref], default_model_ref=default_ref)
+    if direct_model_key:
+        default_key = direct_model_key
+        chain = [direct_model_key]
+    else:
+        chain = [target.model_key for target in config.get_scope_model_chain(role_name)]
+        default_key = str(chain[0] if chain else config.resolve_role_model_key(role_name)).strip()
+    if not default_key:
+        target_label = f"role '{role_name}'" if role_name else f"model_key '{direct_model_key}'"
+        raise ValueError(f"No model configured for {target_label}.")
+
+    provider = FallbackProvider(config=config, model_chain=chain or [default_key], default_model_ref=default_key)
     return ProviderChatModelAdapter(
         provider=provider,
-        default_model=default_ref,
+        default_model=default_key,
         default_temperature=config.agents.defaults.temperature,
         default_max_tokens=config.agents.defaults.max_tokens,
         default_reasoning_effort=config.agents.defaults.reasoning_effort,
@@ -50,6 +56,7 @@ def build_chat_model(
 
 def _build_special_provider_bridge(
     *,
+    model_key: str,
     provider_id: str,
     model_id: str,
     provider_cfg: ProviderConfig | None,
@@ -71,7 +78,7 @@ def _build_special_provider_bridge(
             )
         provider = ResponsesProvider(
             api_key=api_key,
-            api_base=config.get_api_base() or "http://localhost:8000/v1/responses",
+            api_base=config.get_api_base(model_key) or "http://localhost:8000/v1/responses",
             default_model=model_id,
         )
     elif provider_id == "github_copilot":
@@ -80,7 +87,7 @@ def _build_special_provider_bridge(
             _validate_github_copilot_oauth_cache()
         provider = LiteLLMProvider(
             api_key=(provider_cfg.api_key or None) if provider_cfg else None,
-            api_base=config.get_api_base(),
+            api_base=config.get_api_base(model_key),
             default_model=f"github_copilot/{model_id}",
             extra_headers=(provider_cfg.extra_headers if provider_cfg else None),
             provider_name="github_copilot",

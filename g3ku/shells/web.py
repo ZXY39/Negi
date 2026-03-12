@@ -10,7 +10,7 @@ from loguru import logger
 from g3ku.agent.loop import AgentLoop
 from g3ku.bus.queue import MessageBus
 from g3ku.cli.commands import _make_provider
-from g3ku.config.loader import load_config
+from g3ku.config.live_runtime import get_runtime_config
 from g3ku.runtime import SessionRuntimeManager
 
 _global_agent: Optional[AgentLoop] = None
@@ -26,8 +26,8 @@ def debug_trace_enabled() -> bool:
 def get_agent() -> AgentLoop:
     global _global_agent, _global_bus, _global_runtime_manager
     if not _global_agent:
-        config = load_config()
-        provider_name, model_name = config.get_scope_model_target("ceo")
+        config, revision, _changed = get_runtime_config(force=False)
+        provider_name, model_name = config.get_role_model_target("ceo")
         provider = _make_provider(config, scope="ceo")
         middlewares = []
         try:
@@ -76,10 +76,48 @@ def get_agent() -> AgentLoop:
             debug_mode=debug_mode,
             middlewares=middlewares,
         )
+        _global_agent._runtime_model_revision = revision
+        _global_agent._runtime_default_model_key = config.resolve_role_model_key("ceo")
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
     elif _global_runtime_manager is None or _global_runtime_manager.loop is not _global_agent:
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
     return _global_agent
+
+
+async def refresh_web_agent_runtime(force: bool = False, reason: str = "runtime") -> bool:
+    loop = get_agent()
+    config, revision, changed = get_runtime_config(force=force)
+    if not changed and int(getattr(loop, "_runtime_model_revision", 0) or 0) == int(revision or 0):
+        return False
+
+    provider_name, model_name = config.get_role_model_target("ceo")
+    provider = _make_provider(config, scope="ceo")
+    loop.app_config = config
+    loop.provider = provider
+    loop.model_client = provider
+    loop.multi_agent_config = config.agents.multi_agent
+    loop.provider_name = provider_name
+    loop.model = model_name
+    loop.temperature = config.agents.defaults.temperature
+    loop.max_tokens = config.agents.defaults.max_tokens
+    loop.reasoning_effort = config.agents.defaults.reasoning_effort
+    loop._runtime_model_revision = revision
+    loop._runtime_default_model_key = config.resolve_role_model_key("ceo")
+
+    resource_manager = getattr(loop, "resource_manager", None)
+    if resource_manager is not None and hasattr(resource_manager, "bind_app_config"):
+        resource_manager.bind_app_config(config)
+
+    service = getattr(loop, "org_graph_service", None)
+    if service is not None and hasattr(service, "ensure_runtime_config_current"):
+        service.ensure_runtime_config_current(force=False, reason=reason)
+
+    if hasattr(loop, "_ceo_model_chain_cache_key"):
+        loop._ceo_model_chain_cache_key = None
+    if hasattr(loop, "_ceo_model_client_cache"):
+        loop._ceo_model_client_cache = None
+    logger.info("Web runtime config refreshed revision={} reason={}", revision, reason)
+    return True
 
 
 def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager:
@@ -156,4 +194,4 @@ def run_web_shell(*, host: str, port: int, reload: bool, debug: bool, set_debug_
     )
 
 
-__all__ = ["debug_trace_enabled", "get_agent", "get_runtime_manager", "run_web_shell", "shutdown_web_runtime"]
+__all__ = ["debug_trace_enabled", "get_agent", "get_runtime_manager", "refresh_web_agent_runtime", "run_web_shell", "shutdown_web_runtime"]

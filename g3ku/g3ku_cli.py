@@ -7,6 +7,8 @@ from pathlib import Path
 import typer
 import uvicorn
 
+from g3ku.config.loader import load_config
+
 
 app = typer.Typer(
     add_completion=False,
@@ -36,6 +38,15 @@ def _set_prompt_log_mode(enabled: bool) -> None:
     os.environ["G3KU_PROMPT_TRACE"] = "1"
 
 
+def _resolve_backend_port(port: int | None) -> int:
+    if port is not None:
+        return port
+    try:
+        return int(load_config().gateway.port)
+    except Exception:
+        return 18790
+
+
 @app.callback()
 def _main() -> None:
     """G3ku command group."""
@@ -44,7 +55,7 @@ def _main() -> None:
 @app.command()
 def start(
     host: str = typer.Option("127.0.0.1", "--host", help="Backend bind host."),
-    port: int = typer.Option(3000, "--port", min=1, max=65535, help="Backend bind port."),
+    port: int | None = typer.Option(None, "--port", min=1, max=65535, help="Backend bind port. Defaults to gateway.port from project config."),
     reload: bool = typer.Option(False, "--reload", help="Enable uvicorn reload mode."),
     log_enabled: bool = typer.Option(False, "--log", "-log", help="Render main-agent user/prompt/answer logs."),
     open_browser: bool = typer.Option(False, "--open", help="Open the app URL in the default browser."),
@@ -56,9 +67,10 @@ def start(
     """
 
     root = _resolve_project_root()
+    resolved_port = _resolve_backend_port(port)
     frontend_mode = _ensure_frontend_ready()
     _set_prompt_log_mode(log_enabled)
-    url = f"http://{host}:{port}"
+    url = f"http://{host}:{resolved_port}"
 
     typer.echo(f"[g3ku] project root: {root}")
     typer.echo(f"[g3ku] frontend mode: {frontend_mode}")
@@ -77,7 +89,7 @@ def start(
     uvicorn.run(
         "g3ku.web.main:app",
         host=host,
-        port=port,
+        port=resolved_port,
         reload=reload,
     )
 

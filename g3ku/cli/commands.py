@@ -260,7 +260,7 @@ def _make_provider(config: Config, *, scope: str = "ceo"):
     from g3ku.providers.chatmodels import build_chat_model
 
     try:
-        return build_chat_model(config, scope=scope)
+        return build_chat_model(config, role=scope)
     except (ValueError, RuntimeError) as exc:
         console.print("[red]Configuration error:[/red]")
         console.print(str(exc))
@@ -867,9 +867,9 @@ def status():
     if config_path.exists():
         from g3ku.providers.registry import PROVIDERS
 
-        console.print(f"CEO Model: {config.resolve_scope_model_reference('ceo')}")
-        console.print(f"Execution Model: {config.resolve_scope_model_reference('execution')}")
-        console.print(f"Inspection Model: {config.resolve_scope_model_reference('inspection')}")
+        console.print(f"CEO Model: {config.resolve_role_model_key('ceo')}")
+        console.print(f"Execution Model: {config.resolve_role_model_key('execution')}")
+        console.print(f"Inspection Model: {config.resolve_role_model_key('inspection')}")
         console.print(f"Runtime: {config.agents.defaults.runtime}")
         mem_cfg = config.tools.memory
         console.print(f"Memory Mode: {mem_cfg.mode} ({'enabled' if mem_cfg.enabled else 'disabled'})")

@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 SubagentRunMode = Literal["sync", "background"]
 SubagentLifecycleStatus = Literal[
@@ -19,8 +19,23 @@ SubagentLifecycleStatus = Literal[
 
 
 class ModelFallbackTarget(BaseModel):
-    provider_model: str
+    model_key: str
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_model_key(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "model_key" not in payload and "provider_model" in payload:
+            payload["model_key"] = payload.pop("provider_model")
+        payload["model_key"] = str(payload.get("model_key") or "").strip()
+        return payload
+
+    @property
+    def provider_model(self) -> str:
+        return self.model_key
 
 
 class DynamicSubagentRequest(BaseModel):

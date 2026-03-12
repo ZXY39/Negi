@@ -62,20 +62,37 @@ class CategoryResolver:
         if isinstance(raw_chain, Iterable) and not isinstance(raw_chain, (str, bytes, dict)):
             for item in raw_chain:
                 try:
-                    targets.append(ModelFallbackTarget.model_validate(item))
+                    target = ModelFallbackTarget.model_validate(item)
+                    if self._is_known_model_key(target.model_key):
+                        targets.append(target)
                 except Exception:
                     continue
-        provider_model = str(metadata.get('provider_model') or '').strip()
-        if provider_model:
-            targets.insert(0, ModelFallbackTarget(provider_model=provider_model))
+        explicit_model_keys = self._normalize_names(metadata.get('model_keys') or [])
+        explicit_model_key = str(metadata.get('model_key') or '').strip()
+        if explicit_model_key:
+            explicit_model_keys.insert(0, explicit_model_key)
+        for model_key in reversed(explicit_model_keys):
+            if self._is_known_model_key(model_key):
+                targets.insert(0, ModelFallbackTarget(model_key=model_key))
         if targets:
             return self._dedupe_model_chain(targets)
-        default_model = None
-        if getattr(self._loop, 'provider_name', None) and getattr(self._loop, 'model', None):
-            default_model = f"{self._loop.provider_name}:{self._loop.model}"
-        elif getattr(self._loop, 'model', None):
-            default_model = str(self._loop.model)
-        return [ModelFallbackTarget(provider_model=default_model)] if default_model else []
+        default_model_key = str(getattr(self._loop, '_runtime_default_model_key', '') or '').strip()
+        app_config = getattr(self._loop, 'app_config', None)
+        if not default_model_key and app_config is not None:
+            try:
+                default_model_key = app_config.resolve_role_model_key('ceo')
+            except Exception:
+                default_model_key = ''
+        return [ModelFallbackTarget(model_key=default_model_key)] if default_model_key else []
+
+    def _is_known_model_key(self, value: str) -> bool:
+        model_key = str(value or '').strip()
+        if not model_key or ':' in model_key:
+            return False
+        app_config = getattr(self._loop, 'app_config', None)
+        if app_config is None:
+            return True
+        return app_config.get_managed_model(model_key) is not None
 
     @staticmethod
     def _resolve_role_name(request: DynamicSubagentRequest, metadata: dict[str, Any]) -> str:
@@ -133,7 +150,7 @@ class CategoryResolver:
         seen: set[str] = set()
         deduped: list[ModelFallbackTarget] = []
         for target in targets:
-            key = str(target.provider_model or '').strip()
+            key = str(target.model_key or '').strip()
             if not key or key in seen:
                 continue
             seen.add(key)

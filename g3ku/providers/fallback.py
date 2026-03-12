@@ -114,7 +114,7 @@ class FallbackProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
     ) -> LLMResponse:
-        from g3ku.org_graph.llm.provider_factory import build_provider_from_model
+        from g3ku.org_graph.llm.provider_factory import build_provider_from_model_key
 
         requested = str(model or "").strip()
         if requested and requested not in self._model_chain:
@@ -124,13 +124,13 @@ class FallbackProvider(LLMProvider):
 
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
-        for model_ref in chain:
+        for model_key in chain:
             try:
-                target = build_provider_from_model(self._config, model_ref)
+                target = build_provider_from_model_key(self._config, model_key)
             except Exception as exc:
                 last_error = exc
                 if len(chain) > 1:
-                    logger.warning("Model target init failed for {}: {}", model_ref, exc)
+                    logger.warning("Model target init failed for {}: {}", model_key, exc)
                     continue
                 raise
 
@@ -154,14 +154,14 @@ class FallbackProvider(LLMProvider):
                 )
             except Exception as exc:
                 last_error = exc
-                if not is_retryable_model_error(exc, retry_on=target.retry_on) or model_ref == chain[-1]:
+                if not is_retryable_model_error(exc, retry_on=target.retry_on) or model_key == chain[-1]:
                     raise
-                logger.warning("Model fallback triggered for {}: {}", model_ref, exc)
+                logger.warning("Model fallback triggered for {}: {}", model_key, exc)
                 continue
 
-            if response_requires_retry(response, retry_on=target.retry_on) and model_ref != chain[-1]:
+            if response_requires_retry(response, retry_on=target.retry_on) and model_key != chain[-1]:
                 last_response = response
-                logger.warning("Model fallback triggered for {}: {}", model_ref, response.content or response.finish_reason)
+                logger.warning("Model fallback triggered for {}: {}", model_key, response.content or response.finish_reason)
                 continue
             return response
 

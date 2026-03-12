@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from g3ku.org_graph.types import DispatchShape, EventScope, RoleKind, StageStatus, UnitStatus, WorkMode
 
@@ -63,9 +63,28 @@ class UnitAgentRecord(Model):
     updated_at: str
     started_at: str | None = None
     finished_at: str | None = None
-    provider_model: str | None = None
+    model_key: str | None = None
+    model_binding: Literal["live_role", "fixed_key"] = "live_role"
     mutation_allowed: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_binding(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "model_key" not in payload and "provider_model" in payload:
+            legacy_model = str(payload.get("provider_model") or "").strip()
+            payload["model_key"] = legacy_model or None
+            payload["model_binding"] = "fixed_key" if legacy_model else payload.get("model_binding") or "live_role"
+        payload["model_key"] = str(payload.get("model_key") or "").strip() or None
+        payload["model_binding"] = str(payload.get("model_binding") or ("fixed_key" if payload.get("model_key") else "live_role")).strip() or "live_role"
+        return payload
+
+    @property
+    def provider_model(self) -> str | None:
+        return self.model_key
 
 
 class UnitStageRecord(Model):
@@ -154,9 +173,24 @@ class WorkUnitBlueprint(Model):
     objective_summary: str
     prompt_preview: str
     mode: WorkMode = "local"
-    provider_model: str | None = None
+    model_key: str | None = None
     mutation_allowed: bool = False
     validation_profile_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_model_key(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "model_key" not in payload and "provider_model" in payload:
+            payload["model_key"] = payload.pop("provider_model")
+        payload["model_key"] = str(payload.get("model_key") or "").strip() or None
+        return payload
+
+    @property
+    def provider_model(self) -> str | None:
+        return self.model_key
 
 
 class StageBlueprint(Model):

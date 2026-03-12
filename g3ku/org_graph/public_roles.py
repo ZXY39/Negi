@@ -32,6 +32,7 @@ def to_public_allowed_roles(roles: list[str] | None) -> list[str]:
 def to_public_model_defaults(defaults: dict[str, Any] | None) -> dict[str, str]:
     payload = defaults if isinstance(defaults, dict) else {}
     return {
+        "agent": str(payload.get("agent") or "").strip(),
         "ceo": str(payload.get("ceo") or "").strip(),
         "execution": str(payload.get("execution") or "").strip(),
         "inspection": str(payload.get("inspection") or "").strip(),

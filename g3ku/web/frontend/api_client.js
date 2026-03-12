@@ -85,6 +85,10 @@ class ApiClient {
         return this.post(`/api/models/${modelKey}/disable`);
     }
 
+    static async deleteManagedModel(modelKey) {
+        return this.delete(`/api/models/${modelKey}`);
+    }
+
     static async updateModelRoleChain(scope, modelKeys) {
         return this.put(`/api/models/roles/${scope}`, { modelKeys });
     }

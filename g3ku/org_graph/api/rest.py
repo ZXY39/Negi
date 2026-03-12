@@ -207,6 +207,21 @@ async def disable_model_catalog_entry(model_key: str):
     return JSONResponse({'ok': True, 'model': model, **service.list_model_catalog()})
 
 
+@router.delete('/models/{model_key}')
+async def delete_model_catalog_entry(model_key: str):
+    service = get_org_graph_service()
+    try:
+        result = await service.delete_model_catalog_entry(model_key)
+    except ValueError as exc:
+        detail = str(exc)
+        if 'Unknown model key' in detail:
+            raise HTTPException(status_code=404, detail='model_not_found') from exc
+        if detail == 'model_in_use':
+            raise HTTPException(status_code=409, detail='model_in_use') from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    return JSONResponse({'ok': True, 'result': result, **service.list_model_catalog()})
+
+
 @router.get('/projects/{project_id}')
 async def get_project(project_id: str):
     service = get_org_graph_service()

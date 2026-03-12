@@ -203,6 +203,9 @@ class RuntimeAgentSession:
         )
 
     async def prompt(self, message: str | UserInputMessage) -> RunResult:
+        from g3ku.shells.web import refresh_web_agent_runtime
+
+        await refresh_web_agent_runtime(force=False, reason="prompt")
         user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
         if getattr(self._loop, "prompt_trace", False):
             logger.info(

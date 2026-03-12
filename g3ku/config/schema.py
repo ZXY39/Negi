@@ -3,9 +3,35 @@
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
+
+ROLE_SCOPE_ALIASES = {
+    "agent": "agent",
+    "main": "agent",
+    "default": "agent",
+    "ceo": "ceo",
+    "org_graph.ceo": "ceo",
+    "org_graph_ceo": "ceo",
+    "execution": "execution",
+    "org_graph.execution": "execution",
+    "org_graph_execution": "execution",
+    "inspection": "inspection",
+    "checker": "inspection",
+    "org_graph.inspection": "inspection",
+    "org_graph_inspection": "inspection",
+}
+
+REQUIRED_MODEL_ROLES = ("agent", "ceo", "execution", "inspection")
+
+
+def normalize_role_scope(value: str) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    normalized = ROLE_SCOPE_ALIASES.get(raw)
+    if normalized is None:
+        raise ValueError(f"Invalid scope: {value}")
+    return normalized
 
 
 class Base(BaseModel):
@@ -217,8 +243,8 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "."
-    model: str = "anthropic:claude-sonnet-4-5"
-    provider: str = "auto"  # Deprecated; provider must come from agents.defaults.model as provider:model.
+    model: str = ""
+    provider: str = "auto"  # Deprecated; provider selection is derived from managed models.
     runtime: Literal["langgraph"] = "langgraph"  # Single runtime mode (classic removed)
     max_tokens: int = 8192
     temperature: float = 0.1
@@ -256,8 +282,44 @@ class AgentDefaults(Base):
 
 
 class ModelFallbackTarget(Base):
-    provider_model: str
+    model_key: str
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "model_key" not in payload and "provider_model" in payload:
+            payload["model_key"] = payload.pop("provider_model")
+        return payload
+
+    @field_validator("model_key")
+    @classmethod
+    def _validate_model_key(cls, value: str) -> str:
+        model_key = str(value or "").strip()
+        if not model_key:
+            raise ValueError("model_key is required")
+        return model_key
+
+    @field_validator("retry_on", mode="before")
+    @classmethod
+    def _normalize_retry_on(cls, value: Any) -> list[str]:
+        items = value if isinstance(value, list) else ["network", "429", "5xx"]
+        clean: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            token = str(item or "").strip().lower()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            clean.append(token)
+        return clean or ["network", "429", "5xx"]
+
+    @property
+    def provider_model(self) -> str:
+        return self.model_key
 
 
 class ManagedModelConfig(Base):
@@ -275,6 +337,51 @@ class ManagedModelConfig(Base):
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
     description: str = ""
 
+    @field_validator("key")
+    @classmethod
+    def _validate_key(cls, value: str) -> str:
+        key = str(value or "").strip()
+        if not key:
+            raise ValueError("models.catalog[].key is required")
+        return key
+
+    @field_validator("provider_model")
+    @classmethod
+    def _validate_provider_model(cls, value: str) -> str:
+        provider_model = str(value or "").strip()
+        if not provider_model:
+            raise ValueError("models.catalog[].provider_model is required")
+        Config.parse_provider_model(provider_model)
+        return provider_model
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key(cls, value: str) -> str:
+        api_key = str(value or "").strip()
+        if not api_key:
+            raise ValueError("models.catalog[].api_key is required")
+        return api_key
+
+    @field_validator("api_base")
+    @classmethod
+    def _normalize_api_base(cls, value: str | None) -> str | None:
+        api_base = str(value or "").strip()
+        return api_base or None
+
+    @field_validator("retry_on", mode="before")
+    @classmethod
+    def _normalize_retry_on(cls, value: Any) -> list[str]:
+        items = value if isinstance(value, list) else ["network", "429", "5xx"]
+        clean: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            token = str(item or "").strip().lower()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            clean.append(token)
+        return clean or ["network", "429", "5xx"]
+
 
 class RoleModelRoutingConfig(Base):
     """Ordered model references for each runtime scope."""
@@ -283,6 +390,20 @@ class RoleModelRoutingConfig(Base):
     ceo: list[str] = Field(default_factory=list)
     execution: list[str] = Field(default_factory=list)
     inspection: list[str] = Field(default_factory=list)
+
+    @field_validator("agent", "ceo", "execution", "inspection", mode="before")
+    @classmethod
+    def _normalize_chain(cls, value: Any) -> list[str]:
+        items = value if isinstance(value, list) else []
+        clean: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            key = str(item or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            clean.append(key)
+        return clean
 
 
 class ModelsConfig(Base):
@@ -296,7 +417,7 @@ class MultiAgentConfig(Base):
     """Dynamic subagent orchestration configuration."""
 
     enabled: bool = True
-    orchestrator_model: str | None = None
+    orchestrator_model_key: str | None = None
     session_store_path: str = ".g3ku/dynamic-subagents.sqlite3"
     background_store_path: str = ".g3ku/background-tasks.sqlite3"
     destroy_sync_sessions: bool = True
@@ -311,6 +432,16 @@ class MultiAgentConfig(Base):
     repeated_action_threshold: int = 3
     blackboard_dir: str = ".g3ku/blackboard"
     interrupt_mode: str = "ticket"
+
+    @field_validator("orchestrator_model_key")
+    @classmethod
+    def _normalize_orchestrator_model_key(cls, value: str | None) -> str | None:
+        model_key = str(value or "").strip()
+        return model_key or None
+
+    @property
+    def orchestrator_model(self) -> str | None:
+        return self.orchestrator_model_key
 
 
 class AgentsConfig(Base):
@@ -628,6 +759,41 @@ class Config(BaseSettings):
     resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
     org_graph: OrgGraphConfig = Field(default_factory=OrgGraphConfig)
 
+    @model_validator(mode="after")
+    def _validate_model_runtime_contract(self) -> "Config":
+        catalog = list(self.models.catalog or [])
+        if not catalog:
+            raise ValueError("models.catalog must be non-empty")
+
+        catalog_by_key: dict[str, ManagedModelConfig] = {}
+        for item in catalog:
+            key = str(item.key or "").strip()
+            existing = catalog_by_key.get(key)
+            if existing is not None:
+                raise ValueError(f"Duplicate model key in models.catalog: {key}")
+            catalog_by_key[key] = item
+
+        for scope in REQUIRED_MODEL_ROLES:
+            chain = getattr(self.models.roles, scope)
+            if not chain:
+                raise ValueError(f"models.roles.{scope} must be non-empty")
+            for model_key in chain:
+                item = catalog_by_key.get(str(model_key or "").strip())
+                if item is None:
+                    raise ValueError(f"models.roles.{scope} references unknown model key: {model_key}")
+                if not item.enabled:
+                    raise ValueError(f"models.roles.{scope} references disabled model key: {model_key}")
+
+        orchestrator_model_key = str(self.agents.multi_agent.orchestrator_model_key or "").strip()
+        if orchestrator_model_key:
+            item = catalog_by_key.get(orchestrator_model_key)
+            if item is None:
+                raise ValueError(f"agents.multi_agent.orchestrator_model_key references unknown model key: {orchestrator_model_key}")
+            if not item.enabled:
+                raise ValueError(f"agents.multi_agent.orchestrator_model_key references disabled model key: {orchestrator_model_key}")
+
+        return self
+
     @property
     def workspace_path(self) -> Path:
         """Get expanded workspace path."""
@@ -641,18 +807,18 @@ class Config(BaseSettings):
         raw = (value or "").strip()
         if not raw:
             raise ValueError(
-                "Invalid agents.defaults.model.\n"
-                "Original field: agents.defaults.model = ''\n"
+                "Invalid provider_model.\n"
+                "Original field value: ''\n"
                 "New required format: provider:model\n"
-                "Example fix: agents.defaults.model = 'openai:gpt-4.1'"
+                "Example fix: provider_model = 'openai:gpt-4.1'"
             )
         if ":" not in raw:
             hint = "openai:gpt-4.1" if "/" in raw else "anthropic:claude-sonnet-4-5"
             raise ValueError(
-                "Invalid agents.defaults.model syntax.\n"
+                "Invalid provider_model syntax.\n"
                 f"Original field value: {raw!r}\n"
                 "New required format: provider:model (colon separator).\n"
-                f"Example fix: agents.defaults.model = '{hint}'"
+                f"Example fix: provider_model = '{hint}'"
             )
 
         provider_part, model_part = raw.split(":", 1)
@@ -660,41 +826,50 @@ class Config(BaseSettings):
         model_id = model_part.strip()
         if not provider_id or not model_id:
             raise ValueError(
-                "Invalid agents.defaults.model.\n"
+                "Invalid provider_model.\n"
                 f"Original field value: {raw!r}\n"
                 "New required format: provider:model (both provider and model must be non-empty).\n"
-                "Example fix: agents.defaults.model = 'openrouter:anthropic/claude-sonnet-4-5'"
+                "Example fix: provider_model = 'openrouter:anthropic/claude-sonnet-4-5'"
             )
 
         if find_by_name(provider_id) is None:
             supported = ", ".join(spec.name for spec in PROVIDERS)
             raise ValueError(
-                "Unknown provider in agents.defaults.model.\n"
+                "Unknown provider in provider_model.\n"
                 f"Original provider: {provider_part!r}\n"
                 f"New supported providers: {supported}\n"
-                "Example fix: agents.defaults.model = 'openai:gpt-4.1'"
+                "Example fix: provider_model = 'openai:gpt-4.1'"
             )
 
         return provider_id, model_id
 
-    def get_model_target(self, model: str | None = None) -> tuple[str, str]:
-        """Get parsed (provider_id, model_id) from strict provider:model syntax."""
-        resolved = self.resolve_provider_model_reference(model or self.agents.defaults.model)
-        return self.parse_provider_model(resolved)
+    def get_model_target(self, model_key: str | None = None) -> tuple[str, str]:
+        """Get parsed (provider_id, model_id) for a managed model key."""
+        managed = self.get_managed_model(model_key)
+        if managed is None:
+            raise ValueError(f"Unknown model key: {model_key}")
+        return self.parse_provider_model(str(managed.provider_model or "").strip())
+
+    def get_role_model_keys(self, role: str) -> list[str]:
+        normalized = normalize_role_scope(role)
+        return list(getattr(self.models.roles, normalized))
+
+    def resolve_role_model_key(self, role: str) -> str:
+        refs = self.get_role_model_keys(role)
+        if refs:
+            return str(refs[0]).strip()
+        raise ValueError(f"No model configured for role '{role}'.")
+
+    def get_role_model_target(self, role: str) -> tuple[str, str]:
+        return self.get_model_target(self.resolve_role_model_key(role))
 
     def resolve_scope_model_reference(self, scope: str) -> str:
         """Resolve the primary model reference configured for a runtime scope."""
-        refs = self.get_scope_model_refs(scope)
-        if refs:
-            return str(refs[0]).strip()
-        fallback = str(self.agents.defaults.model or "").strip()
-        if fallback:
-            return fallback
-        raise ValueError(f"No model configured for scope '{scope}'.")
+        return self.resolve_role_model_key(scope)
 
     def get_scope_model_target(self, scope: str) -> tuple[str, str]:
         """Get parsed (provider_id, model_id) for a runtime scope."""
-        return self.get_model_target(self.resolve_scope_model_reference(scope))
+        return self.get_role_model_target(scope)
 
     def get_managed_model(self, ref: str | None = None) -> ManagedModelConfig | None:
         key = str(ref or "").strip()
@@ -703,50 +878,46 @@ class Config(BaseSettings):
         for item in self.models.catalog:
             if str(item.key or "").strip() == key:
                 return item
-        matches = [item for item in self.models.catalog if str(item.provider_model or "").strip() == key]
-        if len(matches) == 1:
-            return matches[0]
         return None
 
     def resolve_provider_model_reference(self, ref: str | None = None) -> str:
         raw = str(ref or "").strip()
-        if not raw:
-            raw = str(self.agents.defaults.model or "").strip()
         managed = self.get_managed_model(raw)
-        if managed is not None:
-            return str(managed.provider_model or "").strip()
-        return raw
+        if managed is None:
+            raise ValueError(f"Unknown model key: {ref}")
+        return str(managed.provider_model or "").strip()
 
-    def get_provider(self, model: str | None = None) -> ProviderConfig | None:
-        """Get provider config selected by strict provider:model syntax."""
-        managed = self.get_managed_model(model)
-        if managed is not None:
-            return ProviderConfig(
-                api_key=str(managed.api_key or ""),
-                api_base=managed.api_base,
-                extra_headers=managed.extra_headers,
-            )
-        provider_id, _ = self.get_model_target(model)
-        return getattr(self.providers, provider_id, None)
+    def get_provider(self, model_key: str | None = None) -> ProviderConfig | None:
+        """Get provider config selected by managed model key."""
+        managed = self.get_managed_model(model_key)
+        if managed is None:
+            raise ValueError(f"Unknown model key: {model_key}")
+        return ProviderConfig(
+            api_key=str(managed.api_key or ""),
+            api_base=managed.api_base,
+            extra_headers=managed.extra_headers,
+        )
 
-    def get_provider_name(self, model: str | None = None) -> str | None:
-        """Get provider name from strict provider:model syntax."""
-        provider_id, _ = self.get_model_target(model)
+    def get_provider_name(self, model_key: str | None = None) -> str | None:
+        """Get provider name from managed model key."""
+        provider_id, _ = self.get_model_target(model_key)
         return provider_id
 
-    def get_api_key(self, model: str | None = None) -> str | None:
-        """Get API key for the provider selected by strict provider:model."""
-        p = self.get_provider(model)
+    def get_api_key(self, model_key: str | None = None) -> str | None:
+        """Get API key for the provider selected by managed model key."""
+        p = self.get_provider(model_key)
         return p.api_key if p else None
 
-    def get_api_base(self, model: str | None = None) -> str | None:
-        """Get API base URL for strict provider:model, with gateway defaults."""
+    def get_api_base(self, model_key: str | None = None) -> str | None:
+        """Get API base URL for a managed model key, with gateway defaults."""
         from g3ku.providers.registry import find_by_name
 
-        managed = self.get_managed_model(model)
+        managed = self.get_managed_model(model_key)
+        if managed is None:
+            raise ValueError(f"Unknown model key: {model_key}")
         if managed is not None and managed.api_base:
             return managed.api_base
-        provider_id, _ = self.get_model_target(model)
+        provider_id, _ = self.get_model_target(model_key)
         p = getattr(self.providers, provider_id, None)
         if p and p.api_base:
             return p.api_base
@@ -755,28 +926,11 @@ class Config(BaseSettings):
             return spec.default_api_base
         return None
 
-    def get_model_runtime_profile(self, ref: str | None = None) -> ManagedModelConfig | None:
-        return self.get_managed_model(ref)
+    def get_model_runtime_profile(self, model_key: str | None = None) -> ManagedModelConfig | None:
+        return self.get_managed_model(model_key)
 
     def get_scope_model_refs(self, scope: str) -> list[str]:
-        normalized = str(scope or "").strip().lower().replace("-", "_")
-        roles = self.models.roles
-        if normalized in {"agent", "main", "default"}:
-            refs = list(roles.agent or [])
-            return refs or [str(self.agents.defaults.model or "").strip()]
-        if normalized in {"ceo", "org_graph.ceo", "org_graph_ceo"}:
-            refs = list(roles.ceo or [])
-            legacy = str(self.org_graph.ceo_model or self.agents.defaults.model or "").strip()
-            return refs or ([legacy] if legacy else [])
-        if normalized in {"execution", "org_graph.execution", "org_graph_execution"}:
-            refs = list(roles.execution or [])
-            legacy = str(self.org_graph.execution_model or self.agents.defaults.model or "").strip()
-            return refs or ([legacy] if legacy else [])
-        if normalized in {"inspection", "checker", "org_graph.inspection", "org_graph_inspection"}:
-            refs = list(roles.inspection or [])
-            legacy = str(self.org_graph.inspection_model or self.org_graph.execution_model or self.agents.defaults.model or "").strip()
-            return refs or ([legacy] if legacy else [])
-        return []
+        return self.get_role_model_keys(scope)
 
     def get_scope_model_chain(self, scope: str) -> list[ModelFallbackTarget]:
         chain: list[ModelFallbackTarget] = []
@@ -788,9 +942,9 @@ class Config(BaseSettings):
             if managed is not None:
                 if not managed.enabled:
                     continue
-                chain.append(ModelFallbackTarget(provider_model=key, retry_on=list(managed.retry_on or [])))
+                chain.append(ModelFallbackTarget(model_key=key, retry_on=list(managed.retry_on or [])))
                 continue
-            chain.append(ModelFallbackTarget(provider_model=key))
+            chain.append(ModelFallbackTarget(model_key=key))
         return chain
 
     model_config = ConfigDict(env_prefix="G3KU_", env_nested_delimiter="__")

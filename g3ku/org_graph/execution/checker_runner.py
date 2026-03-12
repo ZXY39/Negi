@@ -80,7 +80,8 @@ class CheckerRunner:
             created_at=now_iso(),
             updated_at=now_iso(),
             started_at=now_iso(),
-            provider_model=self._service.resolve_project_provider_model(project=project, node_type='inspection'),
+            model_key=None,
+            model_binding='live_role',
             mutation_allowed=False,
         )
         return checker

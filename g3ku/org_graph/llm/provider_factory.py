@@ -44,10 +44,10 @@ def _resolve_litellm_model(provider_id: str, model_id: str) -> str:
 
 
 
-def _assert_provider_ready(config: Config, provider_id: str, provider_ref: str) -> None:
-    provider_cfg = config.get_provider(provider_ref)
+def _assert_provider_ready(config: Config, provider_id: str, model_key: str) -> None:
+    provider_cfg = config.get_provider(model_key)
     api_key = (provider_cfg.api_key if provider_cfg else '') or ''
-    api_base = config.get_api_base(provider_ref)
+    api_base = config.get_api_base(model_key)
     spec = find_by_name(provider_id)
     if provider_id == 'custom':
         return
@@ -62,8 +62,8 @@ def _assert_provider_ready(config: Config, provider_id: str, provider_ref: str) 
     if not api_key:
         raise ValueError(f'Provider {provider_id} is not configured with an API key')
 
-def build_provider_from_model(config: Config, provider_model: str) -> ProviderTarget:
-    provider_ref = str(provider_model or '').strip()
+def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTarget:
+    provider_ref = str(model_key or '').strip()
     provider_id, model_id = config.get_model_target(provider_ref)
     _assert_provider_ready(config, provider_id, provider_ref)
     provider_cfg = config.get_provider(provider_ref)

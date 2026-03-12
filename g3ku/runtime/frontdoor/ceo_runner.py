@@ -80,7 +80,7 @@ class CeoFrontDoorRunner:
         if app_config is not None:
             ceo_refs = [
                 str(ref or '').strip()
-                for ref in app_config.get_scope_model_refs('ceo')
+                for ref in app_config.get_role_model_keys('ceo')
                 if str(ref or '').strip()
             ]
         if ceo_refs:
@@ -90,7 +90,7 @@ class CeoFrontDoorRunner:
             if cached_client is not None and cached_key == cache_key:
                 return cached_client, ceo_refs
 
-            client = build_chat_model(app_config, scope='ceo')
+            client = build_chat_model(app_config, role='ceo')
             self._loop._ceo_model_chain_cache_key = cache_key
             self._loop._ceo_model_client_cache = client
             return client, ceo_refs

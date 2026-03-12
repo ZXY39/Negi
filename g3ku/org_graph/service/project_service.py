@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.config.model_manager import ModelManager
 from g3ku.org_graph.config import ResolvedOrgGraphConfig
 from g3ku.org_graph.errors import PermissionDeniedError
@@ -65,6 +66,7 @@ class ProjectService:
         self.checker_runner = CheckerRunner(self)
         self.unit_runner = UnitRunner(self)
         self.project_runner = ProjectRunner(self)
+        self._runtime_model_revision = max(int(peek_runtime_revision() or 0), 1)
         self._startup_lock = asyncio.Lock()
         self._started = False
         self._closed = False
@@ -118,27 +120,70 @@ class ProjectService:
             unit_id=unit_id,
         )
 
-    def _reload_runtime_config(self, config=None) -> None:
+    def _apply_runtime_config(self, config, revision: int) -> None:
         from g3ku.org_graph.config import resolve_org_graph_config
 
-        self.config = resolve_org_graph_config(config or self.config.raw)
+        self.config = resolve_org_graph_config(config)
         self.llm = OrgGraphLLM.from_config(self.config.raw, default_model=self.config.execution_model)
+        self._runtime_model_revision = int(revision or self._runtime_model_revision or 1)
+        if self.resource_manager is not None and hasattr(self.resource_manager, "bind_app_config"):
+            self.resource_manager.bind_app_config(self.config.raw)
+
+    def ensure_runtime_config_current(self, force: bool = False, reason: str = "runtime") -> bool:
+        _ = reason
+        runtime_config, revision, changed = get_runtime_config(force=force)
+        if not changed and int(revision or 0) == int(self._runtime_model_revision or 0):
+            return False
+        self._apply_runtime_config(runtime_config, revision)
+        return True
+
+    def resolve_role_model_key(self, role: str) -> str:
+        self.ensure_runtime_config_current(force=False, reason="resolve_role_model_key")
+        normalized = 'inspection' if role in {'inspection', 'checker'} else 'execution' if role in {'execution'} else 'ceo' if role in {'ceo'} else 'agent'
+        return self.config.raw.resolve_role_model_key(normalized)
+
+    def resolve_role_model_chain(self, role: str) -> list[str]:
+        self.ensure_runtime_config_current(force=False, reason="resolve_role_model_chain")
+        normalized = 'inspection' if role in {'inspection', 'checker'} else 'execution' if role in {'execution'} else 'ceo' if role in {'ceo'} else 'agent'
+        return self.config.raw.get_role_model_keys(normalized)
+
+    def resolve_bound_model_key(self, role: str, model_binding: str, model_key: str | None) -> str:
+        binding = str(model_binding or "live_role").strip() or "live_role"
+        if binding == "fixed_key":
+            resolved = str(model_key or "").strip()
+            if not resolved:
+                raise ValueError(f"Fixed model binding for role '{role}' requires model_key")
+            item = self.config.raw.get_managed_model(resolved)
+            if item is None:
+                raise ValueError(f"Unknown model key: {resolved}")
+            if not item.enabled:
+                raise ValueError(f"Disabled model key cannot be used: {resolved}")
+            return resolved
+        return self.resolve_role_model_key(role)
+
+    def resolve_bound_model_chain(self, role: str, model_binding: str, model_key: str | None) -> list[str]:
+        binding = str(model_binding or "live_role").strip() or "live_role"
+        if binding == "fixed_key":
+            return [self.resolve_bound_model_key(role, binding, model_key)]
+        return self.resolve_role_model_chain(role)
 
     def _model_manager(self) -> ModelManager:
         return ModelManager(self.config.raw.model_copy(deep=True))
 
     def list_model_catalog(self) -> dict[str, Any]:
+        self.ensure_runtime_config_current(force=False, reason="list_model_catalog")
         manager = self._model_manager()
         catalog = manager.list_models()
         return {
             "items": [str(item.get('key') or '').strip() for item in catalog if str(item.get('key') or '').strip()],
             "catalog": catalog,
             "roles": {
+                "agent": list(manager.config.models.roles.agent),
                 "ceo": list(manager.config.models.roles.ceo),
                 "execution": list(manager.config.models.roles.execution),
                 "inspection": list(manager.config.models.roles.inspection),
             },
-            "scopes": ["ceo", "execution", "inspection"],
+            "scopes": ["agent", "ceo", "execution", "inspection"],
             "defaults": self.default_node_provider_models(),
         }
 
@@ -158,7 +203,7 @@ class ProjectService:
             retry_on=[str(item) for item in (payload.get("retry_on") or [])] if payload.get("retry_on") is not None else None,
             description=str(payload.get("description") or ""),
         )
-        self._reload_runtime_config(manager.config)
+        self.ensure_runtime_config_current(force=True, reason="add_model_catalog_entry")
         return result
 
     async def update_model_catalog_entry(self, model_key: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -175,56 +220,92 @@ class ProjectService:
             retry_on=[str(item) for item in (payload.get("retry_on") or [])] if payload.get("retry_on") is not None else None,
             description=payload.get("description"),
         )
-        self._reload_runtime_config(manager.config)
+        self.ensure_runtime_config_current(force=True, reason="update_model_catalog_entry")
         return result
 
     async def set_model_catalog_entry_enabled(self, model_key: str, enabled: bool) -> dict[str, Any]:
         manager = self._model_manager()
         result = manager.set_model_enabled(model_key, enabled)
-        self._reload_runtime_config(manager.config)
+        self.ensure_runtime_config_current(force=True, reason="set_model_catalog_entry_enabled")
         return result
 
     async def update_model_role_chain(self, scope: str, model_keys: list[str]) -> dict[str, Any]:
         manager = self._model_manager()
         result = manager.set_scope_chain(scope, model_keys)
-        self._reload_runtime_config(manager.config)
+        self.ensure_runtime_config_current(force=True, reason="update_model_role_chain")
+        return result
+
+    async def delete_model_catalog_entry(self, model_key: str) -> dict[str, Any]:
+        self.ensure_runtime_config_current(force=False, reason="delete_model_catalog_entry")
+        if self._model_key_in_use(model_key):
+            raise ValueError("model_in_use")
+        manager = self._model_manager()
+        result = manager.delete_model(model_key)
+        self.ensure_runtime_config_current(force=True, reason="delete_model_catalog_entry")
         return result
 
     def default_node_provider_models(self) -> dict[str, str]:
+        self.ensure_runtime_config_current(force=False, reason="default_node_provider_models")
         fallback = self._first_ready_provider_model()
         return to_public_model_defaults(
             {
-                'ceo': self._effective_provider_model(str(self.config.ceo_model or '').strip(), fallback=fallback),
-                'execution': self._effective_provider_model(str(self.config.execution_model or '').strip(), fallback=fallback),
-                'inspection': self._effective_provider_model(str(self.config.inspection_model or '').strip(), fallback=fallback),
+                'agent': self._effective_provider_model(self.resolve_role_model_key('agent'), fallback=fallback),
+                'ceo': self._effective_provider_model(self.resolve_role_model_key('ceo'), fallback=fallback),
+                'execution': self._effective_provider_model(self.resolve_role_model_key('execution'), fallback=fallback),
+                'inspection': self._effective_provider_model(self.resolve_role_model_key('inspection'), fallback=fallback),
             }
         )
 
     def _provider_model_candidates(self) -> list[str]:
         role_refs = [
+            *self.config.raw.models.roles.agent,
             *self.config.raw.models.roles.ceo,
             *self.config.raw.models.roles.execution,
             *self.config.raw.models.roles.inspection,
         ]
         catalog_refs = [item.key for item in self.config.raw.models.catalog]
         return [
-            self.config.raw.agents.defaults.model,
-            self.config.raw.agents.multi_agent.orchestrator_model,
-            self.config.raw.org_graph.ceo_model,
-            self.config.raw.org_graph.execution_model,
-            self.config.raw.org_graph.inspection_model,
+            self.config.raw.agents.multi_agent.orchestrator_model_key,
             *catalog_refs,
             *role_refs,
         ]
+
+    def _model_key_in_use(self, target_model_key: str) -> bool:
+        target = str(target_model_key or '').strip()
+        if not target:
+            return False
+        active_project_statuses = {'queued', 'planning', 'running', 'checking', 'blocked'}
+        active_unit_statuses = {'pending', 'planning', 'ready', 'running', 'checking', 'blocked'}
+        for project in self.list_projects():
+            if project.status not in active_project_statuses:
+                continue
+            for unit in self.list_units(project.project_id):
+                if unit.status in active_unit_statuses and unit.model_binding == 'fixed_key' and str(unit.model_key or '').strip() == target:
+                    return True
+                checkpoint = self.checkpoint_store.get(unit.unit_id)
+                if not isinstance(checkpoint, dict):
+                    continue
+                for stage_state in checkpoint.get('stages', []):
+                    if str(stage_state.get('status') or '') == 'completed':
+                        continue
+                    for work_state in stage_state.get('work_items', []):
+                        legacy_model_key = str(work_state.get('provider_model') or '').strip() or None
+                        model_key = str(work_state.get('model_key') or legacy_model_key or '').strip()
+                        model_binding = str(work_state.get('model_binding') or ('fixed_key' if model_key else 'live_role')).strip()
+                        if model_binding != 'fixed_key' or model_key != target:
+                            continue
+                        if str(work_state.get('status') or '') not in {'completed', 'canceled'}:
+                            return True
+        return False
 
     def _provider_model_is_ready(self, provider_model: str) -> bool:
         candidate = str(provider_model or '').strip()
         if not candidate:
             return False
         try:
-            from g3ku.org_graph.llm.provider_factory import build_provider_from_model
+            from g3ku.org_graph.llm.provider_factory import build_provider_from_model_key
 
-            build_provider_from_model(self.config.raw, candidate)
+            build_provider_from_model_key(self.config.raw, candidate)
         except Exception:
             return False
         return True
@@ -243,26 +324,18 @@ class ProjectService:
         return str(fallback or '').strip()
 
     def resolve_project_model_chain(self, *, project: ProjectRecord | None, node_type: str) -> list[str]:
+        _ = project
         normalized_type = 'inspection' if node_type in {'inspection', 'checker'} else 'execution' if node_type in {'execution'} else 'ceo'
-        scope = {'ceo': 'ceo', 'execution': 'execution', 'inspection': 'inspection'}[normalized_type]
-        chain = [target.provider_model for target in self.config.raw.get_scope_model_chain(scope)]
+        chain = self.resolve_role_model_chain(normalized_type)
         if chain:
             return chain
         fallback = self.resolve_project_provider_model(project=project, node_type=node_type)
         return [fallback] if fallback else []
 
     def resolve_project_provider_model(self, *, project: ProjectRecord | None, node_type: str) -> str:
+        _ = project
         normalized_type = 'inspection' if node_type in {'inspection', 'checker'} else 'execution' if node_type in {'execution'} else 'ceo'
-        raw_defaults = {
-            'ceo': str(self.config.ceo_model or '').strip(),
-            'execution': str(self.config.execution_model or '').strip(),
-            'inspection': str(self.config.inspection_model or '').strip(),
-        }
-        defaults = self.default_node_provider_models()
-        resolved = str(defaults.get(normalized_type) or '').strip()
-        if resolved:
-            return resolved
-        return raw_defaults[normalized_type]
+        return self.resolve_role_model_key(normalized_type)
 
     def list_effective_tool_names(
         self,
@@ -311,6 +384,7 @@ class ProjectService:
         async with self._startup_lock:
             if self._started:
                 return
+            self.ensure_runtime_config_current(force=False, reason="startup")
             if self.config.governance_enabled:
                 self.resource_registry.refresh()
                 self.seed_ceo_governance_defaults()
@@ -367,7 +441,8 @@ class ProjectService:
                     updated_at=self.now(),
                     started_at=None,
                     finished_at=None,
-                    provider_model=self.resolve_project_provider_model(project=project, node_type='execution'),
+                    model_key=None,
+                    model_binding='live_role',
                     mutation_allowed=False,
                     metadata={},
                 )
@@ -404,6 +479,7 @@ class ProjectService:
         return now_iso()
 
     async def create_project(self, request: ProjectCreateRequest) -> ProjectRecord:
+        self.ensure_runtime_config_current(force=False, reason="create_project")
         session_id = str(request.session_id or 'web:shared').strip() or 'web:shared'
         active = [project for project in self.list_projects(session_id) if project.status not in {'completed', 'failed', 'canceled', 'archived'}]
         if len(active) >= self.config.max_active_projects_per_session:
@@ -454,7 +530,8 @@ class ProjectService:
             updated_at=self.now(),
             started_at=None,
             finished_at=None,
-            provider_model=self.resolve_project_provider_model(project=project, node_type='execution'),
+            model_key=None,
+            model_binding='live_role',
             mutation_allowed=False,
             metadata={'request_output_target': request.output_target},
         )
@@ -478,9 +555,10 @@ class ProjectService:
         role_title: str,
         objective: str,
         prompt_preview: str,
-        provider_model: str | None = None,
+        model_key: str | None = None,
         mutation_allowed: bool = False,
     ) -> UnitAgentRecord:
+        explicit_model_key = str(model_key or "").strip() or None
         unit = UnitAgentRecord(
             unit_id=new_unit_id('execution'),
             project_id=project.project_id,
@@ -502,7 +580,8 @@ class ProjectService:
             updated_at=self.now(),
             started_at=None,
             finished_at=None,
-            provider_model=str(provider_model or self.resolve_project_provider_model(project=project, node_type='execution') or parent.provider_model or self.config.execution_model),
+            model_key=explicit_model_key,
+            model_binding='fixed_key' if explicit_model_key else 'live_role',
             mutation_allowed=bool(mutation_allowed),
             metadata={},
         )

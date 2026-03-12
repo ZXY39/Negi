@@ -201,14 +201,16 @@ def _coerce_work_unit(
         mode = 'local'
     if mode == 'delegate' and not delegation_allowed:
         mode = 'local'
-    provider_model = str(item.get('provider_model') or '').strip() or None
+    model_key = str(item.get('model_key') or '').strip() or None
+    if model_key and ':' in model_key:
+        model_key = None
     mutation_allowed = bool(item.get('mutation_allowed', False))
     return WorkUnitPlan(
         role_title=role_title,
         objective_summary=objective_summary,
         prompt_preview=prompt_preview,
         mode=mode,
-        provider_model=provider_model,
+        model_key=model_key,
         mutation_allowed=mutation_allowed,
         validation_profile_id=None,
     )
@@ -299,8 +301,8 @@ async def build_execution_plan(
     level: int,
     effective_max_depth: int,
     llm=None,
-    provider_model: str | None = None,
-    provider_model_chain: list[str] | None = None,
+    model_key: str | None = None,
+    model_chain: list[str] | None = None,
     local_available_tools: list[str] | None = None,
     local_available_skills: list[str] | None = None,
     delegate_available_tools: list[str] | None = None,
@@ -333,8 +335,8 @@ async def build_execution_plan(
             payload = await llm.chat_json(
                 system_prompt=PLANNER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
-                provider_model=provider_model,
-                provider_model_chain=provider_model_chain,
+                provider_model=model_key,
+                provider_model_chain=model_chain,
                 monitor_context=monitor_context,
             )
             if payload:

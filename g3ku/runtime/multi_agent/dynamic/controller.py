@@ -255,11 +255,11 @@ class DynamicSubagentController:
             trace_payload(trace, lifecycle_status='injecting', **self._trace_details(record, current_action='Injecting delegated context')),
         )
 
-        async def _factory(model_client, provider_model: str):
+        async def _factory(model_client, model_key: str):
             self.session_store.update(
                 session_id,
                 status='active',
-                metadata={**metadata, 'active_provider_model': provider_model, 'current_action': 'Executing delegated task'},
+                metadata={**metadata, 'active_model_key': model_key, 'current_action': 'Executing delegated task'},
             )
             if background and self.background_pool is not None and task_id:
                 self.background_pool.store.update(task_id, status='running', category=spec.name, session_id=session_id)
@@ -270,7 +270,7 @@ class DynamicSubagentController:
                 trace_payload(
                     trace,
                     lifecycle_status='active',
-                    provider_model=provider_model,
+                    model_key=model_key,
                     **self._trace_details(record, current_action='Executing delegated task'),
                 ),
             )

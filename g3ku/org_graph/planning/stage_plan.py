@@ -22,7 +22,7 @@ class WorkUnitPlan:
     objective_summary: str
     prompt_preview: str
     mode: str = "local"
-    provider_model: str | None = None
+    model_key: str | None = None
     mutation_allowed: bool = False
     validation_profile_id: str | None = None
 

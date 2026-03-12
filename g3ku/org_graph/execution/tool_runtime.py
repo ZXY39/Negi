@@ -10,7 +10,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.org_graph.errors import EngineeringFailureError
 from g3ku.org_graph.governance.resource_filter import list_effective_tool_names
 from g3ku.org_graph.governance.action_mapper import resolve_tool_action
-from g3ku.org_graph.llm.provider_factory import build_provider_from_model
+from g3ku.org_graph.llm.provider_factory import build_provider_from_model_key
 from g3ku.org_graph.prompt_loader import load_prompt
 from g3ku.providers.fallback import is_retryable_model_error, response_requires_retry
 
@@ -181,7 +181,7 @@ class OrgGraphToolRuntime:
         chain = [str(item or "").strip() for item in provider_model_chain if str(item or "").strip()]
         for index, provider_model in enumerate(chain):
             try:
-                target = build_provider_from_model(self._service.config.raw, provider_model)
+                target = build_provider_from_model_key(self._service.config.raw, provider_model)
             except Exception as exc:
                 last_error = exc
                 if index < len(chain) - 1:
@@ -232,9 +232,8 @@ class OrgGraphToolRuntime:
         )
         if not effective_tools:
             return None
-        provider_model = str(unit.provider_model or self._service.config.execution_model)
-        provider_model_chain = [provider_model] if unit.provider_model else self._service.resolve_project_model_chain(project=project, node_type='execution')
-        if not any(self._service._provider_model_is_ready(candidate) for candidate in provider_model_chain):
+        model_chain = self._service.resolve_bound_model_chain('execution', unit.model_binding, unit.model_key)
+        if not any(self._service._provider_model_is_ready(candidate) for candidate in model_chain):
             return None
         tools = self._build_tools(
             effective_tools=effective_tools,
@@ -257,7 +256,7 @@ class OrgGraphToolRuntime:
             },
         ]
         return await self._run_tool_loop(
-            provider_model_chain=provider_model_chain,
+            provider_model_chain=model_chain,
             messages=messages,
             tools=tools,
             project=project,
@@ -291,8 +290,7 @@ class OrgGraphToolRuntime:
         candidate_content: str,
         validation_tools: list[str] | None,
     ) -> str:
-        provider_model = str(unit.provider_model or self._service.config.inspection_model or self._service.config.execution_model)
-        provider_model_chain = [provider_model] if unit.provider_model else self._service.resolve_project_model_chain(project=project, node_type='inspection')
+        model_chain = self._service.resolve_bound_model_chain('inspection', unit.model_binding, unit.model_key)
         permission_subject = self._service.build_policy_subject(
             session_id=project.session_id,
             actor_role='inspection',
@@ -330,7 +328,7 @@ class OrgGraphToolRuntime:
         try:
             if tools:
                 content = await self._run_tool_loop(
-                    provider_model_chain=provider_model_chain,
+                    provider_model_chain=model_chain,
                     messages=messages,
                     tools=tools,
                     project=project,
@@ -348,7 +346,7 @@ class OrgGraphToolRuntime:
                 )
             else:
                 response = await self._call_with_fallback(
-                    provider_model_chain=provider_model_chain,
+                    provider_model_chain=model_chain,
                     messages=messages,
                     tools=None,
                     max_tokens=600,

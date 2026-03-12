@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 import json
-import re
 from pathlib import Path
 
 from g3ku.config.schema import Config
@@ -83,127 +82,71 @@ def _provider_payload(cfg: Config, provider_name: str) -> dict[str, object]:
     }
 
 
+def _ensure_no_legacy_model_fields(raw_data: dict) -> None:
+    legacy_paths = (
+        ("agents", "defaults", "model"),
+        ("agents", "multiAgent", "orchestratorModel"),
+        ("agents", "multi_agent", "orchestrator_model"),
+        ("orgGraph", "ceoModel"),
+        ("orgGraph", "executionModel"),
+        ("orgGraph", "inspectionModel"),
+        ("org_graph", "ceo_model"),
+        ("org_graph", "execution_model"),
+        ("org_graph", "inspection_model"),
+    )
+    hits = [".".join(path) for path in legacy_paths if _path_exists(raw_data, path)]
+    if hits:
+        preview = ", ".join(hits)
+        raise ValueError(
+            "当前版本只支持 models.catalog + models.roles + orchestrator_model_key。"
+            f"请从 {get_config_path()} 删除旧字段: {preview}"
+        )
+
+
 def _referenced_provider_names(cfg: Config) -> list[str]:
-    values = [
-        cfg.agents.defaults.model,
-        cfg.agents.multi_agent.orchestrator_model,
-        cfg.org_graph.ceo_model or cfg.agents.defaults.model,
-        cfg.org_graph.execution_model or cfg.agents.defaults.model,
-        cfg.org_graph.inspection_model or cfg.org_graph.execution_model or cfg.agents.defaults.model,
-    ]
+    names: set[str] = set()
+    values = []
     if cfg.tools.memory.enabled:
         values.append(cfg.tools.memory.embedding.provider_model)
         values.append(cfg.tools.memory.retrieval.rerank_provider_model)
 
-    names: set[str] = set()
     for value in values:
         provider_model = str(value or "").strip()
         if not provider_model:
-            continue
-        if cfg.get_managed_model(provider_model) is not None:
             continue
         provider_name, _ = cfg.parse_provider_model(provider_model)
         names.add(provider_name)
     return sorted(names)
 
 
-def _model_key_slug(value: str, *, used: set[str]) -> str:
-    base = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_") or "model"
-    if base[0].isdigit():
-        base = f"model_{base}"
-    candidate = base
-    index = 2
-    while candidate in used:
-        candidate = f"{base}_{index}"
-        index += 1
-    used.add(candidate)
-    return candidate
-
-
 def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[str, list[str]]]:
-    if cfg.models.catalog:
-        catalog = [
-            {
-                "key": item.key,
-                "providerModel": item.provider_model,
-                "apiKey": item.api_key,
-                "apiBase": item.api_base,
-                "extraHeaders": item.extra_headers,
-                "enabled": item.enabled,
-                "maxTokens": item.max_tokens,
-                "temperature": item.temperature,
-                "reasoningEffort": item.reasoning_effort,
-                "retryOn": list(item.retry_on or []),
-                "description": item.description,
-            }
-            for item in cfg.models.catalog
-        ]
-        routes = {
-            "agent": list(cfg.models.roles.agent),
-            "ceo": list(cfg.models.roles.ceo),
-            "execution": list(cfg.models.roles.execution),
-            "inspection": list(cfg.models.roles.inspection),
+    catalog = [
+        {
+            "key": item.key,
+            "providerModel": item.provider_model,
+            "apiKey": item.api_key,
+            "apiBase": item.api_base,
+            "extraHeaders": item.extra_headers,
+            "enabled": item.enabled,
+            "maxTokens": item.max_tokens,
+            "temperature": item.temperature,
+            "reasoningEffort": item.reasoning_effort,
+            "retryOn": list(item.retry_on or []),
+            "description": item.description,
         }
-        return catalog, routes
-
-    used: set[str] = set()
-    catalog: list[dict[str, object]] = []
-    routes: dict[str, list[str]] = {"agent": [], "ceo": [], "execution": [], "inspection": []}
-    by_provider_model: dict[str, str] = {}
-
-    def ensure_model(ref: str) -> str:
-        provider_model = cfg.resolve_provider_model_reference(ref)
-        existing = by_provider_model.get(provider_model)
-        if existing:
-            return existing
-        provider_cfg = cfg.get_provider(ref)
-        key = _model_key_slug(provider_model, used=used)
-        catalog.append(
-            {
-                "key": key,
-                "providerModel": provider_model,
-                "apiKey": getattr(provider_cfg, "api_key", ""),
-                "apiBase": getattr(provider_cfg, "api_base", None),
-                "extraHeaders": getattr(provider_cfg, "extra_headers", None),
-                "enabled": True,
-                "maxTokens": cfg.agents.defaults.max_tokens,
-                "temperature": cfg.agents.defaults.temperature,
-                "reasoningEffort": cfg.agents.defaults.reasoning_effort,
-                "retryOn": ["network", "429", "5xx"],
-                "description": "",
-            }
-        )
-        by_provider_model[provider_model] = key
-        return key
-
-    for scope, refs in {
-        "agent": [],
-        "ceo": [cfg.org_graph.ceo_model or cfg.agents.defaults.model],
-        "execution": [cfg.org_graph.execution_model or cfg.agents.defaults.model],
-        "inspection": [cfg.org_graph.inspection_model or cfg.org_graph.execution_model or cfg.agents.defaults.model],
-    }.items():
-        for ref in refs:
-            model_ref = str(ref or "").strip()
-            if not model_ref:
-                continue
-            routes[scope].append(ensure_model(model_ref))
-
+        for item in cfg.models.catalog
+    ]
+    routes = {
+        "agent": list(cfg.models.roles.agent),
+        "ceo": list(cfg.models.roles.ceo),
+        "execution": list(cfg.models.roles.execution),
+        "inspection": list(cfg.models.roles.inspection),
+    }
     return catalog, routes
 
 
 def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     catalog, routes = _managed_models_payload(cfg)
-    default_model = str((routes["ceo"][0] if routes["ceo"] else cfg.agents.defaults.model) or "")
-    org_ceo_model = str((routes["ceo"][0] if routes["ceo"] else (cfg.org_graph.ceo_model or default_model)) or "")
-    org_execution_model = str((routes["execution"][0] if routes["execution"] else (cfg.org_graph.execution_model or default_model)) or "")
-    org_inspection_model = str((routes["inspection"][0] if routes["inspection"] else (cfg.org_graph.inspection_model or org_execution_model)) or "")
-    runtime_routes = {
-        "ceo": list(routes.get("ceo", [])),
-        "execution": list(routes.get("execution", [])),
-        "inspection": list(routes.get("inspection", [])),
-    }
-    if routes.get("agent"):
-        runtime_routes["agent"] = list(routes["agent"])
 
     providers = {
         provider_name: _provider_payload(cfg, provider_name)
@@ -214,7 +157,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         "agents": {
             "defaults": {
                 "workspace": cfg.agents.defaults.workspace,
-                "model": default_model,
                 "runtime": cfg.agents.defaults.runtime,
                 "maxTokens": cfg.agents.defaults.max_tokens,
                 "temperature": cfg.agents.defaults.temperature,
@@ -223,7 +165,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "reasoningEffort": cfg.agents.defaults.reasoning_effort,
             },
             "multiAgent": {
-                "orchestratorModel": cfg.agents.multi_agent.orchestrator_model,
+                "orchestratorModelKey": cfg.agents.multi_agent.orchestrator_model_key,
             },
         },
         "channels": {
@@ -232,7 +174,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         },
         "models": {
             "catalog": catalog,
-            "roles": runtime_routes,
+            "roles": routes,
         },
         "providers": providers,
         "gateway": {
@@ -383,9 +325,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         },
         "orgGraph": {
             "enabled": cfg.org_graph.enabled,
-            "ceoModel": org_ceo_model,
-            "executionModel": org_execution_model,
-            "inspectionModel": org_inspection_model,
             "projectStorePath": cfg.org_graph.project_store_path,
             "checkpointStorePath": cfg.org_graph.checkpoint_store_path,
             "taskMonitorStorePath": cfg.org_graph.task_monitor_store_path,
@@ -444,6 +383,7 @@ def load_config(config_path: Path | None = None) -> Config:
     if path != expected_path:
         raise ValueError(f"Config must be loaded from {expected_path}, got {path}")
     raw_data = _load_json_file(expected_path)
+    _ensure_no_legacy_model_fields(raw_data)
     org_graph_raw = raw_data.get('orgGraph') if isinstance(raw_data.get('orgGraph'), dict) else raw_data.get('org_graph')
     if isinstance(org_graph_raw, dict):
         if 'taskMonitorStorePath' not in org_graph_raw and 'task_monitor_store_path' not in org_graph_raw:

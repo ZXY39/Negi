@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 
 from g3ku.config.loader import load_config
 from g3ku.config.schema import Config
@@ -38,6 +39,29 @@ def _resolve_path(raw: str) -> Path:
     return path
 
 
+def _ensure_runtime_schema_cutover(*, project_store_path: Path, checkpoint_store_path: Path, task_monitor_store_path: Path, artifact_dir: Path) -> None:
+    sentinel = project_store_path.parent / "runtime-schema-version"
+    try:
+        current = sentinel.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        current = ""
+    if current == "2":
+        return
+
+    for target in (project_store_path, checkpoint_store_path, task_monitor_store_path):
+        for candidate in (target, target.with_name(f"{target.name}-wal"), target.with_name(f"{target.name}-shm")):
+            try:
+                if candidate.exists():
+                    candidate.unlink()
+            except FileNotFoundError:
+                pass
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir, ignore_errors=True)
+
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("2", encoding="utf-8")
+
+
 
 def resolve_org_graph_config(config: Config | None = None) -> ResolvedOrgGraphConfig:
     cfg = config or load_config()
@@ -50,15 +74,20 @@ def resolve_org_graph_config(config: Config | None = None) -> ResolvedOrgGraphCo
     task_monitor_store_path = _resolve_path(getattr(org, 'task_monitor_store_path', '.g3ku/org-graph/task-monitor.sqlite3'))
     governance_store_path = _resolve_path(governance_raw)
     artifact_dir = _resolve_path(org.artifact_dir)
+    _ensure_runtime_schema_cutover(
+        project_store_path=project_store_path,
+        checkpoint_store_path=checkpoint_store_path,
+        task_monitor_store_path=task_monitor_store_path,
+        artifact_dir=artifact_dir,
+    )
     project_store_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_store_path.parent.mkdir(parents=True, exist_ok=True)
     task_monitor_store_path.parent.mkdir(parents=True, exist_ok=True)
     governance_store_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    fallback_model = cfg.agents.defaults.model
-    ceo_model_chain = cfg.get_scope_model_refs("ceo")
-    execution_model_chain = cfg.get_scope_model_refs("execution")
-    inspection_model_chain = cfg.get_scope_model_refs("inspection")
+    ceo_model_chain = cfg.get_role_model_keys("ceo")
+    execution_model_chain = cfg.get_role_model_keys("execution")
+    inspection_model_chain = cfg.get_role_model_keys("inspection")
     return ResolvedOrgGraphConfig(
         raw=cfg,
         project_store_path=project_store_path,
@@ -66,11 +95,11 @@ def resolve_org_graph_config(config: Config | None = None) -> ResolvedOrgGraphCo
         task_monitor_store_path=task_monitor_store_path,
         governance_store_path=governance_store_path,
         artifact_dir=artifact_dir,
-        ceo_model=(ceo_model_chain[0] if ceo_model_chain else (org.ceo_model or fallback_model)),
+        ceo_model=cfg.resolve_role_model_key("ceo"),
         ceo_model_chain=ceo_model_chain,
-        execution_model=(execution_model_chain[0] if execution_model_chain else (org.execution_model or fallback_model)),
+        execution_model=cfg.resolve_role_model_key("execution"),
         execution_model_chain=execution_model_chain,
-        inspection_model=(inspection_model_chain[0] if inspection_model_chain else (org.inspection_model or org.execution_model or fallback_model)),
+        inspection_model=cfg.resolve_role_model_key("inspection"),
         inspection_model_chain=inspection_model_chain,
         default_max_depth=org.default_max_depth,
         hard_max_depth=org.hard_max_depth,

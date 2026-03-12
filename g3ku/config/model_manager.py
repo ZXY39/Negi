@@ -35,6 +35,10 @@ def _normalize_scope(value: str) -> str:
 class ModelManager:
     config: Config
 
+    def __post_init__(self) -> None:
+        self._normalize_shared_catalog()
+        self._revalidate()
+
     @classmethod
     def load(cls) -> "ModelManager":
         return cls(load_config())
@@ -109,7 +113,7 @@ class ModelManager:
         self.config.models.catalog.append(item)
         for scope in scopes or []:
             self.add_model_to_scope(clean_key, scope)
-        self._sync_legacy_model_fields()
+        self._revalidate()
         self.save()
         return self.get_model(clean_key)
 
@@ -151,14 +155,19 @@ class ModelManager:
         if description is not None:
             update["description"] = str(description).strip()
         self._replace_model(item.key, item.model_copy(update=update))
-        self._sync_legacy_model_fields()
+        self._revalidate()
         self.save()
         return self.get_model(item.key)
 
     def set_model_enabled(self, key: str, enabled: bool) -> dict[str, Any]:
         item = self._require_model(key)
-        self._replace_model(item.key, item.model_copy(update={"enabled": bool(enabled)}))
-        self._sync_legacy_model_fields()
+        enabled_flag = bool(enabled)
+        self._replace_model(item.key, item.model_copy(update={"enabled": enabled_flag}))
+        if not enabled_flag:
+            self._remove_model_from_roles(item.key)
+            if self.config.agents.multi_agent.orchestrator_model_key == item.key:
+                self.config.agents.multi_agent.orchestrator_model_key = None
+        self._revalidate()
         self.save()
         return self.get_model(item.key)
 
@@ -170,17 +179,33 @@ class ModelManager:
             model_key = str(key or "").strip()
             if not model_key or model_key in seen:
                 continue
-            self._require_model(model_key)
+            item = self._require_model(model_key)
+            if not item.enabled:
+                raise ValueError(f"Disabled model cannot be assigned to roles: {model_key}")
             seen.add(model_key)
             clean.append(model_key)
+        if not clean:
+            raise ValueError(f"models.roles.{normalized_scope} must be non-empty")
         role_routes = self.config.models.roles
         setattr(role_routes, normalized_scope, clean)
-        self._sync_legacy_model_fields()
+        self._revalidate()
         self.save()
         return {"scope": normalized_scope, "model_keys": clean}
 
+    def delete_model(self, key: str) -> dict[str, Any]:
+        item = self._require_model(key)
+        self.config.models.catalog = [candidate for candidate in self.config.models.catalog if candidate.key != item.key]
+        self._remove_model_from_roles(item.key)
+        if self.config.agents.multi_agent.orchestrator_model_key == item.key:
+            self.config.agents.multi_agent.orchestrator_model_key = None
+        self._revalidate()
+        self.save()
+        return {"key": item.key, "deleted": True}
+
     def add_model_to_scope(self, key: str, scope: str) -> None:
         model = self._require_model(key)
+        if not model.enabled:
+            raise ValueError(f"Disabled model cannot be assigned to roles: {model.key}")
         normalized_scope = _normalize_scope(scope)
         route = self._scope_list(normalized_scope)
         if model.key not in route:
@@ -207,25 +232,15 @@ class ModelManager:
     def save(self) -> None:
         save_config(self.config)
 
-    def _sync_legacy_model_fields(self) -> None:
-        agent_chain = self._scope_list("agent")
-        ceo_chain = self._scope_list("ceo")
-        execution_chain = self._scope_list("execution")
-        inspection_chain = self._scope_list("inspection")
-        if agent_chain:
-            self.config.agents.defaults.model = self._first_enabled_ref(agent_chain)
-        elif ceo_chain:
-            self.config.agents.defaults.model = self._first_enabled_ref(ceo_chain)
-        if ceo_chain:
-            self.config.org_graph.ceo_model = self._first_enabled_ref(ceo_chain)
-        if execution_chain:
-            self.config.org_graph.execution_model = self._first_enabled_ref(execution_chain)
-        if inspection_chain:
-            self.config.org_graph.inspection_model = self._first_enabled_ref(inspection_chain)
-
     def _scope_list(self, scope: str) -> list[str]:
         normalized_scope = _normalize_scope(scope)
         return getattr(self.config.models.roles, normalized_scope)
+
+    def _remove_model_from_roles(self, key: str) -> None:
+        role_routes = self.config.models.roles
+        for scope in VALID_SCOPES:
+            refs = getattr(role_routes, scope)
+            setattr(role_routes, scope, [ref for ref in refs if ref != key])
 
     def _require_model(self, key: str) -> ManagedModelConfig:
         item = self.config.get_managed_model(key)
@@ -239,9 +254,72 @@ class ModelManager:
             catalog.append(replacement if item.key == key else item)
         self.config.models.catalog = catalog
 
-    def _first_enabled_ref(self, refs: list[str]) -> str:
+    def _normalize_shared_catalog(self) -> None:
+        catalog = list(self.config.models.catalog or [])
+        if len(catalog) < 2:
+            return
+
+        usage: dict[str, set[str]] = {}
+        for scope in VALID_SCOPES:
+            for ref in getattr(self.config.models.roles, scope):
+                key = str(ref or "").strip()
+                if not key:
+                    continue
+                usage.setdefault(key, set()).add(scope)
+
+        groups: dict[tuple[str, str, str, tuple[tuple[str, str], ...]], list[ManagedModelConfig]] = {}
+        for item in catalog:
+            groups.setdefault(self._shared_signature(item), []).append(item)
+
+        alias_map: dict[str, str] = {}
+        for items in groups.values():
+            if len(items) < 2:
+                continue
+            scopes = {scope for item in items for scope in usage.get(item.key, set())}
+            if len(scopes) < 2:
+                continue
+            canonical = items[0]
+            for duplicate in items[1:]:
+                alias_map[duplicate.key] = canonical.key
+
+        if not alias_map:
+            return
+
+        self.config.models.catalog = [item for item in catalog if item.key not in alias_map]
+        role_routes = self.config.models.roles
+        for scope in VALID_SCOPES:
+            refs = getattr(role_routes, scope)
+            setattr(role_routes, scope, self._remap_model_refs(refs, alias_map))
+        self.config.agents.multi_agent.orchestrator_model_key = self._remap_model_ref(
+            self.config.agents.multi_agent.orchestrator_model_key,
+            alias_map,
+        )
+
+    def _shared_signature(self, item: ManagedModelConfig) -> tuple[str, str, str, tuple[tuple[str, str], ...]]:
+        headers = tuple(sorted((str(key), str(value)) for key, value in (item.extra_headers or {}).items()))
+        return (
+            str(item.provider_model or "").strip(),
+            str(item.api_key or "").strip(),
+            str(item.api_base or "").strip(),
+            headers,
+        )
+
+    def _remap_model_ref(self, ref: str | None, alias_map: dict[str, str]) -> str | None:
+        raw = str(ref or "").strip()
+        if not raw:
+            return None if ref is None else ""
+        return alias_map.get(raw, raw)
+
+    def _remap_model_refs(self, refs: list[str], alias_map: dict[str, str]) -> list[str]:
+        clean: list[str] = []
+        seen: set[str] = set()
         for ref in refs:
-            item = self.config.get_managed_model(ref)
-            if item is None or item.enabled:
-                return ref
-        return refs[0]
+            key = alias_map.get(str(ref or "").strip(), str(ref or "").strip())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            clean.append(key)
+        return clean
+
+    def _revalidate(self) -> None:
+        self.config = Config.model_validate(self.config.model_dump(mode="python"))

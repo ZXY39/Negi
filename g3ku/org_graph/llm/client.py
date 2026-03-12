@@ -8,7 +8,7 @@ from loguru import logger
 
 from g3ku.config.schema import Config
 from g3ku.org_graph.errors import ModelChainUnavailableError
-from g3ku.org_graph.llm.provider_factory import ProviderTarget, build_provider_from_model
+from g3ku.org_graph.llm.provider_factory import ProviderTarget, build_provider_from_model_key
 from g3ku.providers.fallback import is_retryable_model_error, response_requires_retry
 
 
@@ -27,7 +27,7 @@ class OrgGraphLLM:
         key = str(provider_model or self._default_model or "").strip()
         target = self._targets.get(key)
         if target is None:
-            target = build_provider_from_model(self._config, key)
+            target = build_provider_from_model_key(self._config, key)
             self._targets[key] = target
         return target
 

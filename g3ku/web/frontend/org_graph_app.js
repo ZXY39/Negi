@@ -1,11 +1,12 @@
 const MODEL_SCOPES = [
+    { key: "agent", label: "Agent" },
     { key: "ceo", label: "CEO" },
     { key: "execution", label: "执行" },
     { key: "inspection", label: "检验" },
 ];
 
-const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
-const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+const EMPTY_MODEL_ROLES = () => ({ agent: [], ceo: [], execution: [], inspection: [] });
+const DEFAULT_MODEL_DEFAULTS = () => ({ agent: "", ceo: "", execution: "", inspection: "" });
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -343,29 +344,81 @@ function syncModelRoleDraftState() {
     S.modelCatalog.rolesDirty = !!S.modelCatalog.roleEditing && !modelRolesEqual(S.modelCatalog.roleDrafts, S.modelCatalog.roles);
 }
 
-function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
-    const payload = data && typeof data === "object" ? data : {};
-    const rolesPayload = payload.roles && typeof payload.roles === "object" ? payload.roles : {};
-    const nextRoles = EMPTY_MODEL_ROLES();
-    MODEL_SCOPES.forEach(({ key }) => {
-        nextRoles[key] = Array.isArray(rolesPayload[key])
-            ? rolesPayload[key].map((item) => String(item || "").trim()).filter(Boolean)
-            : [];
+function modelCatalogHeadersKey(headers) {
+    if (!headers || typeof headers !== "object" || Array.isArray(headers)) return "";
+    return Object.entries(headers)
+        .map(([key, value]) => [String(key), String(value)])
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, value]) => `${key}:${value}`)
+        .join("\n");
+}
+
+function modelCatalogSignature(item) {
+    if (!item || typeof item !== "object") return "";
+    return [
+        String(item.provider_model || "").trim(),
+        String(item.api_key || "").trim(),
+        String(item.api_base || "").trim(),
+        modelCatalogHeadersKey(item.extra_headers),
+    ].join("\n");
+}
+
+function remapModelRef(ref, aliasMap = {}) {
+    const raw = String(ref || "").trim();
+    if (!raw) return "";
+    return String(aliasMap[raw] || raw).trim();
+}
+
+function remapModelRefs(refs, aliasMap = {}) {
+    const normalized = [];
+    (refs || []).forEach((ref) => {
+        const target = remapModelRef(ref, aliasMap);
+        if (!target || normalized.some((item) => item === target)) return;
+        normalized.push(target);
     });
-    const rawCatalog = Array.isArray(payload.catalog) ? payload.catalog : [];
-    const normalizedCatalog = [];
-    const seenCatalog = new Set();
-    rawCatalog.forEach((item) => {
+    return normalized;
+}
+
+function normalizeCatalogEntries(items) {
+    const catalog = [];
+    const aliasMap = {};
+    const signatureToKey = new Map();
+    (items || []).forEach((item) => {
         if (!item || typeof item !== "object") return;
         const key = String(item.key || "").trim();
         const providerModel = String(item.provider_model || "").trim();
-        const dedupeKey = key || providerModel;
-        if (!dedupeKey || seenCatalog.has(dedupeKey)) return;
-        seenCatalog.add(dedupeKey);
-        normalizedCatalog.push({ ...item });
+        const signature = modelCatalogSignature(item) || key || providerModel;
+        if (!signature) return;
+        const canonicalKey = signatureToKey.get(signature);
+        if (canonicalKey) {
+            if (key && key !== canonicalKey) aliasMap[key] = canonicalKey;
+            return;
+        }
+        const nextKey = key || providerModel;
+        if (!nextKey) return;
+        signatureToKey.set(signature, nextKey);
+        catalog.push({ ...item, key: nextKey });
     });
-    S.modelCatalog.items = Array.isArray(payload.items) ? payload.items.map((item) => String(item || "").trim()).filter(Boolean) : [];
-    S.modelCatalog.catalog = normalizedCatalog;
+    return { catalog, aliasMap };
+}
+
+function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
+    const payload = data && typeof data === "object" ? data : {};
+    const { catalog, aliasMap } = normalizeCatalogEntries(Array.isArray(payload.catalog) ? payload.catalog : []);
+    const rolesPayload = payload.roles && typeof payload.roles === "object" ? payload.roles : {};
+    const nextRoles = EMPTY_MODEL_ROLES();
+    MODEL_SCOPES.forEach(({ key }) => {
+        nextRoles[key] = remapModelRefs(
+            Array.isArray(rolesPayload[key])
+                ? rolesPayload[key].map((item) => String(item || "").trim()).filter(Boolean)
+                : [],
+            aliasMap,
+        );
+    });
+    S.modelCatalog.items = Array.isArray(payload.items)
+        ? remapModelRefs(payload.items.map((item) => String(item || "").trim()).filter(Boolean), aliasMap)
+        : [];
+    S.modelCatalog.catalog = catalog;
     S.modelCatalog.roles = normalizeAllModelRoles(nextRoles);
     if (preserveRoleDrafts && S.modelCatalog.roleEditing) {
         S.modelCatalog.roleDrafts = normalizeAllModelRoles(S.modelCatalog.roleDrafts);
@@ -377,7 +430,8 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
     }
     S.modelCatalog.defaults = { ...DEFAULT_MODEL_DEFAULTS(), ...(payload.defaults || {}) };
     if (S.modelCatalog.mode !== "create") {
-        const selectedKey = String(S.modelCatalog.selectedModelKey || "").trim();
+        const selectedKey = remapModelRef(S.modelCatalog.selectedModelKey, aliasMap);
+        S.modelCatalog.selectedModelKey = selectedKey;
         if (selectedKey && !S.modelCatalog.catalog.some((item) => String(item.key || "").trim() === selectedKey)) {
             S.modelCatalog.selectedModelKey = "";
         }
@@ -541,7 +595,14 @@ function renderModelDetail() {
                                 <input class="resource-search" name="apiBase" value="${esc(current?.api_base || "")}" placeholder="https://api.example.com/v1">
                             </label>
                         </div>
-                        <label class="role-toggle ${enabled ? "checked" : ""}"><input type="checkbox" name="enabled" ${enabled ? "checked" : ""}><span>启用此模型</span></label>
+                        <div class="model-form-status-area" style="margin-top: var(--space-4);">
+                            ${enabled 
+                                ? `<button type="button" class="toolbar-btn danger" data-model-control="disable" data-key="${esc(current?.key || "")}">禁用模型</button>` 
+                                : `<button type="button" class="toolbar-btn success" data-model-control="enable" data-key="${esc(current?.key || "")}">启用模型</button>`
+                            }
+                            ${!isCreate ? `<button type="button" class="toolbar-btn ghost" data-model-control="delete" data-key="${esc(current?.key || "")}">删除模型</button>` : ""}
+                            <input type="checkbox" name="enabled" ${enabled ? "checked" : ""} style="display:none">
+                        </div>
                     </section>
                     <section class="resource-section">
                         <h3>模型参数</h3>
@@ -938,13 +999,33 @@ async function saveModelDetail() {
         }
 
         hint(draft.isCreate ? "模型已添加。" : "模型配置已保存。");
-        renderModelCatalog();
+        showToast({ title: draft.isCreate ? "添加成功" : "修改成功", text: draft.isCreate ? "模型已添加成功" : "模型配置已保存", kind: "success" });
+        clearModelSelection();
+
     } catch (e) {
         S.modelCatalog.error = e.message || "save failed";
         hint(`模型配置错误：${S.modelCatalog.error}`, true);
-        renderModelRoleEditors();
-        renderModelList();
-        syncModelDetailScopeToggles();
+        showToast({ title: "修改失败", text: `模型配置错误：${S.modelCatalog.error}`, kind: "error" });
+        clearModelSelection();
+    }
+}
+
+async function deleteModelDetail(modelKey) {
+    const targetKey = String(modelKey || "").trim();
+    if (!targetKey) return;
+    const confirmed = window.confirm(`删除模型 ${targetKey}？此操作会同时从 catalog 和所有角色链移除它。`);
+    if (!confirmed) return;
+    try {
+        const payload = await ApiClient.deleteManagedModel(targetKey);
+        applyModelCatalog(payload, { preserveRoleDrafts: false });
+        hint("模型已删除。");
+        showToast({ title: "删除成功", text: `模型 ${targetKey} 已删除`, kind: "success" });
+        clearModelSelection();
+    } catch (e) {
+        const message = e.message || "delete failed";
+        S.modelCatalog.error = message;
+        hint(`模型删除失败：${message}`, true);
+        showToast({ title: "删除失败", text: `模型删除失败：${message}`, kind: "error" });
     }
 }
 
@@ -1554,10 +1635,12 @@ function renderSkillDetail() {
                 </div>
             </div>
             <div class="detail-modal-body">
-                <label class="role-toggle ${S.selectedSkill.enabled ? "checked" : ""}">
-                    <input id="skill-enabled" type="checkbox" ${S.selectedSkill.enabled ? "checked" : ""}>
-                    <span>启用该技能</span>
-                </label>
+                <div class="resource-status-row" style="margin-bottom: var(--space-4);">
+                    ${S.selectedSkill.enabled 
+                        ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>` 
+                        : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`
+                    }
+                </div>
                 <div class="resource-section">
                     <h3>允许的角色</h3>
                     <div class="resource-filter-row">
@@ -1578,10 +1661,13 @@ function renderSkillDetail() {
         </article>`;
     U.skillDetail.querySelector("#skill-modal-close")?.addEventListener("click", clearSkillSelection);
     U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => void saveSkill());
-    U.skillDetail.querySelector("#skill-enabled")?.addEventListener("change", (e) => {
-        S.selectedSkill.enabled = !!e.target.checked;
-        e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
-        queueResourceSave("skill");
+    U.skillDetail.querySelector("#skill-enable-btn")?.addEventListener("click", () => {
+        S.selectedSkill.enabled = true;
+        saveSkill();
+    });
+    U.skillDetail.querySelector("#skill-disable-btn")?.addEventListener("click", () => {
+        S.selectedSkill.enabled = false;
+        saveSkill();
     });
     U.skillDetail.querySelectorAll(".skill-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const nextRoles = new Set(allowedRoles);
@@ -1720,10 +1806,12 @@ function renderToolDetail() {
                 </div>
             </div>
             <div class="detail-modal-body">
-                <label class="role-toggle ${S.selectedTool.enabled ? "checked" : ""}">
-                    <input id="tool-enabled" type="checkbox" ${S.selectedTool.enabled ? "checked" : ""}>
-                    <span>启用工具族</span>
-                </label>
+                <div class="resource-status-row" style="margin-bottom: var(--space-4);">
+                    ${S.selectedTool.enabled 
+                        ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>` 
+                        : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`
+                    }
+                </div>
                 <div class="resource-section">
                     <div class="tool-permission-heading">
                         <h3>分配动作权限</h3>
@@ -1760,10 +1848,13 @@ function renderToolDetail() {
         </article>`;
     U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
     U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => void saveTool());
-    U.toolDetail.querySelector("#tool-enabled")?.addEventListener("change", (e) => {
-        S.selectedTool.enabled = !!e.target.checked;
-        e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
-        queueResourceSave("tool");
+    U.toolDetail.querySelector("#tool-enable-btn")?.addEventListener("click", () => {
+        S.selectedTool.enabled = true;
+        saveTool();
+    });
+    U.toolDetail.querySelector("#tool-disable-btn")?.addEventListener("click", () => {
+        S.selectedTool.enabled = false;
+        saveTool();
     });
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
@@ -2088,8 +2179,23 @@ function bind() {
     });
     U.modelDetail?.addEventListener("click", (e) => {
         const cancel = e.target.closest("[data-model-detail-cancel]");
-        if (!cancel) return;
-        clearModelSelection();
+        if (cancel) {
+            clearModelSelection();
+            return;
+        }
+        const controlBtn = e.target.closest("[data-model-control]");
+        if (controlBtn) {
+            const action = controlBtn.dataset.modelControl;
+            if (action === "delete") {
+                void deleteModelDetail(controlBtn.dataset.key);
+                return;
+            }
+            const checkbox = U.modelDetail.querySelector('input[name="enabled"]');
+            if (checkbox) {
+                checkbox.checked = action === "enable";
+                saveModelDetail();
+            }
+        }
     });
     U.modelDetail?.addEventListener("change", (e) => {
         const toggle = e.target.closest(".role-toggle");
@@ -2175,3 +2281,5 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+

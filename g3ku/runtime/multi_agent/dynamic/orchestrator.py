@@ -26,10 +26,10 @@ class OrchestratorRunner:
         system_prompt = self._prompt_builder.build_orchestrator_prompt()
         tools = self._build_tools(session=session, on_progress=on_progress)
         model_client = self._loop.model_client
-        orchestrator_model = str(getattr(self._config, "orchestrator_model", "") or "").strip()
-        default_provider_model = f"{self._loop.provider_name}:{self._loop.model}" if getattr(self._loop, "provider_name", None) else str(getattr(self._loop, "model", "") or "")
-        if orchestrator_model and orchestrator_model != default_provider_model:
-            model_client = self._controller.model_chain_executor._build_model_client(orchestrator_model)
+        orchestrator_model_key = str(getattr(self._config, "orchestrator_model_key", "") or "").strip()
+        default_model_key = str(getattr(self._loop, "_runtime_default_model_key", "") or "").strip()
+        if orchestrator_model_key and orchestrator_model_key != default_model_key:
+            model_client = self._controller.model_chain_executor._build_model_client(orchestrator_model_key)
         agent = create_agent(
             model=model_client,
             tools=tools,
