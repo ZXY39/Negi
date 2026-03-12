@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: web_search
-description: Search the web. Returns titles, URLs, and snippets.
+description: 网页搜索，返回标题、URL 和摘要。
 config_namespace: tools.web
 requires:
   tools: []
@@ -15,10 +15,10 @@ parameters:
   properties:
     query:
       type: string
-      description: Search query
+      description: 搜索关键词
     count:
       type: integer
-      description: Results (1-10)
+      description: 返回结果数量（1-10）
       minimum: 1
       maximum: 10
   required:

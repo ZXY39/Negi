@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: message
-description: Send a message to the user. Use this when you want to communicate something.
+description: 向用户发送消息，需要与外部渠道沟通时使用。
 config_namespace: ''
 requires:
   tools: []
@@ -15,18 +15,18 @@ parameters:
   properties:
     content:
       type: string
-      description: The message content to send
+      description: 要发送的消息内容
     channel:
       type: string
-      description: 'Optional: target channel (telegram, discord, etc.)'
+      description: 可选：目标渠道（telegram、discord 等）
     chat_id:
       type: string
-      description: 'Optional: target chat/user ID'
+      description: 可选：目标聊天/用户 ID
     media:
       type: array
       items:
         type: string
-      description: 'Optional: list of file paths to attach (images, audio, documents)'
+      description: 可选：要附加的文件路径列表（图片、音频、文档）
   required:
   - content
 exposure:

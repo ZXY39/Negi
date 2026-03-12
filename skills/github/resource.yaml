@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: github
-description: Interact with GitHub using the gh CLI
+description: 使用 gh CLI 与 GitHub 交互
 trigger:
   keywords: []
   always: false

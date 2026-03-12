@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: web_fetch
-description: Fetch URL and extract readable content (HTML 鈫?markdown/text).
+description: 抓取 URL 并提取可读内容（HTML 转 markdown/text）。
 config_namespace: tools.web
 requires:
   tools: []
@@ -15,7 +15,7 @@ parameters:
   properties:
     url:
       type: string
-      description: URL to fetch
+      description: 要抓取的 URL
     extractMode:
       type: string
       enum:

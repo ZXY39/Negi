@@ -1,8 +1,7 @@
 schema_version: 1
 kind: tool
 name: task_monitor_summary
-description: Summarize unread progress, engineering exceptions, total tasks, active
-  tasks, and failed tasks.
+description: 汇总未读进度、工程异常、任务总数、进行中任务和失败任务。
 config_namespace: ''
 requires:
   tools: []

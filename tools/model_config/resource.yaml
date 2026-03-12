@@ -1,9 +1,7 @@
 schema_version: 1
 kind: tool
 name: model_config
-description: Manage .g3ku/config.json model catalog and role model chains. Supports
-  listing models, adding/updating models, enabling/disabling models, and setting ordered
-  fallback chains for ceo/execution/inspection scopes.
+description: 管理 .g3ku/config.json 的模型目录与角色模型链。支持列出模型、添加/更新、启用/禁用，以及设置 ceo/execution/inspection 的有序回退链。
 config_namespace: ''
 requires:
   tools: []
@@ -25,55 +23,55 @@ parameters:
       - enable_model
       - disable_model
       - set_scope_chain
-      description: Model config action to perform.
+      description: 要执行的模型配置动作。
     key:
       type: string
-      description: Managed model key.
+      description: 受管模型 key。
     provider_model:
       type: string
-      description: Provider:model identifier or managed model reference.
+      description: Provider:model 标识符或受管模型引用。
     api_key:
       type: string
-      description: API key for add/update operations.
+      description: add/update 操作的 API key。
     api_base:
       type: string
-      description: API base URL for add/update operations.
+      description: add/update 操作的 API base URL。
     extra_headers:
       type: object
-      description: Optional extra headers for this model.
+      description: 可选：该模型的额外请求头。
     enabled:
       type: boolean
-      description: Optional enabled flag for add/update actions.
+      description: 可选：add/update 的 enabled 标记。
     max_tokens:
       type: integer
-      description: Optional max output token cap for this model.
+      description: 可选：该模型的最大输出 token 上限。
     temperature:
       type: number
-      description: Optional default temperature for this model.
+      description: 可选：该模型默认 temperature。
     reasoning_effort:
       type: string
-      description: Optional reasoning effort override.
+      description: 可选：推理强度覆盖值。
     retry_on:
       type: array
       items:
         type: string
-      description: Retry triggers such as network, 429, 5xx.
+      description: 重试触发条件，如 network、429、5xx。
     description:
       type: string
-      description: Optional human-readable description.
+      description: 可选：人类可读的描述。
     scopes:
       type: array
       items:
         type: string
-      description: Scopes for add_model, e.g. ceo, execution, inspection.
+      description: add_model 的作用域，例如 ceo、execution、inspection。
     scope:
       type: string
-      description: Target scope for set_scope_chain.
+      description: set_scope_chain 的目标作用域。
     model_keys:
       type: array
       items:
         type: string
-      description: Ordered model keys for set_scope_chain.
+      description: set_scope_chain 的有序模型 key 列表。
   required:
   - action
 exposure:

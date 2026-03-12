@@ -1,14 +1,11 @@
 schema_version: 1
 kind: tool
 name: file_vault_lookup
-description: 'Find uploaded files by placeholder, filename, or prior-turn context
-  and return ranked candidates.
+description: '通过占位符、文件名或上文上下文查找已上传文件，并返回排序后的候选项。
 
-  MUST CALL: when user references previously uploaded files or images (e.g., ''上次/之前/那个文件/那张图/那三张图/之前上传的图片/商品图/风格图'')
-  and current turn does not include the target file.
+  必须调用：当用户引用之前上传的文件或图片（例如“上次/之前/那个文件/那张图/那三张图/之前上传的图片/商品图/风格图”），且当前回合未包含目标文件时。
 
-  AVOID CALL: when target file is already uploaded in current turn and can be handled
-  directly.'
+  避免调用：目标文件已在当前回合上传且可直接处理时。'
 config_namespace: tools.file_vault
 requires:
   tools: []
@@ -22,15 +19,15 @@ parameters:
   properties:
     query:
       type: string
-      description: Lookup query with filename or context keywords.
+      description: 包含文件名或上下文关键词的检索词。
     session:
       type: string
-      description: Optional session key override.
+      description: 可选：会话 key 覆盖值。
     limit:
       type: integer
       minimum: 1
       maximum: 20
-      description: Max candidates.
+      description: 候选结果上限。
   required:
   - query
 exposure:

@@ -1,8 +1,7 @@
 schema_version: 1
 kind: tool
 name: file_vault_set_policy
-description: Update file vault max storage and cleanup threshold. Only call when user
-  explicitly asks to adjust storage policy.
+description: 更新文件库最大存储和清理阈值。仅在用户明确要求调整策略时调用。
 config_namespace: tools.file_vault
 requires:
   tools: []
@@ -18,12 +17,12 @@ parameters:
       type: number
       minimum: 0.1
       maximum: 1024
-      description: New max storage in GB.
+      description: 新的最大存储（GB）。
     threshold_pct:
       type: integer
       minimum: 10
       maximum: 95
-      description: Cleanup trigger threshold percentage.
+      description: 触发清理的阈值百分比。
 exposure:
   agent: true
   org_graph: true

@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: memory
-description: Two-layer memory system with grep-based recall
+description: 双层记忆系统，支持基于 grep 的回忆检索
 trigger:
   keywords: []
   always: true

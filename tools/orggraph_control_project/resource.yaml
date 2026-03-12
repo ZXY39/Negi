@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: orggraph_control_project
-description: Pause, resume, cancel, or archive an existing org-graph project.
+description: 暂停、继续、取消或归档已有的 org-graph 项目。
 config_namespace: ''
 requires:
   tools: []
@@ -15,7 +15,7 @@ parameters:
   properties:
     project_id:
       type: string
-      description: The project id to control.
+      description: 要控制的项目 id。
     action:
       type: string
       enum:
@@ -23,7 +23,7 @@ parameters:
       - resume
       - cancel
       - archive
-      description: Control action to perform.
+      description: 要执行的控制动作。
   required:
   - project_id
   - action

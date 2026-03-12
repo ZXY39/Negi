@@ -1,8 +1,7 @@
 schema_version: 1
 kind: tool
 name: orggraph_create_project
-description: Create a new org-graph background project for long-running or multi-step
-  work.
+description: 创建 org-graph 后台项目，用于长时间或多步骤任务。
 config_namespace: ''
 requires:
   tools: []
@@ -16,13 +15,13 @@ parameters:
   properties:
     prompt:
       type: string
-      description: The project request to execute in the background.
+      description: 要在后台执行的项目请求。
     preferred_title:
       type: string
-      description: Optional short project title.
+      description: 可选：项目短标题。
     output_target:
       type: string
-      description: Optional output target label.
+      description: 可选：输出目标标识。
   required:
   - prompt
 exposure:

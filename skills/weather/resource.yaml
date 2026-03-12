@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: weather
-description: Get current weather and forecasts
+description: 获取当前天气与预报
 trigger:
   keywords: []
   always: false

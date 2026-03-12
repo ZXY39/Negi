@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: batch-web-planning
-description: Batch Web Planning
+description: 批量网页调研规划
 trigger:
   keywords: []
   always: false

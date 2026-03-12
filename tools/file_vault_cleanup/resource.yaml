@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: file_vault_cleanup
-description: Run file vault cleanup. Use dry_run=true first to preview deletions.
+description: 执行文件库清理。建议先使用 dry_run=true 预览删除内容。
 config_namespace: tools.file_vault
 requires:
   tools: []
@@ -15,12 +15,12 @@ parameters:
   properties:
     dry_run:
       type: boolean
-      description: Preview only without deleting files.
+      description: 仅预览，不删除文件。
     target_pct:
       type: integer
       minimum: 1
       maximum: 95
-      description: Optional target usage percent after cleanup.
+      description: 可选：清理后目标占用百分比。
 exposure:
   agent: true
   org_graph: true

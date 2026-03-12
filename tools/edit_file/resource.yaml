@@ -1,8 +1,7 @@
 schema_version: 1
 kind: tool
 name: edit_file
-description: Edit a file by replacing old_text with new_text. The old_text must exist
-  exactly in the file.
+description: 通过将 old_text 替换为 new_text 来编辑文件，old_text 必须在文件中唯一匹配。
 config_namespace: ''
 requires:
   tools: []
@@ -17,13 +16,13 @@ parameters:
   properties:
     path:
       type: string
-      description: The file path to edit
+      description: 要编辑的文件路径
     old_text:
       type: string
-      description: The exact text to find and replace
+      description: 要精确匹配并替换的文本
     new_text:
       type: string
-      description: The text to replace with
+      description: 替换后的文本
   required:
   - path
   - old_text

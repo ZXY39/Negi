@@ -1,22 +1,15 @@
 schema_version: 1
 kind: tool
 name: memory_search
-description: 'Search long-term memory and return structured results grouped by context
-  type (memory/resource/skill) plus a unified ranked view.
+description: '搜索长期记忆并返回结构化结果，按 context 类型（memory/resource/skill）分组，并提供统一排序视图。
 
-  MUST CALL: when the answer depends on prior user/project facts not fully present
-  in current turn, including remembered preferences, previous decisions, constraints,
-  unresolved action items, or references like ''as discussed before''/''remember''.
+  必须调用：当回答依赖当前轮未包含的历史用户/项目事实时，例如偏好、既有决策、约束、未完成事项，或出现“之前说过/记得”类引用。
 
-  AVOID CALL: for pure single-turn transformations (rewrite/translate/format), general
-  world knowledge, simple greetings, or when current-turn content already contains
-  all required facts.
+  避免调用：纯单轮改写/翻译/格式化、常识问答、简单问候，或当前轮已包含全部所需事实。
 
-  CALL LIMIT: normally call at most once per user turn; call again only if tool outputs
-  introduce new entities that require a second targeted lookup.
+  调用频率：通常每轮最多一次；仅当输出引入新的实体且需要二次检索时再调用。
 
-  QUERY WRITING: include concrete entities and intent (person/project/date/decision),
-  avoid vague queries like ''help me'' or ''that thing''.'
+  查询写法：包含具体实体与意图（人/项目/日期/决策），避免“帮我一下/那个东西”这类模糊描述。'
 config_namespace: tools.memory
 requires:
   tools: []
@@ -30,10 +23,10 @@ parameters:
   properties:
     query:
       type: string
-      description: Concrete lookup query with entities/intent. Avoid vague text.
+      description: 包含实体与意图的明确检索词，避免模糊描述。
     limit:
       type: integer
-      description: Max number of unified results.
+      description: 统一视图的最大结果数。
       minimum: 1
       maximum: 20
     context_type:
@@ -42,13 +35,13 @@ parameters:
       - memory
       - resource
       - skill
-      description: 'Optional: restrict search to one context type.'
+      description: 可选：仅检索某一类 context。
     include_l2:
       type: boolean
-      description: Include L2 preview snippets when available.
+      description: 包含 L2 预览片段（若可用）。
     session:
       type: string
-      description: Optional session key override, e.g. cli:direct.
+      description: 可选：会话 key 覆盖值，例如 cli:direct。
   required:
   - query
 exposure:

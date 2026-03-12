@@ -125,7 +125,7 @@ Migrate those into:
 schema_version: 1
 kind: skill
 name: example-skill
-description: Describe what the skill does and when to use it.
+description: 描述该 skill 的作用与适用场景。
 trigger:
   keywords: []
   always: false
@@ -148,7 +148,7 @@ exposure:
 schema_version: 1
 kind: tool
 name: example_tool
-description: Describe what the tool does and when it should be called.
+description: 描述该 tool 的作用与调用时机。
 config_namespace: ''
 requires:
   tools: []

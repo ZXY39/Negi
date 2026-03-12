@@ -1,10 +1,7 @@
 schema_version: 1
 kind: tool
 name: picture_washing
-description: Generate images for picture-washing by calling a DOUBAO-compatible POST
-  /v1/images/generations endpoint. Use config-injected defaults for base_url/authorization
-  when not provided by call args. When authorization is missing, auto-probe session
-  cookie via agent_browser and compose Bearer token.
+description: 通过调用兼容 DOUBAO 的 POST /v1/images/generations 接口生成洗图结果。当调用参数未提供 base_url/authorization 时使用配置默认值；authorization 缺失时可通过 agent_browser 自动探测 session cookie 并组装 Bearer token。
 config_namespace: tools.picture_washing
 requires:
   tools: []
@@ -18,42 +15,37 @@ parameters:
   properties:
     base_url:
       type: string
-      description: Optional override. DOUBAO service base URL, e.g. http://localhost:8000.
-        If omitted, use tools.pictureWashing.baseUrl from config.
+      description: 可选覆盖。DOUBAO 服务 base URL，例如 http://localhost:8000。未提供时使用配置 tools.pictureWashing.baseUrl。
     authorization:
       type: string
-      description: Optional override. Bearer token or raw sessionid string. If omitted,
-        use tools.pictureWashing.authorization from config, or auto-probe session
-        cookie via agent_browser if enabled.
+      description: 可选覆盖。Bearer token 或原始 sessionid。未提供时使用配置 tools.pictureWashing.authorization，或在启用时通过 agent_browser 自动探测 session cookie。
     authorization_probe_url:
       type: string
-      description: Optional override. URL used by agent_browser when authorization
-        is missing. If omitted, use tools.pictureWashing.authorizationProbeUrl or
-        infer from base_url.
+      description: 可选覆盖。当 authorization 缺失时 agent_browser 使用的 URL。未提供时使用 tools.pictureWashing.authorizationProbeUrl 或从 base_url 推断。
     auto_probe_authorization:
       type: boolean
-      description: Optional override to enable/disable authorization auto-probing.
+      description: 可选覆盖：是否启用授权自动探测。
     prompt:
       type: string
-      description: Final compliant image prompt.
+      description: 最终合规的图片提示词。
     image:
       type: string
-      description: Product image URL or data:image/...;base64,...
+      description: 商品图片 URL 或 data:image/...;base64,...
     ratio:
       type: string
-      description: Target ratio, e.g. 1:1, 3:4, 4:3, 16:9, 9:16.
+      description: 目标比例，例如 1:1、3:4、4:3、16:9、9:16。
     style:
       type: string
-      description: Optional generation style override.
+      description: 可选：生成风格覆盖值。
     model:
       type: string
-      description: Optional generation model override.
+      description: 可选：生成模型覆盖值。
     stream:
       type: boolean
-      description: Optional stream override.
+      description: 可选：流式输出覆盖值。
     timeout_s:
       type: integer
-      description: Optional HTTP timeout override in seconds.
+      description: 可选：HTTP 超时时间（秒）。
       minimum: 10
       maximum: 600
   required:

@@ -1,8 +1,7 @@
 schema_version: 1
 kind: tool
 name: propose_file_patch
-description: Propose a unified-diff style patch artifact without modifying the target
-  file. Use this when a reviewable patch is safer than directly writing the file.
+description: 生成统一 diff 风格的补丁工件，不直接修改目标文件。需要可审阅变更时使用。
 config_namespace: ''
 requires:
   tools: []
@@ -17,16 +16,16 @@ parameters:
   properties:
     path:
       type: string
-      description: File path to patch.
+      description: 要打补丁的文件路径。
     old_text:
       type: string
-      description: Exact text to replace. Must match uniquely.
+      description: 要替换的精确文本，必须唯一匹配。
     new_text:
       type: string
-      description: Replacement text.
+      description: 替换文本。
     summary:
       type: string
-      description: Optional short patch summary.
+      description: 可选：补丁摘要。
   required:
   - path
   - old_text

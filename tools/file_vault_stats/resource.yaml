@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: file_vault_stats
-description: Return file vault capacity, usage, and most-used files.
+description: 返回文件库容量、使用情况和占用最多的文件。
 config_namespace: tools.file_vault
 requires:
   tools: []
@@ -17,7 +17,7 @@ parameters:
       type: integer
       minimum: 1
       maximum: 50
-      description: How many top-used files to include.
+      description: 返回占用最多文件的数量。
 exposure:
   agent: true
   org_graph: true

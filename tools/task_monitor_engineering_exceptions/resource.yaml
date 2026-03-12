@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: task_monitor_engineering_exceptions
-description: Return task ids that currently have unresolved engineering exceptions.
+description: 返回当前存在未解决工程异常的任务 id 列表。
 config_namespace: ''
 requires:
   tools: []

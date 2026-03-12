@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: list_dir
-description: List the contents of a directory.
+description: 列出指定目录的内容。
 config_namespace: ''
 requires:
   tools: []
@@ -16,7 +16,7 @@ parameters:
   properties:
     path:
       type: string
-      description: The directory path to list
+      description: 要列出的目录路径
   required:
   - path
 exposure:

@@ -1,8 +1,7 @@
 schema_version: 1
 kind: tool
 name: task_monitor_progress
-description: Inspect one task in detail, including status, tree text, node output,
-  logs, and latest checker output.
+description: 查看单个任务详情，包括状态、树文本、节点输出、日志和最新检查输出。
 config_namespace: ''
 requires:
   tools: []
@@ -16,7 +15,7 @@ parameters:
   properties:
     task_id:
       type: string
-      description: The target project/task id.
+      description: 目标任务/项目 ID。
   required:
   - task_id
 exposure:

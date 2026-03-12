@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: cron
-description: 'Schedule reminders and recurring tasks. Actions: add, list, remove.'
+description: 安排提醒和周期任务。动作：add、list、remove。
 config_namespace: ''
 requires:
   tools: []
@@ -19,25 +19,25 @@ parameters:
       - add
       - list
       - remove
-      description: Action to perform
+      description: 要执行的动作
     message:
       type: string
-      description: Reminder message (for add)
+      description: 提醒消息（用于 add）
     every_seconds:
       type: integer
-      description: Interval in seconds (for recurring tasks)
+      description: 周期任务的间隔秒数
     cron_expr:
       type: string
-      description: Cron expression like '0 9 * * *' (for scheduled tasks)
+      description: Cron 表达式，例如 '0 9 * * *'（定时任务）
     tz:
       type: string
-      description: IANA timezone for cron expressions (e.g. 'America/Vancouver')
+      description: Cron 表达式的 IANA 时区（例如 'America/Vancouver'）
     at:
       type: string
-      description: ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')
+      description: 一次性执行的 ISO datetime（例如 '2026-02-12T10:30:00'）
     job_id:
       type: string
-      description: Job ID (for remove)
+      description: 任务 ID（用于 remove）
   required:
   - action
 exposure:

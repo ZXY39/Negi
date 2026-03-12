@@ -1,8 +1,7 @@
 schema_version: 1
 kind: skill
 name: picture-washing
-description: Progressive competitor picture-washing workflow for e-commerce image
-  generation
+description: 电商图片生成的竞品洗图流程
 trigger:
   keywords:
   - 洗图

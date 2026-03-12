@@ -1,8 +1,7 @@
 schema_version: 1
 kind: tool
 name: load_skill_context
-description: Load the detailed body of a currently visible skill so the CEO can use
-  it.
+description: 加载当前可见技能的详细正文，便于 CEO 使用。
 config_namespace: ''
 requires:
   tools: []
@@ -16,7 +15,7 @@ parameters:
   properties:
     skill_id:
       type: string
-      description: The skill id to load.
+      description: 要加载的 skill id。
   required:
   - skill_id
 exposure:

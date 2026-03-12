@@ -1,8 +1,7 @@
 schema_version: 1
 kind: skill
 name: skill-creator
-description: Create or update root-level skills and tools using the unified resource
-  layout under skills/ and tools/.
+description: 基于统一资源规范创建或更新根级 skills 与 tools。
 trigger:
   keywords: []
   always: false

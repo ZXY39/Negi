@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: task_monitor_list
-description: List all, in-progress, failed, or unread tasks with short descriptions.
+description: 列出全部/进行中/失败/未读的任务及简要说明。
 config_namespace: ''
 requires:
   tools: []
@@ -20,7 +20,7 @@ parameters:
       - 2
       - 3
       - 4
-      description: 1=all, 2=in_progress, 3=failed, 4=unread_progress
+      description: 1=全部，2=进行中，3=失败，4=未读进度
   required:
   - scope
 exposure:

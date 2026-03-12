@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: tmux
-description: Remote-control tmux sessions for interactive CLIs
+description: 远程控制 tmux 会话以操作交互式 CLI
 trigger:
   keywords: []
   always: false
