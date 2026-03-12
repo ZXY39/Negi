@@ -49,6 +49,11 @@ class ApiClient {
         return `${protocol}//${host}/api/ws/ceo?session_id=${DEFAULT_SESSION_ID}`;
     }
 
+    static async getCeoHistory(limit = 200) {
+        const data = await this.get("/api/session/history", { session_id: DEFAULT_SESSION_ID, limit });
+        return data.items || [];
+    }
+
     static getProjectWsUrl(projectId) {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;

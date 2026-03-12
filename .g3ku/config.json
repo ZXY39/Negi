@@ -87,7 +87,7 @@
     },
     "memory": {
       "enabled": true,
-      "mode": "rag",
+      "mode": "dual",
       "backend": "rag",
       "archVersion": "v2",
       "features": {
@@ -135,7 +135,7 @@
         "autoFactConfidence": 0.8
       },
       "compat": {
-        "dualWriteLegacyFiles": false
+        "dualWriteLegacyFiles": true
       },
       "commit": {
         "turnTrigger": 20,

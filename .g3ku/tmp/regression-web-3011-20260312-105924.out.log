@@ -1,0 +1,6 @@
+[g3ku] project root: D:\zxy\project\G3ku
+[g3ku] frontend mode: static
+[g3ku] backend url: http://127.0.0.1:3011
+INFO:     127.0.0.1:55729 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55770 - "GET /api/session/history?session_id=web%3Aregression-20260312-105835&limit=20 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55805 - "GET /api/session/history?session_id=web%3Aregression-20260312-105835&limit=20 HTTP/1.1" 200 OK

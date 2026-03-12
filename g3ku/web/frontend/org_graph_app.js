@@ -6,6 +6,15 @@ const MODEL_SCOPES = [
 
 const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
 const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
+    const next = EMPTY_MODEL_ROLES();
+    MODEL_SCOPES.forEach(({ key }) => {
+        next[key] = Array.isArray(roles?.[key])
+            ? roles[key].map((item) => String(item || "").trim()).filter(Boolean)
+            : [];
+    });
+    return next;
+};
 
 const S = {
     view: "ceo",
@@ -25,6 +34,7 @@ const S = {
         items: [],
         catalog: [],
         roles: EMPTY_MODEL_ROLES(),
+        roleDrafts: EMPTY_MODEL_ROLES(),
         defaults: DEFAULT_MODEL_DEFAULTS(),
         loading: false,
         saving: false,
@@ -32,6 +42,7 @@ const S = {
         search: "",
         selectedModelKey: "",
         mode: "view",
+        roleEditing: false,
         rolesDirty: false,
         dragState: null,
     },
@@ -65,12 +76,15 @@ const U = {
     modelHint: document.getElementById("sidebar-model-hint"),
     modelRefresh: document.getElementById("model-refresh-btn"),
     modelCreate: document.getElementById("model-create-btn"),
+    modelRolesCancel: document.getElementById("model-roles-cancel-btn"),
     modelRolesSave: document.getElementById("model-roles-save-btn"),
     modelRoleEditors: document.getElementById("model-role-editors"),
     modelSearch: document.getElementById("model-search-input"),
     modelList: document.getElementById("model-list"),
     modelDetailEmpty: document.getElementById("model-detail-empty"),
     modelDetail: document.getElementById("model-detail-content"),
+    modelBackdrop: document.getElementById("model-detail-backdrop"),
+    modelDrawer: document.querySelector(".model-detail-dialog"),
     projectGrid: document.getElementById("project-card-grid"),
     projectSummary: document.getElementById("project-selection-summary"),
     projectMultiToggle: document.getElementById("project-multi-toggle"),
@@ -150,6 +164,17 @@ function addMsg(text, role) {
     U.ceoFeed.appendChild(el);
     icons();
     U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
+}
+
+async function loadCeoHistory() {
+    if (!U.ceoFeed) return;
+    try {
+        const items = await ApiClient.getCeoHistory(200);
+        U.ceoFeed.innerHTML = "";
+        items.forEach((item) => addMsg(item.text || "", item.role === "user" ? "user" : "system"));
+    } catch (e) {
+        console.error("加载 CEO 历史失败:", e);
+    }
 }
 
 function addNotice(notice, bump = true) {
@@ -267,12 +292,21 @@ function modelRefEquivalent(left, right) {
     return false;
 }
 
-function modelScopeChain(scope) {
-    return Array.isArray(S.modelCatalog.roles?.[scope]) ? [...S.modelCatalog.roles[scope]] : [];
+function activeModelRoles() {
+    return S.modelCatalog.roleEditing ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
 }
 
-function modelScopeContains(scope, ref) {
-    return modelScopeChain(scope).some((item) => modelRefEquivalent(item, ref));
+function modelScopeChain(scope, source = "active") {
+    const roles = source === "draft"
+        ? S.modelCatalog.roleDrafts
+        : source === "committed"
+            ? S.modelCatalog.roles
+            : activeModelRoles();
+    return Array.isArray(roles?.[scope]) ? [...roles[scope]] : [];
+}
+
+function modelScopeContains(scope, ref, source = "active") {
+    return modelScopeChain(scope, source).some((item) => modelRefEquivalent(item, ref));
 }
 
 function normalizeModelRoleChain(refs) {
@@ -288,6 +322,27 @@ function normalizeModelRoleChain(refs) {
     return normalized;
 }
 
+function normalizeAllModelRoles(roles = EMPTY_MODEL_ROLES()) {
+    const next = EMPTY_MODEL_ROLES();
+    MODEL_SCOPES.forEach(({ key }) => {
+        next[key] = normalizeModelRoleChain(Array.isArray(roles?.[key]) ? roles[key] : []);
+    });
+    return next;
+}
+
+function modelRolesEqual(left, right) {
+    return MODEL_SCOPES.every(({ key }) => {
+        const leftChain = normalizeModelRoleChain(left?.[key] || []);
+        const rightChain = normalizeModelRoleChain(right?.[key] || []);
+        if (leftChain.length !== rightChain.length) return false;
+        return leftChain.every((item, index) => modelRefEquivalent(item, rightChain[index]));
+    });
+}
+
+function syncModelRoleDraftState() {
+    S.modelCatalog.rolesDirty = !!S.modelCatalog.roleEditing && !modelRolesEqual(S.modelCatalog.roleDrafts, S.modelCatalog.roles);
+}
+
 function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
     const payload = data && typeof data === "object" ? data : {};
     const rolesPayload = payload.roles && typeof payload.roles === "object" ? payload.roles : {};
@@ -299,8 +354,13 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
     });
     S.modelCatalog.items = Array.isArray(payload.items) ? payload.items.map((item) => String(item || "").trim()).filter(Boolean) : [];
     S.modelCatalog.catalog = Array.isArray(payload.catalog) ? payload.catalog.map((item) => ({ ...item })) : [];
-    if (!preserveRoleDrafts) {
-        S.modelCatalog.roles = nextRoles;
+    S.modelCatalog.roles = normalizeAllModelRoles(nextRoles);
+    if (preserveRoleDrafts && S.modelCatalog.roleEditing) {
+        S.modelCatalog.roleDrafts = normalizeAllModelRoles(S.modelCatalog.roleDrafts);
+        syncModelRoleDraftState();
+    } else {
+        S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+        S.modelCatalog.roleEditing = false;
         S.modelCatalog.rolesDirty = false;
     }
     S.modelCatalog.defaults = { ...DEFAULT_MODEL_DEFAULTS(), ...(payload.defaults || {}) };
@@ -333,56 +393,41 @@ function syncModelDetailScopeToggles() {
 
 function renderModelHint() {
     if (S.modelCatalog.loading) return hint("正在加载模型配置...");
-    if (S.modelCatalog.saving) return hint("正在保存模型配置...");
+    if (S.modelCatalog.saving) return hint("正在保存...");
     if (S.modelCatalog.error) return hint(`模型配置错误：${S.modelCatalog.error}`, true);
     if (!S.modelCatalog.catalog.length) return hint("当前还没有模型，请先添加模型。", false);
-    if (S.modelCatalog.rolesDirty) return hint("角色模型链有未保存的修改，请点击“保存角色链”。", false);
-    return hint("可在这里维护模型目录、角色降级链和模型参数。", false);
+    if (S.modelCatalog.roleEditing && S.modelCatalog.rolesDirty) return hint("正在修改模型链，请点击“保存”应用修改。", false);
+    if (S.modelCatalog.roleEditing) return hint("已进入模型链编辑模式，可拖动、移除或加入模型后再点击“保存”。", false);
+    return hint("点击“修改模型链”后再调整角色链；点击模型可打开配置弹窗。", false);
 }
 
 function renderModelRoleEditors() {
     if (!U.modelRoleEditors) return;
-    const catalog = [...S.modelCatalog.catalog].sort((left, right) => String(left.key || "").localeCompare(String(right.key || "")));
+    const editing = !!S.modelCatalog.roleEditing;
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
         const chain = modelScopeChain(scope.key);
         const defaultText = S.modelCatalog.defaults[scope.key]
-            ? `???? ${S.modelCatalog.defaults[scope.key]}`
-            : "???????";
+            ? `当前首选 ${S.modelCatalog.defaults[scope.key]}`
+            : "未配置当前首选";
         const chainMarkup = chain.length
             ? chain.map((ref, index) => {
                 const item = modelRefItem(ref);
                 const modelKey = String(item?.key || ref).trim();
-                const badges = [index === 0 ? '<span class="policy-chip risk-low">??</span>' : ""];
-                if (item?.enabled === false) badges.push('<span class="policy-chip neutral">???</span>');
-                if (!item) badges.push('<span class="policy-chip neutral">???</span>');
+                const badges = [index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ""];
+                if (item?.enabled === false) badges.push('<span class="policy-chip neutral">已禁用</span>');
+                if (!item) badges.push('<span class="policy-chip neutral">未托管</span>');
                 return `
-                    <article class="model-chain-slide" draggable="true" data-model-chain-ref="${esc(modelKey)}" data-scope="${scope.key}">
-                        <button type="button" class="model-chain-handle" aria-label="??????"><span class="model-chain-grip" aria-hidden="true">?</span></button>
+                    <article class="model-chain-slide${editing ? " is-editing" : ""}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${esc(modelKey)}" data-scope="${scope.key}">
+                        ${editing ? '<button type="button" class="model-chain-handle" aria-label="拖动调整顺序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>' : ''}
                         <button type="button" class="model-chain-main" data-model-open="${esc(modelKey)}">
                             <span class="resource-list-title">${esc(modelKey)}</span>
                             <span class="resource-list-subtitle">${esc(item?.provider_model || ref)}</span>
                             <span class="model-inline-meta">${badges.join("")}</span>
                         </button>
-                        <button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">??</button>
+                        ${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>` : ''}
                     </article>`;
             }).join("")
-            : '<div class="empty-state compact">??????</div>';
-
-        const availableMarkup = catalog.length
-            ? catalog.map((item) => {
-                const inChain = chain.some((ref) => modelRefEquivalent(ref, item.key));
-                const disabledAttr = inChain ? ' disabled' : '';
-                const dragAttr = inChain ? '' : ' draggable="true"';
-                return `
-                    <article class="model-available-item ${inChain ? "is-in-chain" : ""}"${dragAttr} data-model-available-key="${esc(item.key)}" data-scope="${scope.key}">
-                        <button type="button" class="model-available-main" data-model-open="${esc(item.key)}">
-                            <span class="resource-list-title">${esc(item.key)}</span>
-                            <span class="resource-list-subtitle">${esc(item.provider_model)}</span>
-                        </button>
-                        <button type="button" class="toolbar-btn ghost small" data-model-role-add-item="${scope.key}" data-model-key="${esc(item.key)}"${disabledAttr}>${inChain ? "????" : "??"}</button>
-                    </article>`;
-            }).join("")
-            : '<div class="empty-state compact">??????</div>';
+            : `<div class="empty-state compact">${editing ? '从下方共享模型列表拖入，构建当前角色链。' : '点击“修改模型链”后再调整当前角色链。'}</div>`;
 
         return `
             <section class="model-chain-card">
@@ -391,15 +436,11 @@ function renderModelRoleEditors() {
                         <h3>${esc(scope.label)}</h3>
                         <p class="subtitle">${esc(defaultText)}</p>
                     </div>
-                    <span class="policy-chip neutral">${chain.length} ???</span>
+                    <span class="policy-chip neutral">${chain.length} 个候选</span>
                 </div>
                 <div class="model-role-section">
-                    <div class="model-role-section-title">?????</div>
+                    <div class="model-role-section-title">当前角色链</div>
                     <div class="model-chain-list" data-model-chain-list="${scope.key}">${chainMarkup}</div>
-                </div>
-                <div class="model-role-section">
-                    <div class="model-role-section-title">????</div>
-                    <div class="model-available-list" data-model-available-list="${scope.key}">${availableMarkup}</div>
                 </div>
             </section>`;
     }).join("");
@@ -407,7 +448,35 @@ function renderModelRoleEditors() {
 
 function renderModelList() {
     if (!U.modelList) return;
-    U.modelList.innerHTML = "";
+    const editing = !!S.modelCatalog.roleEditing;
+    const catalog = filterModels().sort((left, right) => String(left.key || "").localeCompare(String(right.key || "")));
+    if (!catalog.length) {
+        const emptyText = S.modelCatalog.search
+            ? "没有匹配的模型，请调整搜索条件。"
+            : "暂无可用模型，请先添加模型。";
+        U.modelList.innerHTML = `<div class="empty-state compact">${emptyText}</div>`;
+        return;
+    }
+    U.modelList.innerHTML = catalog.map((item) => {
+        const usedScopes = MODEL_SCOPES.filter((scope) => modelScopeContains(scope.key, item.key));
+        const usageMarkup = usedScopes.length
+            ? usedScopes.map((scope) => `<span class="policy-chip neutral">${esc(scope.label)}</span>`).join("")
+            : '<span class="policy-chip neutral">未加入角色链</span>';
+        const stateChips = [usageMarkup];
+        if (item.enabled === false) stateChips.push('<span class="policy-chip neutral">已禁用</span>');
+        return `
+            <article class="model-available-item ${usedScopes.length ? "is-in-chain" : ""}"${editing ? ' draggable="true"' : ''} data-model-available-key="${esc(item.key)}">
+                <div class="model-shared-item-head">
+                    <button type="button" class="model-available-main" data-model-open="${esc(item.key)}">
+                        <span class="resource-list-title">${esc(item.key)}</span>
+                        <span class="resource-list-subtitle">${esc(item.provider_model)}</span>
+                    </button>
+                    <button type="button" class="toolbar-btn ghost small" data-model-open="${esc(item.key)}">配置</button>
+                </div>
+                <div class="model-inline-meta">${stateChips.join("")}</div>
+                <div class="resource-empty-copy">${editing ? '拖动当前模型到上方任意角色链即可加入。' : '点击“修改模型链”后，可拖动当前模型到任意角色链。'}</div>
+            </article>`;
+    }).join("");
 }
 
 function renderModelDetail() {
@@ -415,101 +484,105 @@ function renderModelDetail() {
     const isCreate = S.modelCatalog.mode === "create";
     const current = isCreate ? null : modelRefItem(S.modelCatalog.selectedModelKey);
     if (!isCreate && !current) {
-        U.modelDetailEmpty.style.display = "grid";
+        U.modelDetailEmpty.style.display = "none";
         U.modelDetail.innerHTML = "";
+        setDrawerOpen(U.modelBackdrop, U.modelDrawer, false);
         return;
     }
 
     const enabled = isCreate ? true : !!current?.enabled;
-    const selectedScopes = MODEL_SCOPES.filter((scope) => current && modelScopeContains(scope.key, current.key)).map((scope) => scope.label);
-    const scopeMarkup = MODEL_SCOPES.map((scope) => {
-        const checked = current ? modelScopeContains(scope.key, current.key) : false;
-        return `<label class="role-toggle ${checked ? "checked" : ""}"><input type="checkbox" name="scope_${scope.key}" ${checked ? "checked" : ""}><span>${esc(scope.label)}</span></label>`;
-    }).join("");
 
     U.modelDetailEmpty.style.display = "none";
+    setDrawerOpen(U.modelBackdrop, U.modelDrawer, true);
     U.modelDetail.innerHTML = `
-        <article class="model-detail-card">
-            <div class="panel-header">
-                <div>
-                    <h2>${isCreate ? "添加模型" : "模型配置"}</h2>
+        <article class="model-detail-card model-config-shell">
+            <div class="detail-modal-header model-config-header">
+                <div class="detail-modal-title">
+                    <h2 id="model-detail-title">${isCreate ? "添加模型" : "模型配置"}</h2>
                     <p class="subtitle">${esc(isCreate ? "填写必填项后写入 .g3ku/config.json" : `${current.key} · ${current.provider_model}`)}</p>
                 </div>
-                <div class="model-inline-meta">
+                <div class="detail-modal-actions">
                     <span class="policy-chip ${enabled ? "risk-low" : "neutral"}">${enabled ? "已启用" : "已禁用"}</span>
-                    ${!isCreate ? `<span class="policy-chip neutral">${esc(selectedScopes.join(" / ") || "未加入角色链")}</span>` : ""}
+                    <button type="submit" form="model-detail-form" class="toolbar-btn success">保存</button>
+                    <button type="button" class="toolbar-btn ghost" data-model-detail-cancel="1" data-modal-close>关闭</button>
                 </div>
             </div>
-            <form id="model-detail-form" class="model-detail-form" data-mode="${isCreate ? "create" : "edit"}" data-model-key="${esc(current?.key || "")}">
-                <section class="resource-section">
-                    <h3>基本信息</h3>
-                    <div class="model-form-grid">
-                        <label class="resource-field">
-                            <span class="resource-field-label">模型 Key *</span>
-                            <input class="resource-search" name="key" ${isCreate ? `value=""` : `value="${esc(current.key)}" disabled`} placeholder="如 openai_primary">
-                        </label>
-                        <label class="resource-field">
-                            <span class="resource-field-label">Provider / Model *</span>
-                            <input class="resource-search" name="providerModel" value="${esc(current?.provider_model || "")}" placeholder="如 openai:gpt-4.1">
-                        </label>
-                        <label class="resource-field">
-                            <span class="resource-field-label">API Key *</span>
-                            <input class="resource-search" name="apiKey" value="${esc(current?.api_key || "")}" placeholder="sk-...">
-                        </label>
-                        <label class="resource-field">
-                            <span class="resource-field-label">Base URL ${isCreate ? "*" : ""}</span>
-                            <input class="resource-search" name="apiBase" value="${esc(current?.api_base || "")}" placeholder="https://api.example.com/v1">
-                        </label>
+            <div class="detail-modal-body model-config-body">
+                <form id="model-detail-form" class="model-detail-form" data-mode="${isCreate ? "create" : "edit"}" data-model-key="${esc(current?.key || "")}">
+                    <section class="resource-section">
+                        <h3>基本信息</h3>
+                        <div class="model-form-grid">
+                            <label class="resource-field">
+                                <span class="resource-field-label">模型 Key *</span>
+                                <input class="resource-search" name="key" ${isCreate ? `value=""` : `value="${esc(current.key)}" disabled`} placeholder="如 openai_primary">
+                            </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">Provider / Model *</span>
+                                <input class="resource-search" name="providerModel" value="${esc(current?.provider_model || "")}" placeholder="如 openai:gpt-4.1">
+                            </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">API Key *</span>
+                                <input class="resource-search" name="apiKey" value="${esc(current?.api_key || "")}" placeholder="sk-...">
+                            </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">Base URL ${isCreate ? "*" : ""}</span>
+                                <input class="resource-search" name="apiBase" value="${esc(current?.api_base || "")}" placeholder="https://api.example.com/v1">
+                            </label>
+                        </div>
+                        <label class="role-toggle ${enabled ? "checked" : ""}"><input type="checkbox" name="enabled" ${enabled ? "checked" : ""}><span>启用此模型</span></label>
+                    </section>
+                    <section class="resource-section">
+                        <h3>模型参数</h3>
+                        <div class="model-form-grid">
+                            <label class="resource-field">
+                                <span class="resource-field-label">Max Tokens</span>
+                                <input class="resource-search" type="number" min="1" step="1" name="maxTokens" value="${esc(String(current?.max_tokens ?? ""))}" placeholder="留空使用默认值">
+                            </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">Temperature</span>
+                                <input class="resource-search" type="number" min="0" max="2" step="0.1" name="temperature" value="${esc(String(current?.temperature ?? ""))}" placeholder="留空使用默认值">
+                            </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">Reasoning Effort</span>
+                                <input class="resource-search" name="reasoningEffort" value="${esc(current?.reasoning_effort || "")}" placeholder="如 low / medium / high">
+                            </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">Retry On</span>
+                                <input class="resource-search" name="retryOn" value="${esc((current?.retry_on || []).join(", "))}" placeholder="如 network, 429, 5xx">
+                            </label>
+                        </div>
+                    </section>
+                    <section class="resource-section">
+                        <h3>额外请求头</h3>
+                        <textarea class="resource-editor model-textarea" name="extraHeaders" rows="6" placeholder='{"X-Trace-Id": "demo"}'>${esc(current?.extra_headers ? JSON.stringify(current.extra_headers, null, 2) : "")}</textarea>
+                    </section>
+                    <section class="resource-section">
+                        <h3>说明</h3>
+                        <textarea class="resource-editor model-textarea" name="description" rows="5" placeholder="可填写用途、限制、成本等说明">${esc(current?.description || "")}</textarea>
+                    </section>
+                    <div class="model-actions">
+                        <button type="submit" class="toolbar-btn success">${isCreate ? "添加并保存" : "保存模型"}</button>
+                        <button type="button" class="toolbar-btn ghost" data-model-detail-cancel="1">${isCreate ? "取消" : "关闭"}</button>
                     </div>
-                    <label class="role-toggle ${enabled ? "checked" : ""}"><input type="checkbox" name="enabled" ${enabled ? "checked" : ""}><span>启用此模型</span></label>
-                </section>
-                <section class="resource-section">
-                    <h3>模型参数</h3>
-                    <div class="model-form-grid">
-                        <label class="resource-field">
-                            <span class="resource-field-label">Max Tokens</span>
-                            <input class="resource-search" type="number" min="1" step="1" name="maxTokens" value="${esc(String(current?.max_tokens ?? ""))}" placeholder="留空使用默认值">
-                        </label>
-                        <label class="resource-field">
-                            <span class="resource-field-label">Temperature</span>
-                            <input class="resource-search" type="number" min="0" max="2" step="0.1" name="temperature" value="${esc(String(current?.temperature ?? ""))}" placeholder="留空使用默认值">
-                        </label>
-                        <label class="resource-field">
-                            <span class="resource-field-label">Reasoning Effort</span>
-                            <input class="resource-search" name="reasoningEffort" value="${esc(current?.reasoning_effort || "")}" placeholder="如 low / medium / high">
-                        </label>
-                        <label class="resource-field">
-                            <span class="resource-field-label">Retry On</span>
-                            <input class="resource-search" name="retryOn" value="${esc((current?.retry_on || []).join(", "))}" placeholder="如 network, 429, 5xx">
-                        </label>
-                    </div>
-                </section>
-                <section class="resource-section">
-                    <h3>作用范围</h3>
-                    <div class="model-scopes-grid">${scopeMarkup}</div>
-                </section>
-                <section class="resource-section">
-                    <h3>额外请求头</h3>
-                    <textarea class="resource-editor model-textarea" name="extraHeaders" rows="6" placeholder='{"X-Trace-Id": "demo"}'>${esc(current?.extra_headers ? JSON.stringify(current.extra_headers, null, 2) : "")}</textarea>
-                </section>
-                <section class="resource-section">
-                    <h3>说明</h3>
-                    <textarea class="resource-editor model-textarea" name="description" rows="5" placeholder="可填写用途、限制、成本等说明">${esc(current?.description || "")}</textarea>
-                </section>
-                <div class="model-actions">
-                    <button type="submit" class="toolbar-btn success">${isCreate ? "添加并保存" : "保存模型"}</button>
-                    ${isCreate ? '<button type="button" class="toolbar-btn ghost" data-model-detail-cancel="1">取消</button>' : ""}
-                </div>
-            </form>
+                </form>
+            </div>
         </article>`;
 }
 
 function renderModelCatalog() {
     if (U.modelRefresh) U.modelRefresh.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
     if (U.modelCreate) U.modelCreate.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
+    if (U.modelRolesCancel) {
+        U.modelRolesCancel.hidden = !S.modelCatalog.roleEditing;
+        U.modelRolesCancel.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
+    }
     if (U.modelRolesSave) {
-        U.modelRolesSave.disabled = S.modelCatalog.loading || S.modelCatalog.saving || !S.modelCatalog.rolesDirty;
-        U.modelRolesSave.textContent = S.modelCatalog.saving ? "正在保存角色链..." : "保存角色链";
+        U.modelRolesSave.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
+        U.modelRolesSave.textContent = S.modelCatalog.saving
+            ? "正在保存..."
+            : S.modelCatalog.roleEditing
+                ? "保存"
+                : "修改模型链";
     }
     renderModelHint();
     renderModelRoleEditors();
@@ -523,7 +596,7 @@ async function loadModels() {
     renderModelCatalog();
     try {
         const data = await ApiClient.getOrgGraphModels();
-        applyModelCatalog(data);
+        applyModelCatalog(data, { preserveRoleDrafts: !!S.modelCatalog.roleEditing });
     } catch (e) {
         S.modelCatalog.error = e.message || "load failed";
     } finally {
@@ -544,12 +617,48 @@ function startCreateModel() {
     renderModelCatalog();
 }
 
+function clearModelSelection() {
+    S.modelCatalog.mode = "view";
+    S.modelCatalog.selectedModelKey = "";
+    renderModelCatalog();
+}
+
 
 function clearModelDragDecorations() {
-    if (!U.modelRoleEditors) return;
-    U.modelRoleEditors.querySelectorAll('.is-drop-target').forEach((item) => item.classList.remove('is-drop-target'));
-    U.modelRoleEditors.querySelectorAll('.is-drop-zone').forEach((item) => item.classList.remove('is-drop-zone'));
-    U.modelRoleEditors.querySelectorAll('[data-model-drop-placeholder]').forEach((item) => item.remove());
+    [U.modelRoleEditors, U.modelList].filter(Boolean).forEach((root) => {
+        root.querySelectorAll('.is-drop-target').forEach((item) => item.classList.remove('is-drop-target'));
+        root.querySelectorAll('.is-drop-zone').forEach((item) => item.classList.remove('is-drop-zone'));
+        root.querySelectorAll('[data-model-drop-placeholder]').forEach((item) => item.remove());
+    });
+}
+
+function beginModelDrag(item, { scope = "", ref = "", source = "available" } = {}, dataTransfer = null) {
+    const modelRef = String(ref || "").trim();
+    if (!S.modelCatalog.roleEditing || !item || !modelRef) return false;
+    S.modelCatalog.dragState = {
+        scope: String(scope || ""),
+        ref: modelRef,
+        source,
+        scrollFrameId: null,
+        scrollTarget: null,
+        scrollStep: 0,
+    };
+    item.classList.add("is-dragging");
+    clearModelDragDecorations();
+    if (dataTransfer) {
+        dataTransfer.effectAllowed = source === "chain" ? "move" : "copyMove";
+        dataTransfer.setData("text/plain", modelRef);
+    }
+    return true;
+}
+
+function finishModelDrag() {
+    stopModelAutoScroll();
+    [U.modelRoleEditors, U.modelList].filter(Boolean).forEach((root) => {
+        root.querySelectorAll(".model-chain-slide.is-dragging, .model-available-item.is-dragging").forEach((item) => item.classList.remove("is-dragging"));
+    });
+    S.modelCatalog.dragState = null;
+    clearModelDragDecorations();
 }
 
 function stopModelAutoScroll() {
@@ -647,41 +756,41 @@ function removeRoleChainItem(scope, modelKey) {
 }
 
 function updateRoleChainDraft(scope, nextChain) {
-    S.modelCatalog.roles[scope] = normalizeModelRoleChain(nextChain);
-    S.modelCatalog.rolesDirty = true;
+    if (!S.modelCatalog.roleEditing) return;
+    S.modelCatalog.roleDrafts[scope] = normalizeModelRoleChain(nextChain);
+    syncModelRoleDraftState();
     renderModelHint();
     renderModelRoleEditors();
     renderModelList();
     syncModelDetailScopeToggles();
 }
 
-function setModelScopesInState(modelKey, selectedScopes) {
-    const changed = [];
-    MODEL_SCOPES.forEach(({ key }) => {
-        const currentChain = modelScopeChain(key);
-        const exists = currentChain.some((item) => modelRefEquivalent(item, modelKey));
-        const shouldExist = selectedScopes.has(key);
-        if (exists === shouldExist) return;
-        changed.push(key);
-        S.modelCatalog.roles[key] = normalizeModelRoleChain(
-            shouldExist
-                ? [...currentChain, modelKey]
-                : currentChain.filter((item) => !modelRefEquivalent(item, modelKey))
-        );
-    });
-    if (changed.length) S.modelCatalog.rolesDirty = true;
-    return changed;
+function startModelRoleEditing() {
+    S.modelCatalog.roleEditing = true;
+    S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+    syncModelRoleDraftState();
+    renderModelCatalog();
 }
 
-async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "角色模型链已保存。") {
+function cancelModelRoleEditing() {
+    S.modelCatalog.roleEditing = false;
+    S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+    S.modelCatalog.rolesDirty = false;
+    finishModelDrag();
+    renderModelCatalog();
+    hint("已取消模型链修改。", false);
+}
+
+async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
     const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
     if (!targets.length) return;
+    const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {
         let payload = null;
         for (const scope of targets) {
-            payload = await ApiClient.updateModelRoleChain(scope, normalizeModelRoleChain(S.modelCatalog.roles[scope] || []));
+            payload = await ApiClient.updateModelRoleChain(scope, normalizeModelRoleChain(roleSource[scope] || []));
         }
         if (payload) applyModelCatalog(payload);
         hint(successText);
@@ -693,6 +802,19 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
         S.modelCatalog.saving = false;
         renderModelCatalog();
     }
+}
+
+async function handleModelRoleEditorAction() {
+    if (!S.modelCatalog.roleEditing) {
+        startModelRoleEditing();
+        hint("已进入模型链编辑模式。");
+        return;
+    }
+    if (!S.modelCatalog.rolesDirty) {
+        cancelModelRoleEditing();
+        return;
+    }
+    await persistModelRoleChains(MODEL_SCOPES.map((item) => item.key), "模型链已保存。", { useDrafts: true });
 }
 
 function parseModelRetryOn(raw) {
@@ -776,21 +898,17 @@ async function saveModelDetail() {
     const form = U.modelDetail?.querySelector("#model-detail-form");
     if (!(form instanceof HTMLFormElement)) return;
     const current = form.dataset.mode === "create" ? null : modelRefItem(form.dataset.modelKey);
-    const previousRoles = structuredClone(S.modelCatalog.roles);
-    const previousDirty = S.modelCatalog.rolesDirty;
     try {
         const draft = collectModelFormData(form, current);
-        const targetKey = draft.isCreate ? draft.key : String(current?.key || draft.key);
-        const changedScopes = setModelScopesInState(targetKey, draft.selectedScopes);
-        const preserveRoleDrafts = S.modelCatalog.rolesDirty;
+        const preserveRoleDrafts = !!S.modelCatalog.roleEditing;
         const enableChanged = !draft.isCreate && draft.enabled !== !!current?.enabled;
-        if (!draft.isCreate && !Object.keys(draft.patch).length && !enableChanged && !S.modelCatalog.rolesDirty) {
+        if (!draft.isCreate && !Object.keys(draft.patch).length && !enableChanged) {
             hint("没有需要保存的更改。");
             return;
         }
 
         if (draft.isCreate) {
-            const payload = await ApiClient.createManagedModel(draft.payload);
+            const payload = await ApiClient.createManagedModel({ ...draft.payload, scopes: [] });
             applyModelCatalog(payload, { preserveRoleDrafts });
             S.modelCatalog.mode = "view";
             S.modelCatalog.selectedModelKey = payload.model?.key || draft.key;
@@ -807,15 +925,9 @@ async function saveModelDetail() {
             S.modelCatalog.selectedModelKey = current.key;
         }
 
-        if (S.modelCatalog.rolesDirty || changedScopes.length) {
-            await persistModelRoleChains(MODEL_SCOPES.map((item) => item.key), draft.isCreate ? "模型已添加并同步角色链。" : "模型配置已保存。");
-            return;
-        }
         hint(draft.isCreate ? "模型已添加。" : "模型配置已保存。");
         renderModelCatalog();
     } catch (e) {
-        S.modelCatalog.roles = previousRoles;
-        S.modelCatalog.rolesDirty = previousDirty;
         S.modelCatalog.error = e.message || "save failed";
         hint(`模型配置错误：${S.modelCatalog.error}`, true);
         renderModelRoleEditors();
@@ -1785,6 +1897,14 @@ function switchView(view) {
     if (view !== "projects") setMultiSelectMode(false);
     if (view !== "skills") setDrawerOpen(U.skillBackdrop, U.skillDrawer, false);
     if (view !== "tools") setDrawerOpen(U.toolBackdrop, U.toolDrawer, false);
+    if (view !== "models") {
+        setDrawerOpen(U.modelBackdrop, U.modelDrawer, false);
+        S.modelCatalog.mode = "view";
+        S.modelCatalog.selectedModelKey = "";
+        S.modelCatalog.roleEditing = false;
+        S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+        S.modelCatalog.rolesDirty = false;
+    }
     S.view = view;
     if (view === "projects") void loadProjects();
     if (view === "skills") void loadSkills();
@@ -1805,15 +1925,18 @@ function bind() {
     });
     U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);
-    U.modelRolesSave?.addEventListener("click", () => void persistModelRoleChains(MODEL_SCOPES.map((item) => item.key)));
+    U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);
+    U.modelRolesSave?.addEventListener("click", () => void handleModelRoleEditorAction());
     U.modelSearch?.addEventListener("input", (e) => {
         S.modelCatalog.search = String(e.target.value || "");
         renderModelList();
     });
     U.modelList?.addEventListener("click", (e) => {
-        const button = e.target.closest("[data-model-key]");
-        if (!button) return;
-        openModel(button.dataset.modelKey);
+        const open = e.target.closest("[data-model-open]");
+        if (open) {
+            openModel(open.dataset.modelOpen);
+            return;
+        }
     });
     U.modelRoleEditors?.addEventListener("click", (e) => {
         const open = e.target.closest("[data-model-open]");
@@ -1821,6 +1944,7 @@ function bind() {
             openModel(open.dataset.modelOpen);
             return;
         }
+        if (!S.modelCatalog.roleEditing) return;
         const action = e.target.closest("[data-model-chain-action]");
         if (action) {
             const scope = String(action.dataset.scope || "");
@@ -1833,109 +1957,114 @@ function bind() {
             }
             return;
         }
-        const add = e.target.closest("[data-model-role-add-item]");
-        if (!add) return;
-        const scope = String(add.dataset.modelRoleAddItem || "");
-        const modelKey = String(add.dataset.modelKey || "").trim();
-        if (!scope || !modelKey) return;
-        if (modelScopeChain(scope).some((item) => modelRefEquivalent(item, modelKey))) return;
-        insertRoleChainItem(scope, modelKey);
     });
     U.modelRoleEditors?.addEventListener("dragstart", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
         const chainItem = e.target.closest("[data-model-chain-ref]");
-        const availableItem = e.target.closest("[data-model-available-key]");
-        const item = chainItem || availableItem;
-        if (!item) return;
-        const isChain = !!chainItem;
-        S.modelCatalog.dragState = {
-            scope: String(item.dataset.scope || ""),
-            ref: String(isChain ? item.dataset.modelChainRef || "" : item.dataset.modelAvailableKey || ""),
-            source: isChain ? "chain" : "available",
-            scrollFrameId: null,
-            scrollTarget: null,
-            scrollStep: 0,
-        };
-        item.classList.add("is-dragging");
-        clearModelDragDecorations();
-        e.dataTransfer.effectAllowed = isChain ? "move" : "copyMove";
-        e.dataTransfer.setData("text/plain", S.modelCatalog.dragState.ref);
+        if (!chainItem) return;
+        beginModelDrag(chainItem, {
+            scope: String(chainItem.dataset.scope || ""),
+            ref: String(chainItem.dataset.modelChainRef || ""),
+            source: "chain",
+        }, e.dataTransfer);
     });
     U.modelRoleEditors?.addEventListener("dragover", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
         const chainList = e.target.closest("[data-model-chain-list]");
-        if (chainList) {
-            const scope = String(chainList.dataset.modelChainList || "");
-            if (!scope || scope !== dragState.scope) return;
-            e.preventDefault();
-            e.dataTransfer.dropEffect = dragState.source === "chain" ? "move" : "copy";
-            clearModelDragDecorations();
-            let targetItem = e.target.closest("[data-model-chain-ref]");
-            if (targetItem && dragState.source === "chain" && String(targetItem.dataset.modelChainRef || "") === dragState.ref) {
-                targetItem = null;
-            }
-            ensureModelDropPlaceholder(chainList, targetItem, e.clientY);
-            startModelAutoScroll(chainList, e.clientY);
-            return;
-        }
-        const availableList = e.target.closest("[data-model-available-list]");
-        if (!availableList) return;
-        const scope = String(availableList.dataset.modelAvailableList || "");
-        if (!scope || scope !== dragState.scope) return;
+        if (!chainList) return;
+        const scope = String(chainList.dataset.modelChainList || "");
+        const allowDrop = dragState.source === "available" || scope === dragState.scope;
+        if (!scope || !allowDrop) return;
         e.preventDefault();
-        e.dataTransfer.dropEffect = dragState.source === "chain" ? "move" : "none";
+        e.dataTransfer.dropEffect = dragState.source === "chain" ? "move" : "copy";
         clearModelDragDecorations();
-        const targetItem = e.target.closest("[data-model-available-key]");
-        highlightModelAvailableZone(availableList, targetItem);
-        startModelAutoScroll(availableList, e.clientY);
+        let targetItem = e.target.closest("[data-model-chain-ref]");
+        if (targetItem && dragState.source === "chain" && scope === dragState.scope && String(targetItem.dataset.modelChainRef || "") === dragState.ref) {
+            targetItem = null;
+        }
+        ensureModelDropPlaceholder(chainList, targetItem, e.clientY);
+        startModelAutoScroll(chainList, e.clientY);
     });
     U.modelRoleEditors?.addEventListener("drop", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
         const chainList = e.target.closest("[data-model-chain-list]");
-        if (chainList) {
-            const scope = String(chainList.dataset.modelChainList || "");
-            if (!scope || scope !== dragState.scope) return;
-            e.preventDefault();
-            const placeholder = chainList.querySelector('[data-model-drop-placeholder]');
-            const children = [...chainList.children];
-            const placeholderIndex = children.indexOf(placeholder);
-            const targetIndex = placeholderIndex < 0
-                ? children.filter((child) => child.matches?.('[data-model-chain-ref]') && String(child.dataset.modelChainRef || '') !== dragState.ref).length
-                : children.slice(0, placeholderIndex).filter((child) => child.matches?.('[data-model-chain-ref]') && String(child.dataset.modelChainRef || '') !== dragState.ref).length;
-            clearModelDragDecorations();
-            stopModelAutoScroll();
-            if (dragState.source === "chain") moveRoleChainItem(scope, dragState.ref, targetIndex);
-            else insertRoleChainItem(scope, dragState.ref, targetIndex);
-            return;
-        }
-        const availableList = e.target.closest("[data-model-available-list]");
-        if (!availableList) return;
-        const scope = String(availableList.dataset.modelAvailableList || "");
-        if (!scope || scope !== dragState.scope) return;
+        if (!chainList) return;
+        const scope = String(chainList.dataset.modelChainList || "");
+        const allowDrop = dragState.source === "available" || scope === dragState.scope;
+        if (!scope || !allowDrop) return;
         e.preventDefault();
+        const placeholder = chainList.querySelector('[data-model-drop-placeholder]');
+        const children = [...chainList.children];
+        const placeholderIndex = children.indexOf(placeholder);
+        const targetIndex = placeholderIndex < 0
+            ? children.filter((child) => child.matches?.('[data-model-chain-ref]') && String(child.dataset.modelChainRef || '') !== dragState.ref).length
+            : children.slice(0, placeholderIndex).filter((child) => child.matches?.('[data-model-chain-ref]') && String(child.dataset.modelChainRef || '') !== dragState.ref).length;
         clearModelDragDecorations();
         stopModelAutoScroll();
-        if (dragState.source === "chain") {
-            removeRoleChainItem(scope, dragState.ref);
-        }
+        if (dragState.source === "chain") moveRoleChainItem(scope, dragState.ref, targetIndex);
+        else insertRoleChainItem(scope, dragState.ref, targetIndex);
     });
     U.modelRoleEditors?.addEventListener("dragleave", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
-        const zone = e.target.closest("[data-model-chain-list], [data-model-available-list]");
+        const zone = e.target.closest("[data-model-chain-list]");
         if (!zone) return;
         const related = e.relatedTarget;
         if (related && zone.contains(related)) return;
         clearModelDragDecorations();
         stopModelAutoScroll();
     });
-    U.modelRoleEditors?.addEventListener("dragend", () => {
-        S.modelCatalog.dragState = null;
-        U.modelRoleEditors?.querySelectorAll(".model-chain-slide.is-dragging, .model-available-item.is-dragging").forEach((item) => item.classList.remove("is-dragging"));
+    U.modelRoleEditors?.addEventListener("dragend", finishModelDrag);
+    U.modelList?.addEventListener("dragstart", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        const availableItem = e.target.closest("[data-model-available-key]");
+        if (!availableItem) return;
+        beginModelDrag(availableItem, {
+            ref: String(availableItem.dataset.modelAvailableKey || ""),
+            source: "available",
+        }, e.dataTransfer);
+    });
+    U.modelList?.addEventListener("dragover", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        const dragState = S.modelCatalog.dragState;
+        if (!dragState?.ref || dragState.source !== "chain") return;
+        const availableList = e.target.closest("[data-model-available-list]");
+        if (!availableList) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        clearModelDragDecorations();
+        const targetItem = e.target.closest("[data-model-available-key]");
+        highlightModelAvailableZone(availableList, targetItem);
+        startModelAutoScroll(availableList, e.clientY);
+    });
+    U.modelList?.addEventListener("drop", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        const dragState = S.modelCatalog.dragState;
+        if (!dragState?.ref || dragState.source !== "chain") return;
+        const availableList = e.target.closest("[data-model-available-list]");
+        if (!availableList) return;
+        e.preventDefault();
+        clearModelDragDecorations();
+        stopModelAutoScroll();
+        removeRoleChainItem(dragState.scope, dragState.ref);
+    });
+    U.modelList?.addEventListener("dragleave", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        const dragState = S.modelCatalog.dragState;
+        if (!dragState?.ref) return;
+        const zone = e.target.closest("[data-model-available-list]");
+        if (!zone) return;
+        const related = e.relatedTarget;
+        if (related && zone.contains(related)) return;
         clearModelDragDecorations();
         stopModelAutoScroll();
     });
+    U.modelList?.addEventListener("dragend", finishModelDrag);
     U.modelDetail?.addEventListener("submit", (e) => {
         if (e.target?.id !== "model-detail-form") return;
         e.preventDefault();
@@ -1944,8 +2073,7 @@ function bind() {
     U.modelDetail?.addEventListener("click", (e) => {
         const cancel = e.target.closest("[data-model-detail-cancel]");
         if (!cancel) return;
-        S.modelCatalog.mode = "view";
-        renderModelCatalog();
+        clearModelSelection();
     });
     U.modelDetail?.addEventListener("change", (e) => {
         const toggle = e.target.closest(".role-toggle");
@@ -1987,6 +2115,7 @@ function bind() {
     [U.toolSearch, U.toolStatus, U.toolRisk].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderTools));
     U.toolRefresh?.addEventListener("click", () => void refreshTools());
     U.toolSave?.addEventListener("click", () => void saveTool());
+    U.modelBackdrop?.addEventListener("click", clearModelSelection);
     U.skillBackdrop?.addEventListener("click", clearSkillSelection);
     U.toolBackdrop?.addEventListener("click", clearToolSelection);
     U.toastClose?.addEventListener("click", closeToast);
@@ -2009,6 +2138,10 @@ function bind() {
             closeProjectMenus();
             return;
         }
+        if (S.modelCatalog.mode === "create" || S.modelCatalog.selectedModelKey) {
+            clearModelSelection();
+            return;
+        }
         if (S.selectedSkill) clearSkillSelection();
         if (S.selectedTool) clearToolSelection();
     });
@@ -2021,6 +2154,7 @@ function init() {
     renderToolActions();
     void loadModels();
     void loadNotices();
+    void loadCeoHistory();
     initCeoWs();
 }
 

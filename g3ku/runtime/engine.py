@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
@@ -81,6 +82,8 @@ class AgentRuntimeEngine:
         self.agent_browser_config = dict(agent_browser_config or {})
         self.debug_mode = bool(debug_mode)
         self.debug_trace = bool(debug_mode)
+        raw_prompt_trace = str(os.getenv("G3KU_PROMPT_TRACE", "")).strip().lower()
+        self.prompt_trace = self.debug_trace or raw_prompt_trace in {"1", "true", "yes", "on", "debug", "log"}
         self.middlewares = list(middlewares or [])
 
         self._context_builder_cls = context_builder_cls
@@ -121,6 +124,7 @@ class AgentRuntimeEngine:
         self.background_pool = None
         self.org_graph_service = None
         self.org_graph_monitor_service = None
+        self._runtime_closed = False
 
         temp_root = self.workspace / '.g3ku' / 'tmp'
         temp_root.mkdir(parents=True, exist_ok=True)
@@ -212,12 +216,105 @@ class AgentRuntimeEngine:
         return len(tasks)
 
     async def _ensure_checkpointer_ready(self) -> None:
+        if not self._checkpointer_enabled:
+            return None
+        if self._checkpointer is not None:
+            return None
+        backend = str(getattr(self, '_checkpointer_backend', 'disabled') or 'disabled').lower()
+        if backend != 'sqlite' or not self._checkpointer_path:
+            return None
+
+        async with self._checkpointer_lock:
+            if not self._checkpointer_enabled or self._checkpointer is not None:
+                return None
+            try:
+                from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+                cp_path = Path(self._checkpointer_path)
+                cp_path.parent.mkdir(parents=True, exist_ok=True)
+                self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(str(cp_path))
+                self._checkpointer = await self._checkpointer_cm.__aenter__()
+                setup = getattr(self._checkpointer, 'setup', None)
+                if setup is not None:
+                    maybe = setup()
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                logger.info('SQLite checkpointer ready at {}', cp_path)
+            except Exception as exc:
+                logger.warning(
+                    'SQLite checkpointer bootstrap failed; fallback to session-file history: {}',
+                    exc,
+                )
+                cm = self._checkpointer_cm
+                self._checkpointer = None
+                self._checkpointer_cm = None
+                self._checkpointer_path = None
+                self._checkpointer_backend = 'disabled'
+                self._checkpointer_enabled = False
+                if cm is not None and hasattr(cm, '__aexit__'):
+                    try:
+                        maybe = cm.__aexit__(None, None, None)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+                    except Exception:
+                        logger.debug('Checkpointer cleanup skipped after bootstrap failure')
         return None
 
     async def _connect_mcp(self) -> None:
         return None
 
     async def close_mcp(self) -> None:
+        if self._runtime_closed:
+            return None
+        self._runtime_closed = True
+
+        for task_set in (self._consolidation_tasks, self._commit_tasks):
+            tasks = list(task_set)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            task_set.clear()
+
+        pool = getattr(self, 'background_pool', None)
+        if pool is not None and hasattr(pool, 'close'):
+            try:
+                await pool.close()
+            except Exception:
+                logger.debug('Background pool close skipped during runtime shutdown')
+
+        org_graph_service = getattr(self, 'org_graph_service', None)
+        if org_graph_service is not None:
+            try:
+                await org_graph_service.close()
+            except Exception:
+                logger.debug('org-graph service close skipped during runtime shutdown')
+
+        memory_manager = getattr(self, 'memory_manager', None)
+        if memory_manager is not None:
+            try:
+                memory_manager.close()
+            except Exception:
+                logger.debug('Memory manager close skipped during runtime shutdown')
+
+        checkpointer = getattr(self, '_checkpointer', None)
+        if checkpointer is not None and hasattr(checkpointer, 'close'):
+            try:
+                maybe = checkpointer.close()
+                if inspect.isawaitable(maybe):
+                    await maybe
+            except Exception:
+                logger.debug('Checkpointer close skipped during runtime shutdown')
+        checkpointer_cm = getattr(self, '_checkpointer_cm', None)
+        if checkpointer_cm is not None and hasattr(checkpointer_cm, '__aexit__'):
+            try:
+                maybe = checkpointer_cm.__aexit__(None, None, None)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            except Exception:
+                logger.debug('Checkpointer context close skipped during runtime shutdown')
+        self._checkpointer = None
+        self._checkpointer_cm = None
         return None
 
     def record_session_notice(self, session_key: str | None, *, source: str, level: str = 'warn', text: str, metadata: dict[str, Any] | None = None) -> None:

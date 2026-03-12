@@ -412,7 +412,7 @@ def _make_agent_loop(
 def web(
     host: str = typer.Option("127.0.0.1", "--host", help="Web UI host"),
     port: int = typer.Option(3000, "--port", "-p", help="Web UI port"),
-    reload: bool = typer.Option(True, "--reload/--no-reload", help="Enable auto-reload"),
+    reload: bool = typer.Option(False, "--reload/--no-reload", help="Enable auto-reload"),
     debug: bool = typer.Option(False, "--debug/--no-debug", help="Enable full backend debug trace logs."),
 ):
     """Start g3ku Web UI (compatible alias of `g3ku-web`)."""

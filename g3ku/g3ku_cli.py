@@ -30,6 +30,12 @@ def _ensure_frontend_ready() -> str:
     return "static"
 
 
+def _set_prompt_log_mode(enabled: bool) -> None:
+    if not enabled:
+        return
+    os.environ["G3KU_PROMPT_TRACE"] = "1"
+
+
 @app.callback()
 def _main() -> None:
     """G3ku command group."""
@@ -40,6 +46,7 @@ def start(
     host: str = typer.Option("127.0.0.1", "--host", help="Backend bind host."),
     port: int = typer.Option(3000, "--port", min=1, max=65535, help="Backend bind port."),
     reload: bool = typer.Option(False, "--reload", help="Enable uvicorn reload mode."),
+    log_enabled: bool = typer.Option(False, "--log", "-log", help="Render main-agent user/prompt/answer logs."),
     open_browser: bool = typer.Option(False, "--open", help="Open the app URL in the default browser."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the resolved actions without starting the server."),
 ) -> None:
@@ -50,11 +57,14 @@ def start(
 
     root = _resolve_project_root()
     frontend_mode = _ensure_frontend_ready()
+    _set_prompt_log_mode(log_enabled)
     url = f"http://{host}:{port}"
 
     typer.echo(f"[g3ku] project root: {root}")
     typer.echo(f"[g3ku] frontend mode: {frontend_mode}")
     typer.echo(f"[g3ku] backend url: {url}")
+    if log_enabled:
+        typer.echo("[g3ku] main-agent prompt logging: enabled")
 
     if open_browser:
         typer.echo(f"[g3ku] opening browser: {url}")

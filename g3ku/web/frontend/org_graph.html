@@ -163,7 +163,7 @@
                     <div id="skill-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
                     <section class="resource-detail-panel skill-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="skill-detail-title" tabindex="-1">
                         <div id="skill-detail-empty" class="empty-state resource-empty">请选择一个 Skill 查看详情。</div>
-                        <div id="skill-detail-content"></div>
+                        <div id="skill-detail-content" class="resource-detail-shell"></div>
                     </section>
                 </div>
             </section>
@@ -206,7 +206,7 @@
                     <div id="tool-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
                     <section class="resource-detail-panel tool-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="tool-detail-title" tabindex="-1">
                         <div id="tool-detail-empty" class="empty-state resource-empty">请选择一个工具族查看详情。</div>
-                        <div id="tool-detail-content"></div>
+                        <div id="tool-detail-content" class="resource-detail-shell"></div>
                     </section>
                 </div>
             </section>
@@ -221,21 +221,38 @@
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                         <button id="model-create-btn" class="toolbar-btn" type="button">添加模型</button>
-                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button">保存角色链</button>
+                        <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消</button>
+                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button">修改模型链</button>
                     </div>
                 </header>
 
                 <div class="resource-layout model-simple-layout">
                     <section class="resource-detail-panel model-detail-panel">
-                        <div class="model-role-summary-panel">
-                            <div id="model-role-editors" class="model-routing-grid"></div>
-                        </div>
-                        <div class="model-detail-body">
-                            <div id="model-detail-empty" class="empty-state resource-empty">点击角色链中的模型即可查看详情，或点击“添加模型”。</div>
-                            <div id="model-detail-content" class="resource-detail-shell"></div>
+                        <div class="model-catalog-shell">
+                            <div class="model-role-summary-panel">
+                                <div id="model-role-editors" class="model-routing-grid"></div>
+                            </div>
+                            <section class="model-shared-panel">
+                                <div class="panel-header model-shared-header">
+                                    <div>
+                                        <h3>共享可用模型</h3>
+                                        <p class="subtitle">从下方共享模型列表拖入任意角色链，点击模型可打开独立配置弹窗。</p>
+                                    </div>
+                                    <div class="model-shared-actions">
+                                        <input id="model-search-input" class="resource-search" type="search" placeholder="搜索模型 Key / Provider / 描述">
+                                    </div>
+                                </div>
+                                <div id="model-list" class="model-shared-list" data-model-available-list="shared"></div>
+                            </section>
                         </div>
                     </section>
                 </div>
+
+                <div id="model-detail-backdrop" class="model-detail-backdrop" aria-hidden="true"></div>
+                <section class="resource-detail-panel model-detail-dialog" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="model-detail-title" tabindex="-1">
+                    <div id="model-detail-empty" class="empty-state resource-empty">点击模型可查看详情或添加新模型。</div>
+                    <div id="model-detail-content" class="resource-detail-shell"></div>
+                </section>
             </section>
 
             <section id="view-project-details" class="view-section" style="display: none;">

@@ -625,12 +625,17 @@ class G3kuHybridStore(BaseStore):
                 close_fn = getattr(self._qdrant, "close", None)
                 if callable(close_fn):
                     close_fn()
-                else:
-                    client = getattr(self._qdrant, "_client", None)
+                for attr_name in ("_client", "client", "_async_client", "async_client"):
+                    client = getattr(self._qdrant, attr_name, None)
                     if client is not None and hasattr(client, "close"):
-                        client.close()
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
             except Exception:
                 pass
+            finally:
+                self._qdrant = None
         try:
             self._conn.close()
         except Exception:

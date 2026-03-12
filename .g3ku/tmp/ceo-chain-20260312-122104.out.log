@@ -1,0 +1,5 @@
+[g3ku] project root: D:\zxy\project\G3ku
+[g3ku] frontend mode: static
+[g3ku] backend url: http://127.0.0.1:3013
+[g3ku] main-agent prompt logging: enabled
+INFO:     127.0.0.1:62706 - "GET /api/models HTTP/1.1" 200 OK

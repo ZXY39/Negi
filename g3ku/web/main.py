@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 
 from g3ku.org_graph.api import router as org_graph_router
 from g3ku.org_graph.integration.web_bridge import shutdown_org_graph_runtime, startup_org_graph_runtime
+from g3ku.shells.web import shutdown_web_runtime
 
 mimetypes.add_type('text/css', '.css')
 mimetypes.add_type('application/javascript', '.js')
@@ -20,6 +21,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         await shutdown_org_graph_runtime()
+        await shutdown_web_runtime()
 
 
 app = FastAPI(title='G3ku Web GUI', lifespan=lifespan)
@@ -87,7 +89,7 @@ async def serve_frontend_spa(full_path: str):
 
 
 def run():
-    uvicorn.run('g3ku.web.main:app', host='127.0.0.1', port=3000, reload=True)
+    uvicorn.run('g3ku.web.main:app', host='127.0.0.1', port=3000, reload=False)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,14 @@
+INFO:     Started server process [13440]
+INFO:     Waiting for application startup.
+2026-03-12 10:59:43.212 | INFO     | g3ku.runtime.bootstrap_bridge:init_capability_runtime:109 - Capability registry enabled (capabilities=18, tools=29, skills=14, agents=0)
+2026-03-12 10:59:43.224 | INFO     | g3ku.runtime.bootstrap_bridge:init_file_vault:296 - File vault enabled at D:\zxy\project\G3ku\memory\uploads
+2026-03-12 10:59:53.112 | INFO     | g3ku.runtime.bootstrap_bridge:init_memory_runtime:314 - RAG memory store enabled (G3kuHybridStore)
+2026-03-12 10:59:53.143 | INFO     | g3ku.runtime.bootstrap_bridge:init_multi_agent_runtime:161 - Dynamic background runtime initialized (session_store=D:\zxy\project\G3ku\.g3ku\dynamic-subagents.sqlite3, background_store=D:\zxy\project\G3ku\.g3ku\background-tasks.sqlite3, blackboard=D:\zxy\project\G3ku\.g3ku\blackboard)
+2026-03-12 10:59:53.185 | WARNING  | g3ku.agent.rag_memory:_init_dense_backend:618 - Hybrid store dense backend unavailable; fallback to sparse-only: Storage folder D:\zxy\project\G3ku\memory\qdrant is already accessed by another instance of Qdrant client. If you require concurrent access, use Qdrant server instead.
+2026-03-12 10:59:56.205 | INFO     | g3ku.runtime.bootstrap_bridge:register_default_tools:204 - Registered 18 tools via capability registry
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:3011 (Press CTRL+C to quit)
+INFO:     127.0.0.1:55771 - "WebSocket /api/ws/ceo?session_id=web%3Aregression-20260312-105835" [accepted]
+INFO:     connection open
+2026-03-12 11:00:22.512 | INFO     | g3ku.runtime.engine:_ensure_checkpointer_ready:239 - SQLite checkpointer ready at D:\zxy\project\G3ku\memory\checkpoints.sqlite3
+INFO:     connection closed

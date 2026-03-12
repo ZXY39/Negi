@@ -3,7 +3,9 @@
 import asyncio
 from dataclasses import asdict
 from datetime import datetime
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
+
+from loguru import logger
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import AssistantMessage, UserInputMessage
@@ -53,6 +55,26 @@ class RuntimeAgentSession:
 
     def _now(self) -> str:
         return datetime.now().isoformat()
+
+    @staticmethod
+    def _history_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        parts.append(text)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text", item.get("content", ""))
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            return "\n".join(parts).strip()
+        return str(content or "")
 
     def _allocate_tool_call_id(self, tool_name: str) -> str:
         normalized = str(tool_name or "tool").strip() or "tool"
@@ -182,6 +204,14 @@ class RuntimeAgentSession:
 
     async def prompt(self, message: str | UserInputMessage) -> RunResult:
         user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
+        if getattr(self._loop, "prompt_trace", False):
+            logger.info(
+                "[main:user] session={} channel={} chat={}\n{}",
+                self._state.session_key,
+                self._channel,
+                self._chat_id,
+                self._history_text(user_input.content),
+            )
         self._last_prompt = user_input.content
         self._event_log = []
         self._pending_tool_names.clear()
@@ -227,6 +257,26 @@ class RuntimeAgentSession:
         self._state.is_running = False
         self._state.status = "completed"
         self._state.pending_tool_calls.clear()
+        if getattr(self._loop, "prompt_trace", False):
+            logger.info(
+                "[main:answer] session={} channel={} chat={}\n{}",
+                self._state.session_key,
+                self._channel,
+                self._chat_id,
+                output,
+            )
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            persisted_session.add_message("user", self._history_text(user_input.content))
+            persisted_session.add_message("assistant", output)
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            await self._emit(
+                "message_delta",
+                channel="analysis",
+                kind="persistence_warning",
+                text="Session transcript persistence failed; response is still available in-memory.",
+            )
         await self._emit("message_end", role="assistant", text=output)
         await self._emit("turn_end", session_key=self._state.session_key, status="completed")
         await self._emit("agent_end", session_key=self._state.session_key, status="completed")

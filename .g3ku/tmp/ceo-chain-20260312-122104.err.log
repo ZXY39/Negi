@@ -1,0 +1,66 @@
+[92m12:21:14 - LiteLLM:WARNING[0m: get_model_cost_map.py:213 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010). Falling back to local backup.
+INFO:     Started server process [5828]
+INFO:     Waiting for application startup.
+2026-03-12 12:21:22.750 | INFO     | g3ku.runtime.bootstrap_bridge:init_capability_runtime:109 - Capability registry enabled (capabilities=18, tools=29, skills=14, agents=0)
+2026-03-12 12:21:22.759 | INFO     | g3ku.runtime.bootstrap_bridge:init_file_vault:296 - File vault enabled at D:\zxy\project\G3ku\memory\uploads
+2026-03-12 12:21:24.280 | WARNING  | g3ku.agent.rag_memory:_init_dense_backend:618 - Hybrid store dense backend unavailable; fallback to sparse-only: Storage folder D:\zxy\project\G3ku\memory\qdrant is already accessed by another instance of Qdrant client. If you require concurrent access, use Qdrant server instead.
+2026-03-12 12:21:24.281 | INFO     | g3ku.runtime.bootstrap_bridge:init_memory_runtime:314 - RAG memory store enabled (G3kuHybridStore)
+2026-03-12 12:21:24.310 | INFO     | g3ku.runtime.bootstrap_bridge:init_multi_agent_runtime:161 - Dynamic background runtime initialized (session_store=D:\zxy\project\G3ku\.g3ku\dynamic-subagents.sqlite3, background_store=D:\zxy\project\G3ku\.g3ku\background-tasks.sqlite3, blackboard=D:\zxy\project\G3ku\.g3ku\blackboard)
+2026-03-12 12:21:24.339 | WARNING  | g3ku.agent.rag_memory:_init_dense_backend:618 - Hybrid store dense backend unavailable; fallback to sparse-only: Storage folder D:\zxy\project\G3ku\memory\qdrant is already accessed by another instance of Qdrant client. If you require concurrent access, use Qdrant server instead.
+2026-03-12 12:21:25.335 | INFO     | g3ku.runtime.bootstrap_bridge:register_default_tools:204 - Registered 18 tools via capability registry
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:3013 (Press CTRL+C to quit)
+INFO:     127.0.0.1:62709 - "WebSocket /api/ws/ceo?session_id=web%3Aceo-chain-20260312-122104" [accepted]
+INFO:     connection open
+2026-03-12 12:21:26.158 | INFO     | g3ku.runtime.session_agent:prompt:208 - [main:user] session=web:ceo-chain-20260312-122104 channel=web chat=ceo-chain-20260312-122104
+Reply with exactly OK.
+2026-03-12 12:21:26.164 | INFO     | g3ku.runtime.engine:_ensure_checkpointer_ready:242 - SQLite checkpointer ready at D:\zxy\project\G3ku\memory\checkpoints.sqlite3
+2026-03-12 12:21:26.283 | INFO     | g3ku.runtime.frontdoor.ceo_runner:run_turn:156 - [main:prompt] session=web:ceo-chain-20260312-122104 channel=web chat=ceo-chain-20260312-122104
+===== MAIN AGENT PROMPT BEGIN =====
+session=web:ceo-chain-20260312-122104
+channel=web
+chat=ceo-chain-20260312-122104
+checkpointer_enabled=True
+thread_id=web:ceo-chain-20260312-122104
+note=LangGraph may restore additional thread history internally beyond the explicit messages below.
+model_chain=responses_gpt_5_4
+tools=agent_browser, delete_file, edit_file, exec, file_vault_cleanup, file_vault_lookup, file_vault_read, file_vault_set_policy, file_vault_stats, list_dir, load_skill_context, memory_search, message, model_config, orggraph_control_project, orggraph_create_project, picture_washing, read_file, task_monitor_engineering_exceptions, task_monitor_list, task_monitor_progress, task_monitor_summary, web_fetch, web_search, write_file
+
+----- MESSAGE 1: SYSTEM -----
+ÄãÊÇÏµÍ³Î¨Ò»µÄ CEO Ö÷ Agent£¬Ò²ÊÇÓÃ»§µÄË½ÈËÖúÊÖÓëÎ¨Ò»Ç°ÃÅ¡£
+
+Äã±ØĞëÏÈÀí½âÓÃ»§ÒâÍ¼£¬ÔÙÔÚÒÔÏÂÈıÖÖĞĞÎªÖĞÑ¡ÔñÒ»ÖÖ£º
+- Ö±½Ó»Ø´ğ£º²»ĞèÒª¹¤¾ß¡¢Ò²²»ĞèÒªºóÌ¨ÏîÄ¿¡£
+- CEO ×ÔÖ´ĞĞ£ºÈÎÎñ¼òµ¥£¬µ«ĞèÒªÄãÊ¹ÓÃµ±Ç°¶Ô CEO ¿É¼ûµÄ¹¤¾ß»ò Skill¡£
+- ´´½¨ orgGraph ÏîÄ¿£ºÈÎÎñ³¤¡¢¸´ÔÓ¡¢ĞèÒªºóÌ¨³ÖĞøÍÆ½ø¡¢¸´ÅÌ»ò½á¹¹»¯¼à¿Ø¡£
+
+¹æÔò£º
+- ²»Òª°Ñ±¾¸Ã×÷ÎªºóÌ¨ÏîÄ¿µÄ¸´ÔÓÈÎÎñÁôÔÚµ±Ç°Ç°ÃÅ»á»°ÀïÖ´ĞĞ¡£
+- ²»Òª¼ÙÉèÄãÓµÓĞ²»¿É¼ûµÄ¹¤¾ß»ò Skill¡£
+- ¶ÔÈÎÎñ¼à¿Ø¡¢Ê§°ÜÅÅ²é¡¢¹¤³ÌÒì³£¡¢ÏîÄ¿½øÕ¹µÈÇëÇó£¬ÓÅÏÈÊ¹ÓÃÈÎÎñ¼à¿Ø¹¤¾ß¡£
+- Èç¹ûÓÃ»§ÒªÇóµÄ²Ù×÷ĞèÒª¹¤¾ß£¬ÓÅÏÈÖ±½Óµ÷ÓÃ¹¤¾ß£¬¶ø²»ÊÇÖ»¿ÚÍ·½âÊÍ¡£
+- Ö»ÓĞµ±Ç°ÖÎÀí²ãÔÊĞí¸ø CEO µÄ¹¤¾ßºÍ Skill ²Å¿ÉÊ¹ÓÃ¡£
+
+## µ±Ç°¶Ô CEO ¿É¼ûµÄ Skills
+
+- agent-browser: Browser automation skill for opening, searching, clicking, filling, and screenshot capture.
+- batch-web-planning: batch-web-planning
+- browser-operation: browser-operation
+- browser-orchestration: browser-orchestration
+- clawhub: Capability and skill discovery helper for browsing installable capabilities.
+- cron: Scheduled reminder and cron management skill.
+- github: GitHub workflow skill for repository and issue operations.
+- memory: Memory usage and retrieval guidance skill.
+- picture-washing: Progressive competitor image generation workflow skill.
+- skill-creator: Skill authoring and maintenance skill following the SKILL.md convention.
+- summarize: Summarization skill for URLs, files, and media resources.
+- tmux: Tmux session control and remote terminal orchestration skill.
+- weather: Weather lookup skill for forecast and current conditions.
+- web-research: web-research
+
+----- MESSAGE 2: USER -----
+Reply with exactly OK.
+===== MAIN AGENT PROMPT END =====
+2026-03-12 12:21:29.617 | INFO     | g3ku.runtime.session_agent:prompt:261 - [main:answer] session=web:ceo-chain-20260312-122104 channel=web chat=ceo-chain-20260312-122104
+OK
+INFO:     connection closed

@@ -3,11 +3,13 @@
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
-from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from g3ku.agent.context import ContextBuilder
 from g3ku.org_graph.integration.web_bridge import get_org_graph_service
 from g3ku.org_graph.models import ProjectCreateRequest
+from g3ku.shells.web import get_agent
 
 router = APIRouter()
 
@@ -60,6 +62,58 @@ def _paginate(items, *, offset: int, limit: int) -> tuple[list, int, int, int]:
     return items[safe_offset:safe_offset + safe_limit], total, safe_offset, safe_limit
 
 
+def _history_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    parts.append(text)
+                continue
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get('type') or '').strip().lower()
+            if item_type in {'text', 'input_text', 'output_text'}:
+                text = item.get('text', item.get('content', ''))
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+                continue
+            text = item.get('text', item.get('content', ''))
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        return '\n'.join(parts).strip()
+    return str(content or '').strip()
+
+
+def _session_history_payload(*, session_id: str, limit: int) -> list[dict[str, Any]]:
+    agent = get_agent()
+    session = agent.sessions.get_or_create(session_id)
+    visible_roles = {'user', 'assistant', 'system'}
+    items: list[dict[str, Any]] = []
+    for entry in session.messages:
+        role = str(entry.get('role') or '').strip().lower()
+        if role not in visible_roles:
+            continue
+        text = _history_content_to_text(entry.get('content'))
+        if not text:
+            continue
+        if role == 'user' and text.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+            continue
+        items.append(
+            {
+                'role': role,
+                'text': text,
+                'timestamp': entry.get('timestamp'),
+            }
+        )
+    if limit > 0:
+        items = items[-limit:]
+    return items
+
+
 @router.post('/projects')
 async def create_project(request: ProjectCreateRequest):
     _ = request
@@ -71,6 +125,12 @@ async def list_projects(session_id: str = Query('web:shared'), offset: int = Que
     service = get_org_graph_service()
     page, total, offset, limit = _paginate([item.model_dump(mode='json') for item in service.list_projects(session_id)], offset=offset, limit=limit)
     return JSONResponse({'ok': True, 'session_id': session_id, 'items': page, 'total': total, 'offset': offset, 'limit': limit})
+
+
+@router.get('/session/history')
+async def get_session_history(session_id: str = Query('web:shared'), limit: int = Query(200, ge=1, le=1000)):
+    items = _session_history_payload(session_id=session_id, limit=limit)
+    return JSONResponse({'ok': True, 'session_id': session_id, 'items': items, 'total': len(items)})
 
 
 @router.get('/models')
