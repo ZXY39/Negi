@@ -1,14 +1,6 @@
 {
-  "generation": 1331,
+  "generation": 5521,
   "tools": [
-    {
-      "name": "agent_browser",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
     {
       "name": "cron",
       "available": true,
@@ -195,22 +187,6 @@
     },
     {
       "name": "task_monitor_summary",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "web_fetch",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "web_search",
       "available": true,
       "busy": false,
       "pendingDelete": false,

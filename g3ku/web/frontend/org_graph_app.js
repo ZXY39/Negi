@@ -48,6 +48,19 @@ const S = {
         dragState: null,
     },
     tree: null,
+    treeView: null,
+    treePan: {
+        active: false,
+        originNodeId: null,
+        startX: 0,
+        startY: 0,
+        offsetX: 0,
+        offsetY: 0,
+        baseOffsetX: 0,
+        baseOffsetY: 0,
+        moved: false,
+        suppressClickNodeId: null,
+    },
     selectedUnitId: null,
     skills: [],
     selectedSkill: null,
@@ -101,6 +114,8 @@ const U = {
     pdSummary: document.getElementById("pd-summary"),
     pdActiveCount: document.getElementById("pd-active-count"),
     tree: document.getElementById("org-tree-container"),
+    projectDetailBackdrop: document.getElementById("project-detail-backdrop"),
+    projectDetailDrawer: document.getElementById("project-detail-drawer"),
     feedTitle: document.getElementById("feed-target-name"),
     detail: document.getElementById("agent-detail-view"),
     adRole: document.getElementById("ad-role"),
@@ -1518,11 +1533,28 @@ async function runProjectBatchAction(action) {
 
 function resetProjectView() {
     S.tree = null;
+    S.treeView = null;
+    S.treePan.offsetX = 0;
+    S.treePan.offsetY = 0;
+    S.treePan.baseOffsetX = 0;
+    S.treePan.baseOffsetY = 0;
     S.selectedUnitId = null;
     U.tree.innerHTML = '<div class="empty-state">等待获取组织结构...</div>';
     U.feedTitle.textContent = "节点详情";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
     hideAgent();
+}
+
+function setProjectDetailOpen(open) {
+    setDrawerOpen(U.projectDetailBackdrop, U.projectDetailDrawer, open);
+}
+
+function clearAgentSelection({ rerender = true } = {}) {
+    S.selectedUnitId = null;
+    U.feedTitle.textContent = "节点详情";
+    if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
+    hideAgent();
+    if (rerender) renderTree();
 }
 
 function findTreeNode(node, nodeId) {
@@ -1533,6 +1565,150 @@ function findTreeNode(node, nodeId) {
         if (found) return found;
     }
     return null;
+}
+
+function bindTreePan() {
+    if (!U.tree || U.tree.dataset.panBound === "true") return;
+    U.tree.dataset.panBound = "true";
+    const state = S.treePan;
+
+    const finishPan = () => {
+        if (!state.active) return;
+        state.active = false;
+        state.originNodeId = null;
+        U.tree.classList.remove("is-panning");
+    };
+
+    const applyPan = () => {
+        const canvas = U.tree?.querySelector(".execution-tree");
+        if (!canvas) return;
+        canvas.style.transform = `translate(${Math.round(state.offsetX)}px, ${Math.round(state.offsetY)}px)`;
+    };
+
+    U.tree.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        state.active = true;
+        state.startX = e.clientX;
+        state.startY = e.clientY;
+        state.baseOffsetX = state.offsetX;
+        state.baseOffsetY = state.offsetY;
+        state.originNodeId = e.target instanceof Element ? e.target.closest(".execution-tree-node")?.dataset?.id || null : null;
+        state.moved = false;
+        state.suppressClickNodeId = null;
+        U.tree.classList.add("is-panning");
+    });
+
+    window.addEventListener("mousemove", (e) => {
+        if (!state.active) return;
+        const dx = e.clientX - state.startX;
+        const dy = e.clientY - state.startY;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+            state.moved = true;
+            if (state.originNodeId) state.suppressClickNodeId = String(state.originNodeId);
+        }
+        state.offsetX = state.baseOffsetX + dx;
+        state.offsetY = state.baseOffsetY + dy;
+        applyPan();
+        e.preventDefault();
+    });
+
+    window.addEventListener("mouseup", () => {
+        if (!state.active) return;
+        window.setTimeout(() => {
+            state.suppressClickNodeId = null;
+        }, 0);
+        finishPan();
+    });
+
+    U.tree.addEventListener("dragstart", (e) => {
+        e.preventDefault();
+    });
+
+    U.tree.__applyPan = applyPan;
+}
+
+function cloneExecutionTreeNode(node, overrides = {}) {
+    return {
+        node_id: node.node_id,
+        parent_node_id: node.parent_node_id || null,
+        state: node.state || "",
+        display_state: String(node.display_state || node.state || "").toUpperCase(),
+        kind: "execution",
+        source_kind: node.kind || "unit",
+        title: String(node.title || node.node_id || "执行节点"),
+        input: node.input || "",
+        output: node.output || "",
+        check: node.check || "",
+        log: Array.isArray(node.log) ? [...node.log] : [],
+        children: [],
+        ...overrides,
+    };
+}
+
+function formatExecutionTreeTitle(node) {
+    const rawTitle = String(node.title || node.node_id || "执行节点").trim();
+    if (String(node.kind || "") === "work_item") {
+        return rawTitle.replace(/^任务\s*\d+\s*[·.:-]\s*/, "").trim() || rawTitle;
+    }
+    return rawTitle;
+}
+
+function buildExecutionTree(rawTree) {
+    if (!rawTree) return null;
+
+    const buildLeaf = (node) => cloneExecutionTreeNode(node, {
+        kind: "execution",
+        title: formatExecutionTreeTitle(node),
+        children: [],
+    });
+
+    const collectExecutionChildren = (node) => {
+        const next = [];
+        (node.children || []).forEach((child) => {
+            const kind = String(child.kind || "unit");
+            if (kind === "stage") {
+                (child.children || []).forEach((stageChild) => {
+                    const stageChildKind = String(stageChild.kind || "work_item");
+                    if (stageChildKind === "work_item") {
+                        const delegatedUnits = (stageChild.children || []).filter((item) => String(item.kind || "unit") === "unit");
+                        if (delegatedUnits.length) {
+                            delegatedUnits.forEach((item) => next.push(walkUnit(item)));
+                        } else {
+                            next.push(buildLeaf(stageChild));
+                        }
+                    } else if (stageChildKind === "unit") {
+                        next.push(walkUnit(stageChild));
+                    } else {
+                        next.push(buildLeaf(stageChild));
+                    }
+                });
+                return;
+            }
+            if (kind === "work_item") {
+                const delegatedUnits = (child.children || []).filter((item) => String(item.kind || "unit") === "unit");
+                if (delegatedUnits.length) {
+                    delegatedUnits.forEach((item) => next.push(walkUnit(item)));
+                } else {
+                    next.push(buildLeaf(child));
+                }
+                return;
+            }
+            if (kind === "unit") {
+                next.push(walkUnit(child));
+                return;
+            }
+            next.push(buildLeaf(child));
+        });
+        return next;
+    };
+
+    const walkUnit = (node, { isRoot = false } = {}) => cloneExecutionTreeNode(node, {
+        kind: isRoot ? "manager" : "execution",
+        title: formatExecutionTreeTitle(node),
+        children: collectExecutionChildren(node),
+    });
+
+    return walkUnit(rawTree, { isRoot: true });
 }
 
 function renderNodeLogs(rows) {
@@ -1554,32 +1730,54 @@ function renderNodeLogs(rows) {
 
 function renderTree() {
     if (!S.tree) return;
+    S.treeView = buildExecutionTree(S.tree);
+    if (!S.treeView) {
+        U.tree.innerHTML = '<div class="empty-state">暂无可展示的执行节点</div>';
+        return;
+    }
     const wrapper = document.createElement("div");
-    wrapper.className = "tree-flow-wrapper";
+    wrapper.className = "execution-tree";
+    const rootList = document.createElement("ul");
+    rootList.className = "execution-tree-list";
 
-    const walk = (node, parent, depth = 0) => {
-        const wrap = document.createElement("div");
-        wrap.className = `flow-node-wrapper line-status-${esc(node.state || "")}`;
-        wrap.style.marginLeft = `${depth * 18}px`;
-        const el = document.createElement("div");
-        el.className = `tree-node${S.selectedUnitId === node.node_id ? " selected" : ""}`;
+    const walk = (node) => {
+        const title = String(node.title || node.node_id || "");
+        const displayState = String(node.display_state || node.state || "").toUpperCase();
+        const item = document.createElement("li");
+        item.className = "execution-tree-item";
+        const el = document.createElement("button");
+        el.type = "button";
+        el.className = `execution-tree-node${S.selectedUnitId === node.node_id ? " selected" : ""}`;
         el.dataset.id = node.node_id;
-        el.innerHTML = `<div class="node-header"><span class="node-title">${esc(node.node_id || "")}</span><span class="status-badge" data-status="${esc(node.state || "")}">${esc(String(node.state || "").toUpperCase())}</span></div>`;
+        el.dataset.kind = node.kind || "execution";
+        el.setAttribute("aria-pressed", S.selectedUnitId === node.node_id ? "true" : "false");
+        el.innerHTML = `<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.state || "")}">${esc(displayState)}</span></span>`;
         el.addEventListener("click", (e) => {
+            if (S.treePan.suppressClickNodeId && S.treePan.suppressClickNodeId === String(node.node_id || "")) {
+                S.treePan.suppressClickNodeId = null;
+                return;
+            }
             e.stopPropagation();
             S.selectedUnitId = node.node_id;
             showAgent(node);
             renderTree();
         });
-        wrap.appendChild(el);
-        parent.appendChild(wrap);
-        (node.children || []).forEach((child) => walk(child, parent, depth + 1));
+        item.appendChild(el);
+        if ((node.children || []).length) {
+            const branch = document.createElement("ul");
+            branch.className = "execution-tree-list";
+            (node.children || []).forEach((child) => branch.appendChild(walk(child)));
+            item.appendChild(branch);
+        }
+        return item;
     };
-    walk(S.tree, wrapper, 0);
+    rootList.appendChild(walk(S.treeView));
+    wrapper.appendChild(rootList);
+    wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px)`;
     U.tree.innerHTML = "";
     U.tree.appendChild(wrapper);
     if (S.selectedUnitId) {
-        const selected = findTreeNode(S.tree, S.selectedUnitId);
+        const selected = findTreeNode(S.treeView, S.selectedUnitId);
         if (selected) {
             showAgent(selected);
         } else {
@@ -1594,18 +1792,20 @@ function renderTree() {
 function showAgent(node) {
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
-    U.adRole.textContent = node.node_id || "节点";
-    U.adStatus.textContent = String(node.state || "").toUpperCase();
+    U.adRole.textContent = node.title || node.node_id || "节点";
+    U.adStatus.textContent = String(node.display_state || node.state || "").toUpperCase();
     U.adStatus.dataset.status = node.state || "";
     U.adInput.textContent = node.input || "-";
     U.adOutput.textContent = node.output || "-";
     U.adCheck.textContent = node.check || "-";
-    U.feedTitle.textContent = `节点详情: ${node.node_id || ""}`;
+    U.feedTitle.textContent = `节点详情: ${node.title || node.node_id || ""}`;
     renderNodeLogs(node.log || []);
+    setProjectDetailOpen(true);
 }
 
 function hideAgent() {
     if (U.detail) U.detail.style.display = "none";
+    setProjectDetailOpen(false);
 }
 
 async function openProject(projectId) {
@@ -2110,6 +2310,7 @@ function switchView(view) {
         S.projectWs.close();
         S.projectWs = null;
     }
+    if (view !== "project-details") clearAgentSelection({ rerender: false });
     if (view !== "projects") setMultiSelectMode(false);
     if (view !== "skills") setDrawerOpen(U.skillBackdrop, U.skillDrawer, false);
     if (view !== "tools") setDrawerOpen(U.toolBackdrop, U.toolDrawer, false);
@@ -2333,13 +2534,8 @@ function bind() {
         }
         await runProjectBatchAction(button.dataset.batchAction);
     }));
-    U.closeAgent?.addEventListener("click", () => {
-        S.selectedUnitId = null;
-        U.feedTitle.textContent = "节点详情";
-        if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
-        hideAgent();
-        renderTree();
-    });
+    U.closeAgent?.addEventListener("click", () => clearAgentSelection());
+    U.projectDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
     [U.skillSearch, U.skillRisk, U.skillStatus, U.skillLegacy].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderSkills));
     U.skillRefresh?.addEventListener("click", () => void refreshSkills());
     U.skillSave?.addEventListener("click", () => void saveSkill());
@@ -2369,6 +2565,10 @@ function bind() {
             closeProjectMenus();
             return;
         }
+        if (U.projectDetailDrawer?.classList.contains("is-open")) {
+            clearAgentSelection();
+            return;
+        }
         if (S.modelCatalog.mode === "create" || S.modelCatalog.selectedModelKey) {
             clearModelSelection();
             return;
@@ -2380,6 +2580,7 @@ function bind() {
 
 function init() {
     bind();
+    bindTreePan();
     icons();
     renderSkillActions();
     renderToolActions();

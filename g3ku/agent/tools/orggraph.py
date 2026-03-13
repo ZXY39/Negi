@@ -22,6 +22,54 @@ def _consume_project_dispatch_slot(runtime: dict[str, Any] | None) -> None:
     payload['main_agent_project_dispatch_count'] = used + 1
 
 
+def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
+    text = ' '.join(str(value or '').split())
+    if len(text) <= max_chars:
+        return text
+    return f'{text[:max_chars - 3].rstrip()}...'
+
+
+def _compact_task_list_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    tasks = [
+        {
+            'task_id': str(item.get('task_id') or '').strip(),
+            'brief': _single_line_text(item.get('brief') or ''),
+        }
+        for item in list(payload.get('tasks') or [])
+        if str(item.get('task_id') or '').strip()
+    ]
+    text = '\n'.join(f"- {item['task_id']}: {item['brief']}" for item in tasks) or 'No matching tasks.'
+    return {
+        'scope': int(payload.get('scope') or 0),
+        'tasks': tasks,
+        'text': text,
+    }
+
+
+def _compact_task_progress_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(payload.get('task_id') or '').strip()
+    task_state = str(payload.get('task_state') or '').strip()
+    tree_text = str(payload.get('tree_text') or '').strip()
+    text = f'任务状态：{task_state}'
+    if tree_text:
+        text = f'{text}\n{tree_text}'
+    return {
+        'task_id': task_id,
+        'task_state': task_state,
+        'tree_text': tree_text,
+        'text': text,
+    }
+
+
+def _compact_engineering_exceptions_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    task_ids = [str(item or '').strip() for item in list(payload.get('task_ids') or []) if str(item or '').strip()]
+    text = '\n'.join(task_ids) if task_ids else 'No engineering exceptions.'
+    return {
+        'task_ids': task_ids,
+        'text': text,
+    }
+
+
 class _ProjectServiceTool(Tool):
     def __init__(self, service_getter: Callable[[], Any]):
         self._service_getter = service_getter
@@ -123,7 +171,7 @@ class TaskMonitorSummaryTool(_ProjectServiceTool):
 
     @property
     def description(self) -> str:
-        return 'Summarize unread progress, engineering exceptions, total tasks, active tasks, and failed tasks.'
+        return 'Summarize unread progress, unread engineering exceptions, total tasks, active tasks, and failed tasks.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -142,7 +190,7 @@ class TaskMonitorListTool(_ProjectServiceTool):
 
     @property
     def description(self) -> str:
-        return 'List all, in-progress, failed, or unread tasks with short descriptions.'
+        return 'Return task ids and short descriptions for all, in-progress, failed, or unread tasks.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -156,8 +204,8 @@ class TaskMonitorListTool(_ProjectServiceTool):
 
     async def execute(self, scope: int, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         service = await self._service()
-        payload = service.monitor_service.list_tasks(_runtime_session_key(__g3ku_runtime), int(scope))
-        return json.dumps(payload, ensure_ascii=False)
+        payload = service.monitor_service.list_tasks(_runtime_session_key(__g3ku_runtime), int(scope), mark_read=False)
+        return json.dumps(_compact_task_list_payload(payload), ensure_ascii=False)
 
 
 class TaskMonitorProgressTool(_ProjectServiceTool):
@@ -167,7 +215,7 @@ class TaskMonitorProgressTool(_ProjectServiceTool):
 
     @property
     def description(self) -> str:
-        return 'Inspect one task in detail, including status, tree text, node output, logs, and latest checker output.'
+        return 'Return one task status and a text tree showing each node id and state.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -181,10 +229,10 @@ class TaskMonitorProgressTool(_ProjectServiceTool):
 
     async def execute(self, task_id: str, **kwargs: Any) -> str:
         service = await self._service()
-        payload = service.monitor_service.progress(task_id)
+        payload = service.monitor_service.progress(task_id, mark_read=False)
         if payload is None:
             return json.dumps({'ok': False, 'error': f'Task not found: {task_id}'}, ensure_ascii=False)
-        return json.dumps(payload, ensure_ascii=False)
+        return json.dumps(_compact_task_progress_payload(payload), ensure_ascii=False)
 
 
 class TaskMonitorEngineeringExceptionsTool(_ProjectServiceTool):
@@ -202,8 +250,8 @@ class TaskMonitorEngineeringExceptionsTool(_ProjectServiceTool):
 
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         service = await self._service()
-        payload = service.monitor_service.engineering_exceptions(_runtime_session_key(__g3ku_runtime))
-        return json.dumps(payload, ensure_ascii=False)
+        payload = service.monitor_service.engineering_exceptions(_runtime_session_key(__g3ku_runtime), mark_read=False)
+        return json.dumps(_compact_engineering_exceptions_payload(payload), ensure_ascii=False)
 
 
 class LoadSkillContextTool(_ProjectServiceTool):

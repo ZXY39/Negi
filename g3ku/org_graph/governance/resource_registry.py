@@ -9,6 +9,9 @@ from g3ku.org_graph.protocol import now_iso
 from g3ku.resources import ResourceManager, get_shared_resource_manager
 
 
+MANUAL_ACTION_TOOL_NAMES = {'patch_apply'}
+
+
 class OrgGraphResourceRegistry:
     def __init__(self, config, store, resource_manager: ResourceManager | None = None):
         self._config = config
@@ -24,6 +27,9 @@ class OrgGraphResourceRegistry:
 
     def refresh(self) -> tuple[list[SkillResourceRecord], list[ToolFamilyRecord]]:
         self._resource_manager.reload_now(trigger="org_graph")
+        return self.refresh_from_current_resources()
+
+    def refresh_from_current_resources(self) -> tuple[list[SkillResourceRecord], list[ToolFamilyRecord]]:
         existing_skills = {item.skill_id: item for item in self._store.list_skill_resources()}
         existing_tools = {item.tool_id: item for item in self._store.list_tool_families()}
         discovered_skills = build_skill_resources(
@@ -83,7 +89,14 @@ class OrgGraphResourceRegistry:
         discovered: list[ToolFamilyRecord],
     ) -> list[ToolFamilyRecord]:
         families = {item.tool_id: item for item in discovered}
-        self._inject_manual_actions(families)
+        discovered_tool_names = {
+            executor_name
+            for family in discovered
+            for action in family.actions
+            for executor_name in action.executor_names
+            if executor_name
+        }
+        self._inject_manual_actions(families, discovered_tool_names=discovered_tool_names)
         merged: list[ToolFamilyRecord] = []
         for tool_id, record in sorted(families.items(), key=lambda item: item[0]):
             existing = existing_tools.get(tool_id)
@@ -100,21 +113,14 @@ class OrgGraphResourceRegistry:
             merged.append(record.model_copy(update={'enabled': existing.enabled, 'actions': merged_actions}))
         return merged
 
-    def _inject_manual_actions(self, families: dict[str, ToolFamilyRecord]) -> None:
+    def _inject_manual_actions(self, families: dict[str, ToolFamilyRecord], *, discovered_tool_names: set[str]) -> None:
         for tool_name, governance in DEFAULT_TOOL_FAMILIES.items():
+            if tool_name not in discovered_tool_names and tool_name not in MANUAL_ACTION_TOOL_NAMES:
+                continue
             tool_id = str(governance.get('tool_id') or tool_name)
             family = families.get(tool_id)
             if family is None:
-                family = ToolFamilyRecord(
-                    tool_id=tool_id,
-                    display_name=str(governance.get('display_name') or tool_id),
-                    description=str(governance.get('description') or tool_id),
-                    enabled=True,
-                    available=True,
-                    source_path=str(self._workspace_root),
-                    actions=[],
-                    metadata={'manual_injected': True},
-                )
+                continue
             action_map = {action.action_id: action for action in family.actions}
             for action in governance.get('actions') or []:
                 action_id = str(action.get('id') or '')

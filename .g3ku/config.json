@@ -22,8 +22,8 @@
       {
         "key": "ceo_primary",
         "providerModel": "responses:gpt-5.4",
-        "apiKey": "sk-7878de4baa6490f5168a45dc926c47377c7dc2376cda13dae7cd91c50e60d023",
-        "apiBase": "https://aixj.vip/v1/responses",
+        "apiKey": "sk-f053c362909e7bd9285bd593d639dac0f45fde9586a2d84904274a8489fa1bf9",
+        "apiBase": "https://cc.sub.258000.sbs/v1/responses",
         "extraHeaders": null,
         "enabled": true,
         "maxTokens": 8192,

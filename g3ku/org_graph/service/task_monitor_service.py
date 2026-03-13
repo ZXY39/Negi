@@ -255,7 +255,209 @@ class TaskMonitorService:
         if project is None:
             return None
         nodes = self._store.list_nodes(project_id)
-        return self._tree_builder.build(nodes=nodes, root_node_id=project.root_unit_id)
+        root = self._tree_builder.build(nodes=nodes, root_node_id=project.root_unit_id)
+        if root is None:
+            return None
+        return self._augment_tree(root)
+
+    def _augment_tree(self, node: MonitorTreeNode) -> MonitorTreeNode:
+        self._decorate_unit_node(node)
+        actual_children = [self._augment_tree(child) for child in node.children]
+        checkpoint = self._checkpoint_for_unit(node.node_id)
+        stages = checkpoint.get('stages') if isinstance(checkpoint, dict) else None
+        if not isinstance(stages, list) or not stages:
+            node.children = actual_children
+            return node
+        actual_children_by_id = {child.node_id: child for child in actual_children}
+        used_child_ids: set[str] = set()
+        synthetic_updated_at = str(checkpoint.get('updated_at') or node.updated_at or now_iso())
+        stage_nodes = [
+            self._build_stage_node(
+                parent_node=node,
+                stage_state=stage_state,
+                actual_children_by_id=actual_children_by_id,
+                used_child_ids=used_child_ids,
+                updated_at=synthetic_updated_at,
+            )
+            for stage_state in stages
+            if isinstance(stage_state, dict)
+        ]
+        unmatched_children = [child for child in actual_children if child.node_id not in used_child_ids]
+        node.children = stage_nodes + unmatched_children
+        return node
+
+    def _decorate_unit_node(self, node: MonitorTreeNode) -> None:
+        unit = getattr(self._service, 'get_unit', lambda _node_id: None)(node.node_id)
+        node.kind = 'unit'
+        node.title = str(getattr(unit, 'role_title', '') or node.title or node.node_id)
+        node.display_state = str(getattr(unit, 'status', '') or node.display_state or node.state or '').upper()
+        if unit is None:
+            return
+        if not node.input:
+            node.input = str(unit.objective_summary or unit.prompt_preview or '')
+        if not node.output:
+            node.output = str(unit.result_summary or unit.error_summary or '')
+        if not node.check and unit.current_action:
+            node.check = str(unit.current_action or '')
+
+    def _checkpoint_for_unit(self, unit_id: str) -> dict[str, Any]:
+        checkpoint_store = getattr(self._service, 'checkpoint_store', None)
+        if checkpoint_store is None:
+            return {}
+        payload = checkpoint_store.get(unit_id)
+        return payload if isinstance(payload, dict) else {}
+
+    def _build_stage_node(
+        self,
+        *,
+        parent_node: MonitorTreeNode,
+        stage_state: dict[str, Any],
+        actual_children_by_id: dict[str, MonitorTreeNode],
+        used_child_ids: set[str],
+        updated_at: str,
+    ) -> MonitorTreeNode:
+        stage_index = int(stage_state.get('index') or 0)
+        stage_id = str(stage_state.get('stage_id') or f'stage-{stage_index or 0}')
+        stage_status = str(stage_state.get('status') or 'pending').strip().lower()
+        title = str(stage_state.get('title') or f'阶段 {stage_index or ""}').strip()
+        stage_node_id = f'{parent_node.node_id}::stage:{stage_id}'
+        work_nodes = [
+            self._build_work_item_node(
+                parent_node_id=stage_node_id,
+                work_item=work_item,
+                actual_children_by_id=actual_children_by_id,
+                used_child_ids=used_child_ids,
+                updated_at=updated_at,
+            )
+            for work_item in list(stage_state.get('work_items') or [])
+            if isinstance(work_item, dict)
+        ]
+        validation_profiles = list(stage_state.get('validation_profiles') or [])
+        checker = stage_state.get('checker') if isinstance(stage_state.get('checker'), dict) else {}
+        return MonitorTreeNode(
+            node_id=stage_node_id,
+            parent_node_id=parent_node.node_id,
+            state=self._status_to_monitor_state(stage_status, error_summary=stage_state.get('error_summary')),
+            display_state=stage_status.upper(),
+            kind='stage',
+            title=f'阶段 {stage_index} · {title}' if stage_index else title,
+            input=str(stage_state.get('objective_summary') or ''),
+            output=str(stage_state.get('result_summary') or stage_state.get('error_summary') or ''),
+            check=self._format_stage_check(checker=checker, validation_profiles=validation_profiles),
+            log=self._build_stage_logs(stage_state=stage_state, validation_profiles=validation_profiles),
+            children=work_nodes,
+            updated_at=updated_at,
+        )
+
+    def _build_work_item_node(
+        self,
+        *,
+        parent_node_id: str,
+        work_item: dict[str, Any],
+        actual_children_by_id: dict[str, MonitorTreeNode],
+        used_child_ids: set[str],
+        updated_at: str,
+    ) -> MonitorTreeNode:
+        index = int(work_item.get('index') or 0)
+        work_status = str(work_item.get('status') or 'pending').strip().lower()
+        child_unit_id = str(work_item.get('child_unit_id') or '').strip()
+        child_nodes: list[MonitorTreeNode] = []
+        if child_unit_id and child_unit_id in actual_children_by_id:
+            child_nodes.append(actual_children_by_id[child_unit_id])
+            used_child_ids.add(child_unit_id)
+        return MonitorTreeNode(
+            node_id=f'{parent_node_id}::work:{index or 0}',
+            parent_node_id=parent_node_id,
+            state=self._status_to_monitor_state(
+                work_status,
+                error_summary=work_item.get('error_summary'),
+                failure_kind=work_item.get('failure_kind'),
+            ),
+            display_state=work_status.upper(),
+            kind='work_item',
+            title=f'任务 {index} · {str(work_item.get("role_title") or "未命名任务").strip()}',
+            input=str(work_item.get('objective_summary') or work_item.get('prompt_preview') or ''),
+            output=str(work_item.get('result_summary') or work_item.get('error_summary') or ''),
+            check=self._format_work_item_check(work_item),
+            log=self._build_work_item_logs(work_item),
+            children=child_nodes,
+            updated_at=updated_at,
+        )
+
+    @staticmethod
+    def _status_to_monitor_state(status: str, *, error_summary: Any = '', failure_kind: Any = None) -> str:
+        value = str(status or '').strip().lower()
+        if value in {'completed', 'success', 'passed'}:
+            return 'success'
+        if value in {'failed', 'canceled', 'error'} or str(error_summary or '').strip() or str(failure_kind or '').strip():
+            return 'failed'
+        if value in {'pending', 'queued', 'blocked', 'paused', 'waiting'}:
+            return 'waiting'
+        return 'in_progress'
+
+    @staticmethod
+    def _format_stage_check(*, checker: dict[str, Any], validation_profiles: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        checker_status = str(checker.get('status') or '').strip()
+        if checker_status:
+            parts.append(f'Checker: {checker_status}')
+        summary = str(checker.get('summary') or '').strip()
+        if summary:
+            parts.append(summary)
+        rework_instructions = str(checker.get('rework_instructions') or '').strip()
+        if rework_instructions:
+            parts.append(rework_instructions)
+        criteria = [str(item.get('acceptance_criteria') or '').strip() for item in validation_profiles if isinstance(item, dict)]
+        criteria = [item for item in criteria if item]
+        if criteria:
+            parts.append('\n'.join(criteria))
+        return '\n\n'.join(parts)
+
+    @staticmethod
+    def _format_work_item_check(work_item: dict[str, Any]) -> str:
+        parts: list[str] = []
+        acceptance_criteria = str(work_item.get('acceptance_criteria') or '').strip()
+        if acceptance_criteria:
+            parts.append(acceptance_criteria)
+        check_status = str(work_item.get('check_status') or '').strip()
+        if check_status:
+            parts.append(f'Check: {check_status}')
+        check_reason = str(work_item.get('check_reason') or '').strip()
+        if check_reason:
+            parts.append(check_reason)
+        return '\n\n'.join(parts)
+
+    def _build_stage_logs(self, *, stage_state: dict[str, Any], validation_profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        logs: list[dict[str, Any]] = []
+        dispatch_shape = str(stage_state.get('dispatch_shape') or '').strip()
+        if dispatch_shape:
+            logs.append(self._log_entry(kind='dispatch', content=f'dispatch_shape={dispatch_shape}', meta={'synthetic': True}))
+        planned_work_count = int(stage_state.get('planned_work_count') or 0)
+        if planned_work_count:
+            logs.append(self._log_entry(kind='plan', content=f'planned_work_count={planned_work_count}', meta={'synthetic': True}))
+        for profile in validation_profiles:
+            if not isinstance(profile, dict):
+                continue
+            criteria = str(profile.get('acceptance_criteria') or '').strip()
+            if criteria:
+                logs.append(self._log_entry(kind='validation', content=criteria, meta={'synthetic': True, 'profile_id': profile.get('profile_id')}))
+        return logs
+
+    def _build_work_item_logs(self, work_item: dict[str, Any]) -> list[dict[str, Any]]:
+        logs: list[dict[str, Any]] = []
+        mode = str(work_item.get('mode') or '').strip()
+        if mode:
+            logs.append(self._log_entry(kind='mode', content=mode, meta={'synthetic': True}))
+        prompt_preview = str(work_item.get('prompt_preview') or '').strip()
+        if prompt_preview:
+            logs.append(self._log_entry(kind='prompt', content=prompt_preview, meta={'synthetic': True}))
+        validation_tools = [str(item or '').strip() for item in list(work_item.get('validation_tools') or []) if str(item or '').strip()]
+        if validation_tools:
+            logs.append(self._log_entry(kind='validation_tools', content=', '.join(validation_tools), meta={'synthetic': True}))
+        child_unit_id = str(work_item.get('child_unit_id') or '').strip()
+        if child_unit_id:
+            logs.append(self._log_entry(kind='delegate', content=child_unit_id, meta={'synthetic': True}))
+        return logs
 
     def get_tree_text(self, project_id: str) -> str:
         return self._tree_builder.to_text(root=self.get_tree(project_id))

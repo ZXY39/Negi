@@ -8,6 +8,7 @@ from loguru import logger
 from g3ku.agent.chatmodel_utils import ensure_chat_model
 from g3ku.integrations.langchain_runtime import extract_final_response
 from g3ku.providers.chatmodels import build_chat_model
+from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 
@@ -75,6 +76,7 @@ class CeoFrontDoorRunner:
         return "\n".join(lines)
 
     def _resolve_ceo_model_client(self) -> tuple[Any, list[str]]:
+        refresh_loop_runtime_config(self._loop, force=False, reason="ceo_model_client")
         app_config = getattr(self._loop, 'app_config', None)
         ceo_refs: list[str] = []
         if app_config is not None:

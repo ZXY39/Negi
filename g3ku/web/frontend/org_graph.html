@@ -285,7 +285,8 @@
                         </div>
                     </div>
 
-                    <div class="feed-panel panel">
+                    <div id="project-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+                    <div id="project-detail-drawer" class="feed-panel panel detail-drawer project-detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="feed-target-name" tabindex="-1">
                         <div class="panel-header">
                             <h2 id="feed-target-name">节点详情</h2>
                         </div>
@@ -294,7 +295,7 @@
                             <div class="agent-detail-header">
                                 <h3 id="ad-role">节点</h3>
                                 <span class="status-badge" id="ad-status">STATUS</span>
-                                <button class="btn-secondary" id="close-agent-btn" type="button"
+                                <button class="btn-secondary" id="close-agent-btn" type="button" data-modal-close
                                     style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--bg-panel); color: var(--text-primary);">返回全局</button>
                             </div>
 

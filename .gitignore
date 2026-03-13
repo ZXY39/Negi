@@ -20,3 +20,8 @@ poetry.lock
 .pytest_cache/
 botpy.log
 tests/
+!tests/
+tests/*
+!tests/resources/
+!tests/resources/**
+!tests/test_memory_runtime_sharing.py

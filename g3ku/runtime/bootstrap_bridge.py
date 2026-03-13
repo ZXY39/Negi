@@ -95,7 +95,10 @@ class RuntimeBootstrapBridge:
             self._loop.org_graph_monitor_service = None
             return
         try:
-            service = ProjectService(resolve_org_graph_config(config))
+            service = ProjectService(
+                resolve_org_graph_config(config),
+                memory_manager=getattr(self._loop, 'memory_manager', None),
+            )
             self._loop.org_graph_service = service
             self._loop.org_graph_monitor_service = getattr(service, 'monitor_service', None)
         except Exception as exc:
@@ -120,6 +123,19 @@ class RuntimeBootstrapBridge:
 
     def _on_resource_snapshot(self, snapshot) -> None:
         self._loop.tools.replace_dynamic_tools(snapshot.tool_instances)
+        service = getattr(self._loop, 'org_graph_service', None)
+        if service is None:
+            return
+        resource_registry = getattr(service, 'resource_registry', None)
+        if resource_registry is None or not hasattr(resource_registry, 'refresh_from_current_resources'):
+            return
+        try:
+            resource_registry.refresh_from_current_resources()
+            policy_engine = getattr(service, 'policy_engine', None)
+            if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
+                policy_engine.sync_default_role_policies()
+        except Exception as exc:
+            logger.debug('org-graph resource sync on snapshot skipped: {}', exc)
 
 
     def init_file_vault(self) -> None:

@@ -48,6 +48,9 @@ class MonitorTreeNode(Model):
     node_id: str
     parent_node_id: str | None = None
     state: MonitorNodeState = 'in_progress'
+    display_state: str = ''
+    kind: str = 'unit'
+    title: str = ''
     wait_reason: str | None = None
     input: str = ''
     output: str = ''

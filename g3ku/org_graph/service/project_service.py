@@ -46,7 +46,13 @@ def _normalize_model_role(role: str) -> str:
 
 
 class ProjectService:
-    def __init__(self, config: ResolvedOrgGraphConfig, resource_manager=None):
+    def __init__(
+        self,
+        config: ResolvedOrgGraphConfig,
+        resource_manager=None,
+        *,
+        memory_manager: MemoryManager | None = None,
+    ):
         self.config = config
         self.store = ProjectStore(config.project_store_path)
         self.checkpoint_store = CheckpointStore(config.checkpoint_store_path)
@@ -55,7 +61,8 @@ class ProjectService:
         self.registry = ProjectRegistry()
         self.notice_service = NoticeService(self.store)
         self.llm = OrgGraphLLM.from_config(config.raw, default_model=config.execution_model)
-        self.memory_manager = self._build_memory_manager()
+        self.memory_manager = memory_manager if memory_manager is not None else self._build_memory_manager()
+        self._owns_memory_manager = memory_manager is None and self.memory_manager is not None
         self.artifact_store = ArtifactStore(artifact_dir=config.artifact_dir, project_store=self.store)
         self.monitor_service = TaskMonitorService(self, self.task_monitor_store)
         self.resource_manager = resource_manager
@@ -1089,7 +1096,7 @@ class ProjectService:
         self._started = False
         self._closed = True
         await self.registry.close()
-        if self.memory_manager is not None:
+        if self._owns_memory_manager and self.memory_manager is not None:
             try:
                 self.memory_manager.close()
             except Exception:

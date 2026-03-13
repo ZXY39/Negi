@@ -137,6 +137,7 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    messages = _sanitize_tool_call_history(messages)
     system_prompt = ""
     input_items: list[dict[str, Any]] = []
 
@@ -196,6 +197,84 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
             continue
 
     return system_prompt, input_items
+
+
+def _sanitize_tool_call_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop incomplete tool-call turns that would break Responses API replay.
+
+    LangGraph checkpoints can occasionally retain an assistant tool call without the
+    matching tool output when a prior run was interrupted or failed mid-turn. The
+    Responses API rejects such history. Preserve assistant text, but strip dangling
+    tool calls so subsequent turns can continue.
+    """
+    completed_call_ids: set[str] = set()
+    declared_call_ids: set[str] = set()
+
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant":
+            for tool_call in msg.get("tool_calls", []) or []:
+                call_id, _ = _split_tool_call_id(tool_call.get("id"))
+                if call_id:
+                    declared_call_ids.add(call_id)
+            continue
+        if role == "tool":
+            call_id, _ = _split_tool_call_id(msg.get("tool_call_id"))
+            if call_id:
+                completed_call_ids.add(call_id)
+
+    sanitized: list[dict[str, Any]] = []
+    dropped_assistant_call_ids: list[str] = []
+
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant":
+            original_tool_calls = list(msg.get("tool_calls", []) or [])
+            if not original_tool_calls:
+                sanitized.append(msg)
+                continue
+
+            kept_tool_calls: list[dict[str, Any]] = []
+            for tool_call in original_tool_calls:
+                call_id, _ = _split_tool_call_id(tool_call.get("id"))
+                if call_id and call_id in completed_call_ids:
+                    kept_tool_calls.append(tool_call)
+                else:
+                    dropped_assistant_call_ids.append(call_id or "<missing>")
+
+            if kept_tool_calls:
+                updated = dict(msg)
+                updated["tool_calls"] = kept_tool_calls
+                sanitized.append(updated)
+                continue
+
+            updated = dict(msg)
+            updated.pop("tool_calls", None)
+            if updated.get("content") or updated.get("reasoning_content") or updated.get("thinking_blocks"):
+                sanitized.append(updated)
+            continue
+
+        if role == "tool":
+            call_id, _ = _split_tool_call_id(msg.get("tool_call_id"))
+            if call_id and call_id in declared_call_ids:
+                sanitized.append(msg)
+            else:
+                logger.warning(
+                    "Dropping orphan tool result without matching assistant tool call before Responses API request: {}",
+                    call_id or "<missing>",
+                )
+            continue
+
+        sanitized.append(msg)
+
+    if dropped_assistant_call_ids:
+        logger.warning(
+            "Dropping {} dangling assistant tool call(s) without matching tool output before Responses API request: {}",
+            len(dropped_assistant_call_ids),
+            ", ".join(dropped_assistant_call_ids),
+        )
+
+    return sanitized
 
 
 def _convert_user_message(content: Any) -> dict[str, Any]:
