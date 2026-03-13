@@ -195,7 +195,7 @@ class RuntimeAgentSession:
     async def _run_message(self, user_input: UserInputMessage) -> str:
         self._multi_agent_runner = getattr(self._loop, "multi_agent_runner", None)
         if self._multi_agent_runner is None:
-            raise RuntimeError("Multi-agent runtime is required but was not initialized.")
+            raise RuntimeError("Main frontdoor runtime is required but was not initialized.")
         return await self._multi_agent_runner.run_turn(
             user_input=user_input,
             session=self,

@@ -83,12 +83,6 @@ class RuntimeBootstrapBridge:
                 '获取任务',
                 '查看任务进度工具',
                 '创建异步任务',
-                'orggraph_create_project',
-                'orggraph_control_project',
-                'task_monitor_summary',
-                'task_monitor_list',
-                'task_monitor_progress',
-                'task_monitor_engineering_exceptions',
             }
             return {
                 name: tool
@@ -123,7 +117,7 @@ class RuntimeBootstrapBridge:
             default_cfg = type(cfg)()
             if cfg.model_dump(mode="python") != default_cfg.model_dump(mode="python"):
                 logger.warning(
-                    "agents.multiAgent settings are deprecated and ignored; top-level split mode is disabled. Use orggraph_create_project for complex work."
+                    "agents.multiAgent settings are deprecated and ignored; top-level split mode is disabled. Use 创建异步任务 for complex work."
                 )
         self._loop.multi_agent_runner = CeoFrontDoorRunner(loop=self._loop)
 

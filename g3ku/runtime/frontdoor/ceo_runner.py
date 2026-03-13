@@ -169,7 +169,6 @@ class CeoFrontDoorRunner:
             {
                 'on_progress': on_progress,
                 'emit_lifecycle': True,
-                'main_agent_project_dispatch_count': 0,
                 'session_key': session.state.session_key,
                 'channel': getattr(session, '_channel', 'cli'),
                 'chat_id': getattr(session, '_chat_id', session.state.session_key),
@@ -186,8 +185,8 @@ class CeoFrontDoorRunner:
         output = final.content if final and final.content else ''
         used_tools = [message.name for message in result_messages if getattr(message, 'name', None)]
         route_kind = 'direct_reply'
-        if 'orggraph_create_project' in used_tools:
-            route_kind = 'project_dispatch'
+        if '创建异步任务' in used_tools:
+            route_kind = 'task_dispatch'
         elif used_tools:
             route_kind = 'self_execute'
         setattr(session, '_last_route_kind', route_kind)

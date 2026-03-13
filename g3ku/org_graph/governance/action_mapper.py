@@ -216,54 +216,6 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
             {'id': 'cleanup', 'label': 'Cleanup Vault', 'risk_level': 'medium', 'destructive': True, 'allowed_roles': ['ceo']},
         ],
     },
-    'orggraph_create_project': {
-        'tool_id': 'project_execution',
-        'display_name': 'Project Execution',
-        'description': 'Create and control org-graph background projects.',
-        'actions': [
-            {'id': 'create_project', 'label': 'Create Project', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo']},
-        ],
-    },
-    'orggraph_control_project': {
-        'tool_id': 'project_execution',
-        'display_name': 'Project Execution',
-        'description': 'Create and control org-graph background projects.',
-        'actions': [
-            {'id': 'control_project', 'label': 'Control Project', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo']},
-        ],
-    },
-    'task_monitor_summary': {
-        'tool_id': 'task_monitoring',
-        'display_name': 'Task Monitoring',
-        'description': 'Summarize and inspect background project progress.',
-        'actions': [
-            {'id': 'summary', 'label': 'Task Summary', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
-        ],
-    },
-    'task_monitor_list': {
-        'tool_id': 'task_monitoring',
-        'display_name': 'Task Monitoring',
-        'description': 'Summarize and inspect background project progress.',
-        'actions': [
-            {'id': 'list', 'label': 'Task List', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
-        ],
-    },
-    'task_monitor_progress': {
-        'tool_id': 'task_monitoring',
-        'display_name': 'Task Monitoring',
-        'description': 'Summarize and inspect background project progress.',
-        'actions': [
-            {'id': 'progress', 'label': 'Task Progress', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
-        ],
-    },
-    'task_monitor_engineering_exceptions': {
-        'tool_id': 'task_monitoring',
-        'display_name': 'Task Monitoring',
-        'description': 'Summarize and inspect background project progress.',
-        'actions': [
-            {'id': 'engineering_exceptions', 'label': 'Engineering Exceptions', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
-        ],
-    },
     '创建异步任务': {
         'tool_id': 'task_runtime',
         'display_name': 'Task Runtime',
@@ -307,7 +259,7 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
 }
 
 
-DEFAULT_FAMILY_ORDER = ['filesystem', 'web_access', 'browser', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'media_tools', 'file_vault', 'project_execution', 'task_monitoring', 'skill_access']
+DEFAULT_FAMILY_ORDER = ['filesystem', 'web_access', 'browser', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'media_tools', 'file_vault', 'task_runtime', 'skill_access']
 
 
 def get_default_tool_governance(tool_name: str) -> dict[str, Any] | None:

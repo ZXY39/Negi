@@ -23,11 +23,6 @@ from g3ku.runtime.message_adapter import (
     dict_to_agent_message,
     dicts_to_agent_messages,
 )
-from g3ku.runtime.multi_agent import (
-    CompiledAgentRole,
-    IntentGateDecision,
-    MultiAgentRunner,
-)
 from g3ku.runtime.model_bridge import LoopRuntimeContext, LoopRuntimeMiddleware, ModelExecutionBridge
 from g3ku.runtime.engine import AgentRuntimeEngine
 from g3ku.runtime.frontdoor import CeoExposureResolver, CeoFrontDoorRunner, CeoPromptBuilder
@@ -51,9 +46,6 @@ __all__ = [
     "RunTurnResult",
     "RuntimeAgentSession",
     "LoopRuntimeMiddleware",
-    "CompiledAgentRole",
-    "IntentGateDecision",
-    "MultiAgentRunner",
     "ModelExecutionBridge",
     "SessionMemoryConsolidationService",
     "SessionTranscriptService",
