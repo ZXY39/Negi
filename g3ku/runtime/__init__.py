@@ -27,7 +27,6 @@ from g3ku.runtime.model_bridge import LoopRuntimeContext, LoopRuntimeMiddleware,
 from g3ku.runtime.engine import AgentRuntimeEngine
 from g3ku.runtime.frontdoor import CeoExposureResolver, CeoFrontDoorRunner, CeoPromptBuilder
 from g3ku.runtime.session_agent import RuntimeAgentSession
-from g3ku.runtime.session_runtime import LegacyAgentSession
 from g3ku.runtime.turns import RunTurnRequest, RunTurnResult
 from g3ku.runtime.session_services import SessionMemoryConsolidationService, SessionTranscriptService
 from g3ku.runtime.tool_bridge import ToolExecutionBridge
@@ -35,7 +34,6 @@ from g3ku.runtime.turn_bridge import TurnLifecycleBridge
 
 __all__ = [
     "AgentRuntimeEngine",
-    "LegacyAgentSession",
     "RuntimeBootstrapBridge",
     "agent_message_to_dict",
     "agent_messages_to_dicts",

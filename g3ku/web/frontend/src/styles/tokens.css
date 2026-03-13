@@ -1,0 +1,39 @@
+﻿:root {
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  --brand-primary: #6366f1;
+  --brand-primary-hover: #4f46e5;
+  --bg-app: #f1f5f9;
+  --bg-panel: #ffffff;
+  --bg-hover: #e2e8f0;
+  --bg-msg-user: #e0e7ff;
+  --bg-msg-sys: #f8fafc;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --text-inverse: #ffffff;
+  --border-color: #cbd5e1;
+  --status-running-bg: #e0e7ff;
+  --status-running-text: #4338ca;
+  --status-success-bg: #dcfce7;
+  --status-success-text: #15803d;
+  --status-failed-bg: #fee2e2;
+  --status-failed-text: #b91c1c;
+  --status-pending-bg: #f1f5f9;
+  --status-pending-text: #475569;
+  --shadow-sm: 0 2px 8px -2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 10px 25px -5px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 20px 35px -10px rgba(15, 23, 42, 0.1);
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-full: 9999px;
+  --font-sans: 'Fira Sans', 'Inter', system-ui, -apple-system, sans-serif;
+}

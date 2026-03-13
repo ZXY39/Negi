@@ -71,11 +71,11 @@ class NodeRunner:
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
-            tools['派生子节点'] = SpawnChildNodesTool(
+            tools['spawn_child_nodes'] = SpawnChildNodesTool(
                 lambda children, call_id=None: self._spawn_children(task_id=task.task_id, parent_node_id=node.node_id, specs=children, call_id=call_id)
             )
         else:
-            tools.pop('派生子节点', None)
+            tools.pop('spawn_child_nodes', None)
         return tools
 
     def _build_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
@@ -234,6 +234,6 @@ class NodeRunner:
 
 
 def _now() -> str:
-    from g3ku.org_graph.protocol import now_iso
+    from main.protocol import now_iso
 
     return now_iso()

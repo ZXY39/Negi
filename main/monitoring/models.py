@@ -25,14 +25,19 @@ class TaskSummaryResult(Model):
     total_tasks: int = 0
     in_progress_tasks: int = 0
     failed_tasks: int = 0
+    unread_tasks: int = 0
     text: str = ''
 
 
 class TaskListItem(Model):
     task_id: str
+    title: str = ''
     brief: str = ''
     status: TaskStatus = 'in_progress'
     is_unread: bool = False
+    created_at: str = ''
+    updated_at: str = ''
+    max_depth: int = 0
 
 
 class TaskProgressResult(Model):

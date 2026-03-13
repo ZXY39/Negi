@@ -4,8 +4,6 @@ from loguru import logger
 
 from g3ku.agent.file_vault import FileVault
 from g3ku.agent.session_commit import SessionCommitService
-from g3ku.org_graph.config import resolve_org_graph_config
-from g3ku.org_graph.service.project_service import ProjectService
 from g3ku.resources import get_shared_resource_manager
 from g3ku.runtime.frontdoor import CeoFrontDoorRunner
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
@@ -39,7 +37,6 @@ class RuntimeBootstrapBridge:
             return
         try:
             self.init_main_runtime()
-            self.init_org_graph_runtime()
             manager = get_shared_resource_manager(
                 self._loop.workspace,
                 app_config=getattr(self._loop, "app_config", None),
@@ -49,13 +46,14 @@ class RuntimeBootstrapBridge:
             self._loop.resource_manager = manager
             manager.start()
             self._on_resource_snapshot(manager.reload_now(trigger="bootstrap"))
-            service = getattr(self._loop, "org_graph_service", None)
+            service = getattr(self._loop, "main_task_service", None)
             if service is not None and hasattr(service, "bind_resource_manager"):
                 service.bind_resource_manager(manager)
                 try:
                     service.resource_registry.refresh()
+                    service.policy_engine.sync_default_role_policies()
                 except Exception as refresh_exc:
-                    logger.debug("org-graph resource refresh after bind skipped: {}", refresh_exc)
+                    logger.debug("main-runtime resource refresh after bind skipped: {}", refresh_exc)
             logger.info(
                 "Resource runtime initialized (skills_dir={}, tools_dir={})",
                 cfg.skills_dir,
@@ -73,31 +71,19 @@ class RuntimeBootstrapBridge:
         if config is None:
             self._loop.main_task_service = None
             return
-
-        def _tool_provider(_node):
-            manager = getattr(self._loop, 'resource_manager', None)
-            if manager is None:
-                return {}
-            excluded = {
-                '任务汇总工具',
-                '获取任务',
-                '查看任务进度工具',
-                '创建异步任务',
-            }
-            return {
-                name: tool
-                for name, tool in manager.tool_instances().items()
-                if name not in excluded
-            }
-
         try:
             service = MainRuntimeService(
                 chat_backend=ConfigChatBackend(config),
-                tool_provider=_tool_provider,
+                app_config=config,
+                store_path=getattr(config.main_runtime, 'store_path', None),
+                files_base_dir=getattr(config.main_runtime, 'files_base_dir', None),
+                artifact_dir=getattr(config.main_runtime, 'artifact_dir', None),
+                governance_store_path=getattr(config.main_runtime, 'governance_store_path', None),
+                resource_manager=getattr(self._loop, 'resource_manager', None),
                 execution_model_refs=config.get_role_model_keys('execution'),
                 acceptance_model_refs=config.get_role_model_keys('inspection'),
-                default_max_depth=getattr(config.org_graph, 'default_max_depth', 1),
-                hard_max_depth=getattr(config.org_graph, 'hard_max_depth', 4),
+                default_max_depth=getattr(config.main_runtime, 'default_max_depth', 1),
+                hard_max_depth=getattr(config.main_runtime, 'hard_max_depth', 4),
             )
             self._loop.main_task_service = service
         except Exception as exc:
@@ -121,31 +107,6 @@ class RuntimeBootstrapBridge:
                 )
         self._loop.multi_agent_runner = CeoFrontDoorRunner(loop=self._loop)
 
-    def init_org_graph_runtime(self) -> None:
-        current = getattr(self._loop, 'org_graph_service', None)
-        if current is not None:
-            resource_manager = getattr(self._loop, 'resource_manager', None)
-            if resource_manager is not None and hasattr(current, 'bind_resource_manager'):
-                current.bind_resource_manager(resource_manager)
-            self._loop.org_graph_monitor_service = getattr(current, 'monitor_service', None)
-            return
-        config = getattr(self._loop, 'app_config', None)
-        if config is None or not bool(getattr(config.org_graph, 'enabled', True)):
-            self._loop.org_graph_service = None
-            self._loop.org_graph_monitor_service = None
-            return
-        try:
-            service = ProjectService(
-                resolve_org_graph_config(config),
-                memory_manager=getattr(self._loop, 'memory_manager', None),
-            )
-            self._loop.org_graph_service = service
-            self._loop.org_graph_monitor_service = getattr(service, 'monitor_service', None)
-        except Exception as exc:
-            self._loop.org_graph_service = None
-            self._loop.org_graph_monitor_service = None
-            logger.warning('org-graph runtime init failed: {}', exc)
-
     def register_default_tools(self) -> None:
         self.init_resource_runtime()
 
@@ -158,13 +119,12 @@ class RuntimeBootstrapBridge:
             "file_vault": getattr(self._loop, "file_vault", None),
             "memory_manager": getattr(self._loop, "memory_manager", None),
             "main_task_service": getattr(self._loop, "main_task_service", None),
-            "org_graph_service": getattr(self._loop, "org_graph_service", None),
             "temp_dir": getattr(self._loop, "temp_dir", None),
         }
 
     def _on_resource_snapshot(self, snapshot) -> None:
         self._loop.tools.replace_dynamic_tools(snapshot.tool_instances)
-        service = getattr(self._loop, 'org_graph_service', None)
+        service = getattr(self._loop, 'main_task_service', None)
         if service is None:
             return
         resource_registry = getattr(service, 'resource_registry', None)
@@ -176,7 +136,7 @@ class RuntimeBootstrapBridge:
             if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
                 policy_engine.sync_default_role_policies()
         except Exception as exc:
-            logger.debug('org-graph resource sync on snapshot skipped: {}', exc)
+            logger.debug('main-runtime resource sync on snapshot skipped: {}', exc)
 
 
     def init_file_vault(self) -> None:

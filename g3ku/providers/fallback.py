@@ -114,7 +114,7 @@ class FallbackProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
     ) -> LLMResponse:
-        from g3ku.org_graph.llm.provider_factory import build_provider_from_model_key
+        from g3ku.providers.provider_factory import build_provider_from_model_key
 
         requested = str(model or "").strip()
         if requested and requested not in self._model_chain:

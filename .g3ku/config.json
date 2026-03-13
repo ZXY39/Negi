@@ -208,21 +208,13 @@
     },
     "statePath": ".g3ku/resources.state.json"
   },
-  "orgGraph": {
+  "mainRuntime": {
     "enabled": true,
-    "projectStorePath": ".g3ku/org-graph/projects.sqlite3",
-    "checkpointStorePath": ".g3ku/org-graph/checkpoints.sqlite3",
-    "taskMonitorStorePath": ".g3ku/org-graph/task-monitor.sqlite3",
-    "artifactDir": ".g3ku/org-graph/artifacts",
+    "storePath": ".g3ku/main-runtime/runtime.sqlite3",
+    "filesBaseDir": ".g3ku/main-runtime/tasks",
+    "artifactDir": ".g3ku/main-runtime/artifacts",
+    "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
     "defaultMaxDepth": 1,
-    "hardMaxDepth": 4,
-    "maxParallelUnitsTotal": -1,
-    "maxActiveProjectsPerSession": 32,
-    "projectNoticeRetention": 200,
-    "eventReplayLimit": 1000,
-    "governance": {
-      "enabled": true,
-      "governanceStorePath": ".g3ku/org-graph/governance.sqlite3"
-    }
+    "hardMaxDepth": 4
   }
 }

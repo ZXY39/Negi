@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.providers.openai_codex_provider import _convert_messages
-from g3ku.org_graph.service.project_service import ProjectService
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 
 
@@ -25,76 +24,59 @@ class _AsyncCloseSpy:
         self.closed += 1
 
 
-def test_init_org_graph_runtime_reuses_existing_memory_manager(monkeypatch):
-    shared_memory_manager = object()
-    resolved_config = object()
+def test_init_main_runtime_binds_configured_paths(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
-    class FakeProjectService:
-        def __init__(self, config, resource_manager=None, *, memory_manager=None):
-            captured['config'] = config
-            captured['resource_manager'] = resource_manager
-            captured['memory_manager'] = memory_manager
-            self.monitor_service = 'monitor'
+    class FakeMainRuntimeService:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
 
     loop = SimpleNamespace(
-        org_graph_service=None,
-        org_graph_monitor_service=None,
         resource_manager=None,
-        memory_manager=shared_memory_manager,
-        app_config=SimpleNamespace(org_graph=SimpleNamespace(enabled=True)),
+        app_config=SimpleNamespace(
+            main_runtime=SimpleNamespace(
+                store_path=str(tmp_path / 'runtime.sqlite3'),
+                files_base_dir=str(tmp_path / 'tasks'),
+                artifact_dir=str(tmp_path / 'artifacts'),
+                governance_store_path=str(tmp_path / 'governance.sqlite3'),
+                default_max_depth=2,
+                hard_max_depth=5,
+            ),
+            get_role_model_keys=lambda role: [f'{role}_model'],
+        ),
+        main_task_service=None,
     )
 
-    monkeypatch.setattr('g3ku.runtime.bootstrap_bridge.resolve_org_graph_config', lambda config: resolved_config)
-    monkeypatch.setattr('g3ku.runtime.bootstrap_bridge.ProjectService', FakeProjectService)
+    monkeypatch.setattr('g3ku.runtime.bootstrap_bridge.ConfigChatBackend', lambda config: f'backend:{config!r}')
+    monkeypatch.setattr('g3ku.runtime.bootstrap_bridge.MainRuntimeService', FakeMainRuntimeService)
 
-    RuntimeBootstrapBridge(loop).init_org_graph_runtime()
+    RuntimeBootstrapBridge(loop).init_main_runtime()
 
-    assert captured['config'] is resolved_config
-    assert captured['resource_manager'] is None
-    assert captured['memory_manager'] is shared_memory_manager
-    assert loop.org_graph_monitor_service == 'monitor'
-
-
-@pytest.mark.asyncio
-async def test_project_service_close_skips_shared_memory_manager():
-    service = ProjectService.__new__(ProjectService)
-    service._closed = False
-    service._started = True
-    service.registry = _AsyncCloseSpy()
-    service.memory_manager = _CloseSpy()
-    service._owns_memory_manager = False
-    service.task_monitor_store = _CloseSpy()
-    service.checkpoint_store = _CloseSpy()
-    service.governance_store = _CloseSpy()
-    service.store = _CloseSpy()
-
-    await service.close()
-
-    assert service.registry.closed == 1
-    assert service.memory_manager.closed == 0
-    assert service.task_monitor_store.closed == 1
-    assert service.checkpoint_store.closed == 1
-    assert service.governance_store.closed == 1
-    assert service.store.closed == 1
+    assert captured['store_path'] == str(tmp_path / 'runtime.sqlite3')
+    assert captured['files_base_dir'] == str(tmp_path / 'tasks')
+    assert captured['artifact_dir'] == str(tmp_path / 'artifacts')
+    assert captured['governance_store_path'] == str(tmp_path / 'governance.sqlite3')
+    assert captured['execution_model_refs'] == ['execution_model']
+    assert captured['acceptance_model_refs'] == ['inspection_model']
 
 
 @pytest.mark.asyncio
-async def test_project_service_close_closes_owned_memory_manager():
-    service = ProjectService.__new__(ProjectService)
-    service._closed = False
-    service._started = True
-    service.registry = _AsyncCloseSpy()
-    service.memory_manager = _CloseSpy()
-    service._owns_memory_manager = True
-    service.task_monitor_store = _CloseSpy()
-    service.checkpoint_store = _CloseSpy()
-    service.governance_store = _CloseSpy()
-    service.store = _CloseSpy()
+async def test_close_mcp_closes_main_task_service_only():
+    from g3ku.runtime.engine import AgentRuntimeEngine
 
-    await service.close()
+    engine = AgentRuntimeEngine.__new__(AgentRuntimeEngine)
+    engine._runtime_closed = False
+    engine._consolidation_tasks = set()
+    engine._commit_tasks = set()
+    engine.background_pool = None
+    engine.main_task_service = _AsyncCloseSpy()
+    engine.memory_manager = None
+    engine._checkpointer = None
+    engine._checkpointer_cm = None
 
-    assert service.memory_manager.closed == 1
+    await AgentRuntimeEngine.close_mcp(engine)
+
+    assert engine.main_task_service.closed == 1
 
 
 def test_convert_messages_strips_dangling_assistant_tool_calls():

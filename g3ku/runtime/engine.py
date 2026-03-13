@@ -12,7 +12,6 @@ from loguru import logger
 
 from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.bus.events import InboundMessage, OutboundMessage
-from g3ku.legacy import direct_runtime as legacy_direct_runtime
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 from g3ku.runtime.manager import SessionRuntimeManager
 
@@ -116,8 +115,6 @@ class AgentRuntimeEngine:
         self.background_task_store = None
         self.dynamic_subagent_controller = None
         self.background_pool = None
-        self.org_graph_service = None
-        self.org_graph_monitor_service = None
         self.main_task_service = None
         self._runtime_closed = False
 
@@ -277,13 +274,6 @@ class AgentRuntimeEngine:
             except Exception:
                 logger.debug('Background pool close skipped during runtime shutdown')
 
-        org_graph_service = getattr(self, 'org_graph_service', None)
-        if org_graph_service is not None:
-            try:
-                await org_graph_service.close()
-            except Exception:
-                logger.debug('org-graph service close skipped during runtime shutdown')
-
         main_task_service = getattr(self, 'main_task_service', None)
         if main_task_service is not None:
             try:
@@ -396,5 +386,5 @@ class AgentRuntimeEngine:
         return None
 
 
-__all__ = ['AgentRuntimeEngine', 'legacy_direct_runtime']
+__all__ = ['AgentRuntimeEngine']
 

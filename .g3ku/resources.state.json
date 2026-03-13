@@ -1,6 +1,16 @@
 {
-  "generation": 11532,
+  "generation": 3,
   "tools": [
+    {
+      "name": "create_async_task",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [
+        "missing toolskills/SKILL.md: tools\\create_async_task_cn"
+      ],
+      "errors": []
+    },
     {
       "name": "cron",
       "available": true,
@@ -122,22 +132,6 @@
       "errors": []
     },
     {
-      "name": "orggraph_control_project",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "orggraph_create_project",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
       "name": "picture_washing",
       "available": true,
       "busy": false,
@@ -162,35 +156,33 @@
       "errors": []
     },
     {
-      "name": "task_monitor_engineering_exceptions",
+      "name": "task_list",
       "available": true,
       "busy": false,
       "pendingDelete": false,
-      "warnings": [],
+      "warnings": [
+        "missing toolskills/SKILL.md: tools\\task_fetch_cn"
+      ],
       "errors": []
     },
     {
-      "name": "task_monitor_list",
+      "name": "task_progress",
       "available": true,
       "busy": false,
       "pendingDelete": false,
-      "warnings": [],
+      "warnings": [
+        "missing toolskills/SKILL.md: tools\\task_progress_cn"
+      ],
       "errors": []
     },
     {
-      "name": "task_monitor_progress",
+      "name": "task_summary",
       "available": true,
       "busy": false,
       "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "task_monitor_summary",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
+      "warnings": [
+        "missing toolskills/SKILL.md: tools\\task_summary_cn"
+      ],
       "errors": []
     },
     {

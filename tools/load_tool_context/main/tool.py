@@ -1,7 +1,7 @@
-from g3ku.agent.tools.orggraph import LoadToolContextTool
+from g3ku.agent.tools.main_runtime import LoadToolContextTool
 
 def build(runtime):
-    service = getattr(runtime.services, 'org_graph_service', None)
+    service = getattr(runtime.services, 'main_task_service', None)
     if service is None:
         return None
-    return LoadToolContextTool(lambda: getattr(runtime.services, 'org_graph_service', service))
+    return LoadToolContextTool(lambda: getattr(runtime.services, 'main_task_service', service))

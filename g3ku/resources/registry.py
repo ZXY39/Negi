@@ -99,7 +99,7 @@ class ResourceRegistry:
             metadata=data,
             exposure={
                 "agent": bool((data.get("exposure") or {}).get("agent", True)),
-                "org_graph": bool((data.get("exposure") or {}).get("org_graph", True)),
+                "main_runtime": bool((data.get("exposure") or {}).get("main_runtime", True)),
             },
         )
         manifest_error = str(data.get("_manifest_error") or "").strip()
@@ -144,7 +144,7 @@ class ResourceRegistry:
             metadata=data,
             exposure={
                 "agent": bool((data.get("exposure") or {}).get("agent", True)),
-                "org_graph": bool((data.get("exposure") or {}).get("org_graph", True)),
+                "main_runtime": bool((data.get("exposure") or {}).get("main_runtime", True)),
             },
         )
         manifest_error = str(data.get("_manifest_error") or "").strip()

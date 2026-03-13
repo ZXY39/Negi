@@ -136,13 +136,6 @@ async def shutdown_web_runtime() -> None:
         except Exception:
             logger.debug("Background pool close skipped during shutdown")
 
-    org_graph_service = getattr(agent, 'org_graph_service', None)
-    if org_graph_service is not None:
-        try:
-            await org_graph_service.close()
-        except Exception:
-            logger.debug("org-graph service close skipped during shutdown")
-
     main_task_service = getattr(agent, 'main_task_service', None)
     if main_task_service is not None:
         try:

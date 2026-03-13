@@ -35,6 +35,18 @@ class SpawnChildResult(Model):
     node_output: str = ''
 
 
+class TaskArtifactRecord(Model):
+    artifact_id: str
+    task_id: str
+    node_id: str | None = None
+    kind: str
+    title: str
+    path: str
+    mime_type: str = 'text/markdown'
+    preview_text: str = ''
+    created_at: str
+
+
 class TaskRecord(Model):
     task_id: str
     session_id: str = 'web:shared'

@@ -13,3 +13,11 @@ def new_task_id() -> str:
 
 def new_node_id() -> str:
     return _new_id('node')
+
+
+def new_artifact_id() -> str:
+    return _new_id('artifact')
+
+
+def new_policy_id() -> str:
+    return _new_id('policy')

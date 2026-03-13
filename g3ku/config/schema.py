@@ -9,15 +9,9 @@ from pydantic_settings import BaseSettings
 
 ROLE_SCOPE_ALIASES = {
     "ceo": "ceo",
-    "org_graph.ceo": "ceo",
-    "org_graph_ceo": "ceo",
     "execution": "execution",
-    "org_graph.execution": "execution",
-    "org_graph_execution": "execution",
     "inspection": "inspection",
     "checker": "inspection",
-    "org_graph.inspection": "inspection",
-    "org_graph_inspection": "inspection",
 }
 
 REQUIRED_MODEL_ROLES = ("ceo", "execution", "inspection")
@@ -717,31 +711,14 @@ class ToolsConfig(Base):
 
 
 
-class OrgGraphGovernanceConfig(Base):
-    """Governance configuration for org-graph resource authorization."""
-
+class MainRuntimeConfig(Base):
     enabled: bool = True
-    governance_store_path: str = ".g3ku/org-graph/governance.sqlite3"
-
-
-class OrgGraphConfig(Base):
-    """Recursive org-graph orchestration configuration."""
-
-    enabled: bool = True
-    ceo_model: str | None = None
-    execution_model: str | None = None
-    inspection_model: str | None = None
-    project_store_path: str = ".g3ku/org-graph/projects.sqlite3"
-    checkpoint_store_path: str = ".g3ku/org-graph/checkpoints.sqlite3"
-    task_monitor_store_path: str = ".g3ku/org-graph/task-monitor.sqlite3"
-    artifact_dir: str = ".g3ku/org-graph/artifacts"
+    store_path: str = '.g3ku/main-runtime/runtime.sqlite3'
+    files_base_dir: str = '.g3ku/main-runtime/tasks'
+    artifact_dir: str = '.g3ku/main-runtime/artifacts'
+    governance_store_path: str = '.g3ku/main-runtime/governance.sqlite3'
     default_max_depth: int = 1
     hard_max_depth: int = 4
-    max_parallel_units_total: int = -1
-    max_active_projects_per_session: int = 32
-    project_notice_retention: int = 200
-    event_replay_limit: int = 1000
-    governance: OrgGraphGovernanceConfig = Field(default_factory=OrgGraphGovernanceConfig)
 
 class Config(BaseSettings):
     """Root configuration for g3ku."""
@@ -753,7 +730,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
-    org_graph: OrgGraphConfig = Field(default_factory=OrgGraphConfig)
+    main_runtime: MainRuntimeConfig = Field(default_factory=MainRuntimeConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":

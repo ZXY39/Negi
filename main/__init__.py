@@ -1,4 +1,4 @@
-from main.models import NodeFinalResult, NodeRecord, TaskRecord
+from main.models import NodeFinalResult, NodeRecord, TaskArtifactRecord, TaskRecord
 from main.service.runtime_service import (
     CreateAsyncTaskTool,
     GetTasksTool,
@@ -14,6 +14,7 @@ __all__ = [
     'MainRuntimeService',
     'NodeFinalResult',
     'NodeRecord',
+    'TaskArtifactRecord',
     'TaskSummaryTool',
     'TaskRecord',
     'TaskService',

@@ -8,7 +8,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from main.models import NodeRecord, TaskRecord
+from main.models import NodeRecord, TaskArtifactRecord, TaskRecord
 
 T = TypeVar('T', bound=BaseModel)
 
@@ -52,8 +52,19 @@ class SQLiteTaskStore:
                 payload_json TEXT NOT NULL
             )
             ''',
+            '''
+            CREATE TABLE IF NOT EXISTS artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                node_id TEXT,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
             'CREATE INDEX IF NOT EXISTS idx_nodes_task_id ON nodes(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
+            'CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id)',
+            'CREATE INDEX IF NOT EXISTS idx_artifacts_node_id ON artifacts(node_id)',
         ]
         with self._lock, self._conn:
             for statement in statements:
@@ -124,8 +135,26 @@ class SQLiteTaskStore:
         updated = mutator(record)
         return self.upsert_node(updated)
 
+    def upsert_artifact(self, record: TaskArtifactRecord) -> TaskArtifactRecord:
+        self._upsert(
+            'artifacts',
+            ['artifact_id', 'task_id', 'node_id', 'created_at', 'payload_json'],
+            [record.artifact_id, record.task_id, record.node_id, record.created_at, record.model_dump_json()],
+            'artifact_id',
+        )
+        return record
+
+    def get_artifact(self, artifact_id: str) -> TaskArtifactRecord | None:
+        row = self._fetchone('SELECT payload_json FROM artifacts WHERE artifact_id = ?', (artifact_id,))
+        return self._parse(row['payload_json'], TaskArtifactRecord) if row else None
+
+    def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
+        rows = self._fetchall('SELECT payload_json FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, artifact_id ASC', (task_id,))
+        return [self._parse(row['payload_json'], TaskArtifactRecord) for row in rows]
+
     def delete_task(self, task_id: str) -> None:
         with self._lock, self._conn:
+            self._conn.execute('DELETE FROM artifacts WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
 

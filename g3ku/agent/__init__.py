@@ -7,7 +7,6 @@ from typing import Any
 
 __all__ = [
     "AgentLoop",
-    "LangGraphAgentLoop",
     "LangGraphMemoryConsolidator",
     "ContextBuilder",
     "MemoryStore",
@@ -16,7 +15,6 @@ __all__ = [
 
 _EXPORT_MAP = {
     "AgentLoop": ("g3ku.agent.loop", "AgentLoop"),
-    "LangGraphAgentLoop": ("g3ku.agent.langgraph_loop", "LangGraphAgentLoop"),
     "LangGraphMemoryConsolidator": ("g3ku.agent.langgraph_memory", "LangGraphMemoryConsolidator"),
     "ContextBuilder": ("g3ku.agent.context", "ContextBuilder"),
     "MemoryStore": ("g3ku.agent.memory", "MemoryStore"),
@@ -28,7 +26,6 @@ _SUBMODULES = {
     "memory",
     "skills",
     "middleware",
-    "langgraph_loop",
     "langgraph_memory",
     "rag_memory",
     "session_commit",

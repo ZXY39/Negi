@@ -33,5 +33,5 @@ def load_manifest(path: Path) -> dict[str, Any]:
     data["name"] = name
     data.setdefault("description", "")
     data.setdefault("requires", {})
-    data.setdefault("exposure", {"agent": True, "org_graph": True})
+    data.setdefault("exposure", {"agent": True, "main_runtime": True})
     return data

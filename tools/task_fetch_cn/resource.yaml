@@ -1,6 +1,7 @@
 schema_version: 1
 kind: tool
-name: 获取任务
+display_name: "\u83b7\u53d6\u4efb\u52a1"
+name: task_list
 description: 按任务类型返回任务 id 列表和简要描述。
 config_namespace: ''
 requires:
@@ -20,6 +21,6 @@ parameters:
   required: [任务类型]
 exposure:
   agent: true
-  org_graph: false
+  main_runtime: false
 toolskill:
   enabled: true

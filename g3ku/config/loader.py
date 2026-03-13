@@ -87,12 +87,6 @@ def _ensure_no_legacy_model_fields(raw_data: dict) -> None:
         ("agents", "defaults", "model"),
         ("agents", "multiAgent", "orchestratorModel"),
         ("agents", "multi_agent", "orchestrator_model"),
-        ("orgGraph", "ceoModel"),
-        ("orgGraph", "executionModel"),
-        ("orgGraph", "inspectionModel"),
-        ("org_graph", "ceo_model"),
-        ("org_graph", "execution_model"),
-        ("org_graph", "inspection_model"),
     )
     hits = [".".join(path) for path in legacy_paths if _path_exists(raw_data, path)]
     if hits:
@@ -332,22 +326,14 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             },
             "statePath": cfg.resources.state_path,
         },
-        "orgGraph": {
-            "enabled": cfg.org_graph.enabled,
-            "projectStorePath": cfg.org_graph.project_store_path,
-            "checkpointStorePath": cfg.org_graph.checkpoint_store_path,
-            "taskMonitorStorePath": cfg.org_graph.task_monitor_store_path,
-            "artifactDir": cfg.org_graph.artifact_dir,
-            "defaultMaxDepth": cfg.org_graph.default_max_depth,
-            "hardMaxDepth": cfg.org_graph.hard_max_depth,
-            "maxParallelUnitsTotal": cfg.org_graph.max_parallel_units_total,
-            "maxActiveProjectsPerSession": cfg.org_graph.max_active_projects_per_session,
-            "projectNoticeRetention": cfg.org_graph.project_notice_retention,
-            "eventReplayLimit": cfg.org_graph.event_replay_limit,
-            "governance": {
-                "enabled": cfg.org_graph.governance.enabled,
-                "governanceStorePath": cfg.org_graph.governance.governance_store_path,
-            },
+        "mainRuntime": {
+            "enabled": cfg.main_runtime.enabled,
+            "storePath": cfg.main_runtime.store_path,
+            "filesBaseDir": cfg.main_runtime.files_base_dir,
+            "artifactDir": cfg.main_runtime.artifact_dir,
+            "governanceStorePath": cfg.main_runtime.governance_store_path,
+            "defaultMaxDepth": cfg.main_runtime.default_max_depth,
+            "hardMaxDepth": cfg.main_runtime.hard_max_depth,
         },
     }
 
@@ -394,10 +380,6 @@ def load_config(config_path: Path | None = None) -> Config:
     raw_data = _load_json_file(expected_path)
     _ensure_no_legacy_model_fields(raw_data)
     _ensure_no_removed_role_scopes(raw_data)
-    org_graph_raw = raw_data.get('orgGraph') if isinstance(raw_data.get('orgGraph'), dict) else raw_data.get('org_graph')
-    if isinstance(org_graph_raw, dict):
-        if 'taskMonitorStorePath' not in org_graph_raw and 'task_monitor_store_path' not in org_graph_raw:
-            org_graph_raw['taskMonitorStorePath'] = '.g3ku/org-graph/task-monitor.sqlite3'
     migrated = _migrate_config(deepcopy(raw_data))
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(raw_data, cfg)
@@ -449,16 +431,10 @@ def _migrate_config(data: dict) -> dict:
                 if camel in multi_agent and snake not in multi_agent:
                     multi_agent[snake] = multi_agent.pop(camel)
 
-    org_graph = data.get("orgGraph")
-    if isinstance(org_graph, dict) and "org_graph" not in data:
-        data["org_graph"] = org_graph
-    data.pop("orgGraph", None)
-    org_graph = data.get("org_graph")
-    if isinstance(org_graph, dict):
-        if "maxParallelUnitsPerStage" in org_graph and "maxParallelUnitsTotal" not in org_graph:
-            org_graph["maxParallelUnitsTotal"] = org_graph.pop("maxParallelUnitsPerStage")
-        if "max_parallel_units_per_stage" in org_graph and "max_parallel_units_total" not in org_graph:
-            org_graph["max_parallel_units_total"] = org_graph.pop("max_parallel_units_per_stage")
+    main_runtime = data.get('mainRuntime')
+    if isinstance(main_runtime, dict) and 'main_runtime' not in data:
+        data['main_runtime'] = main_runtime
+    data.pop('mainRuntime', None)
     tools = data.get("tools", {})
     if isinstance(tools, dict):
         tools.pop("deep_mode", None)

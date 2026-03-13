@@ -1,20 +1,32 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any, Callable
 
+from g3ku.config.live_runtime import get_runtime_config
 from g3ku.agent.tools.base import Tool
-from g3ku.org_graph.protocol import now_iso
+from main.governance import (
+    GovernanceStore,
+    MainRuntimePolicyEngine,
+    MainRuntimeResourceRegistry,
+    PermissionSubject,
+    list_effective_skill_ids,
+    list_effective_tool_names,
+)
 from main.ids import new_node_id, new_task_id
-from main.models import NodeRecord, TaskRecord
+from main.models import NodeRecord, TaskArtifactRecord, TaskRecord
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.query_service import TaskQueryService
+from main.protocol import build_envelope, now_iso
 from main.monitoring.tree_builder import TaskTreeBuilder
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_runner import TaskRunner
+from main.service.event_registry import TaskEventRegistry
+from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
 
@@ -23,8 +35,12 @@ class MainRuntimeService:
         self,
         *,
         chat_backend: ChatBackend,
+        app_config: Any | None = None,
         store_path: Path | str | None = None,
         files_base_dir: Path | str | None = None,
+        artifact_dir: Path | str | None = None,
+        governance_store_path: Path | str | None = None,
+        resource_manager=None,
         tool_provider: Callable[[NodeRecord], dict[str, Tool]] | None = None,
         execution_model_refs: list[str] | None = None,
         acceptance_model_refs: list[str] | None = None,
@@ -32,12 +48,20 @@ class MainRuntimeService:
         hard_max_depth: int = 4,
         max_iterations: int = 16,
     ) -> None:
+        self._chat_backend = chat_backend
+        self._app_config = app_config
         self.store = SQLiteTaskStore(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
         self.file_store = TaskFileStore(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
+        self.artifact_store = TaskArtifactStore(artifact_dir=artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'), store=self.store)
+        self.registry = TaskEventRegistry()
         self.tree_builder = TaskTreeBuilder()
-        self.log_service = TaskLogService(store=self.store, file_store=self.file_store, tree_builder=self.tree_builder)
+        self.log_service = TaskLogService(store=self.store, file_store=self.file_store, tree_builder=self.tree_builder, registry=self.registry)
         self.query_service = TaskQueryService(store=self.store, file_store=self.file_store, log_service=self.log_service)
-        self._tool_provider = tool_provider or (lambda _node: {})
+        self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
+        self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
+        self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
+        self._external_tool_provider = tool_provider or (lambda _node: {})
+        self._resource_manager = resource_manager
         self._default_max_depth = max(0, int(default_max_depth or 0))
         self._hard_max_depth = max(self._default_max_depth, int(hard_max_depth or self._default_max_depth))
         react_loop = ReActToolLoop(chat_backend=chat_backend, log_service=self.log_service, max_iterations=max_iterations)
@@ -56,6 +80,8 @@ class MainRuntimeService:
         if self._started:
             return
         self._started = True
+        self.resource_registry.refresh_from_current_resources()
+        self.policy_engine.sync_default_role_policies()
         for task in self.store.list_tasks():
             self.log_service.bootstrap_missing_files(task.task_id)
             if task.status != 'in_progress':
@@ -156,6 +182,209 @@ class MainRuntimeService:
     def list_nodes(self, task_id: str) -> list[NodeRecord]:
         return self.store.list_nodes(task_id)
 
+    def bind_resource_manager(self, resource_manager) -> None:
+        self._resource_manager = resource_manager
+        self.resource_registry.bind_resource_manager(resource_manager)
+
+    def ensure_runtime_config_current(self, force: bool = False, reason: str = 'runtime') -> bool:
+        config, revision, changed = get_runtime_config(force=force)
+        if not changed and int(getattr(self, '_runtime_model_revision', 0) or 0) == int(revision or 0):
+            return False
+        self._app_config = config
+        if hasattr(self._chat_backend, '_config'):
+            self._chat_backend._config = config
+        self._default_max_depth = max(0, int(getattr(config.main_runtime, 'default_max_depth', 1) or 0))
+        self._hard_max_depth = max(self._default_max_depth, int(getattr(config.main_runtime, 'hard_max_depth', self._default_max_depth) or self._default_max_depth))
+        self.node_runner._execution_model_refs = list(config.get_role_model_keys('execution'))
+        self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
+        if self._resource_manager is not None and hasattr(self._resource_manager, 'bind_app_config'):
+            self._resource_manager.bind_app_config(config)
+        self.resource_registry.refresh_from_current_resources()
+        self.policy_engine.sync_default_role_policies()
+        self._runtime_model_revision = int(revision or 0)
+        return True
+
+    def _subject(self, *, actor_role: str, session_id: str, task_id: str | None = None, node_id: str | None = None) -> PermissionSubject:
+        return PermissionSubject(user_key=session_id, session_id=session_id, task_id=task_id, node_id=node_id, actor_role=actor_role)
+
+    def list_effective_tool_names(self, *, actor_role: str, session_id: str) -> list[str]:
+        supported = sorted((self._resource_manager.tool_instances().keys() if self._resource_manager is not None else []))
+        return list_effective_tool_names(subject=self._subject(actor_role=actor_role, session_id=session_id), supported_tool_names=supported, resource_registry=self.resource_registry, policy_engine=self.policy_engine, mutation_allowed=True)
+
+    def list_visible_skill_resources(self, *, actor_role: str, session_id: str):
+        visible_ids = set(list_effective_skill_ids(subject=self._subject(actor_role=actor_role, session_id=session_id), available_skill_ids=[item.skill_id for item in self.resource_registry.list_skill_resources()], policy_engine=self.policy_engine))
+        return [item for item in self.resource_registry.list_skill_resources() if item.skill_id in visible_ids]
+
+    def list_visible_tool_families(self, *, actor_role: str, session_id: str):
+        visible_names = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        families = []
+        for family in self.resource_registry.list_tool_families():
+            actions = [action for action in family.actions if set(action.executor_names) & visible_names]
+            if actions:
+                families.append(family.model_copy(update={'actions': actions}))
+        return families
+
+    def load_skill_context(self, *, actor_role: str, session_id: str, skill_id: str) -> dict[str, Any]:
+        visible = {item.skill_id: item for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)}
+        record = visible.get(str(skill_id or '').strip())
+        if record is None:
+            return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
+        content = Path(record.skill_doc_path).read_text(encoding='utf-8') if record.skill_doc_path else ''
+        return {'ok': True, 'skill_id': record.skill_id, 'content': content}
+
+    def load_tool_context(self, *, actor_role: str, session_id: str, tool_id: str) -> dict[str, Any]:
+        tool_name = str(tool_id or '').strip()
+        visible = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        if tool_name not in visible:
+            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
+        if self._resource_manager is None:
+            return {'ok': False, 'error': 'Resource manager unavailable'}
+        try:
+            content = self._resource_manager.load_toolskill_body(tool_name)
+        except FileNotFoundError:
+            content = ''
+        return {'ok': True, 'tool_id': tool_name, 'content': content}
+
+    def list_skill_resources(self) -> list[Any]:
+        return list(self.resource_registry.list_skill_resources())
+
+    def get_skill_resource(self, skill_id: str):
+        return self.resource_registry.get_skill_resource(str(skill_id or '').strip())
+
+    def list_skill_files(self, skill_id: str) -> dict[str, str]:
+        return {key: str(path) for key, path in self.resource_registry.skill_file_map(str(skill_id or '').strip()).items()}
+
+    def read_skill_file(self, skill_id: str, file_key: str) -> str:
+        path = self.resource_registry.skill_file_map(str(skill_id or '').strip()).get(str(file_key or '').strip())
+        if path is None:
+            raise ValueError('editable_file_not_allowed')
+        return path.read_text(encoding='utf-8')
+
+    def write_skill_file(self, skill_id: str, file_key: str, content: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        path = self.resource_registry.skill_file_map(str(skill_id or '').strip()).get(str(file_key or '').strip())
+        if path is None:
+            raise ValueError('editable_file_not_allowed')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(content or ''), encoding='utf-8')
+        self.reload_resources(session_id=session_id)
+        return {'skill_id': str(skill_id or '').strip(), 'file_key': str(file_key or '').strip(), 'path': str(path)}
+
+    def update_skill_policy(self, skill_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles: list[str] | None = None):
+        skill = self.get_skill_resource(skill_id)
+        if skill is None:
+            return None
+        updated = skill.model_copy(update={
+            'enabled': skill.enabled if enabled is None else bool(enabled),
+            'allowed_roles': list(skill.allowed_roles if allowed_roles is None else allowed_roles),
+        })
+        self.governance_store.upsert_skill_resource(updated, updated_at=now_iso())
+        self.policy_engine.sync_default_role_policies()
+        return updated
+
+    def enable_skill(self, skill_id: str, *, session_id: str = 'web:shared'):
+        return self.update_skill_policy(skill_id, session_id=session_id, enabled=True)
+
+    def disable_skill(self, skill_id: str, *, session_id: str = 'web:shared'):
+        return self.update_skill_policy(skill_id, session_id=session_id, enabled=False)
+
+    def list_tool_resources(self) -> list[Any]:
+        return list(self.resource_registry.list_tool_families())
+
+    def get_tool_family(self, tool_id: str):
+        return self.resource_registry.get_tool_family(str(tool_id or '').strip())
+
+    def update_tool_policy(self, tool_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles_by_action: dict[str, list[str]] | None = None):
+        family = self.get_tool_family(tool_id)
+        if family is None:
+            return None
+        allowed_roles_by_action = dict(allowed_roles_by_action or {})
+        actions = []
+        for action in family.actions:
+            roles = allowed_roles_by_action.get(action.action_id)
+            actions.append(action.model_copy(update={'allowed_roles': list(action.allowed_roles if roles is None else roles)}))
+        updated = family.model_copy(update={'enabled': family.enabled if enabled is None else bool(enabled), 'actions': actions})
+        self.governance_store.upsert_tool_family(updated, updated_at=now_iso())
+        self.policy_engine.sync_default_role_policies()
+        return updated
+
+    def enable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
+        return self.update_tool_policy(tool_id, session_id=session_id, enabled=True)
+
+    def disable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
+        return self.update_tool_policy(tool_id, session_id=session_id, enabled=False)
+
+    def reload_resources(self, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        if self._resource_manager is not None:
+            self._resource_manager.reload_now(trigger='manual')
+        skills, tools = self.resource_registry.refresh_from_current_resources()
+        self.policy_engine.sync_default_role_policies()
+        return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
+
+    def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False) -> dict[str, Any] | None:
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        progress = self.query_service.view_progress(task_id, mark_read=mark_read)
+        if progress is None:
+            return None
+        latest = self.get_task(task_id) or task
+        return {
+            'task': latest.model_dump(mode='json'),
+            'progress': progress.model_dump(mode='json'),
+        }
+
+    def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
+        return self.store.list_artifacts(task_id)
+
+    def get_artifact(self, artifact_id: str) -> TaskArtifactRecord | None:
+        return self.store.get_artifact(artifact_id)
+
+    async def apply_patch_artifact(self, task_id: str, artifact_id: str) -> dict[str, Any] | None:
+        artifact = self.get_artifact(artifact_id)
+        if artifact is None or artifact.task_id != task_id:
+            return None
+        if artifact.kind != 'patch' or not artifact.path:
+            raise ValueError('artifact is not a patch artifact')
+        from g3ku.agent.tools.propose_patch import parse_patch_artifact
+
+        patch_path = Path(artifact.path)
+        content = patch_path.read_text(encoding='utf-8')
+        metadata, _diff_text = parse_patch_artifact(content)
+        target_path = Path(str(metadata.get('path') or ''))
+        old_text = base64.b64decode(str(metadata.get('old_text_b64') or '')).decode('utf-8')
+        new_text = base64.b64decode(str(metadata.get('new_text_b64') or '')).decode('utf-8')
+        if not target_path.exists():
+            raise ValueError(f'target file not found: {target_path}')
+        current = target_path.read_text(encoding='utf-8')
+        if old_text not in current:
+            raise ValueError('target file no longer matches patch precondition')
+        if current.count(old_text) > 1:
+            raise ValueError('target file has multiple matches for patch precondition')
+        updated = current.replace(old_text, new_text, 1)
+        target_path.write_text(updated, encoding='utf-8')
+        task = self.get_task(task_id)
+        if task is not None:
+            payload = build_envelope(channel='task', session_id=task.session_id, task_id=task.task_id, seq=self.registry.next_task_seq(task.session_id, task.task_id), type='artifact.applied', data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True})
+            self.registry.publish_task(task.session_id, task.task_id, payload)
+            ceo_payload = build_envelope(channel='ceo', session_id=task.session_id, task_id=task.task_id, seq=self.registry.next_ceo_seq(task.session_id), type='task.artifact.applied', data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'task_id': task.task_id})
+            self.registry.publish_ceo(task.session_id, ceo_payload)
+        return {'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True}
+
+    def _actor_role_for_node(self, node: NodeRecord) -> str:
+        return 'inspection' if node.node_kind == 'acceptance' else 'execution'
+
+    def _tool_provider(self, node: NodeRecord) -> dict[str, Tool]:
+        task = self.store.get_task(node.task_id)
+        session_id = task.session_id if task is not None else 'web:shared'
+        actor_role = self._actor_role_for_node(node)
+        visible = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        provided = dict(self._external_tool_provider(node) or {})
+        if self._resource_manager is not None:
+            for name, tool in self._resource_manager.tool_instances().items():
+                if name in visible:
+                    provided[name] = tool
+        return provided
+
     def summary(self, session_id: str) -> str:
         return self.query_service.summary(session_id).text
 
@@ -173,6 +402,8 @@ class MainRuntimeService:
 
     async def close(self) -> None:
         await self.task_runner.close()
+        await self.registry.close()
+        self.governance_store.close()
         self.store.close()
 
     def _clamp_depth(self, requested: int | None) -> int:
@@ -187,7 +418,7 @@ class CreateAsyncTaskTool(Tool):
 
     @property
     def name(self) -> str:
-        return '创建异步任务'
+        return 'create_async_task'
 
     @property
     def description(self) -> str:
@@ -210,7 +441,7 @@ class TaskSummaryTool(Tool):
 
     @property
     def name(self) -> str:
-        return '任务汇总工具'
+        return 'task_summary'
 
     @property
     def description(self) -> str:
@@ -232,7 +463,7 @@ class GetTasksTool(Tool):
 
     @property
     def name(self) -> str:
-        return '获取任务'
+        return 'task_list'
 
     @property
     def description(self) -> str:
@@ -261,7 +492,7 @@ class ViewTaskProgressTool(Tool):
 
     @property
     def name(self) -> str:
-        return '查看任务进度工具'
+        return 'task_progress'
 
     @property
     def description(self) -> str:

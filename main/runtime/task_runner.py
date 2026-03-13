@@ -87,6 +87,6 @@ class TaskRunner:
 
 
 def _now() -> str:
-    from g3ku.org_graph.protocol import now_iso
+    from main.protocol import now_iso
 
     return now_iso()

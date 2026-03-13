@@ -5,10 +5,6 @@ from typing import Any
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.session_agent import RuntimeAgentSession
-from g3ku.runtime.session_runtime import LegacyAgentSession
-
-
-_DEFAULT_LEGACY_SESSION_CLS = LegacyAgentSession
 
 
 class SessionRuntimeManager:
@@ -27,8 +23,6 @@ class SessionRuntimeManager:
     def _resolve_session_cls(self) -> type[RuntimeAgentSession]:
         if self._session_cls is not None:
             return self._session_cls
-        if LegacyAgentSession is not _DEFAULT_LEGACY_SESSION_CLS:
-            return LegacyAgentSession
         return RuntimeAgentSession
 
     def get_or_create(self, *, session_key: str, channel: str, chat_id: str) -> RuntimeAgentSession:

@@ -29,7 +29,7 @@ def refresh_loop_runtime_config(loop, *, force: bool = False, reason: str = "run
     if resource_manager is not None and hasattr(resource_manager, "bind_app_config"):
         resource_manager.bind_app_config(config)
 
-    service = getattr(loop, "org_graph_service", None)
+    service = getattr(loop, "main_task_service", None)
     if service is not None and hasattr(service, "ensure_runtime_config_current"):
         service.ensure_runtime_config_current(force=False, reason=reason)
 

@@ -17,7 +17,7 @@ class SpawnChildNodesTool(Tool):
 
     @property
     def name(self) -> str:
-        return '派生子节点'
+        return 'spawn_child_nodes'
 
     @property
     def description(self) -> str:

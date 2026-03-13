@@ -1,6 +1,7 @@
 schema_version: 1
 kind: tool
-name: 查看任务进度工具
+display_name: "\u67e5\u770b\u4efb\u52a1\u8fdb\u5ea6\u5de5\u5177"
+name: task_progress
 description: 按任务 id 返回任务状态和树状图文本，并将任务标记为已读。
 config_namespace: ''
 requires:
@@ -19,6 +20,6 @@ parameters:
   required: [任务id]
 exposure:
   agent: true
-  org_graph: false
+  main_runtime: false
 toolskill:
   enabled: true

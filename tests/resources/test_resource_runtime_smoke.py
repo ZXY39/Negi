@@ -11,9 +11,10 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
-from g3ku.org_graph.storage.artifact_store import ArtifactStore
-from g3ku.org_graph.storage.project_store import ProjectStore
 from g3ku.resources import ResourceManager
+from main.models import TaskArtifactRecord
+from main.storage.sqlite_store import SQLiteTaskStore
+from main.storage.artifact_store import TaskArtifactStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -82,7 +83,7 @@ def _write_demo_tool(root: Path, *, name: str = 'demo_echo', guide: str = 'Demo 
               - text
             exposure:
               agent: true
-              org_graph: true
+              main_runtime: true
             toolskill:
               enabled: true
             """
@@ -115,13 +116,15 @@ class _VisibleToolService:
     async def startup(self) -> None:
         return None
 
-    def list_effective_tool_names(self, *, actor_role: str, session_id: str):
+    def load_tool_context(self, *, actor_role: str, session_id: str, tool_id: str):
         _ = actor_role, session_id
-        return sorted(self.resource_manager.tool_instances().keys()) if self.resource_manager is not None else []
+        if self.resource_manager is None:
+            return {'ok': False, 'error': 'resource manager unavailable'}
+        return {'ok': True, 'tool_id': tool_id, 'content': self.resource_manager.load_toolskill_body(tool_id)}
 
 
 class _ArtifactService:
-    def __init__(self, artifact_store: ArtifactStore):
+    def __init__(self, artifact_store: TaskArtifactStore):
         self.artifact_store = artifact_store
 
     async def startup(self) -> None:
@@ -152,7 +155,7 @@ async def test_resource_hot_reload_delete_lock_and_load_tool_context(tmp_path: P
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     service = _VisibleToolService()
     service.bind_resource_manager(manager)
-    manager.bind_service_getter(lambda: {'org_graph_service': service})
+    manager.bind_service_getter(lambda: {'main_task_service': service})
     manager.reload_now(trigger='test-bind')
     manager.start()
 
@@ -199,15 +202,12 @@ async def test_propose_file_patch_runs_as_resource_tool(tmp_path: Path):
     target_file = workspace / 'target.txt'
     target_file.write_text('before value\n', encoding='utf-8')
 
-    project_store = ProjectStore(tmp_path / 'projects.sqlite3')
-    artifact_store = ArtifactStore(
-        artifact_dir=tmp_path / 'artifacts',
-        project_store=project_store,
-    )
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
     service = _ArtifactService(artifact_store)
 
     manager = ResourceManager(workspace, app_config=_resource_app_config(poll_interval_ms=500))
-    manager.bind_service_getter(lambda: {'org_graph_service': service})
+    manager.bind_service_getter(lambda: {'main_task_service': service})
     manager.reload_now(trigger='test-bind')
 
     try:
@@ -221,8 +221,8 @@ async def test_propose_file_patch_runs_as_resource_tool(tmp_path: Path):
                 new_text='after value',
                 summary='Patch target',
                 __g3ku_runtime={
-                    'project_id': 'project:test',
-                    'unit_id': 'unit:test',
+                    'task_id': 'task:test',
+                    'node_id': 'node:test',
                     'session_key': 'session:test',
                 },
             )
@@ -239,6 +239,7 @@ async def test_propose_file_patch_runs_as_resource_tool(tmp_path: Path):
         assert 'after value' in diff_text
     finally:
         manager.close()
+        store.close()
 
 
 @pytest.mark.asyncio
@@ -254,9 +255,9 @@ async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
     manager.reload_now(trigger='test-bind')
 
     try:
-        summary_tool = manager.get_tool('任务汇总工具')
-        fetch_tool = manager.get_tool('获取任务')
-        progress_tool = manager.get_tool('查看任务进度工具')
+        summary_tool = manager.get_tool('task_summary')
+        fetch_tool = manager.get_tool('task_list')
+        progress_tool = manager.get_tool('task_progress')
 
         assert summary_tool is not None
         assert fetch_tool is not None

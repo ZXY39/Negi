@@ -13,15 +13,9 @@ def _normalize_scope(value: str) -> str:
     raw = str(value or "").strip().lower().replace("-", "_")
     mapping = {
         "ceo": "ceo",
-        "org_graph.ceo": "ceo",
-        "org_graph_ceo": "ceo",
         "execution": "execution",
-        "org_graph.execution": "execution",
-        "org_graph_execution": "execution",
         "inspection": "inspection",
         "checker": "inspection",
-        "org_graph.inspection": "inspection",
-        "org_graph_inspection": "inspection",
     }
     if raw not in mapping:
         raise ValueError(f"Invalid scope: {value}. Valid scopes: {', '.join(VALID_SCOPES)}")

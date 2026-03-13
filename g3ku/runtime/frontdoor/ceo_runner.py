@@ -120,9 +120,9 @@ class CeoFrontDoorRunner:
             persisted_history = persisted_session.get_history(
                 max_messages=max(1, int(getattr(self._loop, 'memory_window', 100) or 100))
             )
-        org_service = getattr(self._loop, 'org_graph_service', None)
-        if org_service is not None:
-            await org_service.startup()
+        main_service = getattr(self._loop, 'main_task_service', None)
+        if main_service is not None:
+            await main_service.startup()
         for name in ('message', 'cron'):
             tool = self._loop.tools.get(name)
             if tool is not None and hasattr(tool, 'set_context'):
@@ -185,7 +185,7 @@ class CeoFrontDoorRunner:
         output = final.content if final and final.content else ''
         used_tools = [message.name for message in result_messages if getattr(message, 'name', None)]
         route_kind = 'direct_reply'
-        if '创建异步任务' in used_tools:
+        if 'create_async_task' in used_tools:
             route_kind = 'task_dispatch'
         elif used_tools:
             route_kind = 'self_execute'

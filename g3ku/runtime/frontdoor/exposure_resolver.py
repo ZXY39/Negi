@@ -8,7 +8,7 @@ class CeoExposureResolver:
         self._loop = loop
 
     async def resolve_for_actor(self, *, actor_role: str, session_id: str) -> dict[str, Any]:
-        service = getattr(self._loop, 'org_graph_service', None)
+        service = getattr(self._loop, 'main_task_service', None)
         if service is None:
             return {'tool_names': [], 'skills': []}
         await service.startup()
@@ -25,4 +25,3 @@ class CeoExposureResolver:
             'tool_names': sorted(registered & allowed_tool_names),
             'skills': visible_skills,
         }
-

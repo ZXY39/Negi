@@ -1,0 +1,170 @@
+﻿*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+button, input, textarea, select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+input, textarea, select {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 0.9rem;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+}
+
+textarea {
+  resize: vertical;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.eyebrow {
+  margin: 0 0 var(--space-2);
+  color: var(--brand-primary);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.page-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.primary-button,
+.secondary-button,
+.pill-button,
+.icon-button {
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  transition: 0.2s ease;
+}
+
+.primary-button {
+  background: var(--brand-primary);
+  color: white;
+  padding: 0.8rem 1rem;
+}
+
+.primary-button:hover {
+  background: var(--brand-primary-hover);
+}
+
+.secondary-button,
+.pill-button,
+.icon-button {
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+
+.secondary-button,
+.pill-button {
+  padding: 0.75rem 1rem;
+}
+
+.secondary-button.danger {
+  color: var(--status-failed-text);
+}
+
+.icon-button {
+  width: 2.25rem;
+  height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pill-button.active,
+.sidebar-link.active,
+.resource-row.selected,
+.task-card.selected,
+.artifact-row.selected,
+.drawer .resource-file-tabs .active {
+  background: var(--status-running-bg);
+  color: var(--status-running-text);
+  border-color: transparent;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-full);
+  padding: 0.3rem 0.65rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.status-chip.running {
+  background: var(--status-running-bg);
+  color: var(--status-running-text);
+}
+
+.status-chip.success {
+  background: var(--status-success-bg);
+  color: var(--status-success-text);
+}
+
+.status-chip.failed {
+  background: var(--status-failed-bg);
+  color: var(--status-failed-text);
+}
+
+.status-chip.pending {
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+}
+
+.inline-banner,
+.empty-state,
+.detail-panel,
+.task-card,
+.resource-row,
+.stat-card,
+.role-column,
+.model-card,
+.chat-bubble,
+.chat-turn-pending {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.inline-banner,
+.empty-state {
+  padding: var(--space-4);
+}
+
+.inline-banner.error {
+  border-color: var(--status-failed-text);
+  color: var(--status-failed-text);
+}

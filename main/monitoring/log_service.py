@@ -4,9 +4,9 @@ import copy
 from pathlib import Path
 from typing import Any
 
-from g3ku.org_graph.protocol import now_iso
 from main.models import NodeOutputEntry, NodeRecord, TaskRecord
 from main.monitoring.file_store import TaskFileStore
+from main.protocol import build_envelope, now_iso
 from main.monitoring.tree_builder import TaskTreeBuilder
 
 
@@ -18,10 +18,11 @@ def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
 
 
 class TaskLogService:
-    def __init__(self, *, store, file_store: TaskFileStore, tree_builder: TaskTreeBuilder):
+    def __init__(self, *, store, file_store: TaskFileStore, tree_builder: TaskTreeBuilder, registry=None):
         self._store = store
         self._file_store = file_store
         self._tree_builder = tree_builder
+        self._registry = registry
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
         paths = self._file_store.paths_for_task(task.task_id)
@@ -218,6 +219,36 @@ class TaskLogService:
             runtime_state['updated_at'] = now_iso()
             runtime_state['paused'] = bool(updated.is_paused)
             self._file_store.write_json(updated.runtime_state_path, runtime_state)
+        if self._registry is not None:
+            payload = {
+                'task': updated.model_dump(mode='json'),
+                'root': root.model_dump(mode='json') if root is not None else None,
+                'tree_text': tree_text,
+                'nodes': [item.model_dump(mode='json') for item in nodes],
+            }
+            self._registry.publish_task(
+                updated.session_id,
+                updated.task_id,
+                build_envelope(
+                    channel='task',
+                    session_id=updated.session_id,
+                    task_id=updated.task_id,
+                    seq=self._registry.next_task_seq(updated.session_id, updated.task_id),
+                    type='snapshot.task',
+                    data=payload,
+                ),
+            )
+            self._registry.publish_ceo(
+                updated.session_id,
+                build_envelope(
+                    channel='ceo',
+                    session_id=updated.session_id,
+                    task_id=updated.task_id,
+                    seq=self._registry.next_ceo_seq(updated.session_id),
+                    type='task.summary.changed',
+                    data={'task_id': updated.task_id, 'status': updated.status, 'brief': updated.brief_text, 'is_unread': bool(updated.is_unread)},
+                ),
+            )
         return updated
 
     def bootstrap_missing_files(self, task_id: str) -> TaskRecord | None:

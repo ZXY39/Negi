@@ -13,21 +13,21 @@ _METADATA_START = '### G3KU_PATCH_METADATA ###'
 _DIFF_START = '### G3KU_PATCH_DIFF ###'
 
 
-def _runtime_project_id(runtime: dict[str, Any] | None, default: str | None = None) -> str:
+def _runtime_task_id(runtime: dict[str, Any] | None, default: str | None = None) -> str:
     payload = runtime if isinstance(runtime, dict) else {}
-    project_id = str(payload.get('project_id') or '').strip()
-    if project_id:
-        return project_id
+    task_id = str(payload.get('task_id') or payload.get('project_id') or '').strip()
+    if task_id:
+        return task_id
     session_key = str(payload.get('session_key') or '').strip() or 'shared'
     fallback = str(default or '').strip()
     return fallback or f'adhoc:{session_key}'
 
 
-def _runtime_unit_id(runtime: dict[str, Any] | None, default: str | None = None) -> str | None:
+def _runtime_node_id(runtime: dict[str, Any] | None, default: str | None = None) -> str | None:
     payload = runtime if isinstance(runtime, dict) else {}
-    unit_id = str(payload.get('unit_id') or '').strip()
-    if unit_id:
-        return unit_id
+    node_id = str(payload.get('node_id') or payload.get('unit_id') or '').strip()
+    if node_id:
+        return node_id
     fallback = str(default or '').strip()
     return fallback or None
 
@@ -39,14 +39,14 @@ class ProposeFilePatchTool(Tool):
         artifact_store: Any,
         workspace: Path | None = None,
         allowed_dir: Path | None = None,
-        default_project_id: str | None = None,
-        default_unit_id: str | None = None,
+        default_task_id: str | None = None,
+        default_node_id: str | None = None,
     ):
         self._artifact_store = artifact_store
         self._workspace = workspace
         self._allowed_dir = allowed_dir
-        self._default_project_id = default_project_id
-        self._default_unit_id = default_unit_id
+        self._default_task_id = default_task_id
+        self._default_node_id = default_node_id
 
     @property
     def name(self) -> str:
@@ -115,8 +115,8 @@ class ProposeFilePatchTool(Tool):
             }
             artifact_body = f"{_METADATA_START}\n{json.dumps(metadata, ensure_ascii=False)}\n{_DIFF_START}\n{patch_text}\n"
             artifact = self._artifact_store.create_text_artifact(
-                project_id=_runtime_project_id(__g3ku_runtime, self._default_project_id),
-                unit_id=_runtime_unit_id(__g3ku_runtime, self._default_unit_id),
+                task_id=_runtime_task_id(__g3ku_runtime, self._default_task_id),
+                node_id=_runtime_node_id(__g3ku_runtime, self._default_node_id),
                 kind='patch',
                 title=title,
                 content=artifact_body,

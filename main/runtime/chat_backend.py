@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from g3ku.config.schema import Config
-from g3ku.org_graph.llm.provider_factory import build_provider_from_model_key
+from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMResponse
 from g3ku.providers.fallback import is_retryable_model_error, response_requires_retry
 
