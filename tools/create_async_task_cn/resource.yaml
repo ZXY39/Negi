@@ -1,0 +1,24 @@
+schema_version: 1
+kind: tool
+name: 创建异步任务
+description: 把用户需求转交为后台异步任务。
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    task:
+      type: string
+      description: 用户的原始需求。
+  required: [task]
+exposure:
+  agent: true
+  org_graph: false
+toolskill:
+  enabled: true

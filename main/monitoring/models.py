@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import Field
+
+from main.models import Model
+from main.types import NodeStatus, TaskStatus
+
+
+class TaskTreeNode(Model):
+    node_id: str
+    parent_node_id: str | None = None
+    depth: int = 0
+    status: NodeStatus = 'in_progress'
+    title: str = ''
+    input: str = ''
+    output: str = ''
+    check_result: str = ''
+    updated_at: str = ''
+    children: list['TaskTreeNode'] = Field(default_factory=list)
+
+
+class TaskSummaryResult(Model):
+    total_tasks: int = 0
+    in_progress_tasks: int = 0
+    failed_tasks: int = 0
+    text: str = ''
+
+
+class TaskListItem(Model):
+    task_id: str
+    brief: str = ''
+    status: TaskStatus = 'in_progress'
+    is_unread: bool = False
+
+
+class TaskProgressResult(Model):
+    task_id: str
+    task_status: TaskStatus = 'in_progress'
+    tree_text: str = ''
+    root: TaskTreeNode | None = None
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    text: str = ''
+

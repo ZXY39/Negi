@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
-import tempfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from loguru import logger
 
@@ -119,6 +118,7 @@ class AgentRuntimeEngine:
         self.background_pool = None
         self.org_graph_service = None
         self.org_graph_monitor_service = None
+        self.main_task_service = None
         self._runtime_closed = False
 
         temp_root = self.workspace / '.g3ku' / 'tmp'
@@ -283,6 +283,13 @@ class AgentRuntimeEngine:
                 await org_graph_service.close()
             except Exception:
                 logger.debug('org-graph service close skipped during runtime shutdown')
+
+        main_task_service = getattr(self, 'main_task_service', None)
+        if main_task_service is not None:
+            try:
+                await main_task_service.close()
+            except Exception:
+                logger.debug('main task service close skipped during runtime shutdown')
 
         memory_manager = getattr(self, 'memory_manager', None)
         if memory_manager is not None:

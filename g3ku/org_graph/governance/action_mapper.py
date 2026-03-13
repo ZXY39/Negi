@@ -264,6 +264,38 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
             {'id': 'engineering_exceptions', 'label': 'Engineering Exceptions', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
         ],
     },
+    '创建异步任务': {
+        'tool_id': 'task_runtime',
+        'display_name': 'Task Runtime',
+        'description': 'Create background tasks in the new main runtime.',
+        'actions': [
+            {'id': 'create_async_task', 'label': 'Create Async Task', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    '任务汇总工具': {
+        'tool_id': 'task_runtime',
+        'display_name': 'Task Runtime',
+        'description': 'Summarize background tasks in the new main runtime.',
+        'actions': [
+            {'id': 'summary_cn', 'label': 'Task Summary CN', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    '获取任务': {
+        'tool_id': 'task_runtime',
+        'display_name': 'Task Runtime',
+        'description': 'List background tasks in the new main runtime.',
+        'actions': [
+            {'id': 'list_cn', 'label': 'Task List CN', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
+    '查看任务进度工具': {
+        'tool_id': 'task_runtime',
+        'display_name': 'Task Runtime',
+        'description': 'View task progress in the new main runtime.',
+        'actions': [
+            {'id': 'progress_cn', 'label': 'Task Progress CN', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']},
+        ],
+    },
     'load_skill_context': {
         'tool_id': 'skill_access',
         'display_name': 'Skill Access',

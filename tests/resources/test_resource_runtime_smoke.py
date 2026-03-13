@@ -128,6 +128,20 @@ class _ArtifactService:
         return None
 
 
+class _MainTaskService:
+    async def startup(self) -> None:
+        return None
+
+    def summary(self, session_id: str) -> str:
+        return f'summary:{session_id}'
+
+    def get_tasks(self, session_id: str, task_type: int) -> str:
+        return f'list:{session_id}:{task_type}'
+
+    def view_progress(self, task_id: str, *, mark_read: bool = True) -> str:
+        return f'progress:{task_id}:{mark_read}'
+
+
 @pytest.mark.asyncio
 async def test_resource_hot_reload_delete_lock_and_load_tool_context(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -223,5 +237,32 @@ async def test_propose_file_patch_runs_as_resource_tool(tmp_path: Path):
         metadata, diff_text = parse_patch_artifact(artifact_path.read_text(encoding='utf-8'))
         assert Path(metadata['path']) == target_file.resolve()
         assert 'after value' in diff_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    for name in ('task_summary_cn', 'task_fetch_cn', 'task_progress_cn'):
+        shutil.copytree(REPO_ROOT / 'tools' / name, workspace / 'tools' / name)
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.bind_service_getter(lambda: {'main_task_service': _MainTaskService()})
+    manager.reload_now(trigger='test-bind')
+
+    try:
+        summary_tool = manager.get_tool('任务汇总工具')
+        fetch_tool = manager.get_tool('获取任务')
+        progress_tool = manager.get_tool('查看任务进度工具')
+
+        assert summary_tool is not None
+        assert fetch_tool is not None
+        assert progress_tool is not None
+        assert await summary_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}) == 'summary:web:shared'
+        assert await fetch_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}, **{'任务类型': 4}) == 'list:web:shared:4'
+        assert await progress_tool.execute(**{'任务id': 'task:demo'}) == 'progress:task:demo:True'
     finally:
         manager.close()

@@ -1,0 +1,25 @@
+schema_version: 1
+kind: tool
+name: 获取任务
+description: 按任务类型返回任务 id 列表和简要描述。
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    任务类型:
+      type: integer
+      enum: [1, 2, 3, 4]
+      description: 1=所有任务，2=进行中任务，3=失败任务，4=未读任务。
+  required: [任务类型]
+exposure:
+  agent: true
+  org_graph: false
+toolskill:
+  enabled: true

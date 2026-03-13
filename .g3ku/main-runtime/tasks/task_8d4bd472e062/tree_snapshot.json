@@ -1,0 +1,66 @@
+{
+  "task_id": "task:8d4bd472e062",
+  "root": {
+    "node_id": "node:8646a6f7dabd",
+    "parent_node_id": null,
+    "depth": 0,
+    "status": "success",
+    "title": "root-parallel",
+    "input": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are an execution node running in ReAct + tool calling mode.\\n\\nRules:\\n- The user message contains the node context as JSON.\\n- Use tools when they help you complete the node goal.\\n- Only call `派生子节点` if it is actually available in the tool list.\\n- If the node depth limit has been reached, you must finish locally without delegating.\\n- Never reveal hidden chain-of-thought.\\n- Your final response must be a single JSON object in this exact shape:\\n  {\\\"status\\\":\\\"success\\\"|\\\"failed\\\",\\\"output\\\":\\\"...\\\"}\\n- Do not wrap the final JSON in Markdown code fences.\\n\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"{\\n  \\\"task_id\\\": \\\"task:8d4bd472e062\\\",\\n  \\\"node_id\\\": \\\"node:8646a6f7dabd\\\",\\n  \\\"node_kind\\\": \\\"execution\\\",\\n  \\\"depth\\\": 0,\\n  \\\"can_spawn_children\\\": true,\\n  \\\"goal\\\": \\\"root-parallel\\\",\\n  \\\"prompt\\\": \\\"root-parallel\\\"\\n}\"\n  },\n  {\n    \"role\": \"assistant\",\n    \"content\": \"delegating\",\n    \"tool_calls\": [\n      {\n        \"id\": \"call-1\",\n        \"type\": \"function\",\n        \"function\": {\n          \"name\": \"派生子节点\",\n          \"arguments\": \"{\\\"children\\\": [{\\\"goal\\\": \\\"child-a\\\", \\\"prompt\\\": \\\"do-a\\\", \\\"acceptance_prompt\\\": \\\"check-a\\\"}, {\\\"goal\\\": \\\"child-b\\\", \\\"prompt\\\": \\\"do-b\\\", \\\"acceptance_prompt\\\": \\\"check-b\\\"}]}\"\n        }\n      }\n    ]\n  },\n  {\n    \"role\": \"tool\",\n    \"tool_call_id\": \"call-1\",\n    \"name\": \"派生子节点\",\n    \"content\": \"{\\\"children\\\": [{\\\"goal\\\": \\\"child-a\\\", \\\"check_result\\\": \\\"A pass\\\", \\\"node_output\\\": \\\"A done\\\"}, {\\\"goal\\\": \\\"child-b\\\", \\\"check_result\\\": \\\"B pass\\\", \\\"node_output\\\": \\\"B done\\\"}]}\"\n  }\n]",
+    "output": "delegating\n{\"status\":\"success\",\"output\":\"root-complete\"}",
+    "check_result": "",
+    "updated_at": "2026-03-13T18:07:11+08:00",
+    "children": [
+      {
+        "node_id": "node:07ba36068c2b",
+        "parent_node_id": "node:8646a6f7dabd",
+        "depth": 1,
+        "status": "success",
+        "title": "child-a",
+        "input": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are an execution node running in ReAct + tool calling mode.\\n\\nRules:\\n- The user message contains the node context as JSON.\\n- Use tools when they help you complete the node goal.\\n- Only call `派生子节点` if it is actually available in the tool list.\\n- If the node depth limit has been reached, you must finish locally without delegating.\\n- Never reveal hidden chain-of-thought.\\n- Your final response must be a single JSON object in this exact shape:\\n  {\\\"status\\\":\\\"success\\\"|\\\"failed\\\",\\\"output\\\":\\\"...\\\"}\\n- Do not wrap the final JSON in Markdown code fences.\\n\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"{\\n  \\\"task_id\\\": \\\"task:8d4bd472e062\\\",\\n  \\\"node_id\\\": \\\"node:07ba36068c2b\\\",\\n  \\\"node_kind\\\": \\\"execution\\\",\\n  \\\"depth\\\": 1,\\n  \\\"can_spawn_children\\\": true,\\n  \\\"goal\\\": \\\"child-a\\\",\\n  \\\"prompt\\\": \\\"do-a\\\"\\n}\"\n  }\n]",
+        "output": "{\"status\":\"success\",\"output\":\"A done\"}",
+        "check_result": "A pass",
+        "updated_at": "2026-03-13T18:07:10+08:00",
+        "children": [
+          {
+            "node_id": "node:b910e3cec05e",
+            "parent_node_id": "node:07ba36068c2b",
+            "depth": 2,
+            "status": "success",
+            "title": "验收:child-a",
+            "input": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are an acceptance node running in ReAct + tool calling mode.\\n\\nRules:\\n- The user message contains the acceptance context as JSON.\\n- You may use ordinary tools to validate the child node output.\\n- You must not attempt to delegate or create child nodes.\\n- Never reveal hidden chain-of-thought.\\n- Your final response must be a single JSON object in this exact shape:\\n  {\\\"status\\\":\\\"success\\\"|\\\"failed\\\",\\\"output\\\":\\\"...\\\"}\\n- `output` should be the concise acceptance result that the parent node can consume directly.\\n\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"{\\n  \\\"task_id\\\": \\\"task:8d4bd472e062\\\",\\n  \\\"node_id\\\": \\\"node:b910e3cec05e\\\",\\n  \\\"node_kind\\\": \\\"acceptance\\\",\\n  \\\"depth\\\": 2,\\n  \\\"can_spawn_children\\\": false,\\n  \\\"goal\\\": \\\"验收:child-a\\\",\\n  \\\"prompt\\\": \\\"check-a\\\\n\\\\n子节点输出：\\\\nA done\\\"\\n}\"\n  }\n]",
+            "output": "{\"status\":\"success\",\"output\":\"A pass\"}",
+            "check_result": "",
+            "updated_at": "2026-03-13T18:07:10+08:00",
+            "children": []
+          }
+        ]
+      },
+      {
+        "node_id": "node:3304a9b476f6",
+        "parent_node_id": "node:8646a6f7dabd",
+        "depth": 1,
+        "status": "success",
+        "title": "child-b",
+        "input": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are an execution node running in ReAct + tool calling mode.\\n\\nRules:\\n- The user message contains the node context as JSON.\\n- Use tools when they help you complete the node goal.\\n- Only call `派生子节点` if it is actually available in the tool list.\\n- If the node depth limit has been reached, you must finish locally without delegating.\\n- Never reveal hidden chain-of-thought.\\n- Your final response must be a single JSON object in this exact shape:\\n  {\\\"status\\\":\\\"success\\\"|\\\"failed\\\",\\\"output\\\":\\\"...\\\"}\\n- Do not wrap the final JSON in Markdown code fences.\\n\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"{\\n  \\\"task_id\\\": \\\"task:8d4bd472e062\\\",\\n  \\\"node_id\\\": \\\"node:3304a9b476f6\\\",\\n  \\\"node_kind\\\": \\\"execution\\\",\\n  \\\"depth\\\": 1,\\n  \\\"can_spawn_children\\\": true,\\n  \\\"goal\\\": \\\"child-b\\\",\\n  \\\"prompt\\\": \\\"do-b\\\"\\n}\"\n  }\n]",
+        "output": "{\"status\":\"success\",\"output\":\"B done\"}",
+        "check_result": "B pass",
+        "updated_at": "2026-03-13T18:07:10+08:00",
+        "children": [
+          {
+            "node_id": "node:302f8dcae72d",
+            "parent_node_id": "node:3304a9b476f6",
+            "depth": 2,
+            "status": "success",
+            "title": "验收:child-b",
+            "input": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are an acceptance node running in ReAct + tool calling mode.\\n\\nRules:\\n- The user message contains the acceptance context as JSON.\\n- You may use ordinary tools to validate the child node output.\\n- You must not attempt to delegate or create child nodes.\\n- Never reveal hidden chain-of-thought.\\n- Your final response must be a single JSON object in this exact shape:\\n  {\\\"status\\\":\\\"success\\\"|\\\"failed\\\",\\\"output\\\":\\\"...\\\"}\\n- `output` should be the concise acceptance result that the parent node can consume directly.\\n\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"{\\n  \\\"task_id\\\": \\\"task:8d4bd472e062\\\",\\n  \\\"node_id\\\": \\\"node:302f8dcae72d\\\",\\n  \\\"node_kind\\\": \\\"acceptance\\\",\\n  \\\"depth\\\": 2,\\n  \\\"can_spawn_children\\\": false,\\n  \\\"goal\\\": \\\"验收:child-b\\\",\\n  \\\"prompt\\\": \\\"check-b\\\\n\\\\n子节点输出：\\\\nB done\\\"\\n}\"\n  }\n]",
+            "output": "{\"status\":\"success\",\"output\":\"B pass\"}",
+            "check_result": "",
+            "updated_at": "2026-03-13T18:07:10+08:00",
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+schema_version: 1
+kind: tool
+name: 任务汇总工具
+description: 返回总任务、进行中任务、失败任务数量。
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties: {}
+exposure:
+  agent: true
+  org_graph: false
+toolskill:
+  enabled: true

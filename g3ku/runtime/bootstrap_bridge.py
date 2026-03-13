@@ -1,16 +1,16 @@
 ﻿from __future__ import annotations
 
-from pathlib import Path
-
 from loguru import logger
 
 from g3ku.agent.file_vault import FileVault
 from g3ku.agent.session_commit import SessionCommitService
-from g3ku.resources import get_shared_resource_manager
-from g3ku.runtime.frontdoor import CeoFrontDoorRunner
 from g3ku.org_graph.config import resolve_org_graph_config
 from g3ku.org_graph.service.project_service import ProjectService
+from g3ku.resources import get_shared_resource_manager
+from g3ku.runtime.frontdoor import CeoFrontDoorRunner
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
+from main.runtime.chat_backend import ConfigChatBackend
+from main.service.runtime_service import MainRuntimeService
 
 
 class RuntimeBootstrapBridge:
@@ -38,6 +38,7 @@ class RuntimeBootstrapBridge:
         if cfg is None or not bool(getattr(cfg, "enabled", True)):
             return
         try:
+            self.init_main_runtime()
             self.init_org_graph_runtime()
             manager = get_shared_resource_manager(
                 self._loop.workspace,
@@ -63,6 +64,51 @@ class RuntimeBootstrapBridge:
         except Exception as exc:
             self._loop.resource_manager = None
             logger.warning("Resource runtime init failed: {}", exc)
+
+    def init_main_runtime(self) -> None:
+        current = getattr(self._loop, 'main_task_service', None)
+        if current is not None:
+            return
+        config = getattr(self._loop, 'app_config', None)
+        if config is None:
+            self._loop.main_task_service = None
+            return
+
+        def _tool_provider(_node):
+            manager = getattr(self._loop, 'resource_manager', None)
+            if manager is None:
+                return {}
+            excluded = {
+                '任务汇总工具',
+                '获取任务',
+                '查看任务进度工具',
+                '创建异步任务',
+                'orggraph_create_project',
+                'orggraph_control_project',
+                'task_monitor_summary',
+                'task_monitor_list',
+                'task_monitor_progress',
+                'task_monitor_engineering_exceptions',
+            }
+            return {
+                name: tool
+                for name, tool in manager.tool_instances().items()
+                if name not in excluded
+            }
+
+        try:
+            service = MainRuntimeService(
+                chat_backend=ConfigChatBackend(config),
+                tool_provider=_tool_provider,
+                execution_model_refs=config.get_role_model_keys('execution'),
+                acceptance_model_refs=config.get_role_model_keys('inspection'),
+                default_max_depth=getattr(config.org_graph, 'default_max_depth', 1),
+                hard_max_depth=getattr(config.org_graph, 'hard_max_depth', 4),
+            )
+            self._loop.main_task_service = service
+        except Exception as exc:
+            self._loop.main_task_service = None
+            logger.warning('main runtime init failed: {}', exc)
 
     def init_multi_agent_runtime(self) -> None:
         cfg = getattr(self._loop, "multi_agent_config", None)
@@ -117,6 +163,7 @@ class RuntimeBootstrapBridge:
             "cron_service": getattr(self._loop, "cron_service", None),
             "file_vault": getattr(self._loop, "file_vault", None),
             "memory_manager": getattr(self._loop, "memory_manager", None),
+            "main_task_service": getattr(self._loop, "main_task_service", None),
             "org_graph_service": getattr(self._loop, "org_graph_service", None),
             "temp_dir": getattr(self._loop, "temp_dir", None),
         }

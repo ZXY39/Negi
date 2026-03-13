@@ -14,7 +14,7 @@ parameters:
   type: object
   properties: {}
 exposure:
-  agent: true
+  agent: false
   org_graph: true
 toolskill:
   enabled: true

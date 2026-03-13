@@ -1,0 +1,3 @@
+class TaskPausedError(Exception):
+    pass
+

@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+
+class TaskFileStore:
+    def __init__(self, base_dir: Path | str):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def task_dir(self, task_id: str) -> Path:
+        safe_task_id = str(task_id or '').strip().replace(':', '_').replace('/', '_').replace('\\', '_')
+        path = self.base_dir / safe_task_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def paths_for_task(self, task_id: str) -> dict[str, str]:
+        root = self.task_dir(task_id)
+        return {
+            'runtime_state_path': str(root / 'runtime_state.json'),
+            'tree_snapshot_path': str(root / 'tree_snapshot.json'),
+            'tree_text_path': str(root / 'tree.txt'),
+        }
+
+    def write_json(self, path: str | Path, payload: dict[str, Any]) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_suffix(target.suffix + '.tmp')
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        temp.replace(target)
+
+    def read_json(self, path: str | Path) -> dict[str, Any] | None:
+        target = Path(path)
+        if not target.exists():
+            return None
+        return json.loads(target.read_text(encoding='utf-8'))
+
+    def write_text(self, path: str | Path, content: str) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_suffix(target.suffix + '.tmp')
+        temp.write_text(str(content or ''), encoding='utf-8')
+        temp.replace(target)
+
+    def read_text(self, path: str | Path) -> str | None:
+        target = Path(path)
+        if not target.exists():
+            return None
+        return target.read_text(encoding='utf-8')

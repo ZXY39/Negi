@@ -24,7 +24,7 @@ parameters:
   required:
   - scope
 exposure:
-  agent: true
+  agent: false
   org_graph: true
 toolskill:
   enabled: true

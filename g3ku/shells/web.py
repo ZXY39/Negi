@@ -143,6 +143,13 @@ async def shutdown_web_runtime() -> None:
         except Exception:
             logger.debug("org-graph service close skipped during shutdown")
 
+    main_task_service = getattr(agent, 'main_task_service', None)
+    if main_task_service is not None:
+        try:
+            await main_task_service.close()
+        except Exception:
+            logger.debug("main task service close skipped during shutdown")
+
     try:
         await agent.close_mcp()
     except Exception:

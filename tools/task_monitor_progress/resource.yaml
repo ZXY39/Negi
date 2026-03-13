@@ -19,7 +19,7 @@ parameters:
   required:
   - task_id
 exposure:
-  agent: true
+  agent: false
   org_graph: true
 toolskill:
   enabled: true
