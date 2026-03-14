@@ -1,8 +1,9 @@
-# Batch Web Planning
+# 批量网页调研规划 (Batch Web Planning)
 
-Split broad web research requests into independent work items.
+将宽泛的网页调研请求拆分为独立的工作项。
 
-Rules:
-- Each work item must be concrete and executable by one worker session.
-- Prefer 2-8 items.
-- Keep item labels short and task statements explicit.
+规则：
+- 每个工作项必须具体，且能够在一个 worker 会话中执行。
+- 建议拆分为 2-8 个项。
+- 保持项标签简短，任务陈述明确。
+

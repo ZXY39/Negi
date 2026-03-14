@@ -62,7 +62,7 @@ class TaskRunner:
     async def cancel(self, task_id: str) -> None:
         task_record = self._store.get_task(task_id)
         if task_record is not None:
-            self._store.upsert_task(task_record.model_copy(update={'cancel_requested': True, 'updated_at': _now()}))
+            self._log_service.request_cancel(task_id)
         active = self._active_tasks.get(task_id)
         if active is not None and not active.done():
             active.cancel()
@@ -74,7 +74,7 @@ class TaskRunner:
         task_record = self._store.get_task(task_id)
         if task_record is None:
             return
-        self._store.upsert_task(task_record.model_copy(update={'pause_requested': False, 'is_paused': False, 'updated_at': _now()}))
+        self._log_service.set_pause_state(task_id, pause_requested=False, is_paused=False)
         self.start_background(task_id)
 
     async def close(self) -> None:
@@ -84,9 +84,3 @@ class TaskRunner:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._active_tasks.clear()
-
-
-def _now() -> str:
-    from main.protocol import now_iso
-
-    return now_iso()

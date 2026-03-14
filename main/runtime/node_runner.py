@@ -169,14 +169,13 @@ class NodeRunner:
         return results
 
     def _save_spawn_cache(self, parent_node_id: str, cache_key: str, payload: dict[str, Any]) -> None:
-        def _mutate(record: NodeRecord) -> NodeRecord:
-            metadata = dict(record.metadata or {})
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
             operations = dict(metadata.get('spawn_operations') or {})
             operations[cache_key] = payload
             metadata['spawn_operations'] = operations
-            return record.model_copy(update={'metadata': metadata, 'updated_at': _now()})
+            return metadata
 
-        self._store.update_node(parent_node_id, _mutate)
+        self._log_service.update_node_metadata(parent_node_id, _mutate)
 
     def _create_execution_child(self, *, task, parent: NodeRecord, spec: SpawnChildSpec) -> NodeRecord:
         child = NodeRecord(

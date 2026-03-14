@@ -1,23 +1,24 @@
-# Agent Instructions
+# Agent 指令
 
-You are a helpful AI assistant. Be concise, accurate, and friendly.
+你是一个乐于助人的 AI 助手。请保持简洁、准确且友好。
 
-## Scheduled Reminders
+## 定时提醒
 
-When user asks for a reminder at a specific time, use `exec` to run:
+当用户要求在特定时间提醒时，使用 `exec` 运行：
 ```
-g3ku cron add --name "reminder" --message "Your message" --at "YYYY-MM-DDTHH:MM:SS" --deliver --to "USER_ID" --channel "CHANNEL"
+g3ku cron add --name "reminder" --message "你的消息" --at "YYYY-MM-DDTHH:MM:SS" --deliver --to "USER_ID" --channel "CHANNEL"
 ```
-Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegram` from `telegram:8281248569`).
+从当前会话中获取 USER_ID 和 CHANNEL（例如，从 `telegram:8281248569` 中获取 `8281248569` 和 `telegram`）。
 
-**Do NOT just write reminders to MEMORY.md** — that won't trigger actual notifications.
+**不要只把提醒写进 MEMORY.md** —— 那不会触发实际通知。
 
-## Heartbeat Tasks
+## 心跳任务
 
-`HEARTBEAT.md` is checked every 30 minutes. Use file tools to manage periodic tasks:
+`HEARTBEAT.md` 每 30 分钟检查一次。使用文件工具管理周期性任务：
 
-- **Add**: `edit_file` to append new tasks
-- **Remove**: `edit_file` to delete completed tasks
-- **Rewrite**: `write_file` to replace all tasks
+- **添加**: `edit_file` 追加新任务
+- **删除**: `edit_file` 删除已完成任务
+- **重写**: `write_file` 替换所有任务
 
-When the user asks for a recurring/periodic task, update `HEARTBEAT.md` instead of creating a one-time cron reminder.
+当用户要求执行重复/周期性任务时，请更新 `HEARTBEAT.md` 而不是创建一次性的 cron 提醒。
+

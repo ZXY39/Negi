@@ -23,17 +23,18 @@
 - 端点兼容性：接受以 host、`/v1`、`/v1/images`、`/v1/images/generations` 或 `/v1/responses` 结尾的 `base_url` 形式
 - 图像提取后备顺序：`choices[0].message.images` -> `image_details.url` -> `image_details.original_url` -> 从 `message.content` 解析 URL
 - 返回标准化的 JSON 字符串：`success`、`error`、`requestMeta`、`images`、`raw`
-## agent_browser - External agent-browser browser automation
+## agent_browser - 外部 agent-browser 浏览器自动化
 
-- Browser automation powered by the external `agent-browser` CLI/daemon.
-- Use it for opening sites, searching, clicking, filling forms, logging in, reading page text, screenshots, downloads, cookies, storage, and state reuse.
-- Recommended workflow:
-  1. `open`
-  2. `snapshot -i`
-  3. use refs like `@e1`, `@e2` for `click` / `fill` / `get`
-  4. re-run `snapshot` after navigation or DOM changes
-- Use `headless=false` when the user explicitly wants to see the browser window.
-- Use `headless=true` only for background probing or silent internal tasks.
-- Returns structured JSON with `success`, `data`, `error`, `hint`, `stdout_raw`, and `stderr`.
+- 由外部 `agent-browser` CLI/daemon 提供的浏览器自动化。
+- 用于打开网站、搜索、点击、填写表单、登录、读取页面文本、截图、下载、Cookie 以及存储和状态复用。
+- 推荐工作流：
+  1. `open` (打开)
+  2. `snapshot -i` (交互快照)
+  3. 使用如 `@e1`, `@e2` 的引用进行 `click` (点击) / `fill` (填写) / `get` (获取)
+  4. 在导航或 DOM 变更后重新运行 `snapshot` (快照)
+- 当用户明确要求查看浏览器窗口时，使用 `headless=false`。
+- 仅在后台探测或静默内部任务时使用 `headless=true`。
+- 返回结构化的 JSON，包含 `success` (成功)、`data` (数据)、`error` (错误)、`hint` (提示)、`stdout_raw` (标准输出原文) 和 `stderr` (错误输出原文)。
+
 
 

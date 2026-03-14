@@ -1,49 +1,50 @@
-# User Profile
+# 用户画像 (User Profile)
 
-Information about the user to help personalize interactions.
+关于用户的信息，有助于个性化交互。
 
-## Basic Information
+## 基础信息
 
-- **Name**: (your name)
-- **Timezone**: (your timezone, e.g., UTC+8)
-- **Language**: (preferred language)
+- **姓名**: (你的姓名)
+- **时区**: (你的时区，例如 UTC+8)
+- **语言**: (偏好语言)
 
-## Preferences
+## 偏好设置
 
-### Communication Style
+### 沟通风格
 
-- [ ] Casual
-- [ ] Professional
-- [ ] Technical
+- [ ] 随意的 (Casual)
+- [ ] 专业的 (Professional)
+- [ ] 技术性的 (Technical)
 
-### Response Length
+### 回复长度
 
-- [ ] Brief and concise
-- [ ] Detailed explanations
-- [ ] Adaptive based on question
+- [ ] 简明扼要
+- [ ] 详细解释
+- [ ] 根据问题自适应
 
-### Technical Level
+### 技术水平
 
-- [ ] Beginner
-- [ ] Intermediate
-- [ ] Expert
+- [ ] 初学者
+- [ ] 中级
+- [ ] 专家
 
-## Work Context
+## 工作背景
 
-- **Primary Role**: (your role, e.g., developer, researcher)
-- **Main Projects**: (what you're working on)
-- **Tools You Use**: (IDEs, languages, frameworks)
+- **主要角色**: (你的角色，例如 开发者、研究员)
+- **主要项目**: (你正在忙的项目)
+- **使用的工具**: (IDE、语言、框架)
 
-## Topics of Interest
+## 感兴趣的主题
 
 - 
 - 
 - 
 
-## Special Instructions
+## 特殊指令
 
-(Any specific instructions for how the assistant should behave)
+(任何关于助手应该如何表现的具体指令)
 
 ---
 
-*Edit this file to customize g3ku's behavior for your needs.*
+*编辑此文件以根据你的需求自定义 g3ku 的行为。*
+

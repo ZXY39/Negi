@@ -28,22 +28,12 @@ app.include_router(runtime_router, prefix='/api')
 
 WEB_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = WEB_DIR / 'frontend'
-FRONTEND_DIST_DIR = FRONTEND_DIR / 'dist'
-FRONTEND_ENTRY = FRONTEND_DIST_DIR / 'index.html'
-FRONTEND_SOURCE_ENTRY = FRONTEND_DIR / 'src' / 'index.html'
+FRONTEND_ENTRY = FRONTEND_DIR / 'org_graph.html'
 FRONTEND_NO_CACHE_HEADERS = {
     'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
     'Pragma': 'no-cache',
     'Expires': '0',
 }
-OLD_FRONTEND_PATHS = {'api_client.js', 'org_graph_app.js', 'org_graph.html', 'org_graph.css'}
-
-
-def _active_assets_dir() -> Path:
-    assets_dir = FRONTEND_DIST_DIR / 'assets'
-    if assets_dir.exists():
-        return assets_dir
-    return FRONTEND_DIR
 
 
 def _safe_child_file(base_dir: Path, relative_path: str) -> Path:
@@ -59,10 +49,9 @@ def _safe_child_file(base_dir: Path, relative_path: str) -> Path:
 
 
 def _frontend_index_response() -> FileResponse:
-    candidate = FRONTEND_ENTRY if FRONTEND_ENTRY.exists() else FRONTEND_SOURCE_ENTRY
-    if not candidate.exists():
-        raise HTTPException(status_code=404, detail=f'Frontend not found at {candidate}')
-    return FileResponse(str(candidate), headers=FRONTEND_NO_CACHE_HEADERS)
+    if not FRONTEND_ENTRY.exists():
+        raise HTTPException(status_code=404, detail=f'Frontend not found at {FRONTEND_ENTRY}')
+    return FileResponse(str(FRONTEND_ENTRY), headers=FRONTEND_NO_CACHE_HEADERS)
 
 
 @app.get('/')
@@ -70,26 +59,17 @@ async def serve_frontend_root():
     return _frontend_index_response()
 
 
-@app.get('/assets/{asset_path:path}')
-async def serve_frontend_assets(asset_path: str):
-    return FileResponse(str(_safe_child_file(_active_assets_dir(), asset_path)), headers=FRONTEND_NO_CACHE_HEADERS)
-
-
 @app.get('/{full_path:path}')
-async def serve_frontend_spa(full_path: str):
+async def serve_frontend_file(full_path: str):
     if full_path == 'api' or full_path.startswith('api/'):
         raise HTTPException(status_code=404, detail='Not found')
-    if full_path in OLD_FRONTEND_PATHS:
-        raise HTTPException(status_code=404, detail='Not found')
-
-    for base_dir in (FRONTEND_DIST_DIR, FRONTEND_DIR):
-        candidate = (base_dir / full_path).resolve()
-        try:
-            candidate.relative_to(base_dir.resolve())
-        except ValueError:
-            continue
-        if candidate.exists() and candidate.is_file():
-            return FileResponse(str(candidate), headers=FRONTEND_NO_CACHE_HEADERS)
+    candidate = (FRONTEND_DIR / full_path).resolve()
+    try:
+        candidate.relative_to(FRONTEND_DIR.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail='Not found') from exc
+    if candidate.exists() and candidate.is_file():
+        return FileResponse(str(candidate), headers=FRONTEND_NO_CACHE_HEADERS)
     return _frontend_index_response()
 
 

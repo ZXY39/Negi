@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from main.models import NodeOutputEntry, NodeRecord, TaskRecord
 from main.monitoring.file_store import TaskFileStore
@@ -136,16 +136,82 @@ class TaskLogService:
             lambda task: task.model_copy(update={'is_unread': False, 'updated_at': now_iso()}),
         )
 
-    def set_pause_state(self, task_id: str, *, pause_requested: bool | None = None, is_paused: bool | None = None) -> TaskRecord | None:
+    def request_cancel(self, task_id: str) -> TaskRecord | None:
+        return self.update_task_control(task_id, cancel_requested=True)
+
+    def update_task_control(
+        self,
+        task_id: str,
+        *,
+        cancel_requested: bool | None = None,
+        pause_requested: bool | None = None,
+        is_paused: bool | None = None,
+    ) -> TaskRecord | None:
         def _mutate(task: TaskRecord) -> TaskRecord:
             update: dict[str, Any] = {'updated_at': now_iso()}
+            if cancel_requested is not None:
+                update['cancel_requested'] = bool(cancel_requested)
             if pause_requested is not None:
                 update['pause_requested'] = bool(pause_requested)
             if is_paused is not None:
                 update['is_paused'] = bool(is_paused)
             return task.model_copy(update=update)
 
-        return self._store.update_task(task_id, _mutate)
+        updated = self._store.update_task(task_id, _mutate)
+        if updated is None:
+            return None
+        self.update_runtime_state(
+            task_id,
+            paused=bool(updated.is_paused),
+            pause_requested=bool(updated.pause_requested),
+            cancel_requested=bool(updated.cancel_requested),
+        )
+        return self.refresh_task_view(task_id, mark_unread=False) or updated
+
+    def set_pause_state(self, task_id: str, *, pause_requested: bool | None = None, is_paused: bool | None = None) -> TaskRecord | None:
+        return self.update_task_control(task_id, pause_requested=pause_requested, is_paused=is_paused)
+
+    def update_node_metadata(self, node_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]]) -> NodeRecord | None:
+        def _mutate(record: NodeRecord) -> NodeRecord:
+            metadata = metadata_mutator(dict(record.metadata or {}))
+            if not isinstance(metadata, dict):
+                raise TypeError('node metadata mutator must return a dict')
+            return record.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
+
+        return self._store.update_node(node_id, _mutate)
+
+    def mark_task_failed(self, task_id: str, *, reason: str) -> TaskRecord | None:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        root_node = self._store.get_node(task.root_node_id)
+        text = str(reason or 'task failed').strip() or 'task failed'
+        if root_node is not None:
+            self.update_node_status(task_id, root_node.node_id, status='failed', final_output=text, failure_reason=text)
+            return self._store.get_task(task_id)
+
+        updated = self._store.update_task(
+            task_id,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'failed',
+                    'is_unread': True,
+                    'final_output': text,
+                    'failure_reason': text,
+                    'updated_at': now_iso(),
+                    'finished_at': now_iso(),
+                }
+            ),
+        )
+        if updated is None:
+            return None
+        self.update_runtime_state(
+            task_id,
+            paused=bool(updated.is_paused),
+            pause_requested=bool(updated.pause_requested),
+            cancel_requested=bool(updated.cancel_requested),
+        )
+        return updated
 
     def update_runtime_state(self, task_id: str, **payload: Any) -> dict[str, Any]:
         task = self._require_task(task_id)
@@ -154,6 +220,8 @@ class TaskLogService:
             'root_node_id': task.root_node_id,
             'updated_at': now_iso(),
             'paused': bool(task.is_paused),
+            'pause_requested': bool(task.pause_requested),
+            'cancel_requested': bool(task.cancel_requested),
             'active_node_ids': [],
             'runnable_node_ids': [],
             'waiting_node_ids': [],
@@ -164,6 +232,8 @@ class TaskLogService:
         current['root_node_id'] = task.root_node_id
         current['updated_at'] = now_iso()
         current['paused'] = bool(current.get('paused', task.is_paused))
+        current['pause_requested'] = bool(current.get('pause_requested', task.pause_requested))
+        current['cancel_requested'] = bool(current.get('cancel_requested', task.cancel_requested))
         self._file_store.write_json(task.runtime_state_path, current)
         return current
 
@@ -218,6 +288,8 @@ class TaskLogService:
         if runtime_state is not None:
             runtime_state['updated_at'] = now_iso()
             runtime_state['paused'] = bool(updated.is_paused)
+            runtime_state['pause_requested'] = bool(updated.pause_requested)
+            runtime_state['cancel_requested'] = bool(updated.cancel_requested)
             self._file_store.write_json(updated.runtime_state_path, runtime_state)
         if self._registry is not None:
             payload = {

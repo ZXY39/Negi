@@ -39,6 +39,7 @@ class TaskQueryService:
                 brief=item.brief_text or '',
                 status=item.status,
                 is_unread=bool(item.is_unread),
+                is_paused=bool(item.is_paused),
                 created_at=item.created_at,
                 updated_at=item.updated_at,
                 max_depth=int(item.max_depth or 0),

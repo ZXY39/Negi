@@ -88,7 +88,7 @@ class MainRuntimeService:
                 continue
             runtime_state = self.log_service.read_runtime_state(task.task_id)
             if runtime_state is None:
-                self.store.upsert_task(task.model_copy(update={'status': 'failed', 'failure_reason': 'runtime_state_corrupt', 'is_unread': True, 'updated_at': now_iso(), 'finished_at': now_iso()}))
+                self.log_service.mark_task_failed(task.task_id, reason='runtime_state_corrupt')
                 continue
             if bool(task.is_paused) or bool(runtime_state.get('paused')):
                 continue

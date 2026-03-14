@@ -35,6 +35,7 @@ class TaskListItem(Model):
     brief: str = ''
     status: TaskStatus = 'in_progress'
     is_unread: bool = False
+    is_paused: bool = False
     created_at: str = ''
     updated_at: str = ''
     max_depth: int = 0
