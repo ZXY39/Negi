@@ -13,20 +13,15 @@
     --space-10: 2.5rem;
     --space-12: 3rem;
 
-    /* ToC Friendly Brand Colors (Indigo/Violet base) */
-    --brand-primary: #6366f1;
-    /* Indigo 500 */
-    --brand-primary-hover: #4f46e5;
-    /* Indigo 600 */
-    --bg-app: #f1f5f9;
-    /* Slate 100 - Stronger contrast for white cards */
+    /* Miku Green Brand Colors */
+    --brand-primary: #39c5bb;
+    --brand-primary-hover: #33b8ad;
+    --bg-app: #f8fafc;
     --bg-panel: #ffffff;
+    --bg-surface-inner: #f1f5f9;
     --bg-hover: #e2e8f0;
-    /* Slate 200 */
-    --bg-msg-user: #e0e7ff;
-    /* Indigo 100 */
+    --bg-msg-user: #e0f2f1;
     --bg-msg-sys: #f1f5f9;
-    /* Slate 100 */
 
     /* Typography */
     --text-primary: #0f172a;
@@ -38,8 +33,8 @@
     --text-inverse: #ffffff;
 
     /* Softer Borders */
-    --border-color: #cbd5e1;
-    /* Slate 300 - slightly darker for visibility */
+    --border-color: #e2e8f0;
+    --border-strong: #cbd5e1;
     --node-border: rgba(0, 0, 0, 0.08);
 
     /* Semantic Status Colors (Softer Tones) */
@@ -80,26 +75,19 @@
 
 /* Dark Mode Overrides */
 [data-theme="dark"] {
-    --bg-app: #0f172a;
-    /* slate-950 */
-    --bg-panel: #1e293b;
-    /* slate-800 */
+    --bg-app: #020617;    /* Deep Ground */
+    --bg-panel: #1e293b;  /* Elevated surface */
+    --bg-surface-inner: #334155; /* Inner well */
     --bg-hover: #334155;
-    /* slate-700 */
-    --bg-msg-user: #1e3a8a;
-    /* blue-900 */
+    --bg-msg-user: #0f766e; /* Deep Teal */
     --bg-msg-sys: #334155;
-    /* slate-700 */
 
     --text-primary: #f8fafc;
-    /* slate-50 */
     --text-secondary: #cbd5e1;
-    /* slate-300 */
     --text-muted: #64748b;
-    /* slate-500 */
 
     --border-color: #334155;
-    /* slate-700 */
+    --border-strong: #475569;
     --node-border: rgba(255, 255, 255, 0.08);
 
     --status-running-bg: rgba(37, 99, 235, 0.2);
@@ -111,10 +99,10 @@
     --status-pending-bg: rgba(71, 85, 105, 0.4);
     --status-pending-text: #cbd5e1;
 
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
-    --scrollbar-track: color-mix(in srgb, var(--bg-app) 76%, transparent);
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
+    --scrollbar-track: var(--bg-app);
     --scrollbar-thumb: color-mix(in srgb, #60a5fa 34%, var(--border-color) 66%);
     --scrollbar-thumb-hover: color-mix(in srgb, #60a5fa 58%, var(--border-color) 42%);
 }
@@ -163,12 +151,12 @@ html {
 *::-webkit-scrollbar-thumb {
     border: 3px solid transparent;
     border-radius: 999px;
-    background: linear-gradient(180deg, var(--scrollbar-thumb) 0%, color-mix(in srgb, var(--scrollbar-thumb) 74%, var(--border-color) 26%) 100%);
+    background-color: var(--scrollbar-thumb);
     background-clip: padding-box;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-    background: linear-gradient(180deg, var(--scrollbar-thumb-hover) 0%, color-mix(in srgb, var(--scrollbar-thumb-hover) 76%, var(--border-color) 24%) 100%);
+    background-color: var(--scrollbar-thumb-hover);
     background-clip: padding-box;
 }
 
@@ -271,9 +259,11 @@ textarea {
 }
 
 .nav-item.active {
-    background-color: var(--brand-primary);
-    color: var(--text-inverse);
+    background-color: color-mix(in srgb, var(--brand-primary) 12%, transparent);
+    color: var(--brand-primary);
+    font-weight: 700;
 }
+
 
 .sidebar-spacer {
     flex: 1;
@@ -341,6 +331,7 @@ textarea {
     line-height: 1.4;
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
 }
@@ -520,7 +511,7 @@ textarea {
     flex-direction: column;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     border-radius: var(--radius-lg);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 96%, var(--bg-app) 4%) 0%, color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%) 100%);
+    background-color: var(--bg-panel);
     box-shadow: var(--shadow-md);
     overflow: hidden;
 }
@@ -560,9 +551,7 @@ textarea {
     min-height: 0;
     overflow: hidden;
     padding: var(--space-4) var(--space-5) var(--space-5);
-    background:
-        radial-gradient(circle at top left, color-mix(in srgb, var(--brand-primary) 14%, transparent) 0%, transparent 32%),
-        linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 82%, var(--bg-app) 18%) 0%, color-mix(in srgb, var(--bg-app) 74%, transparent) 100%);
+    background-color: var(--bg-app);
     cursor: grab;
     touch-action: none;
 }
@@ -674,7 +663,7 @@ textarea {
     padding: var(--space-3) var(--space-4) var(--space-3) calc(var(--space-4) + 8px);
     border-radius: 18px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 96%, transparent) 0%, color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%) 100%);
+    background-color: var(--bg-panel);
     box-shadow: var(--shadow-sm);
     color: var(--text-primary);
     text-align: left;
@@ -813,7 +802,7 @@ textarea {
     padding: var(--space-3) var(--space-4) var(--space-3) calc(var(--space-4) + 6px);
     border-radius: 18px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 96%, transparent) 0%, color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%) 100%);
+    background-color: var(--bg-panel);
     box-shadow: var(--shadow-sm);
     cursor: pointer;
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
@@ -1035,11 +1024,11 @@ textarea {
 }
 
 .message.system .avatar {
-    background: linear-gradient(135deg, color-mix(in srgb, var(--brand-primary) 78%, #0ea5e9 22%) 0%, var(--brand-primary-hover) 100%);
+    background-color: var(--brand-primary);
 }
 
 .message.user .avatar {
-    background: linear-gradient(135deg, color-mix(in srgb, var(--text-secondary) 82%, var(--bg-panel) 18%) 0%, color-mix(in srgb, var(--text-secondary) 64%, #0f172a 36%) 100%);
+    background-color: var(--text-secondary);
 }
 
 .message .msg-content {
@@ -1047,16 +1036,16 @@ textarea {
     padding: 16px 18px;
     border-radius: 26px 26px 26px 10px;
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 90%, var(--bg-msg-sys) 10%) 0%, color-mix(in srgb, var(--bg-msg-sys) 86%, transparent) 100%);
+    background-color: var(--bg-msg-sys);
     line-height: 1.72;
     color: var(--text-primary);
-    box-shadow: 0 24px 40px -32px rgba(15, 23, 42, 0.55), 0 1px 0 color-mix(in srgb, var(--bg-panel) 55%, transparent) inset;
+    box-shadow: var(--shadow-sm);
     word-break: break-word;
 }
 
 .message.user .msg-content {
     border-radius: 26px 26px 10px 26px;
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-msg-user) 88%, var(--bg-panel) 12%) 0%, color-mix(in srgb, var(--bg-msg-user) 72%, transparent) 100%);
+    background-color: var(--bg-msg-user);
 }
 
 .ceo-turn-content {
@@ -1368,8 +1357,8 @@ textarea {
     padding: 14px;
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
     border-radius: 30px;
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 96%, transparent) 0%, color-mix(in srgb, var(--bg-panel) 84%, var(--bg-app) 16%) 100%);
-    box-shadow: 0 24px 46px -30px rgba(15, 23, 42, 0.58), 0 0 0 1px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+    background-color: var(--bg-panel);
+    box-shadow: var(--shadow-md);
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 12px;
@@ -1387,7 +1376,7 @@ textarea {
 .ceo-model-panel {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
-    background: linear-gradient(180deg, rgba(37, 99, 235, 0.08), rgba(15, 23, 42, 0.02));
+    background-color: var(--bg-app);
     padding: var(--space-4);
 }
 
@@ -1467,7 +1456,7 @@ textarea {
     min-width: 120px;
     padding: 0 22px;
     height: 58px;
-    background: linear-gradient(135deg, color-mix(in srgb, var(--brand-primary) 72%, #0ea5e9 28%) 0%, var(--brand-primary-hover) 100%);
+    background-color: var(--brand-primary);
     color: white;
     border-radius: 22px;
     font-weight: 700;
@@ -1621,7 +1610,7 @@ textarea {
 .model-role-summary-panel {
     padding: var(--space-5);
     border-bottom: 1px solid var(--border-color);
-    background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%);
+    background-color: var(--bg-panel);
 }
 
 .model-role-summary-actions {
@@ -1639,18 +1628,18 @@ textarea {
 .model-routing-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: var(--space-4);
+    gap: var(--space-6);
 }
 
 .model-chain-card {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-4);
     min-height: 0;
-    padding: var(--space-4);
+    padding: var(--space-6);
     border: 1px solid var(--border-color);
-    border-radius: 18px;
-    background: color-mix(in srgb, var(--bg-app) 76%, transparent);
+    border-radius: 20px;
+    background-color: var(--bg-panel);
     box-shadow: var(--shadow-sm);
 }
 
@@ -1674,20 +1663,23 @@ textarea {
     flex-direction: column;
     gap: var(--space-2);
     min-height: 0;
-    max-height: 220px;
+    max-height: 260px;
     overflow-y: auto;
-    padding-right: 4px;
+    padding: var(--space-4);
+    background-color: var(--bg-surface-inner);
+    border-radius: 16px;
+    border: 1px solid var(--border-strong);
 }
 
 .model-chain-slide,
 .model-available-item {
     display: flex;
     align-items: stretch;
-    gap: var(--space-2);
-    padding: var(--space-3);
+    gap: var(--space-3);
+    padding: var(--space-4);
     border: 1px solid var(--border-color);
     border-radius: 14px;
-    background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+    background-color: var(--bg-panel);
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
 }
 
@@ -1732,7 +1724,7 @@ textarea {
     min-height: 100%;
     border-radius: 12px;
     border: 1px dashed color-mix(in srgb, var(--brand-primary) 28%, var(--border-color));
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-app) 86%, transparent) 0%, color-mix(in srgb, var(--bg-app) 74%, var(--brand-primary) 8%) 100%);
+    background-color: var(--bg-app);
     color: var(--brand-primary);
     cursor: grab;
     flex-shrink: 0;
@@ -1813,6 +1805,7 @@ textarea {
 @media (max-width: 1280px) {
     .model-routing-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--space-5);
     }
 }
 
@@ -1831,6 +1824,7 @@ textarea {
     .model-form-grid,
     .model-routing-grid {
         grid-template-columns: minmax(0, 1fr);
+        gap: var(--space-4);
     }
 
     .model-page-actions,
@@ -2055,7 +2049,7 @@ textarea {
     width: 100%;
     height: 100%;
     border-radius: inherit;
-    background: linear-gradient(90deg, color-mix(in srgb, var(--brand-primary) 82%, #ffffff 18%) 0%, var(--brand-primary) 100%);
+    background-color: var(--brand-primary);
     transform-origin: left center;
     transform: scaleX(1);
 }
@@ -2325,6 +2319,7 @@ textarea {
 }
 
 .detail-modal-body {
+    flex: 1;
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
@@ -2583,7 +2578,7 @@ textarea {
     padding: var(--space-4);
     border-radius: 22px;
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 92%, var(--bg-app) 8%) 0%, color-mix(in srgb, var(--bg-panel) 84%, var(--bg-app) 16%) 100%);
+    background-color: var(--bg-panel);
     box-shadow: var(--shadow-sm);
 }
 
@@ -2993,8 +2988,15 @@ textarea {
 }
 
 .resource-controls,
-.resource-pagination,
+.resource-pagination {
+    padding: var(--space-4);
+}
+
 .resource-detail-shell {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
     padding: var(--space-4);
 }
 
@@ -3023,13 +3025,12 @@ textarea {
     padding-right: 48px;
     border-color: color-mix(in srgb, var(--border-color) 84%, transparent);
     background-color: color-mix(in srgb, var(--bg-app) 66%, var(--bg-panel) 34%);
-    background-image:
-        linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 48%, transparent) 0%, transparent 100%),
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18' fill='none'%3E%3Cpath d='M4.5 6.75L9 11.25L13.5 6.75' stroke='%2394A3B8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-    background-position: 0 0, calc(100% - 16px) 50%;
-    background-size: 100% 100%, 18px 18px;
-    background-repeat: no-repeat, no-repeat;
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--bg-panel) 52%, transparent);
+    background-color: color-mix(in srgb, var(--bg-app) 66%, var(--bg-panel) 34%);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18' fill='none'%3E%3Cpath d='M4.5 6.75L9 11.25L13.5 6.75' stroke='%2394A3B8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-position: calc(100% - 16px) 50%;
+    background-size: 18px 18px;
+    background-repeat: no-repeat;
+    box-shadow: var(--shadow-sm);
 }
 
 .resource-select:hover {
@@ -3065,9 +3066,8 @@ textarea {
     min-height: 46px;
     padding: 0 14px 0 16px;
     border-radius: 16px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
-    background:
-        linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 98%, transparent) 0%, color-mix(in srgb, var(--bg-app) 82%, transparent) 100%);
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-surface-inner);
     color: var(--text-primary);
     display: flex;
     align-items: center;
@@ -3077,14 +3077,13 @@ textarea {
     font-size: 0.95rem;
     font-weight: 700;
     line-height: 1.3;
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--bg-panel) 52%, transparent), 0 10px 24px -20px rgba(15, 23, 42, 0.38);
+    box-shadow: var(--shadow-sm);
     transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
 }
 
 .resource-select-trigger:hover {
     border-color: color-mix(in srgb, var(--brand-primary) 26%, var(--border-color));
-    background:
-        linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 100%, transparent) 0%, color-mix(in srgb, var(--bg-app) 76%, transparent) 100%);
+    background-color: var(--bg-hover);
 }
 
 .resource-select-trigger:focus-visible {
@@ -3142,9 +3141,9 @@ textarea {
     gap: 6px;
     padding: 8px;
     border-radius: 18px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: color-mix(in srgb, var(--bg-panel) 98%, var(--bg-app) 2%);
-    box-shadow: 0 24px 50px -24px rgba(15, 23, 42, 0.58), 0 0 0 1px color-mix(in srgb, var(--brand-primary) 10%, transparent);
+    border: 1px solid var(--border-strong);
+    background-color: var(--bg-panel);
+    box-shadow: var(--shadow-lg);
     backdrop-filter: blur(16px);
     max-height: 280px;
     overflow: auto;
@@ -3304,6 +3303,8 @@ textarea {
     font-weight: 600;
     color: var(--text-secondary);
 }
+.project-card-actions {
+    display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);

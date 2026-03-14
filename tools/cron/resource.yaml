@@ -2,7 +2,6 @@ schema_version: 1
 kind: tool
 name: cron
 description: 安排提醒和周期任务。动作：add、list、remove。
-config_namespace: ''
 requires:
   tools: []
   bins: []

@@ -10,18 +10,10 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.resources.embedded_mcp import EmbeddedMCPTool
 from g3ku.resources.models import ToolResourceDescriptor
-
-
-def _resolve_config_slice(config: Any, namespace: str) -> Any:
-    current = config
-    for part in [item for item in str(namespace or "").split(".") if item]:
-        if current is None:
-            return None
-        if isinstance(current, dict):
-            current = current.get(part)
-            continue
-        current = getattr(current, part, None)
-    return current
+from g3ku.resources.tool_settings import (
+    raw_tool_secrets_from_config,
+    raw_tool_settings_from_descriptor,
+)
 
 
 class ManifestBackedTool(Tool):
@@ -79,7 +71,8 @@ class ResourceLoader:
             resource_root=descriptor.root,
             main_root=descriptor.main_root,
             toolskills_root=descriptor.toolskills_root,
-            config_slice=_resolve_config_slice(app_config, descriptor.config_namespace),
+            tool_settings=raw_tool_settings_from_descriptor(descriptor),
+            tool_secrets=raw_tool_secrets_from_config(app_config, descriptor.name),
             services=SimpleNamespace(**services),
             resource_descriptor=descriptor,
         )

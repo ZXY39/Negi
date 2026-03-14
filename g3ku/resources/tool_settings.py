@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, TypeVar
+
+from pydantic import BaseModel
+
+from g3ku.config.schema import Base, MemoryToolsConfig
+from g3ku.resources.manifest import load_manifest
+from g3ku.resources.models import ToolResourceDescriptor
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class ExecToolSettings(Base):
+    timeout: int = 60
+    path_append: str = ""
+    restrict_to_workspace: bool = False
+
+
+class FilesystemToolSettings(Base):
+    restrict_to_workspace: bool = False
+
+
+class MemorySearchToolSettings(Base):
+    default_limit: int = 8
+
+
+class MemoryRuntimeSettings(MemoryToolsConfig):
+    pass
+
+
+def raw_tool_settings_from_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    payload = (metadata or {}).get("settings") if isinstance(metadata, dict) else None
+    return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def raw_tool_settings_from_descriptor(descriptor: ToolResourceDescriptor | None) -> dict[str, Any]:
+    return raw_tool_settings_from_metadata(getattr(descriptor, "metadata", None))
+
+
+def raw_tool_settings_from_runtime(runtime: Any) -> dict[str, Any]:
+    payload = getattr(runtime, "tool_settings", None)
+    return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def raw_tool_secrets_from_config(app_config: Any, tool_name: str) -> dict[str, Any]:
+    secrets = getattr(app_config, "tool_secrets", None)
+    if isinstance(secrets, dict):
+        payload = secrets.get(str(tool_name or "").strip()) or {}
+        return dict(payload or {}) if isinstance(payload, dict) else {}
+    return {}
+
+
+def raw_tool_secrets_from_runtime(runtime: Any) -> dict[str, Any]:
+    payload = getattr(runtime, "tool_secrets", None)
+    return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def validate_tool_settings(model_cls: type[T], payload: dict[str, Any] | None, *, tool_name: str) -> T:
+    try:
+        return model_cls.model_validate(dict(payload or {}))
+    except Exception as exc:
+        raise ValueError(f"invalid settings for tool '{tool_name}': {exc}") from exc
+
+
+def runtime_tool_settings(runtime: Any, model_cls: type[T], *, tool_name: str | None = None) -> T:
+    resolved_name = str(tool_name or getattr(getattr(runtime, "resource_descriptor", None), "name", "") or "tool").strip()
+    return validate_tool_settings(model_cls, raw_tool_settings_from_runtime(runtime), tool_name=resolved_name)
+
+
+def load_tool_settings_from_manifest(workspace: Path, tool_name: str, model_cls: type[T]) -> T:
+    manifest_path = Path(workspace) / "tools" / str(tool_name or "").strip() / "resource.yaml"
+    data = load_manifest(manifest_path)
+    return validate_tool_settings(model_cls, raw_tool_settings_from_metadata(data), tool_name=tool_name)

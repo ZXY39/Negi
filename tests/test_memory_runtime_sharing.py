@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import shutil
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from g3ku.agent.rag_memory import G3kuHybridStore
 from g3ku.providers.openai_codex_provider import _convert_messages
+from g3ku.resources import ResourceManager
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 
 
@@ -204,3 +207,69 @@ def test_g3ku_hybrid_store_reuses_qdrant_backend_per_process(tmp_path, monkeypat
         assert calls["closed"] == 1
     finally:
         G3kuHybridStore._dense_backend_registry.clear()
+
+
+
+def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(Path(__file__).resolve().parents[1] / 'tools' / 'memory_runtime', workspace / 'tools' / 'memory_runtime')
+
+    manager = ResourceManager(
+        workspace,
+        app_config=SimpleNamespace(
+            resources=SimpleNamespace(
+                enabled=True,
+                skills_dir='skills',
+                tools_dir='tools',
+                manifest_name='resource.yaml',
+                state_path='.g3ku/resources.state.json',
+                reload=SimpleNamespace(enabled=True, poll_interval_ms=200, debounce_ms=100, lazy_reload_on_access=True, keep_last_good_version=True),
+                locks=SimpleNamespace(lock_dir='.g3ku/resource-locks', logical_delete_guard=True, windows_fs_lock=True),
+            )
+        ),
+    )
+    manager.reload_now(trigger='test-bind')
+
+    class _FakeMemoryManager:
+        def __init__(self, workspace_path, cfg):
+            self.workspace = workspace_path
+            self.cfg = cfg
+            self.store = object()
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    class _Loop(SimpleNamespace):
+        def _use_rag_memory(self) -> bool:
+            cfg = getattr(self, '_memory_runtime_settings', None)
+            return bool(cfg and cfg.enabled)
+
+    loop = _Loop(
+        workspace=workspace,
+        resource_manager=manager,
+        _internal_tool_settings_fingerprints={},
+        _memory_manager_cls=_FakeMemoryManager,
+        memory_manager=None,
+        commit_service=None,
+        _memory_runtime_settings=None,
+        _store=None,
+        _store_enabled=False,
+        _checkpointer_enabled=False,
+        _checkpointer_backend='disabled',
+        _checkpointer_path=None,
+        _checkpointer=None,
+        _checkpointer_cm=None,
+    )
+
+    try:
+        changed = RuntimeBootstrapBridge(loop).sync_internal_tool_runtimes(force=True, reason='test')
+        assert changed is True
+        assert loop._memory_runtime_settings is not None
+        assert loop._memory_runtime_settings.enabled is True
+        assert loop.memory_manager is not None
+        assert loop._store_enabled is True
+    finally:
+        manager.close()

@@ -67,7 +67,6 @@ class ToolResourceDescriptor(BaseResourceDescriptor):
     requires_tools: list[str] = field(default_factory=list)
     requires_bins: list[str] = field(default_factory=list)
     requires_env: list[str] = field(default_factory=list)
-    config_namespace: str = ""
     toolskill_enabled: bool = True
 
 

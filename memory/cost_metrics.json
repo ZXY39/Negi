@@ -1,8 +1,8 @@
 {
-  "retrieval_calls": 4.0,
+  "retrieval_calls": 13.0,
   "planner_calls": 3.0,
   "commit_calls": 0.0,
   "rerank_calls": 0.0,
-  "token_in": 51.0,
-  "token_out": 3.0
+  "token_in": 69.0,
+  "token_out": 4.0
 }

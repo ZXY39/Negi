@@ -1,12 +1,11 @@
 schema_version: 1
 kind: tool
 name: filesystem
-display_name: "文件系统工具"
-description: 统一的工作区文件工具。用于读取文件、列出目录、写入文件、精确替换编辑文件、删除文件，以及在不直接修改文件时生成可审阅补丁。
+display_name: Filesystem
+description: Read, list, write, edit, delete workspace files, and create reviewable patch artifacts.
 protocol: mcp
 mcp:
   transport: embedded
-config_namespace: ''
 requires:
   tools: []
   bins: []
@@ -15,6 +14,8 @@ permissions:
   network: false
   filesystem:
     - workspace
+settings:
+  restrict_to_workspace: false
 parameters:
   type: object
   properties:
@@ -27,22 +28,22 @@ parameters:
         - edit
         - delete
         - propose_patch
-      description: 要执行的文件动作。
+      description: Filesystem action to execute.
     path:
       type: string
-      description: 目标文件或目录路径；相对路径按 workspace 解析。
+      description: Target file or directory path. Relative paths resolve from workspace.
     content:
       type: string
-      description: action=write 时要写入的完整内容。
+      description: Required when action=write.
     old_text:
       type: string
-      description: action=edit 或 action=propose_patch 时要匹配的原文本，必须唯一匹配。
+      description: Required when action=edit or action=propose_patch. Must match exactly once.
     new_text:
       type: string
-      description: action=edit 或 action=propose_patch 时的替换文本。
+      description: Replacement text for action=edit or action=propose_patch.
     summary:
       type: string
-      description: action=propose_patch 时可选的补丁摘要。
+      description: Optional patch summary when action=propose_patch.
   required:
     - action
     - path

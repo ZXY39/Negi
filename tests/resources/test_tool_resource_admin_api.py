@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+import json
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from loguru import logger
 
 from g3ku.resources import ResourceManager
-from g3ku.runtime.engine import AgentRuntimeEngine
 from main.api import admin_rest
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
 from main.service.runtime_service import MainRuntimeService
@@ -214,18 +213,32 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
     assert [action.action_id for action in visible[0].actions] == ['read']
 
 
-def test_agent_runtime_engine_ignores_mcp_servers(tmp_path: Path):
-    messages: list[str] = []
-    sink_id = logger.add(lambda message: messages.append(message.record['message']), level='WARNING')
-    try:
-        engine = AgentRuntimeEngine(
-            bus=None,
-            provider=None,
-            workspace=tmp_path,
-            mcp_servers={'demo': {'url': 'https://example.com'}},
-        )
-    finally:
-        logger.remove(sink_id)
+def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / '.g3ku').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools' / 'memory_runtime').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools' / 'memory_runtime' / 'resource.yaml').write_text(
+        'schema_version: 1\nkind: tool\nname: memory_runtime\nsettings:\n  enabled: false\n',
+        encoding='utf-8',
+    )
+    (workspace / '.g3ku' / 'config.json').write_text(
+        json.dumps({
+            'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'multiAgent': {'orchestratorModelKey': None}},
+            'channels': {'sendProgress': True, 'sendToolHints': True},
+            'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': '', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
+            'providers': {},
+            'gateway': {'host': '127.0.0.1', 'port': 1, 'heartbeat': {'enabled': True, 'intervalS': 1}},
+            'tools': {'exec': {'timeout': 10}},
+            'resources': {'enabled': True, 'skillsDir': 'skills', 'toolsDir': 'tools', 'manifestName': 'resource.yaml', 'reload': {'enabled': True, 'pollIntervalMs': 1000, 'debounceMs': 400, 'lazyReloadOnAccess': True, 'keepLastGoodVersion': True}, 'locks': {'lockDir': '.g3ku/resource-locks', 'logicalDeleteGuard': True, 'windowsFsLock': True}, 'statePath': '.g3ku/resources.state.json'},
+            'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4},
+        }),
+        encoding='utf-8',
+    )
 
-    assert engine.mcp_servers == {}
-    assert any('tools.mcp_servers is deprecated and ignored' in message for message in messages)
+    monkeypatch.chdir(workspace)
+
+    from g3ku.config.loader import load_config
+
+    with pytest.raises(ValueError, match='config.tools has been removed'):
+        load_config()

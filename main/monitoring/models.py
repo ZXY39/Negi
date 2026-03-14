@@ -21,6 +21,16 @@ class TaskTreeNode(Model):
     children: list['TaskTreeNode'] = Field(default_factory=list)
 
 
+class LatestTaskNodeOutput(Model):
+    node_id: str
+    parent_node_id: str | None = None
+    depth: int = 0
+    status: NodeStatus = 'in_progress'
+    title: str = ''
+    updated_at: str = ''
+    output: str = ''
+
+
 class TaskSummaryResult(Model):
     total_tasks: int = 0
     in_progress_tasks: int = 0
@@ -46,6 +56,7 @@ class TaskProgressResult(Model):
     task_status: TaskStatus = 'in_progress'
     tree_text: str = ''
     root: TaskTreeNode | None = None
+    latest_node: LatestTaskNodeOutput | None = None
     nodes: list[dict[str, Any]] = Field(default_factory=list)
     text: str = ''
 

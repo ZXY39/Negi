@@ -2,7 +2,6 @@ schema_version: 1
 kind: tool
 name: message
 description: 向用户发送消息，需要与外部渠道沟通时使用。
-config_namespace: ''
 requires:
   tools: []
   bins: []

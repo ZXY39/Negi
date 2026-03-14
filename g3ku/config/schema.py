@@ -487,27 +487,6 @@ class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
-class WebSearchConfig(Base):
-    """Web search tool configuration."""
-
-    api_key: str = ""  # Brave Search API key
-    max_results: int = 5
-
-
-class WebToolsConfig(Base):
-    """Web tools configuration."""
-
-    proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
-    search: WebSearchConfig = Field(default_factory=WebSearchConfig)
-
-
-class ExecToolConfig(Base):
-    """Shell exec tool configuration."""
-
-    timeout: int = 60
-    path_append: str = ""
-
-
 class MemoryCheckpointerConfig(Base):
     """LangGraph checkpointer configuration."""
 
@@ -610,69 +589,6 @@ class MemoryToolsConfig(Base):
 
 
 
-class PictureWashingToolConfig(Base):
-    """Picture washing tool configuration."""
-
-    base_url: str = ""
-    authorization: str = ""
-    style: str = "写实"
-    model: str = "Seedream 4.5"
-    stream: bool = False
-    timeout_s: int = 120
-    auto_probe_authorization: bool = True
-    authorization_probe_url: str = ""
-    authorization_probe_timeout_s: int = 45
-    authorization_cookie_names: list[str] = Field(default_factory=lambda: ["sessionid", "session_id"])
-
-
-class AgentBrowserToolConfig(Base):
-    """External agent-browser CLI tool configuration."""
-
-    enabled: bool = True
-    command: str = "agent-browser"
-    npm_command: str = "npm"
-    node_command: str = "node"
-    required_min_version: str = "0.16.3"
-    install_spec: str = "agent-browser@latest"
-    auto_install: bool = True
-    auto_upgrade_if_below_min_version: bool = True
-    auto_install_browser: bool = True
-    browser_install_args: list[str] = Field(default_factory=lambda: ["install"])
-    default_headless: bool = False
-    command_timeout_s: int = 120
-    install_timeout_s: int = 900
-    session_env_key: str = "AGENT_BROWSER_SESSION"
-    max_stdout_chars: int = 120000
-    max_stderr_chars: int = 120000
-    extra_env: dict[str, str] = Field(default_factory=dict)
-    allow_file_access: bool = False
-    default_color_scheme: Literal["light", "dark", "no-preference"] | None = None
-    default_download_path: str = ""
-
-
-class FileVaultConfig(Base):
-    """Uploaded file vault configuration."""
-
-    enabled: bool = True
-    root_dir: str = "memory/uploads"
-    index_db_path: str = "memory/file_vault.db"
-    max_storage_bytes: int = 4 * 1024 * 1024 * 1024
-    threshold_pct: int = 70
-    cleanup_target_pct: int = 55
-    recent_protect_hours: int = 24
-
-
-class MCPServerConfig(Base):
-    """MCP server connection configuration (stdio or HTTP)."""
-
-    command: str = ""  # Stdio: command to run (e.g. "npx")
-    args: list[str] = Field(default_factory=list)  # Stdio: command arguments
-    env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
-    url: str = ""  # HTTP: streamable HTTP endpoint URL
-    headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP Headers
-    tool_timeout: int = 30  # Seconds before a tool call is cancelled
-
-
 class ResourceReloadConfig(Base):
     enabled: bool = True
     poll_interval_ms: int = 1000
@@ -696,19 +612,6 @@ class ResourceRuntimeConfig(Base):
     locks: ResourceLocksConfig = Field(default_factory=ResourceLocksConfig)
     state_path: str = ".g3ku/resources.state.json"
 
-class ToolsConfig(Base):
-    """Tools configuration."""
-
-    web: WebToolsConfig = Field(default_factory=WebToolsConfig)
-    exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
-    memory: MemoryToolsConfig = Field(default_factory=MemoryToolsConfig)
-    file_vault: FileVaultConfig = Field(default_factory=FileVaultConfig)
-    picture_washing: PictureWashingToolConfig = Field(default_factory=PictureWashingToolConfig)
-    agent_browser: AgentBrowserToolConfig = Field(default_factory=AgentBrowserToolConfig)
-    restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
-    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
-
-
 
 
 class MainRuntimeConfig(Base):
@@ -728,7 +631,7 @@ class Config(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
-    tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    tool_secrets: dict[str, dict[str, Any]] = Field(default_factory=dict)
     resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
     main_runtime: MainRuntimeConfig = Field(default_factory=MainRuntimeConfig)
 
@@ -912,7 +815,7 @@ class Config(BaseSettings):
             chain.append(ModelFallbackTarget(model_key=key))
         return chain
 
-    model_config = ConfigDict(env_prefix="G3KU_", env_nested_delimiter="__")
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, env_prefix="G3KU_", env_nested_delimiter="__")
 
 
 

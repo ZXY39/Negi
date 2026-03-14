@@ -21,7 +21,7 @@
     "catalog": [
       {
         "key": "ceo_primary",
-        "providerModel": "responses:gpt-5.4",
+        "providerModel": "responses:gpt-5.2",
         "apiKey": "sk-f053c362909e7bd9285bd593d639dac0f45fde9586a2d84904274a8489fa1bf9",
         "apiBase": "https://cc.sub.258000.sbs/v1/responses",
         "extraHeaders": null,
@@ -54,6 +54,11 @@
       "apiKey": "sk-72f5f64d75eb4c9fbb0c83519e6cc204",
       "apiBase": null,
       "extraHeaders": null
+    },
+    "responses": {
+      "apiKey": "sk-f053c362909e7bd9285bd593d639dac0f45fde9586a2d84904274a8489fa1bf9",
+      "apiBase": "https://cc.sub.258000.sbs/v1/responses",
+      "extraHeaders": null
     }
   },
   "gateway": {
@@ -64,130 +69,16 @@
       "intervalS": 1800
     }
   },
-  "tools": {
-    "web": {
-      "proxy": null,
-      "search": {
-        "apiKey": "",
-        "maxResults": 5
-      }
+  "toolSecrets": {
+    "web_search": {
+      "apiKey": ""
     },
-    "exec": {
-      "timeout": 60,
-      "pathAppend": ""
+    "picture_washing": {
+      "authorization": ""
     },
-    "memory": {
-      "enabled": true,
-      "mode": "dual",
-      "backend": "rag",
-      "archVersion": "v2",
-      "features": {
-        "unifiedContext": true,
-        "layeredLoading": true,
-        "queryPlanner": true,
-        "commitPipeline": true,
-        "splitStore": true,
-        "observability": true
-      },
-      "checkpointer": {
-        "backend": "sqlite",
-        "path": "memory/checkpoints.sqlite3"
-      },
-      "store": {
-        "backend": "hybrid",
-        "qdrantPath": "memory/qdrant",
-        "qdrantCollection": "nanobot_memory_v1",
-        "sqlitePath": "memory/memory.db"
-      },
-      "retrieval": {
-        "denseTopK": 24,
-        "sparseTopK": 24,
-        "fusedTopK": 12,
-        "contextTopK": 8,
-        "sentenceWindow": 3,
-        "maxContextTokens": 1200,
-        "defaultLoadLevel": "l1",
-        "rerankProviderModel": "dashscope:qwen3-vl-rerank"
-      },
-      "embedding": {
-        "providerModel": "dashscope:qwen3-vl-embedding",
-        "batchSize": 32
-      },
-      "isolation": {
-        "mode": "session",
-        "namespaceTemplate": [
-          "memory",
-          "{channel}",
-          "{chat_id}"
-        ]
-      },
-      "guard": {
-        "mode": "tiered",
-        "autoFactConfidence": 0.8
-      },
-      "compat": {
-        "dualWriteLegacyFiles": true
-      },
-      "commit": {
-        "turnTrigger": 20,
-        "idleMinutesTrigger": 360
-      },
-      "cost": {
-        "maxIncreasePct": 15
-      },
-      "bootstrapMode": "new_only",
-      "retentionDays": null
-    },
-    "agentBrowser": {
-      "enabled": true,
-      "command": "agent-browser",
-      "npmCommand": "npm",
-      "nodeCommand": "node",
-      "requiredMinVersion": "0.16.3",
-      "installSpec": "agent-browser@latest",
-      "autoInstall": true,
-      "autoUpgradeIfBelowMinVersion": true,
-      "autoInstallBrowser": true,
-      "browserInstallArgs": [
-        "install"
-      ],
-      "defaultHeadless": false,
-      "commandTimeoutS": 120,
-      "installTimeoutS": 600,
-      "sessionEnvKey": "AGENT_BROWSER_SESSION",
-      "maxStdoutChars": 120000,
-      "maxStderrChars": 120000,
-      "extraEnv": {},
-      "allowFileAccess": false,
-      "defaultColorScheme": null,
-      "defaultDownloadPath": ""
-    },
-    "fileVault": {
-      "enabled": true,
-      "rootDir": "memory/uploads",
-      "indexDbPath": "memory/file_vault.db",
-      "maxStorageBytes": 4294967296,
-      "thresholdPct": 70,
-      "cleanupTargetPct": 55,
-      "recentProtectHours": 24
-    },
-    "pictureWashing": {
-      "baseUrl": "",
-      "authorization": "",
-      "style": "写实",
-      "model": "Seedream 4.5",
-      "stream": false,
-      "timeoutS": 120,
-      "autoProbeAuthorization": true,
-      "authorizationProbeUrl": "",
-      "authorizationProbeTimeoutS": 45,
-      "authorizationCookieNames": [
-        "sessionid",
-        "session_id"
-      ]
-    },
-    "mcpServers": {},
-    "restrictToWorkspace": false
+    "agent_browser": {
+      "extraEnv": {}
+    }
   },
   "resources": {
     "enabled": true,

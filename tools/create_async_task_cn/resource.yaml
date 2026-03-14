@@ -3,7 +3,6 @@ kind: tool
 display_name: "\u521b\u5efa\u5f02\u6b65\u4efb\u52a1"
 name: create_async_task
 description: 把用户需求转交为后台异步任务。
-config_namespace: ''
 requires:
   tools: []
   bins: []

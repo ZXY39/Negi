@@ -21,6 +21,7 @@ from rich.text import Text
 
 from g3ku import __logo__, __version__
 from g3ku.config.schema import Config
+from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
 from g3ku.utils.helpers import resolve_path_in_workspace, sync_workspace_templates
 
 app = typer.Typer(
@@ -267,17 +268,27 @@ def _make_provider(config: Config, *, scope: str = "ceo"):
         raise typer.Exit(1) from exc
 
 
+def _load_memory_runtime_settings(config: Config) -> MemoryRuntimeSettings | None:
+    try:
+        return load_tool_settings_from_manifest(config.workspace_path, "memory_runtime", MemoryRuntimeSettings)
+    except Exception:
+        return None
+
+
 def _memory_startup_self_check(config: Config) -> None:
     """Print startup diagnostics for memory mode and embedding credentials."""
-    mem_cfg = config.tools.memory
+    mem_cfg = _load_memory_runtime_settings(config)
+    if mem_cfg is None:
+        console.print("[yellow]Memory self-check:[/yellow] tools/memory_runtime/resource.yaml is missing or invalid.")
+        return
     if not mem_cfg.enabled:
-        console.print("[yellow]Memory self-check:[/yellow] tools.memory.enabled=false (disabled).")
+        console.print("[yellow]Memory self-check:[/yellow] tools/memory_runtime settings.enabled=false (disabled).")
         return
 
     mode = str(mem_cfg.mode or "legacy").lower()
     if mode != "rag":
         console.print(
-            f"[red]Memory self-check alert:[/red] tools.memory.mode='{mode}', expected 'rag'."
+            f"[red]Memory self-check alert:[/red] tools/memory_runtime mode='{mode}', expected 'rag'."
         )
     else:
         console.print("[green]Memory self-check:[/green] mode=rag")
@@ -385,19 +396,10 @@ def _make_agent_loop(
         reasoning_effort=config.agents.defaults.reasoning_effort,
         multi_agent_config=config.agents.multi_agent,
         app_config=config,
-        brave_api_key=config.tools.web.search.api_key or None,
-        web_proxy=config.tools.web.proxy or None,
-        exec_config=config.tools.exec,
-        memory_config=config.tools.memory,
-        file_vault_config=config.tools.file_vault,
         resource_config=config.resources,
         cron_service=cron_service,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
-        mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
-        picture_washing_config=config.tools.picture_washing.model_dump(),
-        agent_browser_config=config.tools.agent_browser.model_dump(),
         debug_mode=debug_mode,
         middlewares=middlewares,
     )
@@ -871,18 +873,22 @@ def status():
         console.print(f"Execution Model: {config.resolve_role_model_key('execution')}")
         console.print(f"Inspection Model: {config.resolve_role_model_key('inspection')}")
         console.print(f"Runtime: {config.agents.defaults.runtime}")
-        mem_cfg = config.tools.memory
-        console.print(f"Memory Mode: {mem_cfg.mode} ({'enabled' if mem_cfg.enabled else 'disabled'})")
-        cp_path = resolve_path_in_workspace(mem_cfg.checkpointer.path, config.workspace_path)
-        store_db = resolve_path_in_workspace(mem_cfg.store.sqlite_path, config.workspace_path)
-        qdrant_dir = resolve_path_in_workspace(mem_cfg.store.qdrant_path, config.workspace_path)
-        console.print(f"Memory Checkpointer: {mem_cfg.checkpointer.backend} {cp_path}")
-        console.print(f"Memory Store(SQLite): {store_db} {_status_mark(store_db.exists())}")
-        console.print(f"Memory Store(Qdrant): {qdrant_dir} {_status_mark(qdrant_dir.exists())}")
-        pending_file = config.workspace_path / "memory" / "pending_facts.jsonl"
-        audit_file = config.workspace_path / "memory" / "audit.jsonl"
-        console.print(f"Memory Pending File: {pending_file} {_status_mark(pending_file.exists())}")
-        console.print(f"Memory Audit File: {audit_file} {_status_mark(audit_file.exists())}")
+
+        mem_cfg = _load_memory_runtime_settings(config)
+        if mem_cfg is None:
+            console.print("Memory Runtime: [yellow]missing tools/memory_runtime/resource.yaml[/yellow]")
+        else:
+            console.print(f"Memory Mode: {mem_cfg.mode} ({'enabled' if mem_cfg.enabled else 'disabled'})")
+            cp_path = resolve_path_in_workspace(mem_cfg.checkpointer.path, config.workspace_path)
+            store_db = resolve_path_in_workspace(mem_cfg.store.sqlite_path, config.workspace_path)
+            qdrant_dir = resolve_path_in_workspace(mem_cfg.store.qdrant_path, config.workspace_path)
+            console.print(f"Memory Checkpointer: {mem_cfg.checkpointer.backend} {cp_path}")
+            console.print(f"Memory Store(SQLite): {store_db} {_status_mark(store_db.exists())}")
+            console.print(f"Memory Store(Qdrant): {qdrant_dir} {_status_mark(qdrant_dir.exists())}")
+            pending_file = config.workspace_path / "memory" / "pending_facts.jsonl"
+            audit_file = config.workspace_path / "memory" / "audit.jsonl"
+            console.print(f"Memory Pending File: {pending_file} {_status_mark(pending_file.exists())}")
+            console.print(f"Memory Audit File: {audit_file} {_status_mark(audit_file.exists())}")
 
         # Check API keys from registry
         for spec in PROVIDERS:

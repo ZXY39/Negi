@@ -3,7 +3,6 @@ kind: tool
 display_name: "\u83b7\u53d6\u4efb\u52a1"
 name: task_list
 description: 按任务类型返回任务 id 列表和简要描述。
-config_namespace: ''
 requires:
   tools: []
   bins: []

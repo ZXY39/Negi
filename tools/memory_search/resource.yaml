@@ -1,16 +1,10 @@
 schema_version: 1
 kind: tool
 name: memory_search
-description: '搜索长期记忆并返回结构化结果，按 context 类型（memory/resource/skill）分组，并提供统一排序视图。
-
-  必须调用：当回答依赖当前轮未包含的历史用户/项目事实时，例如偏好、既有决策、约束、未完成事项，或出现“之前说过/记得”类引用。
-
-  避免调用：纯单轮改写/翻译/格式化、常识问答、简单问候，或当前轮已包含全部所需事实。
-
-  调用频率：通常每轮最多一次；仅当输出引入新的实体且需要二次检索时再调用。
-
-  查询写法：包含具体实体与意图（人/项目/日期/决策），避免“帮我一下/那个东西”这类模糊描述。'
-config_namespace: tools.memory
+description: Search long-term memory and return grouped and ranked results.
+protocol: mcp
+mcp:
+  transport: embedded
 requires:
   tools: []
   bins: []
@@ -18,34 +12,36 @@ requires:
 permissions:
   network: false
   filesystem: []
+settings:
+  default_limit: 8
 parameters:
   type: object
   properties:
     query:
       type: string
-      description: 包含实体与意图的明确检索词，避免模糊描述。
+      description: Concrete lookup query with entities and intent.
     limit:
       type: integer
-      description: 统一视图的最大结果数。
+      description: Maximum number of unified ranked results.
       minimum: 1
       maximum: 20
     context_type:
       type: string
       enum:
-      - memory
-      - resource
-      - skill
-      description: 可选：仅检索某一类 context。
+        - memory
+        - resource
+        - skill
+      description: Optional context type filter.
     include_l2:
       type: boolean
-      description: 包含 L2 预览片段（若可用）。
+      description: Include L2 preview snippets when available.
     session:
       type: string
-      description: 可选：会话 key 覆盖值，例如 cli:direct。
+      description: Optional session key override, for example cli:direct.
   required:
-  - query
+    - query
 exposure:
   agent: true
-  org_graph: true
+  main_runtime: true
 toolskill:
   enabled: true

@@ -3,7 +3,6 @@ kind: tool
 display_name: "\u4efb\u52a1\u6c47\u603b\u5de5\u5177"
 name: task_summary
 description: 返回总任务、进行中任务、失败任务数量。
-config_namespace: ''
 requires:
   tools: []
   bins: []

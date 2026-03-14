@@ -139,7 +139,6 @@ class ResourceRegistry:
             requires_tools=[str(item) for item in ((data.get("requires") or {}).get("tools") or [])],
             requires_bins=[str(item) for item in ((data.get("requires") or {}).get("bins") or [])],
             requires_env=[str(item) for item in ((data.get("requires") or {}).get("env") or [])],
-            config_namespace=str(data.get("config_namespace") or "").strip(),
             toolskill_enabled=bool((data.get("toolskill") or {}).get("enabled", True)),
             metadata=data,
             exposure={

@@ -2,7 +2,6 @@ schema_version: 1
 kind: tool
 name: load_tool_context
 description: 加载当前可见工具的详细使用说明，便于 CEO 正确使用。
-config_namespace: ''
 requires:
   tools: []
   bins: []

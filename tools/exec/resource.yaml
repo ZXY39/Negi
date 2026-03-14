@@ -1,8 +1,10 @@
 schema_version: 1
 kind: tool
 name: exec
-description: 执行 shell 命令并返回输出。请谨慎使用。
-config_namespace: tools.exec
+description: Execute shell commands inside the workspace runtime.
+protocol: mcp
+mcp:
+  transport: embedded
 requires:
   tools: []
   bins: []
@@ -10,20 +12,24 @@ requires:
 permissions:
   network: false
   filesystem:
-  - workspace
+    - workspace
+settings:
+  timeout: 60
+  path_append: ''
+  restrict_to_workspace: false
 parameters:
   type: object
   properties:
     command:
       type: string
-      description: 要执行的 shell 命令
+      description: Shell command to execute.
     working_dir:
       type: string
-      description: 可选：命令的工作目录
+      description: Optional working directory override.
   required:
-  - command
+    - command
 exposure:
   agent: true
-  org_graph: true
+  main_runtime: true
 toolskill:
   enabled: true

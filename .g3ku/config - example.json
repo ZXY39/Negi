@@ -15,7 +15,7 @@
           "name": "prepend_system_message",
           "classPath": "",
           "options": {
-            "text": "[DEEP_MODE_PROTOCOL_V1]\nEvaluate deep-mode entry on every user turn.\nIf any deep-entry condition is met, FIRST action must be enter_deep_mode.\nDeep-entry conditions: explicit plan request; cross-turn dependency; file-memory dependency; long-running/interruptible task; or at least two weak signals (multi-step, multi-tool, phased wording).\nControl intents must call tools before narrative: status->deep_mode_status, pause->deep_mode_pause, continue->deep_mode_resume(replan=true), restart->deep_mode_cancel then enter_deep_mode.\nIf user says \"do not plan\" or \"direct answer\", prefer normal mode unless a strong deep signal exists.\nForbidden: saying \"I will start\" or \"I will continue\" without a tool call.\nWhen must_execute intent is clear and required tool is available, call the tool in this turn.\nIf prior turns already established file placeholders and user asks to continue reading, use these placeholders, or read the file content, call file_vault_read in this turn.\nIf the user asks to open a browser visibly or says they want to see browser actions, call agent_browser with headless=false; use headless=true only for background probing.\nIf a tool call fails, return only one blocking reason plus the next minimal action.\nNever repeat promises without new tool results."
+            "text": "[DEEP_MODE_PROTOCOL_V1]\nEvaluate deep-mode entry on every user turn.\nIf any deep-entry condition is met, FIRST action must be enter_deep_mode.\nDeep-entry conditions: explicit plan request; cross-turn dependency; file-memory dependency; long-running/interruptible task; or at least two weak signals (multi-step, multi-tool, phased wording).\nControl intents must call tools before narrative: status->deep_mode_status, pause->deep_mode_pause, continue->deep_mode_resume(replan=true), restart->deep_mode_cancel then enter_deep_mode.\nIf user says \"do not plan\" or \"direct answer\", prefer normal mode unless a strong deep signal exists.\nForbidden: saying \"I will start\" or \"I will continue\" without a tool call.\nWhen must_execute intent is clear and required tool is available, call the tool in this turn.\nIf prior turns already established file placeholders and user asks to continue reading, use these placeholders, or read the file content, read the workspace directly with the filesystem tool in this turn.\nIf a tool call fails, return only one blocking reason plus the next minimal action.\nNever repeat promises without new tool results."
           }
         },
         {
@@ -327,139 +327,6 @@
       "intervalS": 1800
     }
   },
-  "tools": {
-    "web": {
-      "proxy": null,
-      "search": {
-        "apiKey": "",
-        "maxResults": 5
-      }
-    },
-    "exec": {
-      "timeout": 60,
-      "pathAppend": ""
-    },
-    "memory": {
-      "enabled": true,
-      "mode": "dual",
-      "backend": "rag",
-      "archVersion": "v2",
-      "features": {
-        "unifiedContext": true,
-        "layeredLoading": true,
-        "queryPlanner": true,
-        "commitPipeline": true,
-        "splitStore": true,
-        "observability": true
-      },
-      "checkpointer": {
-        "backend": "sqlite",
-        "path": "memory/checkpoints.sqlite3"
-      },
-      "store": {
-        "backend": "hybrid",
-        "qdrantPath": "memory/qdrant",
-        "qdrantCollection": "nanobot_memory_v1",
-        "sqlitePath": "memory/memory.db"
-      },
-      "retrieval": {
-        "denseTopK": 24,
-        "sparseTopK": 24,
-        "fusedTopK": 12,
-        "contextTopK": 8,
-        "sentenceWindow": 3,
-        "maxContextTokens": 1200,
-        "defaultLoadLevel": "l1",
-        "rerankProviderModel": "dashscope:qwen3-vl-rerank"
-      },
-      "embedding": {
-        "providerModel": "dashscope:qwen3-vl-embedding",
-        "batchSize": 32
-      },
-      "isolation": {
-        "mode": "session",
-        "namespaceTemplate": [
-          "memory",
-          "{channel}",
-          "{chat_id}"
-        ]
-      },
-      "guard": {
-        "mode": "tiered",
-        "autoFactConfidence": 0.8
-      },
-      "compat": {
-        "dualWriteLegacyFiles": true
-      },
-      "commit": {
-        "turnTrigger": 20,
-        "idleMinutesTrigger": 360
-      },
-      "cost": {
-        "maxIncreasePct": 15
-      },
-      "bootstrapMode": "new_only",
-      "retentionDays": null
-    },
-    "fileVault": {
-      "enabled": true,
-      "rootDir": "memory/uploads",
-      "indexDbPath": "memory/file_vault.db",
-      "maxStorageBytes": 4294967296,
-      "thresholdPct": 70,
-      "cleanupTargetPct": 55,
-      "recentProtectHours": 24
-    },
-    "deepMode": {
-      "enabled": true,
-      "controlEnabled": true,
-      "indexDbPath": "memory/deep_mode.db",
-      "defaultMaxSteps": 12,
-      "stepBudgetPerRun": 3,
-      "runTimeBudgetSeconds": 20
-    },
-    "pictureWashing": {
-      "baseUrl": "",
-      "authorization": "",
-      "style": "写实",
-      "model": "Seedream 4.5",
-      "stream": false,
-      "timeoutS": 120,
-      "autoProbeAuthorization": true,
-      "authorizationProbeUrl": "",
-      "authorizationProbeTimeoutS": 45,
-      "authorizationCookieNames": [
-        "sessionid",
-        "session_id"
-      ]
-    },
-    "restrictToWorkspace": false,
-    "mcpServers": {},
-    "agentBrowser": {
-      "enabled": true,
-      "command": "agent-browser",
-      "npmCommand": "npm",
-      "nodeCommand": "node",
-      "requiredMinVersion": "0.16.3",
-      "installSpec": "agent-browser@latest",
-      "autoInstall": true,
-      "autoUpgradeIfBelowMinVersion": true,
-      "autoInstallBrowser": true,
-      "browserInstallArgs": [
-        "install"
-      ],
-      "defaultHeadless": false,
-      "commandTimeoutS": 120,
-      "installTimeoutS": 600,
-      "sessionEnvKey": "AGENT_BROWSER_SESSION",
-      "maxStdoutChars": 120000,
-      "maxStderrChars": 120000,
-      "extraEnv": {},
-      "allowFileAccess": false,
-      "defaultColorScheme": null,
-      "defaultDownloadPath": ""
-    }
-  },
   "subagent": {
     "protocol": "openai",
     "baseurl": "https://cc.sub.258000.sbs/v1/responses",
@@ -484,5 +351,16 @@
       "windowsFsLock": true
     },
     "statePath": ".g3ku/resources.state.json"
+  },
+  "toolSecrets": {
+    "web_search": {
+      "apiKey": ""
+    },
+    "picture_washing": {
+      "authorization": ""
+    },
+    "agent_browser": {
+      "extraEnv": {}
+    }
   }
 }

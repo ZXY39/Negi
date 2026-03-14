@@ -34,6 +34,12 @@ class CustomProvider(LLMProvider):
             kwargs.update(tools=tools, tool_choice=tool_choice if tool_choice is not None else "auto")
             if parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = bool(parallel_tool_calls)
+        endpoint = f"{self.api_base.rstrip('/')}/chat/completions" if self.api_base else None
+        self._trace_request_payload(
+            provider="custom",
+            endpoint=endpoint,
+            body=dict(kwargs),
+        )
         try:
             return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:

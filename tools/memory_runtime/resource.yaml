@@ -1,0 +1,72 @@
+schema_version: 1
+kind: tool
+name: memory_runtime
+description: Internal memory runtime settings anchor.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+settings:
+  enabled: true
+  mode: dual
+  backend: rag
+  arch_version: v2
+  features:
+    unified_context: true
+    layered_loading: true
+    query_planner: true
+    commit_pipeline: true
+    split_store: true
+    observability: true
+  checkpointer:
+    backend: sqlite
+    path: memory/checkpoints.sqlite3
+  store:
+    backend: hybrid
+    qdrant_path: memory/qdrant
+    qdrant_collection: nanobot_memory_v1
+    sqlite_path: memory/memory.db
+  retrieval:
+    dense_top_k: 24
+    sparse_top_k: 24
+    fused_top_k: 12
+    context_top_k: 8
+    sentence_window: 3
+    max_context_tokens: 1200
+    default_load_level: l1
+    rerank_provider_model: dashscope:qwen3-vl-rerank
+  embedding:
+    provider_model: dashscope:qwen3-vl-embedding
+    batch_size: 32
+  isolation:
+    mode: session
+    namespace_template:
+      - memory
+      - '{channel}'
+      - '{chat_id}'
+  guard:
+    mode: tiered
+    auto_fact_confidence: 0.8
+  compat:
+    dual_write_legacy_files: true
+  commit:
+    turn_trigger: 20
+    idle_minutes_trigger: 360
+  cost:
+    max_increase_pct: 15
+  bootstrap_mode: new_only
+  retention_days: null
+parameters:
+  type: object
+  properties: {}
+exposure:
+  agent: false
+  main_runtime: false
+toolskill:
+  enabled: false

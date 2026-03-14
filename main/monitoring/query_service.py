@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from main.monitoring.models import TaskListItem, TaskProgressResult, TaskSummaryResult
+from main.models import NodeRecord
+from main.monitoring.models import LatestTaskNodeOutput, TaskListItem, TaskProgressResult, TaskSummaryResult
 
 
 class TaskQueryService:
@@ -61,14 +62,49 @@ class TaskQueryService:
         if mark_read:
             self._log_service.mark_task_read(task_id)
             task = self._store.get_task(task_id) or task
+        nodes = self._store.list_nodes(task_id)
+        latest_node = self._latest_node(nodes)
         text = f'Task status: {task.status}'
         if tree_text:
             text = f'{text}\n{tree_text}'
+        if latest_node is not None:
+            latest_output = latest_node.output.strip() or '(empty)'
+            text = f'{text}\nLatest node output [{latest_node.node_id}]:\n{latest_output}'
         return TaskProgressResult(
             task_id=task.task_id,
             task_status=task.status,
             tree_text=str(tree_text or '(empty tree)'),
             root=snapshot.get('root') if isinstance(snapshot.get('root'), dict) else None,
-            nodes=[item.model_dump(mode='json') for item in self._store.list_nodes(task_id)],
+            latest_node=latest_node,
+            nodes=[item.model_dump(mode='json') for item in nodes],
             text=text,
         )
+
+    def _latest_node(self, nodes: list[NodeRecord]) -> LatestTaskNodeOutput | None:
+        if not nodes:
+            return None
+        with_output = [node for node in nodes if self._node_output_text(node).strip()]
+        target = max(with_output or nodes, key=lambda item: (str(item.updated_at or ''), str(item.created_at or ''), str(item.node_id or '')))
+        return LatestTaskNodeOutput(
+            node_id=target.node_id,
+            parent_node_id=target.parent_node_id,
+            depth=int(target.depth or 0),
+            status=target.status,
+            title=target.goal or target.node_id,
+            updated_at=str(target.updated_at or ''),
+            output=self._node_output_text(target),
+        )
+
+    @staticmethod
+    def _node_output_text(node: NodeRecord) -> str:
+        final_output = str(node.final_output or '').strip()
+        if final_output:
+            return final_output
+        for entry in reversed(list(node.output or [])):
+            content = str(entry.content or '').strip()
+            if content:
+                return content
+        failure_reason = str(node.failure_reason or '').strip()
+        if failure_reason:
+            return failure_reason
+        return ''

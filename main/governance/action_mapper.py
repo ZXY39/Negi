@@ -22,24 +22,6 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
             {'id': 'propose_patch', 'label': 'Propose Patch', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo', 'execution']},
         ],
     },
-    'web_search': {
-        'tool_id': 'web_access',
-        'display_name': 'Web Access',
-        'description': 'Search the web.',
-        'actions': [{'id': 'search', 'label': 'Search Web', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES}],
-    },
-    'web_fetch': {
-        'tool_id': 'web_access',
-        'display_name': 'Web Access',
-        'description': 'Fetch web content.',
-        'actions': [{'id': 'fetch', 'label': 'Fetch Web', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES}],
-    },
-    'agent_browser': {
-        'tool_id': 'browser',
-        'display_name': 'Browser',
-        'description': 'Interactive browser runtime.',
-        'actions': [{'id': 'browse', 'label': 'Browser Runtime', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES}],
-    },
     'message': {
         'tool_id': 'messaging',
         'display_name': 'Messaging',
@@ -91,7 +73,7 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'task_progress': {
         'tool_id': 'task_runtime',
         'display_name': 'Task Runtime',
-        'description': 'View task progress.',
+        'description': 'View task status, tree text, and the latest node output, and mark the task as read.',
         'actions': [{'id': 'progress_cn', 'label': 'Task Progress', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
     },
     'load_skill_context': {
@@ -109,7 +91,7 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
 }
 
 
-DEFAULT_FAMILY_ORDER = ['filesystem', 'web_access', 'browser', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'task_runtime', 'skill_access']
+DEFAULT_FAMILY_ORDER = ['filesystem', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'task_runtime', 'skill_access']
 
 
 def get_default_tool_governance(tool_name: str) -> dict[str, Any] | None:

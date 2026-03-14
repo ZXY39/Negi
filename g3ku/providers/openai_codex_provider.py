@@ -62,6 +62,11 @@ class OpenAICodexProvider(LLMProvider):
             )
 
         url = DEFAULT_CODEX_URL
+        self._trace_request_payload(
+            provider="openai_codex",
+            endpoint=url,
+            body=body,
+        )
 
         try:
             try:

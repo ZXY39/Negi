@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
+
 _METADATA_START = '### G3KU_PATCH_METADATA ###'
 _DIFF_START = '### G3KU_PATCH_DIFF ###'
 
@@ -262,10 +264,10 @@ class FilesystemTool:
 
 
 def build(runtime):
-    loop = getattr(runtime, 'loop', None)
-    allowed_dir = runtime.workspace if getattr(loop, 'restrict_to_workspace', False) else None
+    settings = runtime_tool_settings(runtime, FilesystemToolSettings, tool_name='filesystem')
     service = getattr(runtime.services, 'main_task_service', None)
     artifact_store = getattr(service, 'artifact_store', None) if service is not None else None
+    allowed_dir = runtime.workspace if settings.restrict_to_workspace else None
     return FilesystemTool(
         workspace=runtime.workspace,
         allowed_dir=allowed_dir,

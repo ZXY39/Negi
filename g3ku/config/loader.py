@@ -1,10 +1,14 @@
 """Configuration loading utilities."""
 
+from __future__ import annotations
+
 from copy import deepcopy
 import json
 from pathlib import Path
+from typing import Any
 
 from g3ku.config.schema import Config
+from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
 
 
 def _project_config_path() -> Path:
@@ -32,7 +36,7 @@ def get_data_dir() -> Path:
     return get_data_path()
 
 
-def _load_json_file(path: Path) -> dict:
+def _load_json_file(path: Path) -> dict[str, Any]:
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
@@ -55,8 +59,8 @@ def _load_json_file(path: Path) -> dict:
     return data
 
 
-def _path_exists(data: dict, path: tuple[str, ...]) -> bool:
-    current = data
+def _path_exists(data: dict[str, Any], path: tuple[str, ...]) -> bool:
+    current: Any = data
     for key in path:
         if not isinstance(current, dict) or key not in current:
             return False
@@ -64,7 +68,7 @@ def _path_exists(data: dict, path: tuple[str, ...]) -> bool:
     return True
 
 
-def _leaf_paths(value, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+def _leaf_paths(value: Any, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
     if isinstance(value, dict):
         out: list[tuple[str, ...]] = []
         for key, child in value.items():
@@ -82,7 +86,7 @@ def _provider_payload(cfg: Config, provider_name: str) -> dict[str, object]:
     }
 
 
-def _ensure_no_legacy_model_fields(raw_data: dict) -> None:
+def _ensure_no_legacy_model_fields(raw_data: dict[str, Any]) -> None:
     legacy_paths = (
         ("agents", "defaults", "model"),
         ("agents", "multiAgent", "orchestratorModel"),
@@ -92,12 +96,12 @@ def _ensure_no_legacy_model_fields(raw_data: dict) -> None:
     if hits:
         preview = ", ".join(hits)
         raise ValueError(
-            "当前版本只支持 models.catalog + models.roles + orchestrator_model_key。"
-            f"请从 {get_config_path()} 删除旧字段: {preview}"
+            "Current config only supports models.catalog + models.roles + orchestrator_model_key. "
+            f"Remove legacy fields from {get_config_path()}: {preview}"
         )
 
 
-def _ensure_no_removed_role_scopes(raw_data: dict) -> None:
+def _ensure_no_removed_role_scopes(raw_data: dict[str, Any]) -> None:
     models = raw_data.get("models") if isinstance(raw_data.get("models"), dict) else None
     roles = models.get("roles") if isinstance(models, dict) else None
     if isinstance(roles, dict) and "agent" in roles:
@@ -107,19 +111,42 @@ def _ensure_no_removed_role_scopes(raw_data: dict) -> None:
         )
 
 
+def _ensure_no_legacy_tools_config(raw_data: dict[str, Any]) -> None:
+    if "tools" not in raw_data:
+        return
+    raise ValueError(
+        "config.tools has been removed. Move non-secret tool settings into tools/*/resource.yaml settings, "
+        "and move secrets into top-level toolSecrets in .g3ku/config.json."
+    )
+
+
 def _referenced_provider_names(cfg: Config) -> list[str]:
     names: set[str] = set()
-    values = []
-    if cfg.tools.memory.enabled:
-        values.append(cfg.tools.memory.embedding.provider_model)
-        values.append(cfg.tools.memory.retrieval.rerank_provider_model)
 
-    for value in values:
-        provider_model = str(value or "").strip()
+    for item in list(cfg.models.catalog or []):
+        provider_model = str(getattr(item, "provider_model", "") or "").strip()
         if not provider_model:
             continue
         provider_name, _ = cfg.parse_provider_model(provider_model)
         names.add(provider_name)
+
+    try:
+        memory_cfg = load_tool_settings_from_manifest(cfg.workspace_path, "memory_runtime", MemoryRuntimeSettings)
+    except Exception:
+        memory_cfg = None
+
+    if memory_cfg is not None and memory_cfg.enabled:
+        for value in (memory_cfg.embedding.provider_model, memory_cfg.retrieval.rerank_provider_model):
+            provider_model = str(value or "").strip()
+            if not provider_model:
+                continue
+            provider_name, _ = cfg.parse_provider_model(provider_model)
+            names.add(provider_name)
+
+    for provider_name, payload in cfg.providers.model_dump().items():
+        if isinstance(payload, dict) and any(value not in (None, "", {}, []) for value in payload.values()):
+            names.add(str(provider_name))
+
     return sorted(names)
 
 
@@ -150,7 +177,6 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
 
 def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     catalog, routes = _managed_models_payload(cfg)
-
     providers = {
         provider_name: _provider_payload(cfg, provider_name)
         for provider_name in _referenced_provider_names(cfg)
@@ -188,124 +214,9 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "intervalS": cfg.gateway.heartbeat.interval_s,
             },
         },
-        "tools": {
-            "web": {
-                "proxy": cfg.tools.web.proxy,
-                "search": {
-                    "apiKey": cfg.tools.web.search.api_key,
-                    "maxResults": cfg.tools.web.search.max_results,
-                },
-            },
-            "exec": {
-                "timeout": cfg.tools.exec.timeout,
-                "pathAppend": cfg.tools.exec.path_append,
-            },
-            "memory": {
-                "enabled": cfg.tools.memory.enabled,
-                "mode": cfg.tools.memory.mode,
-                "backend": cfg.tools.memory.backend,
-                "archVersion": cfg.tools.memory.arch_version,
-                "features": {
-                    "unifiedContext": cfg.tools.memory.features.unified_context,
-                    "layeredLoading": cfg.tools.memory.features.layered_loading,
-                    "queryPlanner": cfg.tools.memory.features.query_planner,
-                    "commitPipeline": cfg.tools.memory.features.commit_pipeline,
-                    "splitStore": cfg.tools.memory.features.split_store,
-                    "observability": cfg.tools.memory.features.observability,
-                },
-                "checkpointer": {
-                    "backend": cfg.tools.memory.checkpointer.backend,
-                    "path": cfg.tools.memory.checkpointer.path,
-                },
-                "store": {
-                    "backend": cfg.tools.memory.store.backend,
-                    "qdrantPath": cfg.tools.memory.store.qdrant_path,
-                    "qdrantCollection": cfg.tools.memory.store.qdrant_collection,
-                    "sqlitePath": cfg.tools.memory.store.sqlite_path,
-                },
-                "retrieval": {
-                    "denseTopK": cfg.tools.memory.retrieval.dense_top_k,
-                    "sparseTopK": cfg.tools.memory.retrieval.sparse_top_k,
-                    "fusedTopK": cfg.tools.memory.retrieval.fused_top_k,
-                    "contextTopK": cfg.tools.memory.retrieval.context_top_k,
-                    "sentenceWindow": cfg.tools.memory.retrieval.sentence_window,
-                    "maxContextTokens": cfg.tools.memory.retrieval.max_context_tokens,
-                    "defaultLoadLevel": cfg.tools.memory.retrieval.default_load_level,
-                    "rerankProviderModel": cfg.tools.memory.retrieval.rerank_provider_model,
-                },
-                "embedding": {
-                    "providerModel": cfg.tools.memory.embedding.provider_model,
-                    "batchSize": cfg.tools.memory.embedding.batch_size,
-                },
-                "isolation": {
-                    "mode": cfg.tools.memory.isolation.mode,
-                    "namespaceTemplate": cfg.tools.memory.isolation.namespace_template,
-                },
-                "guard": {
-                    "mode": cfg.tools.memory.guard.mode,
-                    "autoFactConfidence": cfg.tools.memory.guard.auto_fact_confidence,
-                },
-                "compat": {
-                    "dualWriteLegacyFiles": cfg.tools.memory.compat.dual_write_legacy_files,
-                },
-                "commit": {
-                    "turnTrigger": cfg.tools.memory.commit.turn_trigger,
-                    "idleMinutesTrigger": cfg.tools.memory.commit.idle_minutes_trigger,
-                },
-                "cost": {
-                    "maxIncreasePct": cfg.tools.memory.cost.max_increase_pct,
-                },
-                "bootstrapMode": cfg.tools.memory.bootstrap_mode,
-                "retentionDays": cfg.tools.memory.retention_days,
-            },
-            "agentBrowser": {
-                "enabled": cfg.tools.agent_browser.enabled,
-                "command": cfg.tools.agent_browser.command,
-                "npmCommand": cfg.tools.agent_browser.npm_command,
-                "nodeCommand": cfg.tools.agent_browser.node_command,
-                "requiredMinVersion": cfg.tools.agent_browser.required_min_version,
-                "installSpec": cfg.tools.agent_browser.install_spec,
-                "autoInstall": cfg.tools.agent_browser.auto_install,
-                "autoUpgradeIfBelowMinVersion": cfg.tools.agent_browser.auto_upgrade_if_below_min_version,
-                "autoInstallBrowser": cfg.tools.agent_browser.auto_install_browser,
-                "browserInstallArgs": cfg.tools.agent_browser.browser_install_args,
-                "defaultHeadless": cfg.tools.agent_browser.default_headless,
-                "commandTimeoutS": cfg.tools.agent_browser.command_timeout_s,
-                "installTimeoutS": cfg.tools.agent_browser.install_timeout_s,
-                "sessionEnvKey": cfg.tools.agent_browser.session_env_key,
-                "maxStdoutChars": cfg.tools.agent_browser.max_stdout_chars,
-                "maxStderrChars": cfg.tools.agent_browser.max_stderr_chars,
-                "extraEnv": cfg.tools.agent_browser.extra_env,
-                "allowFileAccess": cfg.tools.agent_browser.allow_file_access,
-                "defaultColorScheme": cfg.tools.agent_browser.default_color_scheme,
-                "defaultDownloadPath": cfg.tools.agent_browser.default_download_path,
-            },
-            "fileVault": {
-                "enabled": cfg.tools.file_vault.enabled,
-                "rootDir": cfg.tools.file_vault.root_dir,
-                "indexDbPath": cfg.tools.file_vault.index_db_path,
-                "maxStorageBytes": cfg.tools.file_vault.max_storage_bytes,
-                "thresholdPct": cfg.tools.file_vault.threshold_pct,
-                "cleanupTargetPct": cfg.tools.file_vault.cleanup_target_pct,
-                "recentProtectHours": cfg.tools.file_vault.recent_protect_hours,
-            },
-            "pictureWashing": {
-                "baseUrl": cfg.tools.picture_washing.base_url,
-                "authorization": cfg.tools.picture_washing.authorization,
-                "style": cfg.tools.picture_washing.style,
-                "model": cfg.tools.picture_washing.model,
-                "stream": cfg.tools.picture_washing.stream,
-                "timeoutS": cfg.tools.picture_washing.timeout_s,
-                "autoProbeAuthorization": cfg.tools.picture_washing.auto_probe_authorization,
-                "authorizationProbeUrl": cfg.tools.picture_washing.authorization_probe_url,
-                "authorizationProbeTimeoutS": cfg.tools.picture_washing.authorization_probe_timeout_s,
-                "authorizationCookieNames": cfg.tools.picture_washing.authorization_cookie_names,
-            },
-            "mcpServers": {
-                name: server.model_dump(by_alias=True)
-                for name, server in cfg.tools.mcp_servers.items()
-            },
-            "restrictToWorkspace": cfg.tools.restrict_to_workspace,
+        "toolSecrets": {
+            str(name): dict(payload or {})
+            for name, payload in dict(cfg.tool_secrets or {}).items()
         },
         "resources": {
             "enabled": cfg.resources.enabled,
@@ -338,7 +249,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     }
 
 
-def _ensure_runtime_fields_explicit(raw_data: dict, cfg: Config) -> None:
+def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> None:
     middlewares = ((raw_data.get("agents") or {}).get("defaults") or {}).get("middlewares")
     if middlewares is not None:
         raise ValueError(
@@ -364,15 +275,7 @@ def build_project_config_from_example(example_path: Path | None = None) -> Confi
 
 
 def load_config(config_path: Path | None = None) -> Config:
-    """
-    Load configuration from the project-local config file.
-
-    Args:
-        config_path: Optional path to config file. Must point to the project-local file.
-
-    Returns:
-        Loaded configuration object.
-    """
+    """Load configuration from the project-local config file."""
     expected_path = get_config_path().resolve()
     path = Path(config_path).resolve() if config_path is not None else expected_path
     if path != expected_path:
@@ -380,6 +283,7 @@ def load_config(config_path: Path | None = None) -> Config:
     raw_data = _load_json_file(expected_path)
     _ensure_no_legacy_model_fields(raw_data)
     _ensure_no_removed_role_scopes(raw_data)
+    _ensure_no_legacy_tools_config(raw_data)
     migrated = _migrate_config(deepcopy(raw_data))
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(raw_data, cfg)
@@ -387,13 +291,7 @@ def load_config(config_path: Path | None = None) -> Config:
 
 
 def save_config(config: Config, config_path: Path | None = None) -> None:
-    """
-    Save configuration to file.
-
-    Args:
-        config: Configuration to save.
-        config_path: Optional path to save to. Uses default if not provided.
-    """
+    """Save configuration to file."""
     path = config_path or get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -404,7 +302,7 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         f.write("\n")
 
 
-def _migrate_config(data: dict) -> dict:
+def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
     """Migrate old config formats to current."""
     data.pop("subagent", None)
 
@@ -431,152 +329,8 @@ def _migrate_config(data: dict) -> dict:
                 if camel in multi_agent and snake not in multi_agent:
                     multi_agent[snake] = multi_agent.pop(camel)
 
-    main_runtime = data.get('mainRuntime')
-    if isinstance(main_runtime, dict) and 'main_runtime' not in data:
-        data['main_runtime'] = main_runtime
-    data.pop('mainRuntime', None)
-    tools = data.get("tools", {})
-    if isinstance(tools, dict):
-        tools.pop("deep_mode", None)
-        tools.pop("deepMode", None)
-
-    # Move tools.exec.restrictToWorkspace -> tools.restrictToWorkspace
-    exec_cfg = tools.get("exec", {})
-    if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
-        tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
-
-    # Normalize tools.pictureWashing key variants for picture_washing tool defaults
-    pw = tools.get("pictureWashing")
-    if isinstance(pw, dict):
-        if "baseurl" in pw and "baseUrl" not in pw and "base_url" not in pw:
-            pw["baseUrl"] = pw.pop("baseurl")
-        if "apikey" in pw and "authorization" not in pw:
-            pw["authorization"] = pw.pop("apikey")
-
-    # Migrate tools.browserProbe -> tools.agentBrowser
-    agent_browser = tools.get("agentBrowser")
-    legacy_browser = tools.get("browserProbe")
-    if isinstance(legacy_browser, dict):
-        if not isinstance(agent_browser, dict):
-            agent_browser = {}
-            tools["agentBrowser"] = agent_browser
-        mapping = {
-            "headless": "defaultHeadless",
-            "timeoutS": "commandTimeoutS",
-            "autoInstall": "autoInstall",
-            "autoInstallBrowser": "autoInstallBrowser",
-            "installTimeoutS": "installTimeoutS",
-        }
-        for old_key, new_key in mapping.items():
-            if old_key in legacy_browser and new_key not in agent_browser:
-                agent_browser[new_key] = legacy_browser.get(old_key)
-        if "command" not in agent_browser:
-            agent_browser["command"] = "agent-browser"
-        if "npmCommand" not in agent_browser:
-            agent_browser["npmCommand"] = "npm"
-        if "nodeCommand" not in agent_browser:
-            agent_browser["nodeCommand"] = "node"
-        if "requiredMinVersion" not in agent_browser:
-            agent_browser["requiredMinVersion"] = "0.16.3"
-        if "installSpec" not in agent_browser:
-            agent_browser["installSpec"] = "agent-browser@latest"
-        tools.pop("browserProbe", None)
-
-    # Normalize tools.memory key variants.
-    mem = tools.get("memory")
-    if isinstance(mem, dict):
-        store = mem.get("store")
-        if isinstance(store, dict):
-            if "qdrantPath" in store and "qdrant_path" not in store:
-                store["qdrant_path"] = store.pop("qdrantPath")
-            if "qdrantCollection" in store and "qdrant_collection" not in store:
-                store["qdrant_collection"] = store.pop("qdrantCollection")
-            if "sqlitePath" in store and "sqlite_path" not in store:
-                store["sqlite_path"] = store.pop("sqlitePath")
-
-        retrieval = mem.get("retrieval")
-        if isinstance(retrieval, dict):
-            for camel, snake in (
-                ("denseTopK", "dense_top_k"),
-                ("sparseTopK", "sparse_top_k"),
-                ("fusedTopK", "fused_top_k"),
-                ("contextTopK", "context_top_k"),
-                ("sentenceWindow", "sentence_window"),
-                ("maxContextTokens", "max_context_tokens"),
-                ("defaultLoadLevel", "default_load_level"),
-                ("rerankProviderModel", "rerank_provider_model"),
-            ):
-                if camel in retrieval and snake not in retrieval:
-                    retrieval[snake] = retrieval.pop(camel)
-
-        embedding = mem.get("embedding")
-        if isinstance(embedding, dict):
-            if "providerModel" in embedding and "provider_model" not in embedding:
-                embedding["provider_model"] = embedding.pop("providerModel")
-            if "batchSize" in embedding and "batch_size" not in embedding:
-                embedding["batch_size"] = embedding.pop("batchSize")
-
-        isolation = mem.get("isolation")
-        if isinstance(isolation, dict):
-            if "namespaceTemplate" in isolation and "namespace_template" not in isolation:
-                isolation["namespace_template"] = isolation.pop("namespaceTemplate")
-
-        guard = mem.get("guard")
-        if isinstance(guard, dict):
-            if "autoFactConfidence" in guard and "auto_fact_confidence" not in guard:
-                guard["auto_fact_confidence"] = guard.pop("autoFactConfidence")
-
-        compat = mem.get("compat")
-        if isinstance(compat, dict):
-            if "dualWriteLegacyFiles" in compat and "dual_write_legacy_files" not in compat:
-                compat["dual_write_legacy_files"] = compat.pop("dualWriteLegacyFiles")
-
-        features = mem.get("features")
-        if isinstance(features, dict):
-            for camel, snake in (
-                ("unifiedContext", "unified_context"),
-                ("layeredLoading", "layered_loading"),
-                ("queryPlanner", "query_planner"),
-                ("commitPipeline", "commit_pipeline"),
-                ("splitStore", "split_store"),
-                ("observability", "observability"),
-            ):
-                if camel in features and snake not in features:
-                    features[snake] = features.pop(camel)
-
-        commit = mem.get("commit")
-        if isinstance(commit, dict):
-            if "turnTrigger" in commit and "turn_trigger" not in commit:
-                commit["turn_trigger"] = commit.pop("turnTrigger")
-            if "idleMinutesTrigger" in commit and "idle_minutes_trigger" not in commit:
-                commit["idle_minutes_trigger"] = commit.pop("idleMinutesTrigger")
-
-        cost = mem.get("cost")
-        if isinstance(cost, dict):
-            if "maxIncreasePct" in cost and "max_increase_pct" not in cost:
-                cost["max_increase_pct"] = cost.pop("maxIncreasePct")
-
-        checkpointer = mem.get("checkpointer")
-        if isinstance(checkpointer, dict):
-            if "retentionDays" in checkpointer and "retention_days" not in checkpointer:
-                checkpointer["retention_days"] = checkpointer.pop("retentionDays")
-
-        if "archVersion" in mem and "arch_version" not in mem:
-            mem["arch_version"] = mem.pop("archVersion")
-        if "bootstrapMode" in mem and "bootstrap_mode" not in mem:
-            mem["bootstrap_mode"] = mem.pop("bootstrapMode")
-        if "retentionDays" in mem and "retention_days" not in mem:
-            mem["retention_days"] = mem.pop("retentionDays")
-
-        # Migrate old home-scoped memory defaults to workspace-relative defaults.
-        checkpointer = mem.get("checkpointer")
-        if isinstance(checkpointer, dict) and checkpointer.get("path") == "~/.g3ku/memory/checkpoints.sqlite3":
-            checkpointer["path"] = "memory/checkpoints.sqlite3"
-
-        store = mem.get("store")
-        if isinstance(store, dict):
-            if store.get("sqlite_path") == "~/.g3ku/memory/memory.db":
-                store["sqlite_path"] = "memory/memory.db"
-            if store.get("qdrant_path") == "~/.g3ku/memory/qdrant":
-                store["qdrant_path"] = "memory/qdrant"
+    main_runtime = data.get("mainRuntime")
+    if isinstance(main_runtime, dict) and "main_runtime" not in data:
+        data["main_runtime"] = main_runtime
+    data.pop("mainRuntime", None)
     return data

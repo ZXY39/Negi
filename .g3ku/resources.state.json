@@ -1,5 +1,5 @@
 {
-  "generation": 27,
+  "generation": 4,
   "tools": [
     {
       "name": "create_async_task",
@@ -20,22 +20,6 @@
       "errors": []
     },
     {
-      "name": "delete_file",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "edit_file",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
       "name": "exec",
       "available": true,
       "busy": false,
@@ -44,47 +28,7 @@
       "errors": []
     },
     {
-      "name": "file_vault_cleanup",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "file_vault_lookup",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "file_vault_read",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "file_vault_set_policy",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "file_vault_stats",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "list_dir",
+      "name": "filesystem",
       "available": true,
       "busy": false,
       "pendingDelete": false,
@@ -101,6 +45,14 @@
     },
     {
       "name": "load_tool_context",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "memory_runtime",
       "available": true,
       "busy": false,
       "pendingDelete": false,
@@ -125,30 +77,6 @@
     },
     {
       "name": "model_config",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "picture_washing",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "propose_file_patch",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "read_file",
       "available": true,
       "busy": false,
       "pendingDelete": false,
@@ -183,14 +111,6 @@
       "warnings": [
         "missing toolskills/SKILL.md: tools\\task_summary_cn"
       ],
-      "errors": []
-    },
-    {
-      "name": "write_file",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
       "errors": []
     }
   ],
@@ -230,29 +150,11 @@
       "errors": []
     },
     {
-      "name": "picture-washing",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
       "name": "skill-creator",
       "available": true,
       "busy": false,
       "pendingDelete": false,
       "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "summarize",
-      "available": false,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [
-        "missing required bins"
-      ],
       "errors": []
     },
     {
@@ -267,14 +169,6 @@
     },
     {
       "name": "weather",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
-      "name": "web-research",
       "available": true,
       "busy": false,
       "pendingDelete": false,

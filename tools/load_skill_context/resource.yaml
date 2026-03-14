@@ -2,7 +2,6 @@ schema_version: 1
 kind: tool
 name: load_skill_context
 description: 加载当前可见技能的详细正文，便于 CEO 使用。
-config_namespace: ''
 requires:
   tools: []
   bins: []

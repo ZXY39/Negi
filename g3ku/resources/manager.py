@@ -56,10 +56,21 @@ class ResourceManager:
         self.reload_now(trigger="init")
 
     def bind_app_config(self, app_config: Any) -> None:
+        stale_instances: list[Any] = []
         with self._lock:
             self.app_config = app_config
             self._loader.app_config = app_config
             self._registry = self._build_registry()
+            if self._snapshot.tool_instances:
+                stale_instances = list(self._snapshot.tool_instances.values())
+                self._snapshot = ResourceSnapshot(
+                    generation=self._snapshot.generation,
+                    tools=dict(self._snapshot.tools),
+                    skills=dict(self._snapshot.skills),
+                    tool_instances={},
+                )
+        for instance in stale_instances:
+            self._close_tool_instance(instance)
 
     def bind_service_getter(self, getter: Callable[[], dict[str, Any]]) -> None:
         stale_instances: list[Any] = []

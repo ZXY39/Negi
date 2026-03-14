@@ -12,6 +12,8 @@ import pytest
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
 from g3ku.resources import ResourceManager
+from g3ku.resources.loader import ResourceLoader
+from g3ku.resources.registry import ResourceRegistry
 from main.models import TaskArtifactRecord
 from main.storage.sqlite_store import SQLiteTaskStore
 from main.storage.artifact_store import TaskArtifactStore
@@ -65,7 +67,9 @@ def _write_demo_tool(root: Path, *, name: str = 'demo_echo', guide: str = 'Demo 
             kind: tool
             name: {name}
             description: Echo a short string for resource smoke tests.
-            config_namespace: ''
+            protocol: mcp
+            mcp:
+              transport: embedded
             requires:
               tools: []
               bins: []
@@ -293,3 +297,81 @@ async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
         assert await progress_tool.execute(**{'任务id': 'task:demo'}) == 'progress:task:demo:True'
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+
+    manifest = workspace / 'tools' / 'exec' / 'resource.yaml'
+    manifest.write_text(
+        manifest.read_text(encoding='utf-8')
+        .replace('timeout: 60', 'timeout: 7')
+        .replace("path_append: ''", "path_append: 'D:/bin'")
+        .replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+        encoding='utf-8',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('exec')
+        assert tool is not None
+        handler = tool._handler
+        assert handler.timeout == 7
+        assert handler.path_append == 'D:/bin'
+        assert handler.restrict_to_workspace is True
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_search_reads_manifest_settings(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_search', workspace / 'tools' / 'memory_search')
+
+    manifest = workspace / 'tools' / 'memory_search' / 'resource.yaml'
+    manifest.write_text(
+        manifest.read_text(encoding='utf-8').replace('default_limit: 8', 'default_limit: 11'),
+        encoding='utf-8',
+    )
+
+    class _FakeMemoryManager:
+        def __init__(self):
+            self.last_call = None
+
+        async def search_tool_view(self, **kwargs):
+            self.last_call = kwargs
+            return {'ok': True, 'limit': kwargs['limit']}
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['memory_search']
+    manager = _FakeMemoryManager()
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={'loop': SimpleNamespace(_store_enabled=True), 'memory_manager': manager},
+    )
+
+    payload = json.loads(await tool.execute(query='remember this', __g3ku_runtime={'session_key': 'cli:demo'}))
+    assert payload == {'ok': True, 'limit': 11}
+    assert manager.last_call['limit'] == 11
+
+
+def test_resource_loader_injects_tool_secrets(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['filesystem']
+    loader = ResourceLoader(workspace, app_config=SimpleNamespace(tool_secrets={'filesystem': {'token': 'demo-secret'}}))
+    runtime = loader.build_runtime_context(descriptor)
+
+    assert runtime.tool_settings == {'restrict_to_workspace': False}
+    assert runtime.tool_secrets == {'token': 'demo-secret'}

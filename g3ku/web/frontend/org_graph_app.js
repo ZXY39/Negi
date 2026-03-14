@@ -121,6 +121,7 @@ const U = {
     tdSummary: document.getElementById("td-summary"),
     tdActiveCount: document.getElementById("td-active-count"),
     tree: document.getElementById("org-tree-container"),
+    taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
     taskDetailDrawer: document.getElementById("task-detail-drawer"),
     artifactList: document.getElementById("artifact-list"),
@@ -139,7 +140,6 @@ const U = {
     skillSearch: document.getElementById("skill-search-input"),
     skillRisk: document.getElementById("skill-risk-filter"),
     skillStatus: document.getElementById("skill-status-filter"),
-    skillLegacy: document.getElementById("skill-legacy-filter"),
     skillList: document.getElementById("skill-list"),
     skillEmpty: document.getElementById("skill-detail-empty"),
     skillDetail: document.getElementById("skill-detail-content"),
@@ -373,6 +373,28 @@ function addMsg(text, role, { markdown = false } = {}) {
     U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
 }
 
+function resetCeoFeed() {
+    if (!U.ceoFeed) return;
+    U.ceoFeed.innerHTML = "";
+    S.ceoPendingTurns = [];
+}
+
+function renderCeoSnapshot(messages = []) {
+    resetCeoFeed();
+    messages.forEach((item) => {
+        const role = String(item?.role || "").trim().toLowerCase();
+        const content = String(item?.content || "").trim();
+        if (!content) return;
+        if (role === "user") {
+            addMsg(content, "user");
+            return;
+        }
+        if (role === "assistant" || role === "system") {
+            addMsg(content, "system", { markdown: true });
+        }
+    });
+}
+
 function scrollCeoFeedToBottom() {
     if (!U.ceoFeed) return;
     U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
@@ -548,7 +570,8 @@ function syncDetailSaveButton(kind) {
     }
     if (hint) {
         hint.classList.toggle("is-dirty", dirty);
-        hint.textContent = dirty ? "Changes are staged. Click Save to apply them." : "Enable/disable and permission changes only apply after saving.";
+        hint.textContent = dirty ? "Changes are staged. Click Save to apply them." : "";
+        hint.hidden = !dirty;
     }
 }
 
@@ -584,7 +607,6 @@ function resourceSelectLabel(select) {
     const map = {
         "skill-risk-filter": "Skill risk filter",
         "skill-status-filter": "Skill status filter",
-        "skill-legacy-filter": "Skill type filter",
         "tool-status-filter": "Tool status filter",
         "tool-risk-filter": "Tool risk filter",
     };
@@ -1588,6 +1610,7 @@ function initCeoWs() {
     S.ceoWs = new WebSocket(ApiClient.getCeoWsUrl());
     S.ceoWs.onmessage = (ev) => {
         const payload = JSON.parse(ev.data);
+        if (payload.type === "snapshot.ceo") renderCeoSnapshot(payload.data?.messages || []);
         if (payload.type === "ceo.agent.tool") appendCeoToolEvent(payload.data || {});
         if (payload.type === "ceo.reply.final") finalizeCeoTurn(payload.data?.text || "");
         if (payload.type === "task.summary.changed" && S.view === "tasks") void loadTasks();
@@ -1946,22 +1969,28 @@ function resetTaskView() {
     S.treePan.baseOffsetX = 0;
     S.treePan.baseOffsetY = 0;
     U.tree.innerHTML = '<div class="empty-state">Waiting for task tree...</div>';
-    U.feedTitle.textContent = "Task Summary";
+    U.feedTitle.textContent = "Node Details";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
     if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
     if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
     if (U.artifactApply) U.artifactApply.hidden = true;
+    setTaskSelectionEmptyVisible(false);
+    hideAgent();
 }
 
 function setTaskDetailOpen(open) {
     setDrawerOpen(U.taskDetailBackdrop, U.taskDetailDrawer, open);
 }
 
+function setTaskSelectionEmptyVisible(visible) {
+    if (U.taskSelectionEmpty) U.taskSelectionEmpty.hidden = !visible;
+}
+
 function clearAgentSelection({ rerender = true } = {}) {
     S.selectedNodeId = null;
-    U.feedTitle.textContent = "Task Summary";
+    U.feedTitle.textContent = "Node Details";
+    hideAgent();
     if (rerender) renderTree();
-    showTaskSummary();
 }
 function findTreeNode(node, nodeId) {
     if (!node) return null;
@@ -2067,6 +2096,7 @@ function renderTree() {
     S.treeView = buildExecutionTree(S.tree);
     if (!S.treeView) {
         U.tree.innerHTML = '<div class="empty-state">No nodes to display.</div>';
+        setTaskSelectionEmptyVisible(false);
         return;
     }
     const wrapper = document.createElement("div");
@@ -2111,13 +2141,18 @@ function renderTree() {
     U.tree.appendChild(wrapper);
     if (S.selectedNodeId) {
         const selected = findTreeNode(S.treeView, S.selectedNodeId);
-        if (selected) showAgent(selected);
+        if (selected) {
+            setTaskSelectionEmptyVisible(false);
+            showAgent(selected);
+        }
         else {
             S.selectedNodeId = null;
-            showTaskSummary();
+            setTaskSelectionEmptyVisible(true);
+            hideAgent();
         }
     } else {
-        showTaskSummary();
+        setTaskSelectionEmptyVisible(true);
+        hideAgent();
     }
 }
 function renderArtifacts() {
@@ -2167,28 +2202,10 @@ async function applySelectedArtifact() {
     await loadTaskArtifacts();
 }
 
-function showTaskSummary() {
-    if (!S.currentTask) {
-        hideAgent();
-        return;
-    }
-    U.detail.style.display = "flex";
-    if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
-    U.feedTitle.textContent = "Task Summary";
-    U.adRole.textContent = S.currentTask.title || S.currentTask.task_id || "Task";
-    U.adStatus.textContent = taskStatusLabel(S.currentTask).toUpperCase();
-    U.adStatus.dataset.status = taskStatusKey(S.currentTask);
-    U.adInput.textContent = S.currentTask.user_request || "-";
-    U.adOutput.textContent = S.currentTask.final_output || S.currentTask.failure_reason || S.currentTask.brief_text || "-";
-    U.adCheck.textContent = [`Task ID: ${S.currentTask.task_id}`, `Status: ${taskStatusLabel(S.currentTask)}`, `Max depth: ${S.currentTask.max_depth ?? 0}`, `Updated: ${S.currentTask.updated_at || "-"}`].join("\n");
-    renderNodeLogs([]);
-    renderArtifacts();
-    setTaskDetailOpen(true);
-}
-
 function showAgent(node) {
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
+    setTaskSelectionEmptyVisible(false);
     U.adRole.textContent = node.title || node.node_id || "Node";
     U.adStatus.textContent = String(node.display_state || node.state || "").toUpperCase();
     U.adStatus.dataset.status = node.state || "";
@@ -2219,7 +2236,8 @@ function applyTaskPayload(payload) {
     if (S.tree) renderTree();
     else {
         U.tree.innerHTML = '<div class="empty-state">No task tree.</div>';
-        showTaskSummary();
+        setTaskSelectionEmptyVisible(false);
+        hideAgent();
     }
 }
 
@@ -2273,8 +2291,6 @@ function filterSkills() {
         if (U.skillStatus.value === "enabled" && !skill.enabled) return false;
         if (U.skillStatus.value === "disabled" && skill.enabled) return false;
         if (U.skillStatus.value === "unavailable" && skill.available) return false;
-        if (U.skillLegacy.value === "legacy" && !skill.legacy) return false;
-        if (U.skillLegacy.value === "standard" && skill.legacy) return false;
         return true;
     });
 }
@@ -2382,7 +2398,7 @@ function renderSkillDetail() {
                         ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
                         : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`}
                 </div>
-                <div class="resource-draft-hint${S.skillDirty ? " is-dirty" : ""}"></div>
+                <div class="resource-draft-hint${S.skillDirty ? " is-dirty" : ""}" ${S.skillDirty ? "" : "hidden"}></div>
                 <div class="resource-section">
                     <h3>角色可见性</h3>
                     <div class="resource-filter-row">
@@ -2565,7 +2581,7 @@ function renderToolDetail() {
                     <h3>描述</h3>
                     <div class="resource-copy-block">${esc(description || "暂无描述。")}</div>
                 </div>
-                <div class="resource-draft-hint${S.toolDirty ? " is-dirty" : ""}"></div>
+                <div class="resource-draft-hint${S.toolDirty ? " is-dirty" : ""}" ${S.toolDirty ? "" : "hidden"}></div>
                 <div class="resource-section">
                     <details class="resource-disclosure toolskill-disclosure">
                         <summary class="resource-disclosure-summary">
@@ -3006,7 +3022,7 @@ function bind() {
     }));
     U.closeAgent?.addEventListener("click", () => clearAgentSelection());
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
-    [U.skillSearch, U.skillRisk, U.skillStatus, U.skillLegacy].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderSkills));
+    [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderSkills));
     U.skillRefresh?.addEventListener("click", () => void refreshSkills());
     U.skillSave?.addEventListener("click", () => void saveSkill());
     [U.toolSearch, U.toolStatus, U.toolRisk].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderTools));

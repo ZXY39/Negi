@@ -110,32 +110,65 @@ class ApiClient {
         };
     }
 
+    static _toManagedModelPayload(payload = {}) {
+        const source = payload && typeof payload === "object" ? payload : {};
+        const body = {};
+        const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
+        const pick = (snakeKey, camelKey = null) => {
+            if (has(snakeKey)) return source[snakeKey];
+            if (camelKey && has(camelKey)) return source[camelKey];
+            return undefined;
+        };
+
+        if (has("key")) body.key = source.key;
+        if (has("enabled")) body.enabled = source.enabled;
+        if (has("scopes")) body.scopes = source.scopes;
+        if (has("description")) body.description = source.description;
+
+        const mappedFields = [
+            ["provider_model", "providerModel"],
+            ["api_key", "apiKey"],
+            ["api_base", "apiBase"],
+            ["extra_headers", "extraHeaders"],
+            ["max_tokens", "maxTokens"],
+            ["temperature", null],
+            ["reasoning_effort", "reasoningEffort"],
+            ["retry_on", "retryOn"],
+        ];
+        mappedFields.forEach(([snakeKey, camelKey]) => {
+            const value = pick(snakeKey, camelKey);
+            if (value !== undefined) body[snakeKey] = value;
+        });
+        return body;
+    }
+
+    static async _refreshModelsAfter(requestPromise) {
+        await requestPromise;
+        return this.getOrgGraphModels();
+    }
+
     static async createManagedModel(payload) {
-        const data = await this.post("/api/models", payload);
-        return data.item || data;
+        return this._refreshModelsAfter(this.post("/api/models", this._toManagedModelPayload(payload)));
     }
 
     static async updateManagedModel(modelKey, payload) {
-        const data = await this.put(`/api/models/${modelKey}`, payload);
-        return data.item || data;
+        return this._refreshModelsAfter(this.put(`/api/models/${modelKey}`, this._toManagedModelPayload(payload)));
     }
 
     static async enableManagedModel(modelKey) {
-        const data = await this.post(`/api/models/${modelKey}/enable`);
-        return data.item || data;
+        return this._refreshModelsAfter(this.post(`/api/models/${modelKey}/enable`));
     }
 
     static async disableManagedModel(modelKey) {
-        const data = await this.post(`/api/models/${modelKey}/disable`);
-        return data.item || data;
+        return this._refreshModelsAfter(this.post(`/api/models/${modelKey}/disable`));
     }
 
     static async deleteManagedModel(modelKey) {
-        return this.delete(`/api/models/${modelKey}`);
+        return this._refreshModelsAfter(this.delete(`/api/models/${modelKey}`));
     }
 
     static async updateModelRoleChain(scope, modelKeys) {
-        return this.put(`/api/models/roles/${scope}`, { model_keys: modelKeys, modelKeys });
+        return this._refreshModelsAfter(this.put(`/api/models/roles/${scope}`, { model_keys: modelKeys, modelKeys }));
     }
 
     static async getSkills(offset = 0, limit = 200) {

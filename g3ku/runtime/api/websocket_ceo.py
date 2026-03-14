@@ -17,6 +17,45 @@ def _coerce_event_data(payload: dict[str, Any]) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _history_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    parts.append(text)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get('text', item.get('content', ''))
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        return "\n".join(parts).strip()
+    return str(content or '').strip()
+
+
+def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for raw in list(messages or []):
+        if not isinstance(raw, dict):
+            continue
+        role = str(raw.get('role') or '').strip().lower()
+        if role not in {'user', 'assistant', 'system'}:
+            continue
+        content = _history_text(raw.get('content'))
+        if not content:
+            continue
+        item = {'role': role, 'content': content}
+        timestamp = raw.get('timestamp')
+        if isinstance(timestamp, str) and timestamp.strip():
+            item['timestamp'] = timestamp.strip()
+        items.append(item)
+    return items
+
+
 def _should_forward_tool_event(*, session_id: str, event: AgentEvent) -> bool:
     _ = session_id
     if event.type not in {'tool_execution_start', 'tool_execution_end'}:
@@ -69,6 +108,12 @@ async def ceo_websocket(websocket: WebSocket):
     else:
         default_channel, default_chat_id = 'web', session_id
     session = runtime_manager.get_or_create(session_key=session_id, channel=default_channel or 'web', chat_id=default_chat_id or 'shared')
+    persisted_messages: list[dict[str, Any]] = []
+    transcript_store = getattr(agent, 'sessions', None)
+    load_session = getattr(transcript_store, 'get_or_create', None)
+    if load_session is not None:
+        persisted_session = load_session(session_id)
+        persisted_messages = _build_ceo_snapshot(getattr(persisted_session, 'messages', []))
 
     async def _safe_send(payload: dict[str, Any]) -> None:
         await websocket.send_json(payload)
@@ -94,6 +139,7 @@ async def ceo_websocket(websocket: WebSocket):
     stream_task = asyncio.create_task(sender(stream_queue))
     try:
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
+        await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='snapshot.ceo', data={'messages': persisted_messages}))
         while True:
             data = await websocket.receive_json()
             if str(data.get('type') or '') != 'client.user_message':

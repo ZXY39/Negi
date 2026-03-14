@@ -42,6 +42,7 @@ class LiteLLMProvider(LLMProvider):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self.provider_name = str(provider_name or "")
 
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
@@ -244,6 +245,18 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = tool_choice if tool_choice is not None else "auto"
             if parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = bool(parallel_tool_calls)
+
+        request_body = {
+            key: value
+            for key, value in kwargs.items()
+            if key not in {"api_key", "api_base", "drop_params", "extra_headers"}
+        }
+        provider_label = self.provider_name or getattr(self._gateway, "name", "") or "litellm"
+        self._trace_request_payload(
+            provider=provider_label if provider_label == "litellm" else f"litellm:{provider_label}",
+            endpoint=self.api_base or None,
+            body=request_body,
+        )
 
         try:
             response = await acompletion(**kwargs)

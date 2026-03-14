@@ -83,6 +83,11 @@ class ResponsesProvider(LLMProvider):
         url = self.api_base
         if not url.endswith("/responses"):
             url = url.rstrip("/") + "/responses"
+        self._trace_request_payload(
+            provider="responses",
+            endpoint=url,
+            body=body,
+        )
 
         try:
             last_network_exc: Exception | None = None

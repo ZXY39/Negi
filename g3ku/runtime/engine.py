@@ -32,21 +32,12 @@ class AgentRuntimeEngine:
         max_tokens: int = 4096,
         memory_window: int = 100,
         reasoning_effort: str | None = None,
-        brave_api_key: str | None = None,
-        web_proxy: str | None = None,
-        exec_config=None,
-        memory_config=None,
-        file_vault_config=None,
         resource_config=None,
         multi_agent_config=None,
         app_config: Any | None = None,
         cron_service=None,
-        restrict_to_workspace: bool = False,
         session_manager=None,
-        mcp_servers: dict | None = None,
         channels_config=None,
-        picture_washing_config: dict[str, Any] | None = None,
-        agent_browser_config: dict[str, Any] | None = None,
         context_builder_cls=None,
         memory_manager_cls=None,
         session_manager_cls=None,
@@ -64,25 +55,11 @@ class AgentRuntimeEngine:
         self.max_tokens = int(max_tokens or 4096)
         self.memory_window = int(memory_window or 100)
         self.reasoning_effort = reasoning_effort
-        self.brave_api_key = brave_api_key
-        self.web_proxy = web_proxy
-        self.exec_config = exec_config
-        self.memory_config = memory_config
-        self.file_vault_config = file_vault_config
         self.resource_config = resource_config
         self.multi_agent_config = multi_agent_config
         self.app_config = app_config
         self.cron_service = cron_service
-        self.restrict_to_workspace = bool(restrict_to_workspace)
-        self.mcp_servers = dict(mcp_servers or {})
-        if self.mcp_servers:
-            logger.warning(
-                "tools.mcp_servers is deprecated and ignored; migrate external tools into workspace tools/ directories."
-            )
-            self.mcp_servers = {}
         self.channels_config = channels_config
-        self.picture_washing_config = dict(picture_washing_config or {})
-        self.agent_browser_config = dict(agent_browser_config or {})
         self.debug_mode = bool(debug_mode)
         self.debug_trace = bool(debug_mode)
         raw_prompt_trace = str(os.getenv("G3KU_PROMPT_TRACE", "")).strip().lower()
@@ -109,8 +86,9 @@ class AgentRuntimeEngine:
         self._checkpointer_cm = None
         self._store = None
         self._store_enabled = False
+        self._memory_runtime_settings = None
+        self._internal_tool_settings_fingerprints: dict[str, str] = {}
         self.memory_manager = None
-        self.file_vault = None
         self.commit_service = None
         self.resource_manager = None
         self.multi_agent_role_registry = None
@@ -149,9 +127,6 @@ class AgentRuntimeEngine:
             self.model_client = None
 
         self._bootstrap = RuntimeBootstrapBridge(self)
-        self._bootstrap.init_file_vault()
-        self._bootstrap.init_memory_runtime()
-        self._bootstrap.init_commit_service()
         self._bootstrap.init_multi_agent_runtime()
         self._bootstrap.register_default_tools()
 
@@ -168,11 +143,11 @@ class AgentRuntimeEngine:
         return f"{text[:max_chars]}...(truncated {len(text) - max_chars} chars)"
 
     def _use_rag_memory(self) -> bool:
-        cfg = self.memory_config
+        cfg = getattr(self, '_memory_runtime_settings', None)
         return bool(cfg and getattr(cfg, 'enabled', False) and str(getattr(cfg, 'mode', 'legacy')).lower() in {'rag', 'dual'})
 
     def _use_legacy_memory(self) -> bool:
-        cfg = self.memory_config
+        cfg = getattr(self, '_memory_runtime_settings', None)
         return bool(cfg and getattr(cfg, 'enabled', False) and str(getattr(cfg, 'mode', 'legacy')).lower() in {'legacy', 'dual'})
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:

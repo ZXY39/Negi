@@ -1,8 +1,14 @@
 """Base LLM provider interface."""
 
+import json
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+from loguru import logger
+
+_TRACE_TRUE_VALUES = {"1", "true", "yes", "on", "debug", "log"}
 
 
 @dataclass
@@ -40,6 +46,34 @@ class LLMProvider(ABC):
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
         self.api_key = api_key
         self.api_base = api_base
+
+    @staticmethod
+    def _trace_enabled() -> bool:
+        raw = str(os.getenv("G3KU_PROMPT_TRACE", "")).strip().lower()
+        return raw in _TRACE_TRUE_VALUES
+
+    @staticmethod
+    def _trace_json(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+
+    def _trace_request_payload(
+        self,
+        *,
+        provider: str,
+        endpoint: str | None = None,
+        body: dict[str, Any],
+    ) -> None:
+        if not self._trace_enabled():
+            return
+        lines = [
+            "===== MODEL REQUEST BODY BEGIN =====",
+            f"provider={provider or '-'}",
+            f"endpoint={endpoint or '-'}",
+            "",
+            self._trace_json(body),
+            "===== MODEL REQUEST BODY END =====",
+        ]
+        logger.info("\n".join(lines))
 
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

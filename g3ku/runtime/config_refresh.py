@@ -28,6 +28,11 @@ def refresh_loop_runtime_config(loop, *, force: bool = False, reason: str = "run
     resource_manager = getattr(loop, "resource_manager", None)
     if resource_manager is not None and hasattr(resource_manager, "bind_app_config"):
         resource_manager.bind_app_config(config)
+        resource_manager.reload_now(trigger=reason)
+
+    bootstrap = getattr(loop, "_bootstrap", None)
+    if bootstrap is not None and hasattr(bootstrap, "sync_internal_tool_runtimes"):
+        bootstrap.sync_internal_tool_runtimes(force=True, reason=reason)
 
     service = getattr(loop, "main_task_service", None)
     if service is not None and hasattr(service, "ensure_runtime_config_current"):
