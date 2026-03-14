@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
 
+from g3ku.agent.rag_memory import G3kuHybridStore
 from g3ku.providers.openai_codex_provider import _convert_messages
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 
@@ -151,3 +153,54 @@ def test_convert_messages_keeps_completed_tool_calls_and_outputs():
         "output": [{"type": "input_text", "text": '{"status":"ok"}'}],
     }
     assert input_items[3] == {"role": "user", "content": [{"type": "input_text", "text": "总结一下"}]}
+
+
+def test_g3ku_hybrid_store_reuses_qdrant_backend_per_process(tmp_path, monkeypatch):
+    calls = {"existing": 0, "closed": 0}
+
+    class FakeDenseStore:
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    class FakeQdrantVectorStore:
+        @classmethod
+        def from_existing_collection(cls, **kwargs):
+            _ = kwargs
+            calls["existing"] += 1
+            return FakeDenseStore()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_qdrant",
+        SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setattr(
+        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        lambda **kwargs: object(),
+    )
+
+    G3kuHybridStore._dense_backend_registry.clear()
+    store1 = G3kuHybridStore(
+        sqlite_path=tmp_path / "memory.db",
+        qdrant_path=tmp_path / "qdrant",
+        qdrant_collection="test_collection",
+        embedding_model="dashscope:qwen3-vl-embedding",
+        dashscope_api_key="test-key",
+    )
+    store2 = G3kuHybridStore(
+        sqlite_path=tmp_path / "memory.db",
+        qdrant_path=tmp_path / "qdrant",
+        qdrant_collection="test_collection",
+        embedding_model="dashscope:qwen3-vl-embedding",
+        dashscope_api_key="test-key",
+    )
+
+    try:
+        assert calls["existing"] == 1
+        assert store1._qdrant is store2._qdrant
+        store1.close()
+        assert calls["closed"] == 0
+        store2.close()
+        assert calls["closed"] == 1
+    finally:
+        G3kuHybridStore._dense_backend_registry.clear()

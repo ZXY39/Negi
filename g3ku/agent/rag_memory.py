@@ -13,7 +13,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, ClassVar, Iterable, Literal
 
 import requests
 from langchain_core.documents import Document
@@ -475,8 +475,19 @@ class CommitArtifact:
     timestamp: str = field(default_factory=_now_iso)
 
 
+@dataclass(slots=True)
+class _SharedDenseBackend:
+    """Process-local shared dense backend to avoid duplicate Qdrant local locks."""
+
+    store: Any
+    refs: int = 0
+
+
 class G3kuHybridStore(BaseStore):
     """Hybrid store backed by SQLite (metadata+FTS) and optional Qdrant dense index."""
+
+    _dense_backend_lock: ClassVar[threading.RLock] = threading.RLock()
+    _dense_backend_registry: ClassVar[dict[tuple[str, str, str], _SharedDenseBackend]] = {}
 
     def __init__(
         self,
@@ -510,6 +521,7 @@ class G3kuHybridStore(BaseStore):
 
         self._qdrant = None
         self._dense_enabled = False
+        self._shared_dense_key: tuple[str, str, str] | None = None
         self._init_dense_backend()
 
     def _init_schema(self) -> None:
@@ -586,56 +598,101 @@ class G3kuHybridStore(BaseStore):
         try:
             from langchain_qdrant import QdrantVectorStore
 
-            if _is_dashscope_vl_embedding_model(self.embedding_model):
-                _, model_id = _split_provider_model(self.embedding_model, default_provider="dashscope")
-                api_key = self.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "").strip()
-                if not api_key:
-                    raise RuntimeError(
-                        "DashScope API key is not configured for qwen3-vl-embedding "
-                        "(set providers.dashscope.apiKey or DASHSCOPE_API_KEY)"
-                    )
-                self._embeddings = DashScopeMultimodalEmbeddings(
-                    api_key=api_key,
-                    model=model_id,
-                    api_base=self.dashscope_api_base,
-                    batch_size=self.embedding_batch_size,
-                )
-            else:
-                from langchain.embeddings import init_embeddings
-
-                self._embeddings = init_embeddings(self.embedding_model)
-            # Use a single initialization path to avoid local Qdrant folder lock contention.
-            self._qdrant = QdrantVectorStore.from_texts(
-                texts=["g3ku memory bootstrap"],
-                metadatas=[{"namespace": "__bootstrap__", "key": "__bootstrap__"}],
-                ids=[_vector_point_id("__bootstrap__", "__bootstrap__")],
-                collection_name=self.qdrant_collection,
-                embedding=self._embeddings,
-                path=str(self.qdrant_path),
+            dense_key = (
+                str(self.qdrant_path.expanduser().resolve()).lower(),
+                str(self.qdrant_collection or "").strip(),
+                str(self.embedding_model or "").strip(),
             )
-            self._dense_enabled = True
+            with self._dense_backend_lock:
+                shared = self._dense_backend_registry.get(dense_key)
+                if shared is not None:
+                    shared.refs += 1
+                    self._shared_dense_key = dense_key
+                    self._qdrant = shared.store
+                    self._dense_enabled = True
+                    return
+
+                if _is_dashscope_vl_embedding_model(self.embedding_model):
+                    _, model_id = _split_provider_model(self.embedding_model, default_provider="dashscope")
+                    api_key = self.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "").strip()
+                    if not api_key:
+                        raise RuntimeError(
+                            "DashScope API key is not configured for qwen3-vl-embedding "
+                            "(set providers.dashscope.apiKey or DASHSCOPE_API_KEY)"
+                        )
+                    self._embeddings = DashScopeMultimodalEmbeddings(
+                        api_key=api_key,
+                        model=model_id,
+                        api_base=self.dashscope_api_base,
+                        batch_size=self.embedding_batch_size,
+                    )
+                else:
+                    from langchain.embeddings import init_embeddings
+
+                    self._embeddings = init_embeddings(self.embedding_model)
+
+                try:
+                    qdrant_store = QdrantVectorStore.from_existing_collection(
+                        collection_name=self.qdrant_collection,
+                        embedding=self._embeddings,
+                        path=str(self.qdrant_path),
+                    )
+                except Exception:
+                    qdrant_store = QdrantVectorStore.from_texts(
+                        texts=["g3ku memory bootstrap"],
+                        metadatas=[{"namespace": "__bootstrap__", "key": "__bootstrap__"}],
+                        ids=[_vector_point_id("__bootstrap__", "__bootstrap__")],
+                        collection_name=self.qdrant_collection,
+                        embedding=self._embeddings,
+                        path=str(self.qdrant_path),
+                    )
+
+                self._qdrant = qdrant_store
+                self._dense_enabled = True
+                self._shared_dense_key = dense_key
+                self._dense_backend_registry[dense_key] = _SharedDenseBackend(store=qdrant_store, refs=1)
         except Exception as exc:
             logger.warning("Hybrid store dense backend unavailable; fallback to sparse-only: {}", exc)
             self._dense_enabled = False
             self._qdrant = None
 
+    @staticmethod
+    def _close_qdrant_store(store: Any) -> None:
+        if store is None:
+            return
+        try:
+            close_fn = getattr(store, "close", None)
+            if callable(close_fn):
+                close_fn()
+            for attr_name in ("_client", "client", "_async_client", "async_client"):
+                client = getattr(store, attr_name, None)
+                if client is not None and hasattr(client, "close"):
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def close(self) -> None:
-        if self._qdrant is not None:
-            try:
-                close_fn = getattr(self._qdrant, "close", None)
-                if callable(close_fn):
-                    close_fn()
-                for attr_name in ("_client", "client", "_async_client", "async_client"):
-                    client = getattr(self._qdrant, attr_name, None)
-                    if client is not None and hasattr(client, "close"):
-                        try:
-                            client.close()
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            finally:
-                self._qdrant = None
+        qdrant_store = self._qdrant
+        dense_key = self._shared_dense_key
+        self._qdrant = None
+        self._shared_dense_key = None
+        self._dense_enabled = False
+
+        if qdrant_store is not None:
+            should_close_dense = True
+            with self._dense_backend_lock:
+                shared = self._dense_backend_registry.get(dense_key) if dense_key is not None else None
+                if shared is not None and shared.store is qdrant_store:
+                    shared.refs -= 1
+                    if shared.refs > 0:
+                        should_close_dense = False
+                    else:
+                        self._dense_backend_registry.pop(dense_key, None)
+            if should_close_dense:
+                self._close_qdrant_store(qdrant_store)
         try:
             self._conn.close()
         except Exception:

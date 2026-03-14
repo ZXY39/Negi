@@ -260,6 +260,7 @@ class RuntimeAgentSession:
         self._state.is_running = False
         self._state.status = "completed"
         self._state.pending_tool_calls.clear()
+        user_text = self._history_text(user_input.content)
         if getattr(self._loop, "prompt_trace", False):
             logger.info(
                 "[main:answer] session={} channel={} chat={}\n{}",
@@ -268,9 +269,10 @@ class RuntimeAgentSession:
                 self._chat_id,
                 output,
             )
+        persisted_session = None
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-            persisted_session.add_message("user", self._history_text(user_input.content))
+            persisted_session.add_message("user", user_text)
             persisted_session.add_message("assistant", output)
             self._loop.sessions.save(persisted_session)
         except Exception:
@@ -280,6 +282,40 @@ class RuntimeAgentSession:
                 kind="persistence_warning",
                 text="Session transcript persistence failed; response is still available in-memory.",
             )
+        if getattr(self._loop, "memory_manager", None) is not None and self._loop._use_rag_memory():
+            try:
+                await self._loop.memory_manager.ingest_turn(
+                    session_key=self._state.session_key,
+                    channel=self._channel,
+                    chat_id=self._chat_id,
+                    messages=[
+                        {"role": "user", "content": user_text},
+                        {"role": "assistant", "content": output},
+                    ],
+                )
+            except Exception:
+                await self._emit(
+                    "message_delta",
+                    channel="analysis",
+                    kind="persistence_warning",
+                    text="RAG memory ingest failed; turn history is still available in session transcript.",
+                )
+        if persisted_session is not None and getattr(self._loop, "commit_service", None) is not None:
+            try:
+                artifact = await self._loop.commit_service.maybe_commit(
+                    session=persisted_session,
+                    channel=self._channel,
+                    chat_id=self._chat_id,
+                )
+                if artifact is not None:
+                    self._loop.sessions.save(persisted_session)
+            except Exception:
+                await self._emit(
+                    "message_delta",
+                    channel="analysis",
+                    kind="persistence_warning",
+                    text="RAG memory commit pipeline failed; new turns remain available in session transcript.",
+                )
         await self._emit("message_end", role="assistant", text=output)
         await self._emit("turn_end", session_key=self._state.session_key, status="completed")
         await self._emit("agent_end", session_key=self._state.session_key, status="completed")

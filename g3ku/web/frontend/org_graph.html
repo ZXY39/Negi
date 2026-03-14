@@ -20,7 +20,7 @@
 
             <button class="nav-item active" data-view="ceo" type="button">
                 <i data-lucide="message-square"></i>
-                <span>主Agent 会话</span>
+                <span>CEO 会话</span>
             </button>
             <button class="nav-item" data-view="tasks" type="button">
                 <i data-lucide="briefcase"></i>
@@ -32,9 +32,8 @@
             </button>
             <button class="nav-item" data-view="tools" type="button">
                 <i data-lucide="wrench"></i>
-                <span>工具管理</span>
+                <span>Tool 管理</span>
             </button>
-
             <button class="nav-item" data-view="models" type="button">
                 <i data-lucide="cpu"></i>
                 <span>模型配置</span>
@@ -42,7 +41,7 @@
 
             <div class="sidebar-spacer"></div>
 
-                        <div class="sidebar-footer">
+            <div class="sidebar-footer">
                 <button class="icon-btn theme-toggle" id="theme-toggle" type="button" aria-label="切换主题">
                     <i data-lucide="sun" class="light-icon" style="display: none;"></i>
                     <i data-lucide="moon" class="dark-icon"></i>
@@ -53,22 +52,22 @@
         <main class="main-content">
             <section id="view-ceo" class="view-section active">
                 <header class="content-header">
-                    <h1>主Agent 控制面板</h1>
-                    <p class="subtitle">发起任务、追踪执行过程，并统一管理模型配置与角色降级链。</p>
+                    <h1>CEO 会话</h1>
+                    <p class="subtitle">通过 CEO 前门与 main 运行时交互，查看工具执行流与最终回复。</p>
                 </header>
 
                 <div class="chat-wrapper">
                     <div class="chat-feed" id="ceo-chat-feed">
                         <div class="message system">
                             <div class="avatar"><i data-lucide="cpu"></i></div>
-                            <div class="msg-content">欢迎来到 G3ku Main Runtime。请告诉我你希望主Agent组织执行的任务。</div>
+                            <div class="msg-content">欢迎使用 G3ku Main Runtime。这里会展示 CEO 回合中的工具调用过程与最终回复。</div>
                         </div>
                     </div>
 
                     <div class="chat-input-area">
-                        <textarea id="ceo-input" rows="1" placeholder="输入任务需求，例如：调研 OpenClaw 的主要争议，并产出一份结构化总结。"></textarea>
-                        <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送指令">
-                            <i data-lucide="send"></i> 发送指令
+                        <textarea id="ceo-input" rows="1" placeholder="输入你的任务，例如：让 OpenClaw 分析当前代码问题并创建异步任务"></textarea>
+                        <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
+                            <i data-lucide="send"></i> 发送
                         </button>
                     </div>
                 </div>
@@ -77,37 +76,37 @@
             <section id="view-tasks-list" class="view-section" style="display: none;">
                 <header class="content-header">
                     <h1>任务大厅</h1>
-                    <p class="subtitle">查看任务状态，批量暂停、恢复或取消，并进入任务详情。</p>
+                    <p class="subtitle">查看当前会话中的任务摘要、批量操作与运行状态。</p>
                 </header>
 
                 <div class="project-list-container">
                     <div class="project-toolbar">
                         <div class="project-toolbar-group">
-                            <button id="task-multi-toggle" class="toolbar-btn" type="button" aria-pressed="false">&#22810;&#36873;</button>
+                            <button id="task-multi-toggle" class="toolbar-btn" type="button" aria-pressed="false">多选</button>
                             <div id="task-filter-wrap" class="toolbar-dropdown" hidden>
-                                <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button" aria-haspopup="menu" aria-expanded="false">&#20840;&#36873;</button>
+                                <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button" aria-haspopup="menu" aria-expanded="false">选择</button>
                                 <div id="task-filter-menu" class="toolbar-menu" role="menu" hidden>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="paused">&#24050;&#26242;&#20572;</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="unread">&#24050;&#23436;&#25104;</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="failed">&#24050;&#22833;&#36133;</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="running">&#36827;&#34892;&#20013;</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="paused">已暂停</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="unread">未读</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="failed">失败</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="running">进行中</button>
                                 </div>
                             </div>
                             <div id="task-batch-wrap" class="toolbar-dropdown" hidden>
-                                <button id="task-batch-menu-trigger" class="toolbar-btn ghost" type="button" aria-haspopup="menu" aria-expanded="false">&#25209;&#37327;&#25805;&#20316;</button>
+                                <button id="task-batch-menu-trigger" class="toolbar-btn ghost" type="button" aria-haspopup="menu" aria-expanded="false">批量操作</button>
                                 <div id="task-batch-menu" class="toolbar-menu" role="menu" hidden>
-                                    <button class="toolbar-menu-item danger" type="button" role="menuitem" data-batch-action="delete">&#21024;&#38500;</button>
-                                    <button class="toolbar-menu-item warn" type="button" role="menuitem" data-batch-action="pause">&#26242;&#20572;</button>
-                                    <button class="toolbar-menu-item success" type="button" role="menuitem" data-batch-action="resume">&#24674;&#22797;</button>
+                                    <button class="toolbar-menu-item danger" type="button" role="menuitem" data-batch-action="cancel">取消</button>
+                                    <button class="toolbar-menu-item warn" type="button" role="menuitem" data-batch-action="pause">暂停</button>
+                                    <button class="toolbar-menu-item success" type="button" role="menuitem" data-batch-action="resume">恢复</button>
                                 </div>
                             </div>
                         </div>
                         <div class="project-toolbar-group project-toolbar-actions">
-                            <span id="task-selection-summary" class="project-selection-summary">&#24050;&#36873;&#25321; 0 &#39033;</span>
+                            <span id="task-selection-summary" class="project-selection-summary">已选 0 项</span>
                         </div>
                     </div>
                     <div id="task-card-grid" class="project-card-grid">
-                        <div class="empty-state" style="grid-column: 1/-1;">还没有任何项目。请先回到主Agent会话发布任务。</div>
+                        <div class="empty-state" style="grid-column: 1/-1;">暂无任务，先在 CEO 会话中创建一个异步任务。</div>
                     </div>
                 </div>
             </section>
@@ -116,7 +115,7 @@
                 <header class="content-header resource-header">
                     <div>
                         <h1>Skill 管理</h1>
-                        <p class="subtitle">直接管理 Skill 的启用状态、允许角色和可编辑文件。</p>
+                        <p class="subtitle">查看、编辑 Skill 文件内容与角色可见性策略。</p>
                     </div>
                     <div class="resource-header-actions">
                         <button id="skill-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
@@ -127,7 +126,7 @@
                 <div class="resource-layout full-list-layout">
                     <aside class="resource-list-panel skill-list-panel full-width-panel">
                         <div class="resource-controls">
-                            <input id="skill-search-input" class="resource-search" type="search" placeholder="搜索 Skill 名称、ID、路径">
+                            <input id="skill-search-input" class="resource-search" type="search" placeholder="搜索 Skill 名称、ID 或路径">
                             <div class="resource-filter-row">
                                 <select id="skill-risk-filter" class="resource-select">
                                     <option value="all">全部风险</option>
@@ -154,7 +153,7 @@
 
                     <div id="skill-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
                     <section class="resource-detail-panel skill-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="skill-detail-title" tabindex="-1">
-                        <div id="skill-detail-empty" class="empty-state resource-empty">请选择一个 Skill 查看详情。</div>
+                        <div id="skill-detail-empty" class="empty-state resource-empty">请选择一个 Skill 查看或编辑详情。</div>
                         <div id="skill-detail-content" class="resource-detail-shell"></div>
                     </section>
                 </div>
@@ -163,8 +162,8 @@
             <section id="view-tools" class="view-section" style="display: none;">
                 <header class="content-header resource-header">
                     <div>
-                        <h1>工具管理</h1>
-                        <p class="subtitle">直接管理工具族启停状态和各 action 的角色过滤矩阵。</p>
+                        <h1>Tool 管理</h1>
+                        <p class="subtitle">查看工具族、各 action 权限，以及当前资源可用状态。</p>
                     </div>
                     <div class="resource-header-actions">
                         <button id="tool-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
@@ -175,7 +174,7 @@
                 <div class="resource-layout full-list-layout">
                     <aside class="resource-list-panel tool-list-panel full-width-panel">
                         <div class="resource-controls">
-                            <input id="tool-search-input" class="resource-search" type="search" placeholder="搜索工具族名称、ID、路径">
+                            <input id="tool-search-input" class="resource-search" type="search" placeholder="搜索 Tool 名称、ID 或路径">
                             <div class="resource-filter-row">
                                 <select id="tool-status-filter" class="resource-select">
                                     <option value="all">全部状态</option>
@@ -197,7 +196,7 @@
 
                     <div id="tool-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
                     <section class="resource-detail-panel tool-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="tool-detail-title" tabindex="-1">
-                        <div id="tool-detail-empty" class="empty-state resource-empty">请选择一个工具族查看详情。</div>
+                        <div id="tool-detail-empty" class="empty-state resource-empty">请选择一个 Tool 查看或编辑权限配置。</div>
                         <div id="tool-detail-content" class="resource-detail-shell"></div>
                     </section>
                 </div>
@@ -207,12 +206,12 @@
                 <header class="content-header resource-header model-page-header">
                     <div>
                         <h1>模型配置</h1>
-                        <p class="subtitle">统一管理主Agent、执行、检验三条角色链与可用模型。</p>
+                        <p class="subtitle">管理主 Agent、执行链与检验链可用的模型配置。</p>
                         <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载模型配置...</p>
                     </div>
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
-                        <button id="model-create-btn" class="toolbar-btn" type="button">添加模型</button>
+                        <button id="model-create-btn" class="toolbar-btn" type="button">新建模型</button>
                         <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消</button>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button">修改模型链</button>
                     </div>
@@ -228,10 +227,10 @@
                                 <div class="panel-header model-shared-header">
                                     <div>
                                         <h3>共享可用模型</h3>
-                                        <p class="subtitle">从下方共享模型列表拖入任意角色链，点击模型可打开独立配置弹窗。</p>
+                                        <p class="subtitle">这里列出所有可配置模型，可用于角色链编排与详情编辑。</p>
                                     </div>
                                     <div class="model-shared-actions">
-                                        <input id="model-search-input" class="resource-search" type="search" placeholder="搜索模型 Key / Provider / 描述">
+                                        <input id="model-search-input" class="resource-search" type="search" placeholder="搜索 Key / Provider / 描述">
                                     </div>
                                 </div>
                                 <div id="model-list" class="model-shared-list" data-model-available-list="shared"></div>
@@ -242,7 +241,7 @@
 
                 <div id="model-detail-backdrop" class="model-detail-backdrop" aria-hidden="true"></div>
                 <section class="resource-detail-panel model-detail-dialog" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="model-detail-title" tabindex="-1">
-                    <div id="model-detail-empty" class="empty-state resource-empty">点击模型可查看详情或添加新模型。</div>
+                    <div id="model-detail-empty" class="empty-state resource-empty">请选择一个模型查看或编辑配置。</div>
                     <div id="model-detail-content" class="resource-detail-shell"></div>
                 </section>
             </section>
@@ -257,12 +256,12 @@
                             <h1 id="td-title">正在加载...</h1>
                             <div class="project-meta">
                                 <span class="status-badge" id="td-status">UNKNOWN</span>
-                                <span id="td-summary" class="text-muted">正在同步项目摘要...</span>
+                                <span id="td-summary" class="text-muted">正在获取任务摘要...</span>
                             </div>
                         </div>
                     </div>
                     <div class="header-actions">
-                        <div class="stat-pill"><i data-lucide="play-circle"></i> <span id="td-active-count">0</span> 活动单元</div>
+                        <div class="stat-pill"><i data-lucide="play-circle"></i> <span id="td-active-count">0</span> 活跃节点</div>
                     </div>
                 </header>
 
@@ -273,22 +272,21 @@
                             <i data-lucide="network"></i>
                         </div>
                         <div class="tree-container" id="org-tree-container">
-                            <div class="empty-state">等待获取任务树...</div>
+                            <div class="empty-state">正在加载任务树...</div>
                         </div>
                     </div>
 
                     <div id="task-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
-                    <div id="task-detail-drawer" class="feed-panel panel detail-drawer task-detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="feed-target-name" tabindex="-1">
+                    <div id="task-detail-drawer" class="feed-panel panel detail-drawer task-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="feed-target-name" tabindex="-1">
                         <div class="panel-header">
-                            <h2 id="feed-target-name">节点详情</h2>
+                            <h2 id="feed-target-name">当前节点</h2>
                         </div>
 
                         <div id="agent-detail-view" class="agent-detail-view" style="display: none;">
                             <div class="agent-detail-header">
                                 <h3 id="ad-role">节点</h3>
                                 <span class="status-badge" id="ad-status">STATUS</span>
-                                <button class="btn-secondary" id="close-agent-btn" type="button" data-modal-close
-                                    style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--bg-panel); color: var(--text-primary);">返回全局</button>
+                                <button class="btn-secondary" id="close-agent-btn" type="button" data-modal-close style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--bg-panel); color: var(--text-primary);">关闭</button>
                             </div>
 
                             <div class="agent-detail-section">
@@ -302,20 +300,30 @@
                             </div>
 
                             <div class="agent-detail-section">
-                                <h4><i data-lucide="shield-check"></i> 检验</h4>
+                                <h4><i data-lucide="shield-check"></i> 验收</h4>
                                 <div class="code-block" id="ad-check">-</div>
                             </div>
 
                             <div class="agent-detail-section">
                                 <h4><i data-lucide="activity"></i> 日志</h4>
-                                <div id="ad-logs"
-                                    style="max-height: 250px; overflow-y: auto; background: var(--bg-app); border-radius: var(--radius-md); padding: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2);">
-                                    <div class="empty-state" style="padding: 10px;">暂无动作...</div>
+                                <div id="ad-logs" style="max-height: 250px; overflow-y: auto; background: var(--bg-app); border-radius: var(--radius-md); padding: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2);">
+                                    <div class="empty-state" style="padding: 10px;">暂无日志。</div>
                                 </div>
+                            </div>
+
+                            <div class="agent-detail-section">
+                                <div class="agent-detail-section-header">
+                                    <h4><i data-lucide="package"></i> 工件</h4>
+                                    <button id="artifact-apply-btn" class="toolbar-btn success" type="button" hidden>应用补丁</button>
+                                </div>
+                                <div id="artifact-list" class="artifact-list">
+                                    <div class="empty-state" style="padding: 10px;">暂无工件。</div>
+                                </div>
+                                <div class="code-block" id="artifact-content">选择一个工件查看详情。</div>
                             </div>
                         </div>
 
-                        <div id="task-node-empty" class="empty-state" style="padding: 16px;">点击左侧树节点查看输入、输出、检验、日志与工件。</div>
+                        <div id="task-node-empty" class="empty-state" style="padding: 16px;">选择任务树中的节点后，这里会显示详情、日志和工件。</div>
                     </div>
                 </div>
             </section>
@@ -324,8 +332,8 @@
                 <div id="app-toast" class="app-toast" hidden>
                     <div class="app-toast-main">
                         <div class="app-toast-copy">
-                            <div id="app-toast-title" class="app-toast-title">&#25805;&#20316;&#25104;&#21151;</div>
-                            <div id="app-toast-text" class="app-toast-text">&#20462;&#25913;&#24050;&#29983;&#25928;</div>
+                            <div id="app-toast-title" class="app-toast-title">提示</div>
+                            <div id="app-toast-text" class="app-toast-text">等待操作</div>
                         </div>
                         <button id="app-toast-close" class="icon-btn app-toast-close" type="button" aria-label="关闭提示">
                             <i data-lucide="x"></i>
@@ -340,12 +348,12 @@
             <div id="confirm-backdrop" class="confirm-backdrop" hidden>
                 <div id="confirm-dialog" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text">
                     <div class="confirm-header">
-                        <h2 id="confirm-title">&#30830;&#35748;&#25805;&#20316;</h2>
+                        <h2 id="confirm-title">请确认</h2>
                     </div>
-                    <p id="confirm-text" class="confirm-text">&#27492;&#25805;&#20316;&#19981;&#21487;&#24674;&#22797;&#12290;</p>
+                    <p id="confirm-text" class="confirm-text">确认后继续执行当前操作。</p>
                     <div class="confirm-actions">
-                        <button id="confirm-cancel" class="toolbar-btn ghost" type="button">&#21462;&#28040;</button>
-                        <button id="confirm-accept" class="toolbar-btn danger" type="button">&#30830;&#35748;</button>
+                        <button id="confirm-cancel" class="toolbar-btn ghost" type="button">取消</button>
+                        <button id="confirm-accept" class="toolbar-btn danger" type="button">确认</button>
                     </div>
                 </div>
             </div>

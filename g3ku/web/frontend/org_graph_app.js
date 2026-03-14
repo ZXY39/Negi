@@ -1187,6 +1187,85 @@ function taskStatusKey(task) {
     return pStatus(task.status) || "unknown";
 }
 
+
+
+function setDrawerOpen(backdrop, drawer, open) {
+    const wasOpen = !!drawer?.classList.contains("is-open");
+    backdrop?.classList.toggle("is-open", open);
+    drawer?.classList.toggle("is-open", open);
+    backdrop?.setAttribute("aria-hidden", open ? "false" : "true");
+    drawer?.setAttribute("aria-hidden", open ? "false" : "true");
+    if (open && drawer && !wasOpen) {
+        drawer.__returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        window.requestAnimationFrame(() => {
+            const focusTarget = drawer.querySelector("[data-modal-close], button, input, textarea, select");
+            focusTarget?.focus?.();
+        });
+    }
+    if (!open && drawer?.__returnFocus?.focus) {
+        drawer.__returnFocus.focus();
+    }
+}
+
+function syncActionButton(button, { idleLabel, busyLabel, busy = false, disabled = false } = {}) {
+    if (!button) return;
+    button.textContent = busy ? (busyLabel || idleLabel || button.textContent || "") : (idleLabel || button.textContent || "");
+    button.disabled = !!disabled;
+}
+
+function renderSkillActions() {
+    syncActionButton(U.skillRefresh, {
+        idleLabel: "刷新",
+        busyLabel: "刷新中...",
+        busy: S.skillBusy,
+        disabled: S.skillBusy,
+    });
+    syncActionButton(U.skillSave, {
+        idleLabel: "保存",
+        busyLabel: "保存中...",
+        busy: S.skillBusy,
+        disabled: S.skillBusy || !S.selectedSkill,
+    });
+}
+
+function renderToolActions() {
+    syncActionButton(U.toolRefresh, {
+        idleLabel: "刷新",
+        busyLabel: "刷新中...",
+        busy: S.toolBusy,
+        disabled: S.toolBusy,
+    });
+    syncActionButton(U.toolSave, {
+        idleLabel: "保存",
+        busyLabel: "保存中...",
+        busy: S.toolBusy,
+        disabled: S.toolBusy || !S.selectedTool,
+    });
+}
+
+function clearSkillSelection() {
+    if (S.resourceSaveTimers?.skill) {
+        window.clearTimeout(S.resourceSaveTimers.skill);
+        S.resourceSaveTimers.skill = null;
+    }
+    S.selectedSkill = null;
+    S.skillFiles = [];
+    S.skillContents = {};
+    S.selectedSkillFile = "";
+    renderSkills();
+    renderSkillDetail();
+}
+
+function clearToolSelection() {
+    if (S.resourceSaveTimers?.tool) {
+        window.clearTimeout(S.resourceSaveTimers.tool);
+        S.resourceSaveTimers.tool = null;
+    }
+    S.selectedTool = null;
+    renderTools();
+    renderToolDetail();
+}
+
 function taskStatusLabel(task) {
     return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
 }
@@ -1758,6 +1837,19 @@ function filterSkills() {
     });
 }
 
+function displayRoleLabel(role) {
+    return ({ ceo: "主Agent", execution: "执行", inspection: "检验" }[roleKey(role)] || String(role || ""));
+}
+
+function displayRiskLabel(level) {
+    return ({ low: "低风险", medium: "中风险", high: "高风险" }[String(level || "").trim().toLowerCase()] || String(level || "未知风险"));
+}
+
+function displayEnabledLabel(enabled, available = true) {
+    if (!available) return "不可用";
+    return enabled ? "已启用" : "已禁用";
+}
+
 function renderSkills() {
     U.skillList.innerHTML = "";
     const items = filterSkills();
@@ -1768,7 +1860,7 @@ function renderSkills() {
         el.className = `resource-list-item${S.selectedSkill?.skill_id === skill.skill_id ? " selected" : ""}`;
         const desc = (skill.description || "").trim();
         const subtitle = desc ? (desc.length > 50 ? desc.slice(0, 47) + "..." : desc) : skill.skill_id;
-        el.innerHTML = `<div class="resource-list-title">${esc(skill.display_name)}</div><div class="resource-list-subtitle">${esc(subtitle)}</div><div class="resource-list-meta">${esc(skill.risk_level)} · ${skill.enabled ? "已启用" : "已禁用"}</div>`;
+        el.innerHTML = `<div class="resource-list-title">${esc(skill.display_name)}</div><div class="resource-list-subtitle">${esc(subtitle)}</div><div class="resource-list-meta">${esc(displayRiskLabel(skill.risk_level))} · ${esc(displayEnabledLabel(skill.enabled, skill.available))}</div>`;
         el.addEventListener("click", () => openSkill(skill.skill_id));
         U.skillList.appendChild(el);
     });
@@ -1789,14 +1881,14 @@ function filterTools() {
 function renderTools() {
     U.toolList.innerHTML = "";
     const items = filterTools();
-    if (!items.length) return void (U.toolList.innerHTML = '<div class="empty-state">没有匹配的工具族。</div>');
+    if (!items.length) return void (U.toolList.innerHTML = '<div class="empty-state">没有匹配的 Tool。</div>');
     items.forEach((tool) => {
         const el = document.createElement("button");
         el.type = "button";
         el.className = `resource-list-item${S.selectedTool?.tool_id === tool.tool_id ? " selected" : ""}`;
         const desc = (tool.description || "").trim();
         const subtitle = desc ? (desc.length > 50 ? desc.slice(0, 47) + "..." : desc) : tool.tool_id;
-        el.innerHTML = `<div class="resource-list-title">${esc(tool.display_name)}</div><div class="resource-list-subtitle">${esc(subtitle)}</div><div class="resource-list-meta">${tool.enabled ? "已启用" : "已禁用"} · ${(tool.actions || []).length} 个动作</div>`;
+        el.innerHTML = `<div class="resource-list-title">${esc(tool.display_name)}</div><div class="resource-list-subtitle">${esc(subtitle)}</div><div class="resource-list-meta">${esc(displayEnabledLabel(tool.enabled, tool.available))} · ${(tool.actions || []).length} 个 action</div>`;
         el.addEventListener("click", () => openTool(tool.tool_id));
         U.toolList.appendChild(el);
     });
@@ -1844,24 +1936,23 @@ function renderSkillDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
-                    ${S.selectedSkill.enabled 
-                        ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>` 
-                        : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`
-                    }
+                    ${S.selectedSkill.enabled
+                        ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
+                        : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`}
                 </div>
                 <div class="resource-section">
-                    <h3>允许的角色</h3>
+                    <h3>角色可见性</h3>
                     <div class="resource-filter-row">
                         ${roles.map((role) => `
                             <label class="role-toggle ${allowedRoles.includes(role) ? "checked" : ""}">
                                 <input type="checkbox" class="skill-role" data-role="${role}" ${allowedRoles.includes(role) ? "checked" : ""}>
-                                <span>${esc(roleLabel(role))}</span>
+                                <span>${esc(displayRoleLabel(role))}</span>
                             </label>
                         `).join("")}
                     </div>
                 </div>
                 <div class="resource-section">
-                    <h3>可编辑文件</h3>
+                    <h3>文件内容</h3>
                     <div class="resource-filter-row">${fileTabs}</div>
                     <textarea id="skill-editor" rows="18" class="resource-editor">${editorValue}</textarea>
                 </div>
@@ -2015,21 +2106,20 @@ function renderToolDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
-                    ${S.selectedTool.enabled 
-                        ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>` 
-                        : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`
-                    }
+                    ${S.selectedTool.enabled
+                        ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>`
+                        : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`}
                 </div>
                 <div class="resource-section">
                     <div class="tool-permission-heading">
-                        <h3>分配动作权限</h3>
-                        <p class="subtitle">以设置面板的方式逐项配置每个动作对主Agent、执行、检验角色的使用权限。</p>
+                        <h3>Action 权限</h3>
+                        <p class="subtitle">控制当前工具族下各个 action 对主Agent、执行和检验角色的可见性。</p>
                     </div>
                     <div class="tool-permission-grid">
                         ${actions.length ? actions.map((action) => {
                             const actionName = esc(action.label || action.action_id);
                             const actionId = esc(action.action_id);
-                            const riskLevel = esc(action.risk_level || "medium");
+                            const riskLevel = esc(displayRiskLabel(action.risk_level || "medium"));
                             const riskClass = `risk-${String(action.risk_level || "medium").toLowerCase()}`;
                             return `
                                 <article class="tool-permission-card">
@@ -2043,13 +2133,13 @@ function renderToolDetail() {
                                     <div class="tool-role-toggle-group">
                                         ${roles.map((role) => `
                                             <label class="role-toggle tool-role-toggle ${action.allowed_roles?.includes(role) ? "checked" : ""}">
-                                                <input type="checkbox" class="tool-role tool-role-input" data-action="${actionId}" data-role="${role}" aria-label="${actionName} - ${esc(roleLabel(role))}" ${action.allowed_roles?.includes(role) ? "checked" : ""}>
-                                                <span>${esc(roleLabel(role))}</span>
+                                                <input type="checkbox" class="tool-role tool-role-input" data-action="${actionId}" data-role="${role}" aria-label="${actionName} - ${esc(displayRoleLabel(role))}" ${action.allowed_roles?.includes(role) ? "checked" : ""}>
+                                                <span>${esc(displayRoleLabel(role))}</span>
                                             </label>
                                         `).join("")}
                                     </div>
                                 </article>`;
-                        }).join("") : `<div class="tool-empty-card">暂无可配置动作</div>`}
+                        }).join("") : `<div class="tool-empty-card">当前工具族没有 action。</div>`}
                     </div>
                 </div>
             </div>
@@ -2480,6 +2570,10 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+
+
+
 
 
 

@@ -132,6 +132,24 @@ class CeoFrontDoorRunner:
             message_tool.start_turn()
         exposure = await self._resolver.resolve_for_actor(actor_role='ceo', session_id=session.state.session_key)
         system_prompt = self._prompt_builder.build(skills=list(exposure.get('skills') or []))
+        retrieved_memory = ""
+        if getattr(self._loop, 'memory_manager', None) is not None and self._loop._use_rag_memory():
+            query_text = self._content_text(getattr(user_input, 'content', ''))
+            if query_text:
+                try:
+                    retrieved_memory = await self._loop.memory_manager.retrieve_block(
+                        query=query_text,
+                        session_key=session.state.session_key,
+                        channel=getattr(session, '_channel', 'cli'),
+                        chat_id=getattr(session, '_chat_id', session.state.session_key),
+                    )
+                except Exception:
+                    logger.exception("RAG retrieval failed for session {}", session.state.session_key)
+        if retrieved_memory:
+            if "# Retrieved Context" in retrieved_memory:
+                system_prompt = f"{system_prompt}\n\n{retrieved_memory}"
+            else:
+                system_prompt = f"{system_prompt}\n\n# Retrieved Context\n\n{retrieved_memory}"
         tool_names = list(exposure.get('tool_names') or [])
         tools = self._loop.tools.to_langchain_tools_filtered(tool_names)
         model_client, model_chain = self._resolve_ceo_model_client()
