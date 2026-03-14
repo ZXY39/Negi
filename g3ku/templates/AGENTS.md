@@ -14,11 +14,11 @@ g3ku cron add --name "reminder" --message "你的消息" --at "YYYY-MM-DDTHH:MM:
 
 ## 心跳任务
 
-`HEARTBEAT.md` 每 30 分钟检查一次。使用文件工具管理周期性任务：
+`HEARTBEAT.md` 每 30 分钟检查一次。使用 `filesystem` 工具管理周期性任务：
 
-- **添加**: `edit_file` 追加新任务
-- **删除**: `edit_file` 删除已完成任务
-- **重写**: `write_file` 替换所有任务
+- **添加**: `filesystem(action="edit")` 追加新任务
+- **删除**: `filesystem(action="edit")` 删除已完成任务
+- **重写**: `filesystem(action="write")` 替换所有任务
 
 当用户要求执行重复/周期性任务时，请更新 `HEARTBEAT.md` 而不是创建一次性的 cron 提醒。
 

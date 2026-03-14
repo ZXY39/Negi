@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 
-MUTATING_EXECUTOR_NAMES = frozenset({'write_file', 'edit_file', 'delete_file', 'propose_file_patch'})
+MUTATING_ACTION_IDS = frozenset({'write', 'edit', 'delete', 'propose_patch'})
 
 
 def list_effective_tool_names(*, subject, supported_tool_names: list[str], resource_registry, policy_engine, mutation_allowed: bool) -> list[str]:
@@ -15,12 +15,12 @@ def list_effective_tool_names(*, subject, supported_tool_names: list[str], resou
 
     visible: list[str] = []
     for executor_name in supported_tool_names:
-        if not mutation_allowed and executor_name in MUTATING_EXECUTOR_NAMES:
-            continue
         action_pairs = executor_actions.get(executor_name) or []
         if not action_pairs:
             continue
         for tool_id, action_id in action_pairs:
+            if not mutation_allowed and action_id in MUTATING_ACTION_IDS:
+                continue
             decision = policy_engine.evaluate_tool_action(subject=subject, tool_id=tool_id, action_id=action_id)
             if decision.allowed:
                 visible.append(executor_name)

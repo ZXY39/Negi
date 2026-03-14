@@ -14,15 +14,13 @@
 
 - 请参阅 cron 技能了解用法。
 
-## picture_washing - DOUBAO 图像生成
+## filesystem - 工作区文件操作
 
-- 必需参数：`prompt`、`image`、`ratio`
-- 首选配置注入：设置 `tools.pictureWashing.baseUrl` 和 `tools.pictureWashing.authorization`
-- 调用时参数 `base_url` 和 `authorization` 是可选的覆盖项（优先级高于配置）
-- 可选生成参数：`style`、`model`、`stream`、`timeout_s`（均可在 `tools.pictureWashing` 中配置）
-- 端点兼容性：接受以 host、`/v1`、`/v1/images`、`/v1/images/generations` 或 `/v1/responses` 结尾的 `base_url` 形式
-- 图像提取后备顺序：`choices[0].message.images` -> `image_details.url` -> `image_details.original_url` -> 从 `message.content` 解析 URL
-- 返回标准化的 JSON 字符串：`success`、`error`、`requestMeta`、`images`、`raw`
+- `action` 必填，可选值：`read`、`list`、`write`、`edit`、`delete`、`propose_patch`
+- `path` 始终必填；相对路径按 workspace 解析
+- `write` 需要 `content`
+- `edit` 和 `propose_patch` 需要 `old_text`、`new_text`
+- `propose_patch` 可选 `summary`，返回补丁工件 JSON，不会直接修改文件
 ## agent_browser - 外部 agent-browser 浏览器自动化
 
 - 由外部 `agent-browser` CLI/daemon 提供的浏览器自动化。

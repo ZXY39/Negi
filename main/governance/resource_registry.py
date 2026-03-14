@@ -12,6 +12,15 @@ from main.protocol import now_iso
 MANUAL_ACTION_TOOL_NAMES = {'patch_apply'}
 
 
+def _primary_executor_name(actions: list[ToolActionRecord]) -> str:
+    for action in actions:
+        for executor_name in action.executor_names or []:
+            name = str(executor_name or '').strip()
+            if name:
+                return name
+    return ''
+
+
 class MainRuntimeResourceRegistry:
     def __init__(self, *, workspace_root: Path, store, resource_manager: ResourceManager | None = None):
         self._workspace_root = Path(workspace_root)
@@ -98,7 +107,15 @@ class MainRuntimeResourceRegistry:
                     merged_actions.append(action)
                 else:
                     merged_actions.append(action.model_copy(update={'allowed_roles': list(old.allowed_roles or action.allowed_roles)}))
-            merged.append(record.model_copy(update={'enabled': existing.enabled, 'actions': merged_actions}))
+            merged.append(
+                record.model_copy(
+                    update={
+                        'enabled': existing.enabled,
+                        'actions': merged_actions,
+                        'primary_executor_name': _primary_executor_name(merged_actions),
+                    }
+                )
+            )
         return merged
 
     def _inject_manual_actions(self, families: dict[str, ToolFamilyRecord], *, discovered_tool_names: set[str]) -> None:
@@ -129,4 +146,10 @@ class MainRuntimeResourceRegistry:
                     if tool_name not in executors:
                         executors.append(tool_name)
                     action_map[action_id] = existing.model_copy(update={'executor_names': executors})
-            families[tool_id] = family.model_copy(update={'actions': list(action_map.values())})
+            actions = list(action_map.values())
+            families[tool_id] = family.model_copy(
+                update={
+                    'actions': actions,
+                    'primary_executor_name': _primary_executor_name(actions),
+                }
+            )

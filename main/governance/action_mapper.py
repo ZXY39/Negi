@@ -6,39 +6,21 @@ from typing import Any
 DEFAULT_ALLOWED_ROLES = ['ceo', 'execution', 'inspection']
 READ_ALLOWED_ROLES = ['ceo', 'execution', 'inspection']
 WRITE_ALLOWED_ROLES = ['ceo', 'execution']
-INSPECTION_ALLOWED_ROLES = ['ceo', 'inspection']
 
 
 DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
-    'read_file': {
+    'filesystem': {
         'tool_id': 'filesystem',
         'display_name': 'Filesystem',
-        'description': 'Read files from the workspace.',
-        'actions': [{'id': 'read', 'label': 'Read File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES}],
-    },
-    'list_dir': {
-        'tool_id': 'filesystem',
-        'display_name': 'Filesystem',
-        'description': 'List workspace directories.',
-        'actions': [{'id': 'list', 'label': 'List Directory', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES}],
-    },
-    'write_file': {
-        'tool_id': 'filesystem',
-        'display_name': 'Filesystem',
-        'description': 'Write files in the workspace.',
-        'actions': [{'id': 'write', 'label': 'Write File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES}],
-    },
-    'edit_file': {
-        'tool_id': 'filesystem',
-        'display_name': 'Filesystem',
-        'description': 'Edit files in the workspace.',
-        'actions': [{'id': 'edit', 'label': 'Edit File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES}],
-    },
-    'delete_file': {
-        'tool_id': 'filesystem',
-        'display_name': 'Filesystem',
-        'description': 'Delete files in the workspace.',
-        'actions': [{'id': 'delete', 'label': 'Delete File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo']}],
+        'description': 'Read, list, write, edit, delete workspace files, and create reviewable patch artifacts.',
+        'actions': [
+            {'id': 'read', 'label': 'Read File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
+            {'id': 'list', 'label': 'List Directory', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
+            {'id': 'write', 'label': 'Write File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
+            {'id': 'edit', 'label': 'Edit File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
+            {'id': 'delete', 'label': 'Delete File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo']},
+            {'id': 'propose_patch', 'label': 'Propose Patch', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo', 'execution']},
+        ],
     },
     'web_search': {
         'tool_id': 'web_access',
@@ -82,93 +64,52 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
         'description': 'Manage model catalog and role routing.',
         'actions': [{'id': 'manage', 'label': 'Manage Models', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo']}],
     },
-    'picture_washing': {
-        'tool_id': 'media_tools',
-        'display_name': 'Media Tools',
-        'description': 'Generate or transform pictures.',
-        'actions': [{'id': 'transform', 'label': 'Transform Picture', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
-    },
     'memory_search': {
         'tool_id': 'memory',
         'display_name': 'Memory',
         'description': 'Search long-term memory.',
         'actions': [{'id': 'search', 'label': 'Search Memory', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
     },
-    'file_vault_lookup': {
-        'tool_id': 'file_vault',
-        'display_name': 'File Vault',
-        'description': 'Search uploaded vault content.',
-        'actions': [{'id': 'lookup', 'label': 'Lookup Vault', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
-    },
-    'file_vault_read': {
-        'tool_id': 'file_vault',
-        'display_name': 'File Vault',
-        'description': 'Read uploaded vault content.',
-        'actions': [{'id': 'read', 'label': 'Read Vault File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
-    },
-    'file_vault_stats': {
-        'tool_id': 'file_vault',
-        'display_name': 'File Vault',
-        'description': 'Inspect vault status.',
-        'actions': [{'id': 'stats', 'label': 'Vault Stats', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
-    },
-    'file_vault_set_policy': {
-        'tool_id': 'file_vault',
-        'display_name': 'File Vault',
-        'description': 'Change vault policy.',
-        'actions': [{'id': 'set_policy', 'label': 'Set Vault Policy', 'risk_level': 'medium', 'destructive': True, 'allowed_roles': ['ceo']}],
-    },
-    'file_vault_cleanup': {
-        'tool_id': 'file_vault',
-        'display_name': 'File Vault',
-        'description': 'Clean vault content.',
-        'actions': [{'id': 'cleanup', 'label': 'Cleanup Vault', 'risk_level': 'medium', 'destructive': True, 'allowed_roles': ['ceo']}],
-    },
-    '创建异步任务': {
+    'create_async_task': {
         'tool_id': 'task_runtime',
-        'display_name': '?????',
+        'display_name': 'Task Runtime',
         'description': 'Create background tasks in the main runtime.',
-        'actions': [{'id': 'create_async_task', 'label': '??????', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo']}],
+        'actions': [{'id': 'create_async_task', 'label': 'Create Async Task', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo']}],
     },
-    '任务汇总工具': {
+    'task_summary': {
         'tool_id': 'task_runtime',
-        'display_name': '?????',
+        'display_name': 'Task Runtime',
         'description': 'Summarize background tasks.',
-        'actions': [{'id': 'summary_cn', 'label': '????', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
+        'actions': [{'id': 'summary_cn', 'label': 'Task Summary', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
     },
-    '获取任务': {
+    'task_list': {
         'tool_id': 'task_runtime',
-        'display_name': '?????',
+        'display_name': 'Task Runtime',
         'description': 'List background tasks.',
-        'actions': [{'id': 'list_cn', 'label': '??????', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
+        'actions': [{'id': 'list_cn', 'label': 'Task List', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
     },
-    '查看任务进度工具': {
+    'task_progress': {
         'tool_id': 'task_runtime',
-        'display_name': '?????',
+        'display_name': 'Task Runtime',
         'description': 'View task progress.',
-        'actions': [{'id': 'progress_cn', 'label': '??????', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
+        'actions': [{'id': 'progress_cn', 'label': 'Task Progress', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
     },
     'load_skill_context': {
         'tool_id': 'skill_access',
         'display_name': 'Skill Access',
         'description': 'Load detailed skill context for visible skills.',
-        'actions': [{'id': 'load_context', 'label': 'Load Skill Context', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo', 'execution', 'inspection']}],
+        'actions': [{'id': 'load_context', 'label': 'Load Skill Context', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
     },
     'load_tool_context': {
         'tool_id': 'skill_access',
         'display_name': 'Skill Access',
         'description': 'Load detailed tool usage context for visible tools.',
-        'actions': [{'id': 'load_context', 'label': 'Load Tool Context', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo', 'execution', 'inspection']}],
-    },
-    'propose_file_patch': {
-        'tool_id': 'filesystem',
-        'display_name': 'Filesystem',
-        'description': 'Create reviewable patch artifacts.',
-        'actions': [{'id': 'propose_patch', 'label': 'Propose Patch', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo', 'execution']}],
+        'actions': [{'id': 'load_context', 'label': 'Load Tool Context', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
     },
 }
 
-DEFAULT_FAMILY_ORDER = ['filesystem', 'web_access', 'browser', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'media_tools', 'file_vault', 'task_runtime', 'skill_access']
+
+DEFAULT_FAMILY_ORDER = ['filesystem', 'web_access', 'browser', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'task_runtime', 'skill_access']
 
 
 def get_default_tool_governance(tool_name: str) -> dict[str, Any] | None:

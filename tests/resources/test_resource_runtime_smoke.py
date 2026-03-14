@@ -146,7 +146,7 @@ class _MainTaskService:
 
 
 @pytest.mark.asyncio
-async def test_resource_hot_reload_delete_lock_and_load_tool_context(tmp_path: Path):
+async def test_resource_refresh_is_manual_or_release_triggered_and_load_tool_context(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -160,9 +160,12 @@ async def test_resource_hot_reload_delete_lock_and_load_tool_context(tmp_path: P
     manager.start()
 
     try:
-        _wait_until(lambda: manager.get_tool('load_tool_context') is not None)
+        assert manager.get_tool('load_tool_context') is not None
 
         demo_dir = _write_demo_tool(workspace)
+        time.sleep(0.45)
+        assert manager.get_tool('demo_echo') is None
+        manager.reload_now(trigger='test-manual-add')
         _wait_until(lambda: manager.get_tool('demo_echo') is not None)
 
         load_tool = manager.get_tool('load_tool_context')
@@ -172,10 +175,18 @@ async def test_resource_hot_reload_delete_lock_and_load_tool_context(tmp_path: P
         assert 'Demo echo guide' in payload['content']
 
         shutil.rmtree(demo_dir)
+        time.sleep(0.45)
+        assert manager.get_tool_descriptor('demo_echo') is not None
+        manager.reload_now(trigger='test-manual-delete')
         _wait_until(lambda: manager.get_tool_descriptor('demo_echo') is None)
         assert manager.get_tool('demo_echo') is None
 
-        demo_dir = _write_demo_tool(workspace, guide='Busy tool guide')
+        demo_dir = _write_demo_tool(workspace, guide='Release reload guide')
+        time.sleep(0.45)
+        assert manager.get_tool('demo_echo') is None
+
+        with manager.acquire_tool('load_tool_context'):
+            pass
         _wait_until(lambda: manager.get_tool('demo_echo') is not None)
 
         with manager.acquire_tool('demo_echo'):
@@ -187,17 +198,18 @@ async def test_resource_hot_reload_delete_lock_and_load_tool_context(tmp_path: P
                 pytest.skip('Windows delete guard is required for this smoke test')
 
         shutil.rmtree(demo_dir)
+        manager.reload_now(trigger='test-manual-final-delete')
         _wait_until(lambda: manager.get_tool_descriptor('demo_echo') is None)
     finally:
         manager.close()
 
 
 @pytest.mark.asyncio
-async def test_propose_file_patch_runs_as_resource_tool(tmp_path: Path):
+async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'propose_file_patch', workspace / 'tools' / 'propose_file_patch')
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
 
     target_file = workspace / 'target.txt'
     target_file.write_text('before value\n', encoding='utf-8')
@@ -211,14 +223,26 @@ async def test_propose_file_patch_runs_as_resource_tool(tmp_path: Path):
     manager.reload_now(trigger='test-bind')
 
     try:
-        tool = manager.get_tool('propose_file_patch')
+        tool = manager.get_tool('filesystem')
         assert tool is not None
+        assert 'target.txt' in await tool.execute(action='list', path='.')
+        assert await tool.execute(action='read', path='target.txt') == 'before value'
+        assert 'Successfully wrote' in await tool.execute(action='write', path='written.txt', content='hello\n')
+        assert await tool.execute(action='read', path='written.txt') == 'hello'
+        assert 'Successfully edited' in await tool.execute(
+            action='edit',
+            path='target.txt',
+            old_text='before value',
+            new_text='after value',
+        )
+        assert await tool.execute(action='read', path='target.txt') == 'after value'
 
         result = json.loads(
             await tool.execute(
+                action='propose_patch',
                 path='target.txt',
-                old_text='before value',
-                new_text='after value',
+                old_text='after value',
+                new_text='patched value',
                 summary='Patch target',
                 __g3ku_runtime={
                     'task_id': 'task:test',
@@ -230,13 +254,15 @@ async def test_propose_file_patch_runs_as_resource_tool(tmp_path: Path):
 
         assert result['success'] is True
         assert result['summary'] == 'Patch target'
-        assert target_file.read_text(encoding='utf-8') == 'before value\n'
+        assert target_file.read_text(encoding='utf-8') == 'after value\n'
 
         artifact_path = Path(result['artifact']['path'])
         assert artifact_path.exists()
         metadata, diff_text = parse_patch_artifact(artifact_path.read_text(encoding='utf-8'))
         assert Path(metadata['path']) == target_file.resolve()
-        assert 'after value' in diff_text
+        assert 'patched value' in diff_text
+        assert 'Successfully deleted' in await tool.execute(action='delete', path='written.txt')
+        assert not (workspace / 'written.txt').exists()
     finally:
         manager.close()
         store.close()

@@ -75,6 +75,11 @@ class AgentRuntimeEngine:
         self.cron_service = cron_service
         self.restrict_to_workspace = bool(restrict_to_workspace)
         self.mcp_servers = dict(mcp_servers or {})
+        if self.mcp_servers:
+            logger.warning(
+                "tools.mcp_servers is deprecated and ignored; migrate external tools into workspace tools/ directories."
+            )
+            self.mcp_servers = {}
         self.channels_config = channels_config
         self.picture_washing_config = dict(picture_washing_config or {})
         self.agent_browser_config = dict(agent_browser_config or {})

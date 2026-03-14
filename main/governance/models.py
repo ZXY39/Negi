@@ -53,6 +53,7 @@ class ToolFamilyRecord(Model):
     tool_id: str
     display_name: str
     description: str
+    primary_executor_name: str = ''
     enabled: bool = True
     available: bool = True
     source_path: str

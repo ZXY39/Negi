@@ -217,9 +217,15 @@ class MainRuntimeService:
 
     def list_visible_tool_families(self, *, actor_role: str, session_id: str):
         visible_names = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        subject = self._subject(actor_role=actor_role, session_id=session_id)
         families = []
         for family in self.resource_registry.list_tool_families():
-            actions = [action for action in family.actions if set(action.executor_names) & visible_names]
+            actions = [
+                action
+                for action in family.actions
+                if set(action.executor_names) & visible_names
+                and self.policy_engine.evaluate_tool_action(subject=subject, tool_id=family.tool_id, action_id=action.action_id).allowed
+            ]
             if actions:
                 families.append(family.model_copy(update={'actions': actions}))
         return families
@@ -293,6 +299,39 @@ class MainRuntimeService:
     def get_tool_family(self, tool_id: str):
         return self.resource_registry.get_tool_family(str(tool_id or '').strip())
 
+    def _tool_family_executor_name(self, family) -> str:
+        primary = str(getattr(family, 'primary_executor_name', '') or '').strip()
+        if primary:
+            return primary
+        for action in list(getattr(family, 'actions', []) or []):
+            for executor_name in list(getattr(action, 'executor_names', []) or []):
+                name = str(executor_name or '').strip()
+                if name:
+                    return name
+        fallback = str(getattr(family, 'tool_id', '') or '').strip()
+        if self._resource_manager is not None and fallback:
+            descriptor = self._resource_manager.get_tool_descriptor(fallback)
+            if descriptor is not None:
+                return fallback
+        return ''
+
+    def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
+        family = self.get_tool_family(tool_id)
+        if family is None:
+            return None
+        executor_name = self._tool_family_executor_name(family)
+        content = ''
+        if executor_name and self._resource_manager is not None:
+            try:
+                content = self._resource_manager.load_toolskill_body(executor_name)
+            except FileNotFoundError:
+                content = ''
+        return {
+            'tool_id': family.tool_id,
+            'primary_executor_name': executor_name,
+            'content': content,
+        }
+
     def update_tool_policy(self, tool_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles_by_action: dict[str, list[str]] | None = None):
         family = self.get_tool_family(tool_id)
         if family is None:
@@ -312,6 +351,23 @@ class MainRuntimeService:
 
     def disable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
         return self.update_tool_policy(tool_id, session_id=session_id, enabled=False)
+
+    def is_tool_action_allowed(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        tool_id: str,
+        action_id: str,
+        task_id: str | None = None,
+        node_id: str | None = None,
+    ) -> bool:
+        decision = self.policy_engine.evaluate_tool_action(
+            subject=self._subject(actor_role=actor_role, session_id=session_id, task_id=task_id, node_id=node_id),
+            tool_id=str(tool_id or '').strip(),
+            action_id=str(action_id or '').strip(),
+        )
+        return bool(decision.allowed)
 
     def reload_resources(self, *, session_id: str = 'web:shared') -> dict[str, Any]:
         if self._resource_manager is not None:

@@ -183,6 +183,10 @@ class ApiClient {
         return data.item || data.tool || null;
     }
 
+    static async getToolSkill(toolId) {
+        return this.get(`/api/resources/tools/${toolId}/toolskill`);
+    }
+
     static async updateToolPolicy(toolId, payload) {
         return this.put(`/api/resources/tools/${toolId}/policy`, payload, { session_id: DEFAULT_SESSION_ID });
     }

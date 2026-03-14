@@ -8,9 +8,7 @@ trigger:
 requires:
   tools:
   - exec
-  - read_file
-  - write_file
-  - edit_file
+  - filesystem
   bins: []
   env: []
 content:

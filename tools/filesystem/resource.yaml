@@ -1,0 +1,101 @@
+schema_version: 1
+kind: tool
+name: filesystem
+display_name: "文件系统工具"
+description: 统一的工作区文件工具。用于读取文件、列出目录、写入文件、精确替换编辑文件、删除文件，以及在不直接修改文件时生成可审阅补丁。
+protocol: mcp
+mcp:
+  transport: embedded
+config_namespace: ''
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - read
+        - list
+        - write
+        - edit
+        - delete
+        - propose_patch
+      description: 要执行的文件动作。
+    path:
+      type: string
+      description: 目标文件或目录路径；相对路径按 workspace 解析。
+    content:
+      type: string
+      description: action=write 时要写入的完整内容。
+    old_text:
+      type: string
+      description: action=edit 或 action=propose_patch 时要匹配的原文本，必须唯一匹配。
+    new_text:
+      type: string
+      description: action=edit 或 action=propose_patch 时的替换文本。
+    summary:
+      type: string
+      description: action=propose_patch 时可选的补丁摘要。
+  required:
+    - action
+    - path
+governance:
+  family: filesystem
+  display_name: Filesystem
+  description: Read, list, write, edit, delete workspace files, and create reviewable patch artifacts.
+  actions:
+    - id: read
+      label: Read File
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+    - id: list
+      label: List Directory
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+    - id: write
+      label: Write File
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+        - execution
+    - id: edit
+      label: Edit File
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+        - execution
+    - id: delete
+      label: Delete File
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+    - id: propose_patch
+      label: Propose Patch
+      risk_level: medium
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

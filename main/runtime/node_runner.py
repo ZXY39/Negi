@@ -110,7 +110,12 @@ class NodeRunner:
             'node_id': node.node_id,
             'depth': node.depth,
             'node_kind': node.node_kind,
+            'actor_role': self._actor_role_for_node(node),
         }
+
+    @staticmethod
+    def _actor_role_for_node(node: NodeRecord) -> str:
+        return 'inspection' if node.node_kind == KIND_ACCEPTANCE else 'execution'
 
     async def _spawn_children(
         self,

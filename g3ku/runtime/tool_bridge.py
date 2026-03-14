@@ -297,6 +297,7 @@ class ToolExecutionBridge:
         token = self._loop.tools.push_runtime_context(
             {
                 "on_progress": on_progress,
+                "actor_role": getattr(runtime_context, "actor_role", None),
                 "session_key": getattr(runtime_context, "session_key", None),
                 "channel": channel,
                 "chat_id": chat_id,
@@ -386,6 +387,7 @@ class ToolExecutionBridge:
         token = self._loop.tools.push_runtime_context(
             {
                 "on_progress": on_progress,
+                "actor_role": getattr(runtime_context, "actor_role", None) if runtime_context else None,
                 "session_key": session_key,
                 "channel": channel,
                 "chat_id": chat_id,

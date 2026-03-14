@@ -15,7 +15,9 @@ grep -i "关键词" memory/HISTORY.md
 
 ## 何时更新 MEMORY.md
 
-立即使用 `edit_file` 或 `write_file` 记录重要事实：
+立即使用 `filesystem` 记录重要事实：
+- 优先使用 `action=edit` 做精确更新。
+- 需要完整重写文件时使用 `action=write`。
 - 用户偏好（"我更喜欢深色模式"）
 - 项目背景（"API 使用 OAuth2"）
 - 人际关系（"Alice 是项目负责人"）

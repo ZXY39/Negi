@@ -36,6 +36,7 @@ const S = {
     taskBusy: false,
     confirmState: null,
     toastState: { timeoutId: null, intervalId: null, remaining: 0 },
+    openResourceSelectId: "",
     resourceSaveTimers: { skill: null, tool: null },
     modelCatalog: {
         items: [],
@@ -74,9 +75,11 @@ const S = {
     skillContents: {},
     selectedSkillFile: "",
     skillBusy: false,
+    skillDirty: false,
     tools: [],
     selectedTool: null,
     toolBusy: false,
+    toolDirty: false,
 };
 
 const U = {
@@ -172,16 +175,199 @@ const icons = () => window.lucide && lucide.createIcons();
 const roleKey = (v) => (["ceo", "inspection", "checker"].includes(String(v).toLowerCase()) ? (String(v).toLowerCase() === "ceo" ? "ceo" : "inspection") : "execution");
 const roleLabel = (v) => ({ ceo: "主Agent", execution: "执行", inspection: "检验" }[roleKey(v)]);
 const pStatus = (v) => String(v || "").trim().toLowerCase();
+const MD_TOKEN_MARKER = "\uE000";
+
+function safeHref(value) {
+    const href = String(value || "").trim();
+    if (!href) return "#";
+    if (/^(https?:|mailto:|tel:)/i.test(href) || href.startsWith("/") || href.startsWith("#")) return esc(href);
+    return "#";
+}
+
+function createMarkdownToken(tokens, html) {
+    const token = `${MD_TOKEN_MARKER}${tokens.length}${MD_TOKEN_MARKER}`;
+    tokens.push(html);
+    return token;
+}
+
+function renderInlineMarkdown(value, { allowLinks = true } = {}) {
+    let text = String(value ?? "");
+    if (!text) return "";
+    const tokens = [];
+
+    text = text.replace(/`([^`\n]+)`/g, (_match, code) => createMarkdownToken(tokens, `<code>${esc(code)}</code>`));
+    if (allowLinks) {
+        text = text.replace(/\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, label, target) => {
+            const href = String(target || "").replace(/\s+"[^"]*"$/, "");
+            return createMarkdownToken(
+                tokens,
+                `<a href="${safeHref(href)}" target="_blank" rel="noreferrer noopener">${renderInlineMarkdown(label, { allowLinks: false })}</a>`
+            );
+        });
+    }
+
+    text = esc(text);
+    text = text.replace(/\*\*([^*][\s\S]*?)\*\*/g, "<strong>$1</strong>");
+    text = text.replace(/__([^_][\s\S]*?)__/g, "<strong>$1</strong>");
+    text = text.replace(/~~([^~][\s\S]*?)~~/g, "<del>$1</del>");
+    text = text.replace(/(^|[\s(])\*([^*\n][^*\n]*?)\*(?=($|[\s).,!?:;]))/g, "$1<em>$2</em>");
+    text = text.replace(/(^|[\s(])_([^_\n][^_\n]*?)_(?=($|[\s).,!?:;]))/g, "$1<em>$2</em>");
+
+    return text.replace(new RegExp(`${MD_TOKEN_MARKER}(\\d+)${MD_TOKEN_MARKER}`, "g"), (_match, index) => tokens[Number(index)] || "");
+}
+
+function isMarkdownTableSeparator(line) {
+    return /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+(?:\s*:?-{3,}:?\s*)?\|?\s*$/.test(line);
+}
+
+function splitMarkdownTableCells(line) {
+    let row = String(line || "").trim();
+    if (row.startsWith("|")) row = row.slice(1);
+    if (row.endsWith("|")) row = row.slice(0, -1);
+    return row.split("|").map((cell) => cell.trim());
+}
+
+function isMarkdownBlockStart(lines, index) {
+    const line = String(lines[index] || "");
+    if (!line.trim()) return false;
+    if (/^```/.test(line)) return true;
+    if (/^ {0,3}(#{1,6})\s+/.test(line)) return true;
+    if (/^ {0,3}([-*_]\s*){3,}$/.test(line)) return true;
+    if (/^ {0,3}> ?/.test(line)) return true;
+    if (/^\s*[-*+]\s+/.test(line)) return true;
+    if (/^\s*\d+\.\s+/.test(line)) return true;
+    if (line.includes("|") && lines[index + 1] && isMarkdownTableSeparator(lines[index + 1])) return true;
+    return false;
+}
+
+function renderMarkdownBlocks(value) {
+    const text = String(value ?? "").replace(/\r\n?/g, "\n");
+    const lines = text.split("\n");
+    const blocks = [];
+
+    for (let index = 0; index < lines.length;) {
+        const line = String(lines[index] || "");
+        if (!line.trim()) {
+            index += 1;
+            continue;
+        }
+
+        const fenceMatch = line.match(/^```([\w-]+)?\s*$/);
+        if (fenceMatch) {
+            const codeLines = [];
+            const lang = String(fenceMatch[1] || "").trim();
+            index += 1;
+            while (index < lines.length && !/^```/.test(lines[index])) {
+                codeLines.push(lines[index]);
+                index += 1;
+            }
+            if (index < lines.length && /^```/.test(lines[index])) index += 1;
+            const langClass = lang ? ` class="language-${esc(lang)}"` : "";
+            blocks.push(`<pre><code${langClass}>${esc(codeLines.join("\n"))}</code></pre>`);
+            continue;
+        }
+
+        const headingMatch = line.match(/^ {0,3}(#{1,6})\s+(.*)$/);
+        if (headingMatch) {
+            const level = headingMatch[1].length;
+            blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+            index += 1;
+            continue;
+        }
+
+        if (/^ {0,3}([-*_]\s*){3,}$/.test(line)) {
+            blocks.push("<hr>");
+            index += 1;
+            continue;
+        }
+
+        if (line.includes("|") && lines[index + 1] && isMarkdownTableSeparator(lines[index + 1])) {
+            const headerCells = splitMarkdownTableCells(line);
+            const bodyRows = [];
+            index += 2;
+            while (index < lines.length && String(lines[index] || "").trim().includes("|")) {
+                bodyRows.push(splitMarkdownTableCells(lines[index]));
+                index += 1;
+            }
+            const headerHtml = headerCells.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("");
+            const bodyHtml = bodyRows.map((cells) => `<tr>${cells.map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join("")}</tr>`).join("");
+            blocks.push(`<table><thead><tr>${headerHtml}</tr></thead>${bodyHtml ? `<tbody>${bodyHtml}</tbody>` : ""}</table>`);
+            continue;
+        }
+
+        if (/^ {0,3}> ?/.test(line)) {
+            const quoteLines = [];
+            while (index < lines.length) {
+                const current = String(lines[index] || "");
+                if (!current.trim()) {
+                    quoteLines.push("");
+                    index += 1;
+                    continue;
+                }
+                if (!/^ {0,3}> ?/.test(current)) break;
+                quoteLines.push(current.replace(/^ {0,3}> ?/, ""));
+                index += 1;
+            }
+            blocks.push(`<blockquote>${renderMarkdownBlocks(quoteLines.join("\n")).join("")}</blockquote>`);
+            continue;
+        }
+
+        if (/^\s*\d+\.\s+/.test(line)) {
+            const items = [];
+            while (index < lines.length) {
+                const current = String(lines[index] || "");
+                const match = current.match(/^\s*\d+\.\s+(.*)$/);
+                if (!match) break;
+                items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);
+                index += 1;
+            }
+            blocks.push(`<ol>${items.join("")}</ol>`);
+            continue;
+        }
+
+        if (/^\s*[-*+]\s+/.test(line)) {
+            const items = [];
+            while (index < lines.length) {
+                const current = String(lines[index] || "");
+                const match = current.match(/^\s*[-*+]\s+(.*)$/);
+                if (!match) break;
+                items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);
+                index += 1;
+            }
+            blocks.push(`<ul>${items.join("")}</ul>`);
+            continue;
+        }
+
+        const paragraphLines = [];
+        while (index < lines.length) {
+            const current = String(lines[index] || "");
+            if (!current.trim()) break;
+            if (paragraphLines.length && isMarkdownBlockStart(lines, index)) break;
+            paragraphLines.push(current.trimEnd());
+            index += 1;
+        }
+        blocks.push(`<p>${renderInlineMarkdown(paragraphLines.join("\n")).replace(/\n/g, "<br>")}</p>`);
+    }
+
+    return blocks;
+}
+
+function renderMarkdown(value) {
+    const blocks = renderMarkdownBlocks(value);
+    return blocks.length ? blocks.join("") : "<p>Done.</p>";
+}
 
 function hint(text, err = false) {
     U.modelHint.textContent = text;
     U.modelHint.style.color = err ? "var(--danger, #ff6b6b)" : "";
 }
 
-function addMsg(text, role) {
+function addMsg(text, role, { markdown = false } = {}) {
     const el = document.createElement("div");
     el.className = `message ${role}`;
-    el.innerHTML = `<div class="avatar"><i data-lucide="${role === "system" ? "cpu" : "user"}"></i></div><div class="msg-content">${esc(text)}</div>`;
+    const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
+    const content = markdown ? renderMarkdown(text) : esc(text);
+    el.innerHTML = `<div class="avatar"><i data-lucide="${role === "system" ? "cpu" : "user"}"></i></div><div class="${contentClass}">${content}</div>`;
     U.ceoFeed.appendChild(el);
     icons();
     U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
@@ -273,12 +459,13 @@ function appendCeoToolEvent(event = {}) {
 function finalizeCeoTurn(text) {
     const turn = S.ceoPendingTurns.shift();
     if (!turn?.textEl || !turn.flowEl) {
-        addMsg(text, "system");
+        addMsg(text, "system", { markdown: true });
         return;
     }
     turn.finalized = true;
-    turn.textEl.textContent = String(text || "").trim() || "Done.";
+    turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "Done.");
     turn.textEl.classList.remove("pending");
+    turn.textEl.classList.add("markdown-content");
     if (turn.steps > 0) {
         turn.flowEl.hidden = false;
         turn.flowEl.open = false;
@@ -347,7 +534,39 @@ function showToast({ title = "操作成功", text = "修改已生效", kind = "s
     icons();
 }
 
-function queueResourceSave(_kind) {
+function syncDetailSaveButton(kind) {
+    const isSkill = kind === "skill";
+    const root = isSkill ? U.skillDetail : U.toolDetail;
+    const button = root?.querySelector(isSkill ? "#skill-modal-save" : "#tool-modal-save");
+    const hint = root?.querySelector(".resource-draft-hint");
+    const dirty = isSkill ? S.skillDirty : S.toolDirty;
+    const busy = isSkill ? S.skillBusy : S.toolBusy;
+
+    if (button) {
+        button.textContent = busy ? "Saving..." : dirty ? "Save changes" : "Save";
+        button.disabled = !!busy || !dirty;
+    }
+    if (hint) {
+        hint.classList.toggle("is-dirty", dirty);
+        hint.textContent = dirty ? "Changes are staged. Click Save to apply them." : "Enable/disable and permission changes only apply after saving.";
+    }
+}
+
+function setSkillDirty(next = true) {
+    S.skillDirty = !!next;
+    renderSkillActions();
+    syncDetailSaveButton("skill");
+}
+
+function setToolDirty(next = true) {
+    S.toolDirty = !!next;
+    renderToolActions();
+    syncDetailSaveButton("tool");
+}
+
+function queueResourceSave(kind) {
+    if (kind === "skill") setSkillDirty(true);
+    if (kind === "tool") setToolDirty(true);
 }
 
 function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, returnFocus = null }) {
@@ -359,6 +578,225 @@ function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "dang
     U.confirmBackdrop.hidden = false;
     U.confirmBackdrop.classList.add("is-open");
     window.requestAnimationFrame(() => U.confirmCancel?.focus());
+}
+
+function resourceSelectLabel(select) {
+    const map = {
+        "skill-risk-filter": "Skill risk filter",
+        "skill-status-filter": "Skill status filter",
+        "skill-legacy-filter": "Skill type filter",
+        "tool-status-filter": "Tool status filter",
+        "tool-risk-filter": "Tool risk filter",
+    };
+    return map[String(select?.id || "").trim()] || "Resource filter";
+}
+
+function closeResourceSelects({ exceptId = "", restoreFocus = false } = {}) {
+    const openShells = [...document.querySelectorAll(".resource-select-shell.is-open")];
+    let closed = false;
+    openShells.forEach((shell) => {
+        const selectId = String(shell.dataset.selectId || "");
+        if (exceptId && selectId === exceptId) return;
+        const trigger = shell.querySelector(".resource-select-trigger");
+        const menu = shell.querySelector(".resource-select-menu");
+        shell.classList.remove("is-open");
+        if (menu) menu.hidden = true;
+        if (trigger) trigger.setAttribute("aria-expanded", "false");
+        if (restoreFocus && trigger instanceof HTMLElement) trigger.focus();
+        closed = true;
+    });
+    if (closed && (!exceptId || S.openResourceSelectId !== exceptId)) S.openResourceSelectId = exceptId || "";
+    return closed;
+}
+
+function syncResourceSelectUI(select) {
+    if (!(select instanceof HTMLSelectElement)) return;
+    const shell = select.closest(".resource-select-shell");
+    if (!shell) return;
+    const trigger = shell.querySelector(".resource-select-trigger");
+    const valueEl = shell.querySelector(".resource-select-value");
+    const optionButtons = [...shell.querySelectorAll(".resource-select-option")];
+    const selectedOption = select.selectedOptions?.[0] || [...select.options].find((option) => option.value === select.value) || select.options[0];
+    const selectedValue = String(selectedOption?.value ?? "");
+
+    if (valueEl) valueEl.textContent = String(selectedOption?.textContent || "").trim();
+    if (trigger) {
+        trigger.dataset.value = selectedValue;
+        trigger.setAttribute("aria-label", `${resourceSelectLabel(select)}: ${String(selectedOption?.textContent || "").trim()}`);
+    }
+    optionButtons.forEach((button) => {
+        const isSelected = String(button.dataset.value || "") === selectedValue;
+        button.classList.toggle("is-selected", isSelected);
+        button.setAttribute("aria-selected", isSelected ? "true" : "false");
+        button.tabIndex = isSelected ? 0 : -1;
+    });
+}
+
+function focusResourceSelectOption(shell, direction = "selected") {
+    if (!(shell instanceof HTMLElement)) return;
+    const options = [...shell.querySelectorAll(".resource-select-option")];
+    if (!options.length) return;
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const currentIndex = active ? options.indexOf(active) : -1;
+    let nextIndex = options.findIndex((option) => option.classList.contains("is-selected"));
+    if (direction === "first") nextIndex = 0;
+    else if (direction === "last") nextIndex = options.length - 1;
+    else if (direction === "next") nextIndex = currentIndex >= 0 ? Math.min(options.length - 1, currentIndex + 1) : Math.max(0, nextIndex);
+    else if (direction === "prev") nextIndex = currentIndex >= 0 ? Math.max(0, currentIndex - 1) : Math.max(0, nextIndex);
+    if (nextIndex < 0) nextIndex = 0;
+    options[nextIndex]?.focus();
+}
+
+function setResourceSelectValue(select, value, { close = true } = {}) {
+    if (!(select instanceof HTMLSelectElement)) return;
+    const nextValue = String(value ?? "");
+    if (select.value !== nextValue) {
+        select.value = nextValue;
+        syncResourceSelectUI(select);
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+        syncResourceSelectUI(select);
+    }
+    if (close) closeResourceSelects({ restoreFocus: true });
+}
+
+function openResourceSelect(select, { focus = "selected" } = {}) {
+    if (!(select instanceof HTMLSelectElement)) return;
+    const shell = select.closest(".resource-select-shell");
+    if (!shell) return;
+    const trigger = shell.querySelector(".resource-select-trigger");
+    const menu = shell.querySelector(".resource-select-menu");
+    closeResourceSelects({ exceptId: select.id });
+    shell.classList.add("is-open");
+    if (menu) menu.hidden = false;
+    if (trigger) trigger.setAttribute("aria-expanded", "true");
+    S.openResourceSelectId = select.id;
+    focusResourceSelectOption(shell, focus);
+}
+
+function buildResourceSelect(select) {
+    if (!(select instanceof HTMLSelectElement) || select.dataset.customized === "true") return;
+    const parent = select.parentElement;
+    if (!parent) return;
+
+    const shell = document.createElement("div");
+    shell.className = "resource-select-shell";
+    shell.dataset.selectId = select.id || `resource-select-${Math.random().toString(36).slice(2, 8)}`;
+
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "resource-select-trigger";
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.setAttribute("aria-controls", `${shell.dataset.selectId}-menu`);
+
+    const valueEl = document.createElement("span");
+    valueEl.className = "resource-select-value";
+    const iconEl = document.createElement("span");
+    iconEl.className = "resource-select-icon";
+    iconEl.setAttribute("aria-hidden", "true");
+    iconEl.innerHTML = `
+        <svg viewBox="0 0 18 18" focusable="false" aria-hidden="true">
+            <path d="M4.5 6.75L9 11.25L13.5 6.75" />
+        </svg>
+    `;
+    trigger.append(valueEl, iconEl);
+
+    const menu = document.createElement("div");
+    menu.className = "resource-select-menu";
+    menu.id = `${shell.dataset.selectId}-menu`;
+    menu.setAttribute("role", "listbox");
+    menu.hidden = true;
+    menu.setAttribute("aria-label", resourceSelectLabel(select));
+
+    [...select.options].forEach((option) => {
+        const optionButton = document.createElement("button");
+        optionButton.type = "button";
+        optionButton.className = "resource-select-option";
+        optionButton.dataset.value = option.value;
+        optionButton.setAttribute("role", "option");
+        optionButton.tabIndex = -1;
+
+        const label = document.createElement("span");
+        label.className = "resource-select-option-label";
+        label.textContent = String(option.textContent || "").trim();
+
+        const check = document.createElement("span");
+        check.className = "resource-select-option-check";
+        check.textContent = "✓";
+        check.setAttribute("aria-hidden", "true");
+
+        optionButton.append(label, check);
+        optionButton.addEventListener("click", () => setResourceSelectValue(select, option.value));
+        optionButton.addEventListener("keydown", (e) => {
+            if (e.key === "ArrowDown") {
+                e.preventDefault();
+                focusResourceSelectOption(shell, "next");
+            }
+            if (e.key === "ArrowUp") {
+                e.preventDefault();
+                focusResourceSelectOption(shell, "prev");
+            }
+            if (e.key === "Home") {
+                e.preventDefault();
+                focusResourceSelectOption(shell, "first");
+            }
+            if (e.key === "End") {
+                e.preventDefault();
+                focusResourceSelectOption(shell, "last");
+            }
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setResourceSelectValue(select, option.value);
+            }
+            if (e.key === "Escape") {
+                e.preventDefault();
+                closeResourceSelects({ restoreFocus: true });
+            }
+            if (e.key === "Tab") closeResourceSelects();
+        });
+        menu.appendChild(optionButton);
+    });
+
+    trigger.addEventListener("click", () => {
+        const isOpen = shell.classList.contains("is-open");
+        if (isOpen) closeResourceSelects({ restoreFocus: true });
+        else openResourceSelect(select);
+    });
+    trigger.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            openResourceSelect(select, { focus: "first" });
+        }
+        if (e.key === "ArrowUp") {
+            e.preventDefault();
+            openResourceSelect(select, { focus: "last" });
+        }
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            const isOpen = shell.classList.contains("is-open");
+            if (isOpen) closeResourceSelects({ restoreFocus: true });
+            else openResourceSelect(select);
+        }
+        if (e.key === "Escape") {
+            e.preventDefault();
+            closeResourceSelects({ restoreFocus: true });
+        }
+    });
+
+    select.classList.add("resource-select-native");
+    select.dataset.customized = "true";
+    select.tabIndex = -1;
+    select.setAttribute("aria-hidden", "true");
+    select.addEventListener("change", () => syncResourceSelectUI(select));
+
+    parent.insertBefore(shell, select);
+    shell.append(select, trigger, menu);
+    syncResourceSelectUI(select);
+}
+
+function enhanceResourceSelects() {
+    document.querySelectorAll("select.resource-select").forEach((select) => buildResourceSelect(select));
 }
 
 function closeConfirm({ restoreFocus = true } = {}) {
@@ -1224,8 +1662,9 @@ function renderSkillActions() {
         idleLabel: "保存",
         busyLabel: "保存中...",
         busy: S.skillBusy,
-        disabled: S.skillBusy || !S.selectedSkill,
+        disabled: S.skillBusy || !S.selectedSkill || !S.skillDirty,
     });
+    syncDetailSaveButton("skill");
 }
 
 function renderToolActions() {
@@ -1239,8 +1678,9 @@ function renderToolActions() {
         idleLabel: "保存",
         busyLabel: "保存中...",
         busy: S.toolBusy,
-        disabled: S.toolBusy || !S.selectedTool,
+        disabled: S.toolBusy || !S.selectedTool || !S.toolDirty,
     });
+    syncDetailSaveButton("tool");
 }
 
 function clearSkillSelection() {
@@ -1252,6 +1692,7 @@ function clearSkillSelection() {
     S.skillFiles = [];
     S.skillContents = {};
     S.selectedSkillFile = "";
+    S.skillDirty = false;
     renderSkills();
     renderSkillDetail();
 }
@@ -1262,6 +1703,7 @@ function clearToolSelection() {
         S.resourceSaveTimers.tool = null;
     }
     S.selectedTool = null;
+    S.toolDirty = false;
     renderTools();
     renderToolDetail();
 }
@@ -1940,6 +2382,7 @@ function renderSkillDetail() {
                         ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
                         : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`}
                 </div>
+                <div class="resource-draft-hint${S.skillDirty ? " is-dirty" : ""}"></div>
                 <div class="resource-section">
                     <h3>角色可见性</h3>
                     <div class="resource-filter-row">
@@ -1962,19 +2405,21 @@ function renderSkillDetail() {
     U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => void saveSkill());
     U.skillDetail.querySelector("#skill-enable-btn")?.addEventListener("click", () => {
         S.selectedSkill.enabled = true;
-        saveSkill();
+        setSkillDirty(true);
+        renderSkillDetail();
     });
     U.skillDetail.querySelector("#skill-disable-btn")?.addEventListener("click", () => {
         S.selectedSkill.enabled = false;
-        saveSkill();
+        setSkillDirty(true);
+        renderSkillDetail();
     });
     U.skillDetail.querySelectorAll(".skill-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const nextRoles = new Set(allowedRoles);
         if (e.target.checked) nextRoles.add(e.target.dataset.role);
         else nextRoles.delete(e.target.dataset.role);
         S.selectedSkill.allowed_roles = [...nextRoles];
+        setSkillDirty(true);
         renderSkillDetail();
-        queueResourceSave("skill");
     }));
     U.skillDetail.querySelectorAll(".skill-file").forEach((button) => button.addEventListener("click", () => {
         const editor = document.getElementById("skill-editor");
@@ -1985,6 +2430,7 @@ function renderSkillDetail() {
     U.skillDetail.querySelector("#skill-editor")?.addEventListener("input", (e) => {
         if (!S.selectedSkillFile) return;
         S.skillContents[S.selectedSkillFile] = e.target.value;
+        setSkillDirty(true);
     });
     renderSkillActions();
 }
@@ -2021,6 +2467,7 @@ async function openSkill(skillId, quiet = false) {
         S.skillFiles = files;
         S.selectedSkillFile = files[0]?.file_key || "";
         S.skillContents = {};
+        S.skillDirty = false;
         await Promise.all(files.map(async (file) => {
             const data = await ApiClient.getSkillFile(skillId, file.file_key);
             S.skillContents[file.file_key] = data.content || "";
@@ -2050,9 +2497,12 @@ async function saveSkill() {
         showToast({ title: "保存失败", text: "未选择 Skill", kind: "error" });
         return;
     }
+    if (!S.skillDirty) {
+        showToast({ title: "No pending changes", text: "This skill has no unsaved changes.", kind: "info", durationMs: 1800 });
+        return;
+    }
     S.skillBusy = true;
     renderSkillActions();
-    U.skillDetail.querySelector("#skill-modal-save")?.setAttribute("disabled", "true");
     showToast({ title: "保存中", text: "正在保存 Skill，请稍候…", kind: "info", persistent: true });
     try {
         const editor = document.getElementById("skill-editor");
@@ -2066,17 +2516,16 @@ async function saveSkill() {
         });
         await ApiClient.reloadResources();
         await loadSkills({ renderDetail: false });
+        await openSkill(selectedId, true);
+        setSkillDirty(false);
         addNotice({ kind: "resource_saved", title: "Skill saved", text: displayName || selectedId });
         showToast({ title: "保存成功", text: "Skill 配置已保存", kind: "success", durationMs: 2200 });
-        clearSkillSelection();
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Skill save failed", text: e.message || "Unknown error" });
         showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
-        clearSkillSelection();
     } finally {
         S.skillBusy = false;
         renderSkillActions();
-        U.skillDetail.querySelector("#skill-modal-save")?.removeAttribute("disabled");
     }
 }
 
@@ -2092,6 +2541,8 @@ function renderToolDetail() {
     setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
     const roles = ["ceo", "execution", "inspection"];
     const actions = Array.isArray(S.selectedTool.actions) ? S.selectedTool.actions : [];
+    const description = String(S.selectedTool.description || "").trim();
+    const toolskillContent = String(S.selectedTool.toolskill_content || "").trim();
     U.toolDetail.innerHTML = `
         <article class="resource-detail-card detail-modal-shell">
             <div class="detail-modal-header">
@@ -2109,6 +2560,24 @@ function renderToolDetail() {
                     ${S.selectedTool.enabled
                         ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>`
                         : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`}
+                </div>
+                <div class="resource-section">
+                    <h3>描述</h3>
+                    <div class="resource-copy-block">${esc(description || "暂无描述。")}</div>
+                </div>
+                <div class="resource-draft-hint${S.toolDirty ? " is-dirty" : ""}"></div>
+                <div class="resource-section">
+                    <details class="resource-disclosure toolskill-disclosure">
+                        <summary class="resource-disclosure-summary">
+                            <span>工具技巧</span>
+                            <span class="resource-disclosure-hint">点击展开</span>
+                        </summary>
+                        <div class="resource-disclosure-body">
+                            ${toolskillContent
+                                ? `<pre class="resource-preformatted toolskill-content">${esc(toolskillContent)}</pre>`
+                                : `<div class="resource-empty-copy">暂无工具技巧说明。</div>`}
+                        </div>
+                    </details>
                 </div>
                 <div class="resource-section">
                     <div class="tool-permission-heading">
@@ -2148,11 +2617,13 @@ function renderToolDetail() {
     U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => void saveTool());
     U.toolDetail.querySelector("#tool-enable-btn")?.addEventListener("click", () => {
         S.selectedTool.enabled = true;
-        saveTool();
+        setToolDirty(true);
+        renderToolDetail();
     });
     U.toolDetail.querySelector("#tool-disable-btn")?.addEventListener("click", () => {
         S.selectedTool.enabled = false;
-        saveTool();
+        setToolDirty(true);
+        renderToolDetail();
     });
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
@@ -2162,7 +2633,7 @@ function renderToolDetail() {
         else set.delete(e.target.dataset.role);
         action.allowed_roles = [...set];
         e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
-        queueResourceSave("tool");
+        setToolDirty(true);
     }));
     renderToolActions();
 }
@@ -2174,7 +2645,13 @@ async function loadTools({ renderDetail = true } = {}) {
         S.tools = await ApiClient.getTools(0, 300);
         if (selectedId) {
             const next = S.tools.find((tool) => tool.tool_id === selectedId);
-            if (next) S.selectedTool = next;
+            if (next) {
+                S.selectedTool = {
+                    ...next,
+                    primary_executor_name: S.selectedTool?.primary_executor_name || next.primary_executor_name || "",
+                    toolskill_content: S.selectedTool?.toolskill_content || "",
+                };
+            }
             else clearToolSelection();
         }
         renderTools();
@@ -2194,7 +2671,16 @@ async function openTool(toolId, quiet = false) {
         U.toolDetail.innerHTML = '<div class="empty-state">Loading tool details...</div>';
     }
     try {
-        S.selectedTool = await ApiClient.getTool(toolId);
+        const [tool, toolskill] = await Promise.all([
+            ApiClient.getTool(toolId),
+            ApiClient.getToolSkill(toolId).catch(() => ({ content: "", primary_executor_name: "" })),
+        ]);
+        S.selectedTool = {
+            ...tool,
+            primary_executor_name: toolskill?.primary_executor_name || tool?.primary_executor_name || "",
+            toolskill_content: toolskill?.content || "",
+        };
+        S.toolDirty = false;
         renderTools();
         renderToolDetail();
     } catch (e) {
@@ -2215,19 +2701,24 @@ async function saveTool() {
     const displayName = String(S.selectedTool?.display_name || selectedId || "Tool").trim();
     const enabled = !!S.selectedTool?.enabled;
     const actions = Array.isArray(S.selectedTool?.actions)
-        ? S.selectedTool.actions.map((action) => ({
-            action_id: action.action_id,
-            allowed_roles: Array.isArray(action.allowed_roles) ? [...action.allowed_roles] : [],
-        }))
-        : [];
+        ? Object.fromEntries(
+            S.selectedTool.actions.map((action) => [
+                action.action_id,
+                Array.isArray(action.allowed_roles) ? [...action.allowed_roles] : [],
+            ])
+        )
+        : {};
     if (!selectedId || !S.selectedTool) {
         addNotice({ kind: "resource_failed", title: "No tool selected", text: "Select a tool before saving." });
         showToast({ title: "保存失败", text: "未选择工具族", kind: "error" });
         return;
     }
+    if (!S.toolDirty) {
+        showToast({ title: "No pending changes", text: "This tool has no unsaved changes.", kind: "info", durationMs: 1800 });
+        return;
+    }
     S.toolBusy = true;
     renderToolActions();
-    U.toolDetail.querySelector("#tool-modal-save")?.setAttribute("disabled", "true");
     showToast({ title: "保存中", text: "正在保存工具权限，请稍候…", kind: "info", persistent: true });
     try {
         await ApiClient.updateToolPolicy(selectedId, {
@@ -2236,17 +2727,16 @@ async function saveTool() {
         });
         await ApiClient.reloadResources();
         await loadTools({ renderDetail: false });
+        await openTool(selectedId, true);
+        setToolDirty(false);
         addNotice({ kind: "resource_saved", title: "Tool saved", text: displayName || selectedId });
         showToast({ title: "保存成功", text: "工具权限已保存", kind: "success", durationMs: 2200 });
-        clearToolSelection();
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Tool save failed", text: e.message || "Unknown error" });
         showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
-        clearToolSelection();
     } finally {
         S.toolBusy = false;
         renderToolActions();
-        U.toolDetail.querySelector("#tool-modal-save")?.removeAttribute("disabled");
     }
 }
 
@@ -2533,10 +3023,12 @@ function bind() {
     U.confirmAccept?.addEventListener("click", () => void acceptConfirm());
     document.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
+        if (!e.target.closest(".resource-select-shell")) closeResourceSelects();
         if (!e.target.closest(".toolbar-dropdown")) closeTaskMenus();
     });
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
+        if (closeResourceSelects({ restoreFocus: true })) return;
         if (S.confirmState) {
             closeConfirm();
             return;
@@ -2559,6 +3051,7 @@ function bind() {
 }
 
 function init() {
+    enhanceResourceSelects();
     bind();
     bindTreePan();
     icons();

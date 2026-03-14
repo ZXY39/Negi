@@ -9,7 +9,6 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from g3ku.resources.hot_reload import ResourceHotReloader
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.locks import ResourceLockManager
 from g3ku.resources.models import ResourceKind, ResourceSnapshot, SkillResourceDescriptor, ToolResourceDescriptor
@@ -54,8 +53,6 @@ class ResourceManager:
         self._registry = self._build_registry()
         self._loader = ResourceLoader(self.workspace, app_config=app_config)
         self._locks = ResourceLockManager(windows_fs_lock=bool(self._resources_cfg_value("locks.windows_fs_lock", True)))
-        poll_interval_ms = int(self._resources_cfg_value("reload.poll_interval_ms", 1000) or 1000)
-        self._reloader = ResourceHotReloader(self, poll_interval_s=max(0.2, poll_interval_ms / 1000.0))
         self.reload_now(trigger="init")
 
     def bind_app_config(self, app_config: Any) -> None:
@@ -65,7 +62,19 @@ class ResourceManager:
             self._registry = self._build_registry()
 
     def bind_service_getter(self, getter: Callable[[], dict[str, Any]]) -> None:
-        self._services_getter = getter
+        stale_instances: list[Any] = []
+        with self._lock:
+            self._services_getter = getter
+            if self._snapshot.tool_instances:
+                stale_instances = list(self._snapshot.tool_instances.values())
+                self._snapshot = ResourceSnapshot(
+                    generation=self._snapshot.generation,
+                    tools=dict(self._snapshot.tools),
+                    skills=dict(self._snapshot.skills),
+                    tool_instances={},
+                )
+        for instance in stale_instances:
+            self._close_tool_instance(instance)
 
     def add_on_change(self, callback: Callable[[ResourceSnapshot], None]) -> None:
         if callback not in self._callbacks:
@@ -75,11 +84,8 @@ class ResourceManager:
         if self._started:
             return
         self._started = True
-        if bool(self._resources_cfg_value("reload.enabled", True)):
-            self._reloader.start()
 
     def close(self) -> None:
-        self._reloader.stop()
         for instance in list(self._snapshot.tool_instances.values()):
             self._close_tool_instance(instance)
         self._started = False

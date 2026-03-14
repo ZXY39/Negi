@@ -251,6 +251,16 @@ async def get_tool(tool_id: str):
     return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
+@router.get('/resources/tools/{tool_id}/toolskill')
+async def get_tool_toolskill(tool_id: str):
+    service = _service()
+    await service.startup()
+    payload = service.get_tool_toolskill(tool_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail='tool_not_found')
+    return {'ok': True, **payload}
+
+
 @router.put('/resources/tools/{tool_id}/policy')
 async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
     service = _service()

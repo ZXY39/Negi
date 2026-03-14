@@ -12,6 +12,15 @@ from main.governance.roles import to_public_allowed_roles
 ALL_ROLES = list(DEFAULT_ALLOWED_ROLES)
 
 
+def _primary_executor_name(actions: list[ToolActionRecord]) -> str:
+    for action in actions:
+        for executor_name in action.executor_names or []:
+            name = str(executor_name or '').strip()
+            if name:
+                return name
+    return ''
+
+
 def build_skill_resources(skill_descriptors: list[SkillResourceDescriptor], *, default_risk_level: str, exclude_names: set[str] | None = None) -> list[SkillResourceRecord]:
     excluded = set(exclude_names or set())
     items: list[SkillResourceRecord] = []
@@ -97,15 +106,17 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
                 family['actions'][action_id] = current.model_copy(update={'executor_names': merged_executors})
     items: list[ToolFamilyRecord] = []
     for payload in grouped.values():
+        actions = list(payload['actions'].values())
         items.append(
             ToolFamilyRecord(
                 tool_id=payload['tool_id'],
                 display_name=payload['display_name'],
                 description=payload['description'],
+                primary_executor_name=_primary_executor_name(actions),
                 enabled=payload['enabled'],
                 available=payload['available'],
                 source_path=payload['source_path'],
-                actions=list(payload['actions'].values()),
+                actions=actions,
                 metadata=payload['metadata'],
             )
         )
