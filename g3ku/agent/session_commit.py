@@ -92,6 +92,23 @@ class SessionCommitService:
         metadata["last_commit_at"] = now.isoformat()
         metadata["last_commit_artifact"] = asdict(artifact)
 
+        keep_recent = max(
+            0,
+            int(
+                getattr(
+                    getattr(getattr(self.memory_manager, 'config', None), 'assembly', None),
+                    'recent_messages_limit',
+                    24,
+                )
+                or 24
+            ),
+        )
+        if hasattr(session, 'last_consolidated'):
+            session.last_consolidated = max(
+                int(getattr(session, 'last_consolidated', 0) or 0),
+                max(0, len(session.messages) - keep_recent),
+            )
+
         if hasattr(session, "archive_segments") and isinstance(session.archive_segments, list):
             session.archive_segments.append(
                 {

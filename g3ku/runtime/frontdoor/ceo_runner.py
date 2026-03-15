@@ -9,6 +9,7 @@ from g3ku.agent.chatmodel_utils import ensure_chat_model
 from g3ku.integrations.langchain_runtime import extract_final_response
 from g3ku.providers.chatmodels import build_chat_model
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
+from g3ku.runtime.context import ContextAssemblyService
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 
@@ -18,6 +19,7 @@ class CeoFrontDoorRunner:
         self._loop = loop
         self._resolver = CeoExposureResolver(loop=loop)
         self._prompt_builder = CeoPromptBuilder(loop=loop)
+        self._assembly = ContextAssemblyService(loop=loop, prompt_builder=self._prompt_builder)
 
     @staticmethod
     def _content_text(value: Any) -> str:
@@ -46,34 +48,6 @@ class CeoFrontDoorRunner:
                     parts.append(text.strip())
             return "\n".join(parts).strip()
         return str(value or "")
-
-    def _render_prompt_log(
-        self,
-        *,
-        session,
-        messages: list[dict[str, Any]],
-        tool_names: list[str],
-        checkpointer_enabled: bool,
-        model_chain: list[str],
-    ) -> str:
-        lines = [
-            "===== MAIN AGENT PROMPT BEGIN =====",
-            f"session={session.state.session_key}",
-            f"channel={getattr(session, '_channel', 'cli')}",
-            f"chat={getattr(session, '_chat_id', session.state.session_key)}",
-            f"checkpointer_enabled={checkpointer_enabled}",
-            f"thread_id={session.state.session_key}",
-        ]
-        if checkpointer_enabled:
-            lines.append("note=LangGraph may restore additional thread history internally beyond the explicit messages below.")
-        lines.append("model_chain=" + (" -> ".join(model_chain) if model_chain else "-"))
-        lines.append("tools=" + (", ".join(tool_names) if tool_names else "-"))
-        for index, message in enumerate(messages, start=1):
-            role = str(message.get("role") or "unknown").upper()
-            lines.append(f"\n----- MESSAGE {index}: {role} -----")
-            lines.append(self._content_text(message.get("content")) or "[empty]")
-        lines.append("===== MAIN AGENT PROMPT END =====")
-        return "\n".join(lines)
 
     def _resolve_ceo_model_client(self) -> tuple[Any, list[str]]:
         refresh_loop_runtime_config(self._loop, force=False, reason="ceo_model_client")
@@ -114,12 +88,11 @@ class CeoFrontDoorRunner:
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._loop._ensure_checkpointer_ready()
+        query_text = self._content_text(getattr(user_input, 'content', ''))
         persisted_history: list[dict[str, Any]] = []
+        persisted_session = None
         if getattr(self._loop, '_checkpointer', None) is None:
             persisted_session = self._loop.sessions.get_or_create(session.state.session_key)
-            persisted_history = persisted_session.get_history(
-                max_messages=max(1, int(getattr(self._loop, 'memory_window', 100) or 100))
-            )
         main_service = getattr(self._loop, 'main_task_service', None)
         if main_service is not None:
             await main_service.startup()
@@ -131,26 +104,15 @@ class CeoFrontDoorRunner:
         if message_tool is not None and hasattr(message_tool, 'start_turn'):
             message_tool.start_turn()
         exposure = await self._resolver.resolve_for_actor(actor_role='ceo', session_id=session.state.session_key)
-        system_prompt = self._prompt_builder.build(skills=list(exposure.get('skills') or []))
-        retrieved_memory = ""
-        if getattr(self._loop, 'memory_manager', None) is not None and self._loop._use_rag_memory():
-            query_text = self._content_text(getattr(user_input, 'content', ''))
-            if query_text:
-                try:
-                    retrieved_memory = await self._loop.memory_manager.retrieve_block(
-                        query=query_text,
-                        session_key=session.state.session_key,
-                        channel=getattr(session, '_channel', 'cli'),
-                        chat_id=getattr(session, '_chat_id', session.state.session_key),
-                    )
-                except Exception:
-                    logger.exception("RAG retrieval failed for session {}", session.state.session_key)
-        if retrieved_memory:
-            if "# Retrieved Context" in retrieved_memory:
-                system_prompt = f"{system_prompt}\n\n{retrieved_memory}"
-            else:
-                system_prompt = f"{system_prompt}\n\n# Retrieved Context\n\n{retrieved_memory}"
-        tool_names = list(exposure.get('tool_names') or [])
+        assembly = await self._assembly.build_for_ceo(
+            session=session,
+            query_text=query_text,
+            exposure=exposure,
+            persisted_session=persisted_session,
+        )
+        system_prompt = assembly.system_prompt
+        persisted_history = list(assembly.recent_history or [])
+        tool_names = list(assembly.tool_names or list(exposure.get('tool_names') or []))
         tools = self._loop.tools.to_langchain_tools_filtered(tool_names)
         model_client, model_chain = self._resolve_ceo_model_client()
         agent = create_agent(
@@ -169,20 +131,6 @@ class CeoFrontDoorRunner:
             *persisted_history,
             {'role': 'user', 'content': str(user_input.content or '')},
         ]
-        if getattr(self._loop, 'prompt_trace', False):
-            logger.info(
-                "[main:prompt] session={} channel={} chat={}\n{}",
-                session.state.session_key,
-                getattr(session, '_channel', 'cli'),
-                getattr(session, '_chat_id', session.state.session_key),
-                self._render_prompt_log(
-                    session=session,
-                    messages=messages,
-                    tool_names=tool_names,
-                    checkpointer_enabled=getattr(self._loop, '_checkpointer', None) is not None,
-                    model_chain=model_chain,
-                ),
-            )
         token = self._loop.tools.push_runtime_context(
             {
                 'on_progress': on_progress,

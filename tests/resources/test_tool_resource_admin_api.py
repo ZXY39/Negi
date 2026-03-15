@@ -242,3 +242,22 @@ def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
 
     with pytest.raises(ValueError, match='config.tools has been removed'):
         load_config()
+
+
+def test_admin_memory_trace_endpoints_return_payload():
+    class _StubService:
+        async def startup(self) -> None:
+            return None
+
+        async def get_context_traces(self, *, trace_kind: str, limit: int = 20):
+            return {'ok': True, 'items': [{'trace_kind': trace_kind, 'limit': limit}], 'trace_kind': trace_kind, 'limit': limit}
+
+    client = TestClient(_build_app(_StubService()))
+
+    retrieval = client.get('/api/memory/retrieval-traces?limit=3')
+    assert retrieval.status_code == 200
+    assert retrieval.json()['items'][0]['trace_kind'] == 'retrieval'
+
+    assembly = client.get('/api/memory/context-assembly-traces?limit=2')
+    assert assembly.status_code == 200
+    assert assembly.json()['items'][0]['trace_kind'] == 'context_assembly'

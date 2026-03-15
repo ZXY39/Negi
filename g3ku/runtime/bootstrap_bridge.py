@@ -252,6 +252,8 @@ class RuntimeBootstrapBridge:
                 self._loop.memory_manager = manager_cls(self._loop.workspace, cfg)
                 self._loop._store = self._loop.memory_manager.store
                 self._loop._store_enabled = True
+                if getattr(self._loop, 'main_task_service', None) is not None:
+                    self._loop.main_task_service.memory_manager = self._loop.memory_manager
                 logger.info('RAG memory store enabled ({})', type(self._loop._store).__name__)
             except Exception as exc:
                 logger.warning('RAG memory store init failed, fallback to legacy memory: {}', exc)

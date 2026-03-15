@@ -21,7 +21,7 @@
     "catalog": [
       {
         "key": "ceo_primary",
-        "providerModel": "responses:gpt-5.2",
+        "providerModel": "responses:gpt-5.4",
         "apiKey": "sk-f053c362909e7bd9285bd593d639dac0f45fde9586a2d84904274a8489fa1bf9",
         "apiBase": "https://cc.sub.258000.sbs/v1/responses",
         "extraHeaders": null,

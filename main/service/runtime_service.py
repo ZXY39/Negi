@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.agent.tools.base import Tool
+from g3ku.runtime.context.summarizer import layered_body_payload
 from main.governance import (
     GovernanceStore,
     MainRuntimePolicyEngine,
@@ -62,6 +63,7 @@ class MainRuntimeService:
         self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
         self._external_tool_provider = tool_provider or (lambda _node: {})
         self._resource_manager = resource_manager
+        self.memory_manager = None
         self._default_max_depth = max(0, int(default_max_depth or 0))
         self._hard_max_depth = max(self._default_max_depth, int(hard_max_depth or self._default_max_depth))
         react_loop = ReActToolLoop(chat_backend=chat_backend, log_service=self.log_service, max_iterations=max_iterations)
@@ -72,6 +74,7 @@ class MainRuntimeService:
             tool_provider=self._tool_provider,
             execution_model_refs=list(execution_model_refs or ['execution']),
             acceptance_model_refs=list(acceptance_model_refs or execution_model_refs or ['inspection']),
+            context_enricher=self._enrich_node_messages,
         )
         self.task_runner = TaskRunner(store=self.store, log_service=self.log_service, node_runner=self.node_runner)
         self._started = False
@@ -82,6 +85,11 @@ class MainRuntimeService:
         self._started = True
         self.resource_registry.refresh_from_current_resources()
         self.policy_engine.sync_default_role_policies()
+        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
+            try:
+                await self.memory_manager.sync_catalog(self)
+            except Exception:
+                pass
         for task in self.store.list_tasks():
             self.log_service.bootstrap_missing_files(task.task_id)
             if task.status != 'in_progress':
@@ -222,8 +230,49 @@ class MainRuntimeService:
         record = visible.get(str(skill_id or '').strip())
         if record is None:
             return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
-        content = Path(record.skill_doc_path).read_text(encoding='utf-8') if record.skill_doc_path else ''
-        return {'ok': True, 'skill_id': record.skill_id, 'content': content}
+        path = Path(record.skill_doc_path) if record.skill_doc_path else None
+        content = path.read_text(encoding='utf-8') if path and path.exists() else ''
+        return {
+            'ok': True,
+            'skill_id': record.skill_id,
+            'content': content,
+        }
+
+    def load_skill_context_v2(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        skill_id: str,
+        level: str = 'l1',
+        query: str = '',
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        visible = {item.skill_id: item for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)}
+        record = visible.get(str(skill_id or '').strip())
+        if record is None:
+            return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
+        path = Path(record.skill_doc_path) if record.skill_doc_path else None
+        content = path.read_text(encoding='utf-8') if path and path.exists() else ''
+        payload = layered_body_payload(
+            body=content,
+            level=level,
+            query=query,
+            max_tokens=max_tokens,
+            title=str(getattr(record, 'display_name', '') or ''),
+            description=str(getattr(record, 'description', '') or ''),
+            path=str(path) if path else '',
+        )
+        return {
+            'ok': True,
+            'skill_id': record.skill_id,
+            'uri': f'g3ku://skill/{record.skill_id}',
+            'level': payload['level'],
+            'content': payload['content'],
+            'l0': payload['l0'],
+            'l1': payload['l1'],
+            'path': payload['path'],
+        }
 
     def load_tool_context(self, *, actor_role: str, session_id: str, tool_id: str) -> dict[str, Any]:
         tool_name = str(tool_id or '').strip()
@@ -232,11 +281,51 @@ class MainRuntimeService:
             return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
             return {'ok': False, 'error': 'Resource manager unavailable'}
-        try:
-            content = self._resource_manager.load_toolskill_body(tool_name)
-        except FileNotFoundError:
-            content = ''
-        return {'ok': True, 'tool_id': tool_name, 'content': content}
+        toolskill = self.get_tool_toolskill(tool_name) or {}
+        content = str(toolskill.get('content') or '')
+        return {
+            'ok': True,
+            'tool_id': tool_name,
+            'content': content,
+        }
+
+    def load_tool_context_v2(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        tool_id: str,
+        level: str = 'l1',
+        query: str = '',
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        tool_name = str(tool_id or '').strip()
+        visible = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        if tool_name not in visible:
+            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
+        if self._resource_manager is None:
+            return {'ok': False, 'error': 'Resource manager unavailable'}
+        toolskill = self.get_tool_toolskill(tool_name) or {}
+        content = str(toolskill.get('content') or '')
+        payload = layered_body_payload(
+            body=content,
+            level=level,
+            query=query,
+            max_tokens=max_tokens,
+            title=str(toolskill.get('tool_id') or tool_name),
+            description=str(toolskill.get('description') or ''),
+            path=str(toolskill.get('path') or ''),
+        )
+        return {
+            'ok': True,
+            'tool_id': tool_name,
+            'uri': f'g3ku://resource/tool/{tool_name}',
+            'level': payload['level'],
+            'content': payload['content'],
+            'l0': payload['l0'],
+            'l1': payload['l1'],
+            'path': payload['path'],
+        }
 
     def list_skill_resources(self) -> list[Any]:
         return list(self.resource_registry.list_skill_resources())
@@ -305,18 +394,36 @@ class MainRuntimeService:
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
         family = self.get_tool_family(tool_id)
         if family is None:
+            needle = str(tool_id or '').strip()
+            for item in self.list_tool_resources():
+                action_names = {
+                    str(executor_name or '').strip()
+                    for action in list(getattr(item, 'actions', []) or [])
+                    for executor_name in list(getattr(action, 'executor_names', []) or [])
+                    if str(executor_name or '').strip()
+                }
+                if needle and needle in action_names:
+                    family = item
+                    break
+        if family is None:
             return None
         executor_name = self._tool_family_executor_name(family)
         content = ''
+        path = ''
         if executor_name and self._resource_manager is not None:
             try:
                 content = self._resource_manager.load_toolskill_body(executor_name)
             except FileNotFoundError:
                 content = ''
+            descriptor = self._resource_manager.get_tool_descriptor(executor_name)
+            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
+                path = str(descriptor.toolskills_main_path)
         return {
             'tool_id': family.tool_id,
             'primary_executor_name': executor_name,
             'content': content,
+            'path': path,
+            'description': family.description,
         }
 
     def update_tool_policy(self, tool_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles_by_action: dict[str, list[str]] | None = None):
@@ -362,6 +469,23 @@ class MainRuntimeService:
         skills, tools = self.resource_registry.refresh_from_current_resources()
         self.policy_engine.sync_default_role_policies()
         return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
+
+    async def reload_resources_async(self, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        result = self.reload_resources(session_id=session_id)
+        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
+            try:
+                sync_result = await self.memory_manager.sync_catalog(self)
+                result['catalog'] = sync_result
+            except Exception:
+                result['catalog'] = {'created': 0, 'updated': 0, 'removed': 0}
+        return result
+
+    async def get_context_traces(self, *, trace_kind: str, limit: int = 20) -> dict[str, Any]:
+        manager = self.memory_manager
+        if manager is None or not hasattr(manager, 'read_trace_file'):
+            return {'ok': True, 'items': [], 'trace_kind': trace_kind, 'limit': max(1, int(limit))}
+        items = await manager.read_trace_file(trace_kind=trace_kind, limit=max(1, int(limit)))
+        return {'ok': True, 'items': items, 'trace_kind': trace_kind, 'limit': max(1, int(limit))}
 
     def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False) -> dict[str, Any] | None:
         task = self.get_task(task_id)
@@ -427,6 +551,37 @@ class MainRuntimeService:
                 if name in visible:
                     provided[name] = tool
         return provided
+
+    async def _enrich_node_messages(self, *, task, node: NodeRecord, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        manager = getattr(self, 'memory_manager', None)
+        if manager is None or not getattr(manager, '_feature_enabled', lambda _key: False)('unified_context'):
+            return messages
+        query_text = str(getattr(node, 'prompt', '') or getattr(node, 'goal', '') or '').strip()
+        if not query_text:
+            return messages
+        session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        if ':' in session_key:
+            channel, chat_id = session_key.split(':', 1)
+        else:
+            channel, chat_id = 'task', session_key
+        try:
+            block = await manager.retrieve_block(
+                query=query_text,
+                session_key=session_key,
+                channel=channel,
+                chat_id=chat_id,
+            )
+        except Exception:
+            return messages
+        if not block:
+            return messages
+        enriched = list(messages)
+        if enriched and enriched[0].get('role') == 'system':
+            base = str(enriched[0].get('content') or '')
+            enriched[0] = {**enriched[0], 'content': f"{base}\n\n{block}".strip()}
+        else:
+            enriched.insert(0, {'role': 'system', 'content': block})
+        return enriched
 
     def summary(self, session_id: str) -> str:
         return self.query_service.summary(session_id).text

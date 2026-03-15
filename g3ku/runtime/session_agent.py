@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
+from g3ku.prompt_trace import render_output_trace
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import AssistantMessage, UserInputMessage
 from g3ku.core.results import RunResult
@@ -207,14 +208,6 @@ class RuntimeAgentSession:
 
         await refresh_web_agent_runtime(force=False, reason="prompt")
         user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
-        if getattr(self._loop, "prompt_trace", False):
-            logger.info(
-                "[main:user] session={} channel={} chat={}\n{}",
-                self._state.session_key,
-                self._channel,
-                self._chat_id,
-                self._history_text(user_input.content),
-            )
         self._last_prompt = user_input.content
         self._event_log = []
         self._pending_tool_names.clear()
@@ -262,13 +255,7 @@ class RuntimeAgentSession:
         self._state.pending_tool_calls.clear()
         user_text = self._history_text(user_input.content)
         if getattr(self._loop, "prompt_trace", False):
-            logger.info(
-                "[main:answer] session={} channel={} chat={}\n{}",
-                self._state.session_key,
-                self._channel,
-                self._chat_id,
-                output,
-            )
+            logger.info(render_output_trace(output))
         persisted_session = None
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)

@@ -293,5 +293,19 @@ async def reload_resources(payload: dict[str, Any] | None = Body(default=None), 
     service = _service()
     await service.startup()
     effective_session_id = str((payload or {}).get('session_id') or session_id or 'web:shared')
-    result = service.reload_resources(session_id=effective_session_id)
+    result = await service.reload_resources_async(session_id=effective_session_id)
     return {'ok': True, **result}
+
+
+@router.get('/memory/retrieval-traces')
+async def get_retrieval_traces(limit: int = Query(20, ge=1, le=200)):
+    service = _service()
+    await service.startup()
+    return await service.get_context_traces(trace_kind='retrieval', limit=limit)
+
+
+@router.get('/memory/context-assembly-traces')
+async def get_context_assembly_traces(limit: int = Query(20, ge=1, le=200)):
+    service = _service()
+    await service.startup()
+    return await service.get_context_traces(trace_kind='context_assembly', limit=limit)

@@ -34,15 +34,46 @@ class LoadSkillContextTool(_MainRuntimeTool):
 
     @property
     def description(self) -> str:
-        return 'Load the detailed body of a currently visible skill so the agent can use it.'
+        return 'Load layered context for a currently visible skill. Defaults to L1 overview; use level=l2 for query-aware excerpts.'
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {'type': 'object', 'properties': {'skill_id': {'type': 'string', 'description': 'The skill id to load.'}}, 'required': ['skill_id']}
+        return {
+            'type': 'object',
+            'properties': {
+                'skill_id': {'type': 'string', 'description': 'The skill id to load.'},
+                'level': {'type': 'string', 'enum': ['l0', 'l1', 'l2'], 'description': 'Requested context level. Defaults to l1.'},
+                'query': {'type': 'string', 'description': 'Optional query used to extract a focused L2 excerpt.'},
+                'max_tokens': {'type': 'integer', 'description': 'Optional output token budget for the returned content.'},
+            },
+            'required': ['skill_id'],
+        }
 
-    async def execute(self, skill_id: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        skill_id: str,
+        level: str = 'l1',
+        query: str = '',
+        max_tokens: int | None = None,
+        __g3ku_runtime: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
         service = await self._service()
-        payload = service.load_skill_context(actor_role=_runtime_actor_role(__g3ku_runtime), session_id=_runtime_session_key(__g3ku_runtime), skill_id=str(skill_id or '').strip())
+        if hasattr(service, 'load_skill_context_v2'):
+            payload = service.load_skill_context_v2(
+                actor_role=_runtime_actor_role(__g3ku_runtime),
+                session_id=_runtime_session_key(__g3ku_runtime),
+                skill_id=str(skill_id or '').strip(),
+                level=str(level or 'l1').strip().lower() or 'l1',
+                query=str(query or ''),
+                max_tokens=max_tokens,
+            )
+        else:
+            payload = service.load_skill_context(
+                actor_role=_runtime_actor_role(__g3ku_runtime),
+                session_id=_runtime_session_key(__g3ku_runtime),
+                skill_id=str(skill_id or '').strip(),
+            )
         return json.dumps(payload, ensure_ascii=False)
 
 
@@ -53,13 +84,44 @@ class LoadToolContextTool(_MainRuntimeTool):
 
     @property
     def description(self) -> str:
-        return 'Load the detailed usage guide for a currently visible tool so the agent can use it correctly.'
+        return 'Load layered context for a currently visible tool. Defaults to L1 overview; use level=l2 for query-aware excerpts.'
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {'type': 'object', 'properties': {'tool_id': {'type': 'string', 'description': 'The tool id to load.'}}, 'required': ['tool_id']}
+        return {
+            'type': 'object',
+            'properties': {
+                'tool_id': {'type': 'string', 'description': 'The tool id to load.'},
+                'level': {'type': 'string', 'enum': ['l0', 'l1', 'l2'], 'description': 'Requested context level. Defaults to l1.'},
+                'query': {'type': 'string', 'description': 'Optional query used to extract a focused L2 excerpt.'},
+                'max_tokens': {'type': 'integer', 'description': 'Optional output token budget for the returned content.'},
+            },
+            'required': ['tool_id'],
+        }
 
-    async def execute(self, tool_id: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        tool_id: str,
+        level: str = 'l1',
+        query: str = '',
+        max_tokens: int | None = None,
+        __g3ku_runtime: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
         service = await self._service()
-        payload = service.load_tool_context(actor_role=_runtime_actor_role(__g3ku_runtime), session_id=_runtime_session_key(__g3ku_runtime), tool_id=str(tool_id or '').strip())
+        if hasattr(service, 'load_tool_context_v2'):
+            payload = service.load_tool_context_v2(
+                actor_role=_runtime_actor_role(__g3ku_runtime),
+                session_id=_runtime_session_key(__g3ku_runtime),
+                tool_id=str(tool_id or '').strip(),
+                level=str(level or 'l1').strip().lower() or 'l1',
+                query=str(query or ''),
+                max_tokens=max_tokens,
+            )
+        else:
+            payload = service.load_tool_context(
+                actor_role=_runtime_actor_role(__g3ku_runtime),
+                session_id=_runtime_session_key(__g3ku_runtime),
+                tool_id=str(tool_id or '').strip(),
+            )
         return json.dumps(payload, ensure_ascii=False)

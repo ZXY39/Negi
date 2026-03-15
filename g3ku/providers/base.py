@@ -8,12 +8,15 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.prompt_trace import render_send_data_trace
+
 _TRACE_TRUE_VALUES = {"1", "true", "yes", "on", "debug", "log"}
 
 
 @dataclass
 class ToolCallRequest:
     """A tool call request from the LLM."""
+
     id: str
     name: str
     arguments: dict[str, Any]
@@ -22,13 +25,14 @@ class ToolCallRequest:
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
+
     content: str | None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
-    reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
-    thinking_blocks: list[dict] | None = None  # Anthropic extended thinking
-    
+    reasoning_content: str | None = None
+    thinking_blocks: list[dict] | None = None
+
     @property
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls."""
@@ -38,7 +42,7 @@ class LLMResponse:
 class LLMProvider(ABC):
     """
     Abstract base class for LLM providers.
-    
+
     Implementations should handle the specifics of each provider's API
     while maintaining a consistent interface.
     """
@@ -65,15 +69,8 @@ class LLMProvider(ABC):
     ) -> None:
         if not self._trace_enabled():
             return
-        lines = [
-            "===== MODEL REQUEST BODY BEGIN =====",
-            f"provider={provider or '-'}",
-            f"endpoint={endpoint or '-'}",
-            "",
-            self._trace_json(body),
-            "===== MODEL REQUEST BODY END =====",
-        ]
-        logger.info("\n".join(lines))
+        del provider, endpoint
+        logger.info(render_send_data_trace(self._trace_json(body)))
 
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -135,7 +132,7 @@ class LLMProvider(ABC):
     ) -> LLMResponse:
         """
         Send a chat completion request.
-        
+
         Args:
             messages: List of message dicts with 'role' and 'content'.
             tools: Optional list of tool definitions.

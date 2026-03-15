@@ -567,6 +567,27 @@ class MemoryCostConfig(Base):
     max_increase_pct: int = 15
 
 
+class MemoryAssemblyConfig(Base):
+    """Prompt/context assembly controls for frontdoor orchestration."""
+
+    recent_messages_limit: int = 24
+    archive_summary_top_k: int = 2
+    archive_summary_max_tokens: int = 320
+    skill_inventory_top_k: int = 8
+    skill_inventory_max_tokens: int = 480
+    extension_tool_top_k: int = 6
+    core_tools: list[str] = Field(
+        default_factory=lambda: [
+            'create_async_task',
+            'task_summary',
+            'task_list',
+            'task_progress',
+            'memory_search',
+            'message',
+        ]
+    )
+
+
 class MemoryToolsConfig(Base):
     """RAG memory runtime configuration."""
 
@@ -584,6 +605,7 @@ class MemoryToolsConfig(Base):
     compat: MemoryCompatConfig = Field(default_factory=MemoryCompatConfig)
     commit: MemoryCommitConfig = Field(default_factory=MemoryCommitConfig)
     cost: MemoryCostConfig = Field(default_factory=MemoryCostConfig)
+    assembly: MemoryAssemblyConfig = Field(default_factory=MemoryAssemblyConfig)
     bootstrap_mode: Literal["new_only", "full", "none"] = "new_only"
     retention_days: int | None = None
 

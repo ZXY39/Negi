@@ -23,6 +23,7 @@ class NodeRunner:
         tool_provider,
         execution_model_refs: list[str],
         acceptance_model_refs: list[str],
+        context_enricher=None,
     ) -> None:
         self._store = store
         self._log_service = log_service
@@ -30,6 +31,7 @@ class NodeRunner:
         self._tool_provider = tool_provider
         self._execution_model_refs = list(execution_model_refs or [])
         self._acceptance_model_refs = list(acceptance_model_refs or []) or list(execution_model_refs or [])
+        self._context_enricher = context_enricher
 
     async def run_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         task = self._store.get_task(task_id)
@@ -42,7 +44,7 @@ class NodeRunner:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         try:
             tools = self._build_tools(task=task, node=node)
-            messages = self._resume_messages(task=task, node=node)
+            messages = await self._resume_messages(task=task, node=node)
             result = await self._react_loop.run(
                 task=task,
                 node=node,
@@ -61,12 +63,12 @@ class NodeRunner:
         except Exception as exc:
             return self._mark_failed(task_id, node.node_id, reason=str(exc))
 
-    def _resume_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
+    async def _resume_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
         state = self._log_service.read_runtime_state(task.task_id) or {}
         for frame in list(state.get('frames') or []):
             if str(frame.get('node_id') or '') == node.node_id and isinstance(frame.get('messages'), list) and frame.get('messages'):
                 return list(frame['messages'])
-        return self._build_messages(task=task, node=node)
+        return await self._build_messages(task=task, node=node)
 
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
@@ -78,9 +80,9 @@ class NodeRunner:
             tools.pop('spawn_child_nodes', None)
         return tools
 
-    def _build_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
+    async def _build_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
-        return [
+        messages = [
             {'role': 'system', 'content': load_prompt(system_name)},
             {
                 'role': 'user',
@@ -99,6 +101,11 @@ class NodeRunner:
                 ),
             },
         ]
+        if self._context_enricher is not None:
+            enriched = await self._context_enricher(task=task, node=node, messages=list(messages))
+            if isinstance(enriched, list) and enriched:
+                return enriched
+        return messages
 
     def _model_refs_for(self, node: NodeRecord) -> list[str]:
         return list(self._acceptance_model_refs if node.node_kind == KIND_ACCEPTANCE else self._execution_model_refs)

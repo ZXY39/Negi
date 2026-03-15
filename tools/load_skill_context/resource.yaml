@@ -14,6 +14,13 @@ parameters:
   properties:
     skill_id:
       type: string
+    level:
+      type: string
+      enum: [l0, l1, l2]
+    query:
+      type: string
+    max_tokens:
+      type: integer
       description: 要加载的 skill id。
   required:
   - skill_id

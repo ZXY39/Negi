@@ -1329,6 +1329,7 @@ class MemoryManager:
         self.audit_file = mem_dir / "audit.jsonl"
         self.pending_file = mem_dir / "pending_facts.jsonl"
         self.trace_file = mem_dir / "retrieval_trace.jsonl"
+        self.context_assembly_trace_file = mem_dir / "context_assembly.jsonl"
         self.cost_file = mem_dir / "cost_metrics.json"
         self.archive_dir = ensure_dir(mem_dir / "archives")
         self.context_store_dir = ensure_dir(mem_dir / "context_store")
@@ -1368,6 +1369,87 @@ class MemoryManager:
                 .replace("{session_key}", session_val)
             )
         return tuple(out)
+
+    @staticmethod
+    def catalog_namespace() -> tuple[str, ...]:
+        return ('catalog', 'global')
+
+    async def list_context_records(
+        self,
+        *,
+        namespace_prefix: tuple[str, ...] | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[ContextRecordV2]:
+        return await asyncio.to_thread(
+            self.store.list_context_v2,
+            namespace_prefix,
+            limit=max(limit, 1),
+            offset=max(offset, 0),
+        )
+
+    async def put_context_record(self, *, namespace: tuple[str, ...], record: ContextRecordV2) -> None:
+        await asyncio.to_thread(self.store.put_context_v2, namespace, record)
+
+    async def delete_context_record(self, *, namespace: tuple[str, ...], record_id: str) -> None:
+        await asyncio.to_thread(self.store.delete_context_v2, namespace, record_id)
+
+    async def fetch_context_record(self, *, namespace: tuple[str, ...], record_id: str) -> ContextRecordV2 | None:
+        return await asyncio.to_thread(self.store._fetch_context_v2, namespace, record_id)
+
+    async def sync_catalog(self, service: Any) -> dict[str, int]:
+        if not self._feature_enabled('unified_context') or self.arch_version != 'v2':
+            return {'created': 0, 'updated': 0, 'removed': 0}
+        from g3ku.runtime.context.catalog import ContextCatalogIndexer
+
+        indexer = ContextCatalogIndexer(memory_manager=self, service=service)
+        return await indexer.sync()
+
+    async def write_context_assembly_trace(
+        self,
+        *,
+        session_key: str | None,
+        channel: str | None,
+        chat_id: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        event = {
+            'timestamp': _now_iso(),
+            'session_key': str(session_key or ''),
+            'channel': str(channel or ''),
+            'chat_id': str(chat_id or ''),
+            'payload': payload,
+        }
+        async with self._trace_lock:
+            await asyncio.to_thread(self._append_jsonl, self.context_assembly_trace_file, event)
+
+    async def read_trace_file(self, *, trace_kind: str, limit: int = 20) -> list[dict[str, Any]]:
+        if trace_kind == 'context_assembly':
+            path = self.context_assembly_trace_file
+        else:
+            path = self.trace_file
+        if not path.exists():
+            return []
+
+        def _run() -> list[dict[str, Any]]:
+            try:
+                lines = path.read_text(encoding='utf-8').splitlines()
+            except Exception:
+                return []
+            items: list[dict[str, Any]] = []
+            for line in lines[-max(1, int(limit)) :]:
+                line = str(line or '').strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    items.append(payload)
+            return items
+
+        return await asyncio.to_thread(_run)
 
     def _feature_enabled(self, key: str) -> bool:
         default = self._feature_defaults.get(key, False)
@@ -1649,9 +1731,11 @@ class MemoryManager:
         typed_query: TypedQuery,
         limit: int,
     ) -> list[tuple[ContextRecordV2, float]]:
+        target_namespace = namespace if typed_query.context_type == 'memory' else self.catalog_namespace()
+
         def _run() -> list[tuple[ContextRecordV2, float]]:
             return self.store.search_context_v2(
-                namespace,
+                target_namespace,
                 query=typed_query.query,
                 limit=limit,
                 context_type=typed_query.context_type,
