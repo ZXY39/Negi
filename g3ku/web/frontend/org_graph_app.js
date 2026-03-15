@@ -36,7 +36,6 @@ const S = {
     confirmState: null,
     toastState: { timeoutId: null, intervalId: null, remaining: 0 },
     openResourceSelectId: "",
-    resourceSaveTimers: { skill: null, tool: null },
     modelCatalog: {
         items: [],
         catalog: [],
@@ -497,9 +496,6 @@ function finalizeCeoTurn(text) {
     scrollCeoFeedToBottom();
 }
 
-async function loadCeoHistory() {
-    return [];
-}
 function addNotice(notice, _bump = true) {
     const payload = notice && typeof notice === "object" ? notice : {};
     const kind = String(payload.kind || "").toLowerCase();
@@ -584,11 +580,6 @@ function setToolDirty(next = true) {
     S.toolDirty = !!next;
     renderToolActions();
     syncDetailSaveButton("tool");
-}
-
-function queueResourceSave(kind) {
-    if (kind === "skill") setSkillDirty(true);
-    if (kind === "tool") setToolDirty(true);
 }
 
 function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, returnFocus = null }) {
@@ -1600,10 +1591,6 @@ async function deleteModelDetail(modelKey) {
     }
 }
 
-async function loadNotices() {
-    return [];
-}
-
 function initCeoWs() {
     if (S.ceoWs && S.ceoWs.readyState <= 1) return;
     S.ceoWs = new WebSocket(ApiClient.getCeoWsUrl());
@@ -1706,10 +1693,6 @@ function renderToolActions() {
 }
 
 function clearSkillSelection() {
-    if (S.resourceSaveTimers?.skill) {
-        window.clearTimeout(S.resourceSaveTimers.skill);
-        S.resourceSaveTimers.skill = null;
-    }
     S.selectedSkill = null;
     S.skillFiles = [];
     S.skillContents = {};
@@ -1720,10 +1703,6 @@ function clearSkillSelection() {
 }
 
 function clearToolSelection() {
-    if (S.resourceSaveTimers?.tool) {
-        window.clearTimeout(S.resourceSaveTimers.tool);
-        S.resourceSaveTimers.tool = null;
-    }
     S.selectedTool = null;
     S.toolDirty = false;
     renderTools();
@@ -2498,10 +2477,6 @@ async function openSkill(skillId, quiet = false) {
 
 async function saveSkill() {
     if (S.skillBusy) return;
-    if (S.resourceSaveTimers?.skill) {
-        window.clearTimeout(S.resourceSaveTimers.skill);
-        S.resourceSaveTimers.skill = null;
-    }
     const selectedId = String(S.selectedSkill?.skill_id || "").trim();
     const displayName = String(S.selectedSkill?.display_name || selectedId || "Skill").trim();
     const enabled = !!S.selectedSkill?.enabled;
@@ -2707,10 +2682,6 @@ async function openTool(toolId, quiet = false) {
 
 async function saveTool() {
     if (S.toolBusy) return;
-    if (S.resourceSaveTimers?.tool) {
-        window.clearTimeout(S.resourceSaveTimers.tool);
-        S.resourceSaveTimers.tool = null;
-    }
     const selectedId = String(S.selectedTool?.tool_id || "").trim();
     const displayName = String(S.selectedTool?.display_name || selectedId || "Tool").trim();
     const enabled = !!S.selectedTool?.enabled;

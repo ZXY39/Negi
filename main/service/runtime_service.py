@@ -166,21 +166,8 @@ class MainRuntimeService:
         await self.task_runner.resume(task_id)
         return self.get_task(task_id)
 
-    async def wait_for_task(self, task_id: str) -> TaskRecord | None:
-        await self.task_runner.wait(task_id)
-        return self.get_task(task_id)
-
     def get_task(self, task_id: str) -> TaskRecord | None:
         return self.store.get_task(task_id)
-
-    def list_tasks(self, session_id: str | None = None) -> list[TaskRecord]:
-        return self.store.list_tasks(session_id)
-
-    def get_node(self, node_id: str) -> NodeRecord | None:
-        return self.store.get_node(node_id)
-
-    def list_nodes(self, task_id: str) -> list[NodeRecord]:
-        return self.store.list_nodes(task_id)
 
     def bind_resource_manager(self, resource_manager) -> None:
         self._resource_manager = resource_manager
