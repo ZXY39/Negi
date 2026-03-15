@@ -140,57 +140,6 @@ def build_structured_event(
     }
 
 
-def legacy_payloads_for_event(event: AgentEvent) -> list[dict[str, Any]]:
-    payload = dict(getattr(event, "payload", {}) or {})
-    event_type = str(getattr(event, "type", "") or "")
-    if event_type == "state_snapshot":
-        return []
-    if event_type == "message_delta":
-        channel = str(payload.get("channel") or "progress")
-        kind = str(payload.get("kind") or channel)
-        legacy_type = "deep_progress" if channel == "deep_progress" else "tool_hint" if kind == "tool_plan" else "progress"
-        out = {"type": legacy_type, "text": str(payload.get("text") or ""), "kind": kind}
-        if isinstance(payload.get("data"), dict):
-            out["data"] = payload["data"]
-        return [out]
-    if event_type == "tool_execution_start":
-        return [{
-            "type": "progress",
-            "text": str(payload.get("text") or f"{payload.get('tool_name') or 'tool'} started"),
-            "kind": "tool_start",
-            "data": {
-                **(payload.get("data") or {}),
-                "tool_name": payload.get("tool_name") or "tool",
-                "tool_call_id": payload.get("tool_call_id"),
-            },
-        }]
-    if event_type == "tool_execution_update":
-        kind = str(payload.get("kind") or "tool_plan")
-        legacy_type = "tool_hint" if kind == "tool_plan" else "deep_progress" if kind == "deep_progress" else "progress"
-        out = {"type": legacy_type, "text": str(payload.get("text") or ""), "kind": kind}
-        if isinstance(payload.get("data"), dict):
-            out["data"] = payload["data"]
-        return [out]
-    if event_type == "tool_execution_end":
-        return [{
-            "type": "progress",
-            "text": str(payload.get("text") or ""),
-            "kind": "tool_error" if payload.get("is_error") else "tool_result",
-            "data": {
-                **(payload.get("data") or {}),
-                "tool_name": payload.get("tool_name") or "tool",
-                "tool_call_id": payload.get("tool_call_id"),
-            },
-        }]
-    if event_type == "control_ack" and str(payload.get("action") or "") == "pause":
-        return [{"type": "task_stopped", "text": str(payload.get("text") or "Task stopped."), "kind": "control"}]
-    if event_type == "message_end" and str(payload.get("role") or "") == "assistant":
-        return [{"type": "message", "text": str(payload.get("text") or "")}]
-    if event_type == "error" and (payload.get("recoverable") is False or payload.get("source") == "web"):
-        return [{"type": "error", "text": str(payload.get("message") or "Unknown error")}]
-    return []
-
-
 def cli_event_text(event: AgentEvent) -> tuple[str | None, str | None]:
     payload = dict(getattr(event, "payload", {}) or {})
     event_type = str(getattr(event, "type", "") or "")

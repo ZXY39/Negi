@@ -8,6 +8,7 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.runtime.legacy_metadata import filter_legacy_runtime_metadata, is_legacy_runtime_metadata_message
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
 
@@ -49,7 +50,7 @@ class Session:
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a user turn."""
-        unconsolidated = self.messages[self.last_consolidated:]
+        unconsolidated = filter_legacy_runtime_metadata(self.messages[self.last_consolidated:])
         sliced = unconsolidated[-max_messages:]
 
         # Drop leading non-user messages to avoid orphaned tool_result blocks
@@ -153,6 +154,8 @@ class SessionManager:
                         last_user_turn_at = data.get("last_user_turn_at")
                         commit_turn_counter = int(data.get("commit_turn_counter", 0) or 0)
                     else:
+                        if is_legacy_runtime_metadata_message(data):
+                            continue
                         messages.append(data)
 
             return Session(

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from g3ku.agent.chatmodel_utils import ensure_chat_model
-from g3ku.agent.context import ContextBuilder
 from g3ku.agent.rag_memory import MemoryManager
 from g3ku.runtime.engine import AgentRuntimeEngine
 from g3ku.runtime.model_bridge import (
@@ -63,7 +62,6 @@ class AgentLoop(AgentRuntimeEngine):
             cron_service=cron_service,
             session_manager=session_manager,
             channels_config=channels_config,
-            context_builder_cls=ContextBuilder,
             memory_manager_cls=MemoryManager,
             session_manager_cls=SessionManager,
             chat_model_factory=ensure_chat_model,
@@ -76,7 +74,6 @@ __all__ = [
     'AgentLoop',
     'AgentRuntimeEngine',
     'ensure_chat_model',
-    'ContextBuilder',
     'MemoryManager',
     'SessionManager',
     '_LoopRuntimeContext',

@@ -55,10 +55,6 @@ class ApiClient {
         return `${protocol}//${host}/api/ws/tasks/${encodeURIComponent(taskId)}?session_id=${DEFAULT_SESSION_ID}`;
     }
 
-    static async getTasksSummary() {
-        return this.get("/api/tasks/summary", { session_id: DEFAULT_SESSION_ID });
-    }
-
     static async getTasks(scope = 1) {
         const data = await this.get("/api/tasks", { session_id: DEFAULT_SESSION_ID, scope });
         return data.items || [];
@@ -66,10 +62,6 @@ class ApiClient {
 
     static async getTask(taskId, markRead = false) {
         return this.get(`/api/tasks/${taskId}`, { mark_read: markRead });
-    }
-
-    static async getTaskTree(taskId, markRead = false) {
-        return this.get(`/api/tasks/${taskId}/tree`, { mark_read: markRead });
     }
 
     static async pauseTask(taskId) {

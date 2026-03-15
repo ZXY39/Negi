@@ -38,7 +38,6 @@ class AgentRuntimeEngine:
         cron_service=None,
         session_manager=None,
         channels_config=None,
-        context_builder_cls=None,
         memory_manager_cls=None,
         session_manager_cls=None,
         chat_model_factory=None,
@@ -66,7 +65,6 @@ class AgentRuntimeEngine:
         self.prompt_trace = self.debug_trace or raw_prompt_trace in {"1", "true", "yes", "on", "debug", "log"}
         self.middlewares = list(middlewares or [])
 
-        self._context_builder_cls = context_builder_cls
         self._memory_manager_cls = memory_manager_cls
         self._session_manager_cls = session_manager_cls
         self._chat_model_factory = chat_model_factory
@@ -328,39 +326,6 @@ class AgentRuntimeEngine:
             on_progress=on_progress,
         )
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=output)
-
-    def _transform_context(self, *, history_messages: list[Any], current_message: str, channel: str, chat_id: str, include_legacy_memory: bool = True, temp_dir: str | None = None):
-        builder_cls = self._context_builder_cls
-        if builder_cls is None:
-            return list(history_messages)
-        builder = builder_cls(self.workspace)
-        from g3ku.runtime.message_adapter import agent_messages_to_dicts
-
-        history = history_messages if history_messages and isinstance(history_messages[0], dict) else agent_messages_to_dicts(history_messages)
-        return builder.build_messages(history, current_message, channel=channel, chat_id=chat_id, include_legacy_memory=include_legacy_memory, temp_dir=temp_dir)
-
-    async def _run_agent_loop(self, messages, *, session_key: str, channel: str, chat_id: str, message_id: str | None = None):
-        _ = messages, message_id
-        manager = SessionRuntimeManager(self)
-        result = await manager.prompt('', session_key=session_key, channel=channel, chat_id=chat_id)
-        return str(result.output or ''), None, []
-
-    def _save_turn(self, session, all_messages: list[dict[str, Any]], history_count: int, *, user_content_override: str | None = None) -> None:
-        _ = history_count
-        if user_content_override:
-            session.add_message('user', user_content_override)
-        for item in all_messages:
-            if not isinstance(item, dict):
-                continue
-            session.add_message(str(item.get('role') or 'assistant'), str(item.get('content') or ''))
-
-    def _save_checkpoint_turn_snapshot(self, session, *, user_content: str, assistant_content: str) -> None:
-        session.add_message('user', str(user_content or ''))
-        session.add_message('assistant', str(assistant_content or ''))
-
-    async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
-        _ = session, archive_all
-        return False
 
     def stop(self) -> None:
         return None

@@ -61,16 +61,6 @@ async def create_model(payload: dict = Body(...)):
     return {'ok': True, 'item': item}
 
 
-@router.get('/models/{model_key}')
-async def get_model(model_key: str):
-    manager = ModelManager.load()
-    try:
-        item = manager.get_model(model_key)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {'ok': True, 'item': item}
-
-
 @router.put('/models/{model_key}')
 async def update_model(model_key: str, payload: dict = Body(...)):
     manager = ModelManager.load()

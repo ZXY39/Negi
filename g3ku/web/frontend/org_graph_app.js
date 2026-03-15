@@ -23,7 +23,6 @@ const S = {
     taskWs: null,
     currentTaskId: null,
     tasks: [],
-    taskSummary: null,
     currentTask: null,
     currentTaskProgress: null,
     taskArtifacts: [],
@@ -1896,7 +1895,6 @@ function renderTasks() {
 async function loadTasks() {
     U.taskGrid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">Loading tasks...</div>';
     try {
-        S.taskSummary = await ApiClient.getTasksSummary().catch(() => null);
         S.tasks = await ApiClient.getTasks(1);
         syncTaskSelection();
         renderTasks();
