@@ -2,6 +2,14 @@ schema_version: 1
 kind: tool
 name: memory_runtime
 description: Internal memory runtime settings anchor.
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: ?????????????????
+  compare_rule: ???????????????????????????????toolskill ????????????????
+  source_of_truth: ????????????resource.yaml ? toolskills ?????
 protocol: mcp
 mcp:
   transport: embedded
@@ -40,16 +48,16 @@ settings:
     sentence_window: 3
     max_context_tokens: 1200
     default_load_level: l1
-    rerank_provider_model: dashscope:qwen3-vl-rerank
+    rerank_model_key: memory_rerank_default
   embedding:
-    provider_model: dashscope:qwen3-vl-embedding
     batch_size: 32
+    model_key: memory_embedding_default
   isolation:
     mode: session
     namespace_template:
-      - memory
-      - '{channel}'
-      - '{chat_id}'
+    - memory
+    - '{channel}'
+    - '{chat_id}'
   guard:
     mode: tiered
     auto_fact_confidence: 0.8
@@ -68,12 +76,14 @@ settings:
     skill_inventory_max_tokens: 480
     extension_tool_top_k: 6
     core_tools:
-      - create_async_task
-      - task_summary
-      - task_list
-      - task_progress
-      - memory_search
-      - message
+    - create_async_task
+    - task_summary
+    - task_list
+    - task_progress
+    - memory_search
+    - message
+  catalog_summary:
+    model_key: ceo_primary
   bootstrap_mode: new_only
   retention_days: null
 parameters:

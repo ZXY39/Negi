@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.config.schema import Config
+from g3ku.llm_config.migration import migrate_raw_config_if_needed
 from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
 
 
@@ -125,6 +126,15 @@ def _referenced_provider_names(cfg: Config) -> list[str]:
 
     for item in list(cfg.models.catalog or []):
         provider_model = str(getattr(item, "provider_model", "") or "").strip()
+        if not provider_model and str(getattr(item, "llm_config_id", "") or "").strip():
+            try:
+                from g3ku.llm_config.facade import LLMConfigFacade
+
+                provider_model = str(
+                    LLMConfigFacade(cfg.workspace_path).get_binding(cfg, item.key).get("provider_model") or ""
+                ).strip()
+            except Exception:
+                provider_model = ""
         if not provider_model:
             continue
         provider_name, _ = cfg.parse_provider_model(provider_model)
@@ -154,6 +164,7 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
     catalog = [
         {
             "key": item.key,
+            "llmConfigId": item.llm_config_id,
             "providerModel": item.provider_model,
             "apiKey": item.api_key,
             "apiBase": item.api_base,
@@ -200,6 +211,20 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         "channels": {
             "sendProgress": cfg.channels.send_progress,
             "sendToolHints": cfg.channels.send_tool_hints,
+            "whatsapp": cfg.channels.whatsapp.model_dump(by_alias=True, exclude_none=True),
+            "telegram": cfg.channels.telegram.model_dump(by_alias=True, exclude_none=True),
+            "discord": cfg.channels.discord.model_dump(by_alias=True, exclude_none=True),
+            "feishu": cfg.channels.feishu.model_dump(by_alias=True, exclude_none=True),
+            "mochat": cfg.channels.mochat.model_dump(by_alias=True, exclude_none=True),
+            "dingtalk": cfg.channels.dingtalk.model_dump(by_alias=True, exclude_none=True),
+            "email": cfg.channels.email.model_dump(by_alias=True, exclude_none=True),
+            "slack": cfg.channels.slack.model_dump(by_alias=True, exclude_none=True),
+            "qq": cfg.channels.qq.model_dump(by_alias=True, exclude_none=True),
+            "matrix": cfg.channels.matrix.model_dump(by_alias=True, exclude_none=True),
+            "qqbot": cfg.channels.qqbot.model_dump(by_alias=True, exclude_none=True),
+            "wecom": cfg.channels.wecom.model_dump(by_alias=True, exclude_none=True),
+            "wecomApp": cfg.channels.wecom_app.model_dump(by_alias=True, exclude_none=True),
+            "feishuChina": cfg.channels.feishu_china.model_dump(by_alias=True, exclude_none=True),
         },
         "models": {
             "catalog": catalog,
@@ -246,6 +271,19 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "defaultMaxDepth": cfg.main_runtime.default_max_depth,
             "hardMaxDepth": cfg.main_runtime.hard_max_depth,
         },
+        "chinaBridge": {
+            "enabled": cfg.china_bridge.enabled,
+            "bindHost": cfg.china_bridge.bind_host,
+            "publicPort": cfg.china_bridge.public_port,
+            "controlHost": cfg.china_bridge.control_host,
+            "controlPort": cfg.china_bridge.control_port,
+            "controlToken": cfg.china_bridge.control_token,
+            "autoStart": cfg.china_bridge.auto_start,
+            "nodeBin": cfg.china_bridge.node_bin,
+            "npmClient": cfg.china_bridge.npm_client,
+            "stateDir": cfg.china_bridge.state_dir,
+            "logLevel": cfg.china_bridge.log_level,
+        },
     }
 
 
@@ -258,7 +296,33 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         )
 
     payload = _runtime_config_payload(cfg)
-    missing = [".".join(path) for path in _leaf_paths(payload) if path and not _path_exists(raw_data, path)]
+    exempt_prefixes = {
+        ("providers",),
+        ("mainRuntime",),
+        ("chinaBridge",),
+        ("channels", "whatsapp"),
+        ("channels", "telegram"),
+        ("channels", "discord"),
+        ("channels", "feishu"),
+        ("channels", "mochat"),
+        ("channels", "dingtalk"),
+        ("channels", "email"),
+        ("channels", "slack"),
+        ("channels", "qq"),
+        ("channels", "matrix"),
+        ("channels", "qqbot"),
+        ("channels", "wecom"),
+        ("channels", "wecomApp"),
+        ("channels", "feishuChina"),
+    }
+    missing = [
+        ".".join(path)
+        for path in _leaf_paths(payload)
+        if path
+        and path not in {("channels", "sendProgress"), ("channels", "sendToolHints")}
+        and not any(path[: len(prefix)] == prefix for prefix in exempt_prefixes)
+        and not _path_exists(raw_data, path)
+    ]
     if missing:
         preview = ", ".join(missing[:12])
         suffix = "" if len(missing) <= 12 else f" ... (+{len(missing) - 12} more)"
@@ -284,9 +348,14 @@ def load_config(config_path: Path | None = None) -> Config:
     _ensure_no_legacy_model_fields(raw_data)
     _ensure_no_removed_role_scopes(raw_data)
     _ensure_no_legacy_tools_config(raw_data)
+    migrated_llm, changed = migrate_raw_config_if_needed(deepcopy(raw_data), workspace=Path.cwd())
+    if changed:
+        raw_data = migrated_llm
     migrated = _migrate_config(deepcopy(raw_data))
     cfg = Config.model_validate(migrated)
-    _ensure_runtime_fields_explicit(raw_data, cfg)
+    _ensure_runtime_fields_explicit(migrated, cfg)
+    if changed:
+        save_config(cfg, expected_path)
     return cfg
 
 
@@ -333,4 +402,23 @@ def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(main_runtime, dict) and "main_runtime" not in data:
         data["main_runtime"] = main_runtime
     data.pop("mainRuntime", None)
+
+    china_bridge = data.get("chinaBridge")
+    if isinstance(china_bridge, dict) and "china_bridge" not in data:
+        data["china_bridge"] = china_bridge
+    elif "china_bridge" not in data:
+        data["china_bridge"] = {}
+    data.pop("chinaBridge", None)
+
+    channels = data.get("channels")
+    if isinstance(channels, dict):
+        legacy_qq = channels.get("qq")
+        if isinstance(legacy_qq, dict) and "qqbot" not in channels:
+            channels["qqbot"] = deepcopy(legacy_qq)
+        legacy_feishu = channels.get("feishu")
+        if isinstance(legacy_feishu, dict) and "feishuChina" not in channels and "feishu_china" not in channels:
+            channels["feishuChina"] = deepcopy(legacy_feishu)
+        if "wecomApp" not in channels and isinstance(channels.get("wecom-app"), dict):
+            channels["wecomApp"] = deepcopy(channels["wecom-app"])
+        channels.pop("wecom-app", None)
     return data

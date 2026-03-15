@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
+from g3ku.channels.outbound_router import OutboundRouter
+from g3ku.china_bridge import ChinaBridgeSupervisor, ChinaBridgeTransport
 from g3ku.transports.channel_session import ChannelSessionTransport
 
 
@@ -63,6 +65,11 @@ def run_gateway_shell(
         runtime_bridge=runtime_bridge,
         register_task=task_registrar if callable(task_registrar) else None,
     )
+    china_transport = ChinaBridgeTransport(
+        runtime_bridge=runtime_bridge,
+        app_config=config,
+        register_task=task_registrar if callable(task_registrar) else None,
+    )
 
     async def on_cron_job(job: CronJob) -> str | None:
         reminder_note = (
@@ -89,6 +96,12 @@ def run_gateway_shell(
 
     cron.on_job = on_cron_job
     channels = ChannelManager(config, bus, inbound_handler=channel_transport.handle_inbound)
+    outbound_router = OutboundRouter(bus=bus, legacy_manager=channels, china_transport=china_transport)
+    china_supervisor = ChinaBridgeSupervisor(
+        app_config=config,
+        workspace=config.workspace_path,
+        transport=china_transport,
+    )
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         enabled = set(channels.enabled_channels)
@@ -135,17 +148,34 @@ def run_gateway_shell(
     console.print(f"[green]OK[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
     async def run() -> None:
+        channels_task: asyncio.Task | None = None
+        china_wait_task: asyncio.Task | None = None
         try:
             await cron.start()
             await heartbeat.start()
-            await channels.start_all()
+            await outbound_router.start()
+            await china_supervisor.start()
+            channels_task = asyncio.create_task(channels.start_all(dispatch_outbound=False))
+            waiters = [channels_task]
+            if config.china_bridge.enabled and config.china_bridge.auto_start:
+                china_wait_task = asyncio.create_task(china_supervisor.wait())
+                waiters.append(china_wait_task)
+            await asyncio.gather(*waiters)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
+            if channels_task is not None:
+                channels_task.cancel()
+                await asyncio.gather(channels_task, return_exceptions=True)
+            if china_wait_task is not None:
+                china_wait_task.cancel()
+                await asyncio.gather(china_wait_task, return_exceptions=True)
             await agent.close_mcp()
             heartbeat.stop()
             cron.stop()
             agent.stop()
+            await outbound_router.stop()
+            await china_supervisor.stop()
             await channels.stop_all()
 
     asyncio.run(run())

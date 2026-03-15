@@ -5,6 +5,7 @@ import json
 import os
 import select
 import signal
+import shutil
 import sys
 import warnings
 from pathlib import Path
@@ -303,6 +304,18 @@ def _memory_startup_self_check(config: Config) -> None:
             return "dashscope"
         return None
 
+    def _provider_from_model_key(model_key: str | None) -> str | None:
+        key = str(model_key or "").strip()
+        if not key:
+            return None
+        try:
+            from g3ku.llm_config.facade import LLMConfigFacade
+
+            binding = LLMConfigFacade(config.workspace_path).get_binding(config, key)
+            return _provider_from_model(str(binding.get("provider_model") or ""))
+        except Exception:
+            return None
+
     def _provider_has_key(provider_id: str | None) -> bool:
         if not provider_id:
             return True
@@ -312,7 +325,7 @@ def _memory_startup_self_check(config: Config) -> None:
         return has_cfg_key or has_env_key
 
     embed_model = str(mem_cfg.embedding.provider_model or "").strip()
-    provider_id = _provider_from_model(embed_model)
+    provider_id = _provider_from_model_key(getattr(mem_cfg.embedding, "model_key", None)) or _provider_from_model(embed_model)
     if not provider_id:
         return
 
@@ -330,7 +343,7 @@ def _memory_startup_self_check(config: Config) -> None:
             f"'{provider_id}' has no API key configured. Dense retrieval may fallback to sparse-only."
         )
     rerank_model = str(getattr(mem_cfg.retrieval, "rerank_provider_model", "") or "").strip()
-    rerank_provider = _provider_from_model(rerank_model)
+    rerank_provider = _provider_from_model_key(getattr(mem_cfg.retrieval, "rerank_model_key", None)) or _provider_from_model(rerank_model)
     if mode == "rag" and rerank_provider and not _provider_has_key(rerank_provider):
         console.print(
             "[yellow]Memory self-check warning:[/yellow] rerank provider "
@@ -502,6 +515,76 @@ from g3ku.shells.channels_cli import build_channels_app
 
 channels_app = build_channels_app(console, _logo())
 app.add_typer(channels_app, name="channels")
+
+
+china_bridge_app = typer.Typer(help="Manage the china channels bridge")
+app.add_typer(china_bridge_app, name="china-bridge")
+
+
+def _china_bridge_status_path(config: Config) -> Path:
+    return config.workspace_path / str(config.china_bridge.state_dir or ".g3ku/china-bridge") / "status.json"
+
+
+@china_bridge_app.command("status")
+def china_bridge_status():
+    """Show china bridge status from the runtime status file."""
+    from g3ku.config.loader import load_config
+
+    config = load_config()
+    path = _china_bridge_status_path(config)
+    if not path.exists():
+        console.print(f"[yellow]No china bridge status file at {path}[/yellow]")
+        raise typer.Exit(1)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    console.print_json(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@china_bridge_app.command("doctor")
+def china_bridge_doctor():
+    """Run basic local diagnostics for the china bridge subsystem."""
+    from g3ku.config.loader import load_config
+
+    config = load_config()
+    dist_entry = config.workspace_path / "subsystems" / "china_channels_host" / "dist" / "index.js"
+    status_path = _china_bridge_status_path(config)
+    table = Table(title="China Bridge Doctor")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Value")
+    node_path = shutil.which(config.china_bridge.node_bin)
+    table.add_row("enabled", "ok" if config.china_bridge.enabled else "warn", str(config.china_bridge.enabled))
+    table.add_row("node", "ok" if node_path else "error", node_path or "not found")
+    table.add_row("dist", "ok" if dist_entry.exists() else "error", str(dist_entry))
+    table.add_row("status", "ok" if status_path.exists() else "warn", str(status_path))
+    table.add_row("public_port", "ok", str(config.china_bridge.public_port))
+    table.add_row("control_port", "ok", str(config.china_bridge.control_port))
+    for channel_name in ("qqbot", "dingtalk", "wecom", "wecom_app", "feishu_china"):
+        payload = getattr(config.channels, channel_name)
+        table.add_row(f"channel:{channel_name}", "ok" if payload.enabled else "warn", str(payload.enabled))
+    console.print(table)
+
+
+@china_bridge_app.command("restart")
+def china_bridge_restart():
+    """Terminate the running node host by PID so the gateway supervisor can restart it."""
+    from g3ku.config.loader import load_config
+
+    config = load_config()
+    path = _china_bridge_status_path(config)
+    if not path.exists():
+        console.print(f"[red]No china bridge status file at {path}[/red]")
+        raise typer.Exit(1)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    pid = int(payload.get("pid") or 0)
+    if pid <= 0:
+        console.print("[red]china bridge host PID not available[/red]")
+        raise typer.Exit(1)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception as exc:
+        console.print(f"[red]failed to signal china bridge pid {pid}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]OK[/green] sent SIGTERM to china bridge pid {pid}")
 
 def _middleware_ref(cfg, idx: int) -> str:
     """Human-readable middleware reference for CLI output."""

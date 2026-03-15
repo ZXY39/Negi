@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from g3ku.config.loader import get_config_path, load_config, save_config
-from g3ku.config.schema import Config, ManagedModelConfig
+from g3ku.config.loader import load_config, save_config
+from g3ku.config.schema import Config
+from g3ku.llm_config.enums import AuthMode, Capability
+from g3ku.llm_config.facade import LLMConfigFacade
 
 VALID_SCOPES = ("ceo", "execution", "inspection")
 
@@ -22,38 +24,74 @@ def _normalize_scope(value: str) -> str:
     return mapping[raw]
 
 
+def _infer_auth_mode(provider_id: str) -> AuthMode:
+    if provider_id in {"openai_codex", "github_copilot"}:
+        return AuthMode.OAUTH_CACHE
+    return AuthMode.API_KEY
+
+
+def _legacy_chat_draft(
+    *,
+    provider_model: str,
+    api_key: str,
+    api_base: str,
+    extra_headers: dict[str, str] | None,
+    max_tokens: int | None,
+    temperature: float | None,
+    reasoning_effort: str | None,
+) -> dict[str, Any]:
+    provider_id, model_id = Config.parse_provider_model(provider_model)
+    return {
+        "provider_id": provider_id,
+        "capability": Capability.CHAT,
+        "auth_mode": _infer_auth_mode(provider_id),
+        "api_key": api_key,
+        "base_url": api_base,
+        "default_model": model_id,
+        "parameters": {
+            "timeout_s": 8,
+            "temperature": 0.1 if temperature is None else float(temperature),
+            "max_tokens": 4096 if max_tokens is None else int(max_tokens),
+            **(
+                {"reasoning_effort": str(reasoning_effort).strip()}
+                if reasoning_effort is not None and str(reasoning_effort).strip()
+                else {}
+            ),
+        },
+        "extra_headers": extra_headers or {},
+        "extra_options": {},
+    }
+
+
 @dataclass(slots=True)
 class ModelManager:
     config: Config
+    facade: LLMConfigFacade = field(init=False)
 
     def __post_init__(self) -> None:
-        self._normalize_shared_catalog()
+        self.facade = LLMConfigFacade(self.config.workspace_path)
         self._revalidate()
 
     @classmethod
     def load(cls) -> "ModelManager":
         return cls(load_config())
 
+    def list_templates(self) -> list[dict[str, Any]]:
+        return self.facade.list_templates()
+
+    def get_template(self, provider_id: str) -> dict[str, Any]:
+        return self.facade.get_template(provider_id)
+
+    def validate_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.facade.validate_draft(payload)
+
+    def probe_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.facade.probe_draft(payload)
+
     def list_models(self) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for item in self.config.models.catalog:
-            scopes = [scope for scope in VALID_SCOPES if item.key in self._scope_list(scope)]
-            items.append(
-                {
-                    "key": item.key,
-                    "provider_model": item.provider_model,
-                    "api_key": item.api_key,
-                    "enabled": item.enabled,
-                    "api_base": item.api_base,
-                    "extra_headers": item.extra_headers,
-                    "max_tokens": item.max_tokens,
-                    "temperature": item.temperature,
-                    "reasoning_effort": item.reasoning_effort,
-                    "retry_on": list(item.retry_on or []),
-                    "description": item.description,
-                    "scopes": scopes,
-                }
-            )
+        items = self.facade.list_bindings(self.config)
+        for item in items:
+            item["scopes"] = [scope for scope in VALID_SCOPES if item["key"] in self._scope_list(scope)]
         return items
 
     def add_model(
@@ -77,31 +115,25 @@ class ModelManager:
             raise ValueError("Model key is required")
         if self.config.get_managed_model(clean_key) is not None:
             raise ValueError(f"Model key already exists: {clean_key}")
-        provider_model = str(provider_model or "").strip()
-        if not provider_model:
-            raise ValueError("provider_model is required")
-        self.config.parse_provider_model(provider_model)
-        api_key = str(api_key or "").strip()
-        api_base = str(api_base or "").strip()
-        if not api_key:
-            raise ValueError("api_key is required")
-        if not api_base:
-            raise ValueError("api_base is required")
-
-        item = ManagedModelConfig(
-            key=clean_key,
-            provider_model=provider_model,
-            api_key=api_key,
-            api_base=api_base,
-            extra_headers=extra_headers or None,
-            enabled=bool(enabled),
-            max_tokens=int(max_tokens) if max_tokens is not None else 4096,
-            temperature=float(temperature) if temperature is not None else 0.1,
-            reasoning_effort=str(reasoning_effort) if reasoning_effort is not None and str(reasoning_effort).strip() else None,
-            retry_on=list(retry_on or ["network", "429", "5xx"]),
-            description=str(description or "").strip(),
+        item = self.facade.create_binding(
+            self.config,
+            draft_payload=_legacy_chat_draft(
+                provider_model=str(provider_model or "").strip(),
+                api_key=str(api_key or "").strip(),
+                api_base=str(api_base or "").strip(),
+                extra_headers=extra_headers,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+            ),
+            binding_payload={
+                "key": clean_key,
+                "config_id": "",
+                "enabled": bool(enabled),
+                "description": str(description or "").strip(),
+                "retry_on": list(retry_on or ["network", "429", "5xx"]),
+            },
         )
-        self.config.models.catalog.append(item)
         for scope in scopes or []:
             self.add_model_to_scope(clean_key, scope)
         self._revalidate()
@@ -123,75 +155,79 @@ class ModelManager:
         description: str | None = None,
     ) -> dict[str, Any]:
         item = self._require_model(key)
-        update: dict[str, Any] = {}
+        current = self.facade.get_binding(self.config, key)
+        patch: dict[str, Any] = {}
         if provider_model is not None:
-            clean_provider_model = str(provider_model).strip()
-            self.config.parse_provider_model(clean_provider_model)
-            update["provider_model"] = clean_provider_model
+            provider_id, model_id = self.config.parse_provider_model(str(provider_model).strip())
+            patch["provider_id"] = provider_id
+            patch["default_model"] = model_id
         if api_key is not None:
-            update["api_key"] = str(api_key).strip()
+            patch["api_key"] = str(api_key).strip()
         if api_base is not None:
-            update["api_base"] = str(api_base).strip() or None
-        if extra_headers is not None:
-            update["extra_headers"] = dict(extra_headers) or None
+            patch["base_url"] = str(api_base).strip()
+        parameters: dict[str, Any] = {}
         if max_tokens is not None:
-            update["max_tokens"] = int(max_tokens)
+            parameters["max_tokens"] = int(max_tokens)
         if temperature is not None:
-            update["temperature"] = float(temperature)
+            parameters["temperature"] = float(temperature)
         if reasoning_effort is not None:
-            value = str(reasoning_effort).strip()
-            update["reasoning_effort"] = value or None
+            parameters["reasoning_effort"] = str(reasoning_effort).strip()
+        if parameters:
+            patch["parameters"] = parameters
+        if extra_headers is not None:
+            patch["extra_headers"] = extra_headers
+        self.facade.update_binding(self.config, model_key=key, draft_payload=patch)
         if retry_on is not None:
-            update["retry_on"] = list(retry_on)
+            item.retry_on = list(retry_on)
         if description is not None:
-            update["description"] = str(description).strip()
-        self._replace_model(item.key, item.model_copy(update=update))
+            item.description = str(description).strip()
         self._revalidate()
         self.save()
-        return self.get_model(item.key)
+        return self.get_model(key)
 
     def set_model_enabled(self, key: str, enabled: bool) -> dict[str, Any]:
         item = self._require_model(key)
-        enabled_flag = bool(enabled)
-        self._replace_model(item.key, item.model_copy(update={"enabled": enabled_flag}))
-        if not enabled_flag:
-            self._remove_model_from_roles(item.key)
-            if self.config.agents.multi_agent.orchestrator_model_key == item.key:
+        item.enabled = bool(enabled)
+        if not item.enabled:
+            self._remove_model_from_roles(key)
+            if self.config.agents.multi_agent.orchestrator_model_key == key:
                 self.config.agents.multi_agent.orchestrator_model_key = None
         self._revalidate()
         self.save()
-        return self.get_model(item.key)
-
-    def set_scope_chain(self, scope: str, model_keys: list[str]) -> dict[str, Any]:
-        normalized_scope = _normalize_scope(scope)
-        clean = []
-        seen: set[str] = set()
-        for key in model_keys:
-            model_key = str(key or "").strip()
-            if not model_key or model_key in seen:
-                continue
-            item = self._require_model(model_key)
-            if not item.enabled:
-                raise ValueError(f"Disabled model cannot be assigned to roles: {model_key}")
-            seen.add(model_key)
-            clean.append(model_key)
-        if not clean:
-            raise ValueError(f"models.roles.{normalized_scope} must be non-empty")
-        role_routes = self.config.models.roles
-        setattr(role_routes, normalized_scope, clean)
-        self._revalidate()
-        self.save()
-        return {"scope": normalized_scope, "model_keys": clean}
+        return self.get_model(key)
 
     def delete_model(self, key: str) -> dict[str, Any]:
-        item = self._require_model(key)
-        self.config.models.catalog = [candidate for candidate in self.config.models.catalog if candidate.key != item.key]
-        self._remove_model_from_roles(item.key)
-        if self.config.agents.multi_agent.orchestrator_model_key == item.key:
+        item = self.get_model(key)
+        self.facade.delete_binding(self.config, key)
+        self._remove_model_from_roles(key)
+        if self.config.agents.multi_agent.orchestrator_model_key == key:
             self.config.agents.multi_agent.orchestrator_model_key = None
         self._revalidate()
         self.save()
-        return {"key": item.key, "deleted": True}
+        return item
+
+    def set_scope_chain(self, scope: str, model_keys: list[str]) -> dict[str, Any]:
+        normalized_scope = _normalize_scope(scope)
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for ref in model_keys:
+            key = str(ref or "").strip()
+            if not key or key in seen:
+                continue
+            model = self._require_model(key)
+            if not model.enabled:
+                raise ValueError(f"Disabled model cannot be assigned to roles: {key}")
+            seen.add(key)
+            cleaned.append(key)
+        if not cleaned:
+            raise ValueError("model_keys must not be empty")
+        setattr(self.config.models.roles, normalized_scope, cleaned)
+        self._revalidate()
+        self.save()
+        return {
+            "scope": normalized_scope,
+            "model_keys": list(getattr(self.config.models.roles, normalized_scope)),
+        }
 
     def add_model_to_scope(self, key: str, scope: str) -> None:
         model = self._require_model(key)
@@ -203,22 +239,9 @@ class ModelManager:
             route.append(model.key)
 
     def get_model(self, key: str) -> dict[str, Any]:
-        model = self._require_model(key)
-        scopes = [scope for scope in VALID_SCOPES if model.key in self._scope_list(scope)]
-        return {
-            "key": model.key,
-            "provider_model": model.provider_model,
-            "api_key": model.api_key,
-            "enabled": model.enabled,
-            "api_base": model.api_base,
-            "extra_headers": model.extra_headers,
-            "max_tokens": model.max_tokens,
-            "temperature": model.temperature,
-            "reasoning_effort": model.reasoning_effort,
-            "retry_on": list(model.retry_on or []),
-            "description": model.description,
-            "scopes": scopes,
-        }
+        item = self.facade.get_binding(self.config, key)
+        item["scopes"] = [scope for scope in VALID_SCOPES if key in self._scope_list(scope)]
+        return item
 
     def save(self) -> None:
         save_config(self.config)
@@ -228,89 +251,16 @@ class ModelManager:
         return getattr(self.config.models.roles, normalized_scope)
 
     def _remove_model_from_roles(self, key: str) -> None:
-        role_routes = self.config.models.roles
         for scope in VALID_SCOPES:
-            refs = getattr(role_routes, scope)
-            setattr(role_routes, scope, [ref for ref in refs if ref != key])
+            refs = getattr(self.config.models.roles, scope)
+            setattr(self.config.models.roles, scope, [ref for ref in refs if ref != key])
 
-    def _require_model(self, key: str) -> ManagedModelConfig:
+    def _require_model(self, key: str):
         item = self.config.get_managed_model(key)
         if item is None:
             raise ValueError(f"Unknown model key: {key}")
         return item
 
-    def _replace_model(self, key: str, replacement: ManagedModelConfig) -> None:
-        catalog = []
-        for item in self.config.models.catalog:
-            catalog.append(replacement if item.key == key else item)
-        self.config.models.catalog = catalog
-
-    def _normalize_shared_catalog(self) -> None:
-        catalog = list(self.config.models.catalog or [])
-        if len(catalog) < 2:
-            return
-
-        usage: dict[str, set[str]] = {}
-        for scope in VALID_SCOPES:
-            for ref in getattr(self.config.models.roles, scope):
-                key = str(ref or "").strip()
-                if not key:
-                    continue
-                usage.setdefault(key, set()).add(scope)
-
-        groups: dict[tuple[str, str, str, tuple[tuple[str, str], ...]], list[ManagedModelConfig]] = {}
-        for item in catalog:
-            groups.setdefault(self._shared_signature(item), []).append(item)
-
-        alias_map: dict[str, str] = {}
-        for items in groups.values():
-            if len(items) < 2:
-                continue
-            scopes = {scope for item in items for scope in usage.get(item.key, set())}
-            if len(scopes) < 2:
-                continue
-            canonical = items[0]
-            for duplicate in items[1:]:
-                alias_map[duplicate.key] = canonical.key
-
-        if not alias_map:
-            return
-
-        self.config.models.catalog = [item for item in catalog if item.key not in alias_map]
-        role_routes = self.config.models.roles
-        for scope in VALID_SCOPES:
-            refs = getattr(role_routes, scope)
-            setattr(role_routes, scope, self._remap_model_refs(refs, alias_map))
-        self.config.agents.multi_agent.orchestrator_model_key = self._remap_model_ref(
-            self.config.agents.multi_agent.orchestrator_model_key,
-            alias_map,
-        )
-
-    def _shared_signature(self, item: ManagedModelConfig) -> tuple[str, str, str, tuple[tuple[str, str], ...]]:
-        headers = tuple(sorted((str(key), str(value)) for key, value in (item.extra_headers or {}).items()))
-        return (
-            str(item.provider_model or "").strip(),
-            str(item.api_key or "").strip(),
-            str(item.api_base or "").strip(),
-            headers,
-        )
-
-    def _remap_model_ref(self, ref: str | None, alias_map: dict[str, str]) -> str | None:
-        raw = str(ref or "").strip()
-        if not raw:
-            return None if ref is None else ""
-        return alias_map.get(raw, raw)
-
-    def _remap_model_refs(self, refs: list[str], alias_map: dict[str, str]) -> list[str]:
-        clean: list[str] = []
-        seen: set[str] = set()
-        for ref in refs:
-            key = alias_map.get(str(ref or "").strip(), str(ref or "").strip())
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            clean.append(key)
-        return clean
-
     def _revalidate(self) -> None:
         self.config = Config.model_validate(self.config.model_dump(mode="python"))
+

@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: add-tool
-description: 新增、迁移、合并或审查 `tools/<tool_id>/` 下的标准工具资源时使用。适用于编写符合当前仓库规范的 MCP 工具：`resource.yaml` 定义元数据与参数契约，`main/tool.py` 放工具本体，`toolskills/SKILL.md` 放工具使用说明。
+description: 新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时使用。适用于编写标准 MCP 工具，以及将已有开源项目、CLI 或 vendored 仓库按当前仓库规范接入 G3KU。重点覆盖 `resource.yaml` 元数据、项目来源 `source` 字段、`main/tool.py` 入口契约、`toolskills/SKILL.md` 文档与删除安全原则。
 trigger:
   keywords:
     - 添加工具
@@ -9,6 +9,9 @@ trigger:
     - 创建工具
     - MCP 工具
     - toolskill
+    - 开源工具接入
+    - 接入工具
+    - 包装 CLI
   always: false
 requires:
   tools:

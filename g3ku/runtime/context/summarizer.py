@@ -150,6 +150,7 @@ async def summarize_layered_model_first(
     *,
     title: str = '',
     description: str = '',
+    model_key: str | None = None,
     l0_limit: int = 160,
     l1_limit: int = 640,
 ) -> tuple[str, str]:
@@ -164,7 +165,11 @@ async def summarize_layered_model_first(
         from g3ku.providers.chatmodels import build_chat_model
 
         config, _revision, _changed = get_runtime_config(force=False)
-        model = build_chat_model(config, role='ceo')
+        explicit_model_key = str(model_key or '').strip()
+        if explicit_model_key:
+            model = build_chat_model(config, model_key=explicit_model_key)
+        else:
+            model = build_chat_model(config, role='ceo')
         prompt = (
             'You are generating layered retrieval context for an internal agent catalog.\n'
             'Return strict JSON with keys l0 and l1 only.\n'

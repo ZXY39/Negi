@@ -65,10 +65,19 @@ class FeishuConfig(Base):
 class DingTalkConfig(Base):
     """DingTalk channel configuration using Stream mode."""
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="allow")
     enabled: bool = False
+    name: str | None = None
+    default_account: str | None = None
     client_id: str = ""  # AppKey
     client_secret: str = ""  # AppSecret
     allow_from: list[str] = Field(default_factory=list)  # Allowed staff_ids
+    accounts: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    connection_mode: str | None = None
+    webhook_path: str | None = None
+    token: str | None = None
+    encoding_aes_key: str | None = None
+    mode: str | None = None
 
 
 class DiscordConfig(Base):
@@ -202,6 +211,53 @@ class QQConfig(Base):
     secret: str = ""  # Bot secret (AppSecret) from q.qq.com
     allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
 
+
+class ChinaCompatConfig(Base):
+    """Compat config for extracted china channels; allow upstream fields to pass through."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="allow")
+
+    enabled: bool = False
+    name: str | None = None
+    default_account: str | None = None
+    accounts: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class QQBotCompatConfig(ChinaCompatConfig):
+    app_id: str | int | None = None
+    client_secret: str | None = None
+    token: str | None = None
+    webhook_path: str | None = None
+    mode: str | None = None
+
+
+class WecomCompatConfig(ChinaCompatConfig):
+    bot_id: str | None = None
+    secret: str | None = None
+    token: str | None = None
+    encoding_aes_key: str | None = None
+    receive_id: str | None = None
+    webhook_path: str | None = None
+    mode: str | None = None
+
+
+class WecomAppCompatConfig(ChinaCompatConfig):
+    corp_id: str | None = None
+    corp_secret: str | None = None
+    agent_id: int | None = None
+    token: str | None = None
+    encoding_aes_key: str | None = None
+    webhook_path: str | None = None
+    mode: str | None = None
+
+
+class FeishuChinaCompatConfig(ChinaCompatConfig):
+    app_id: str | None = None
+    app_secret: str | None = None
+    token: str | None = None
+    webhook_path: str | None = None
+    mode: str | None = None
+
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
@@ -217,6 +273,10 @@ class ChannelsConfig(Base):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     qq: QQConfig = Field(default_factory=QQConfig)
     matrix: MatrixConfig = Field(default_factory=MatrixConfig)
+    qqbot: QQBotCompatConfig = Field(default_factory=QQBotCompatConfig)
+    wecom: WecomCompatConfig = Field(default_factory=WecomCompatConfig)
+    wecom_app: WecomAppCompatConfig = Field(default_factory=WecomAppCompatConfig)
+    feishu_china: FeishuChinaCompatConfig = Field(default_factory=FeishuChinaCompatConfig)
 
 
 
@@ -317,8 +377,9 @@ class ManagedModelConfig(Base):
     """Managed model profile with credentials and runtime defaults."""
 
     key: str
-    provider_model: str
-    api_key: str
+    llm_config_id: str | None = None
+    provider_model: str = ""
+    api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None
     enabled: bool = True
@@ -340,18 +401,14 @@ class ManagedModelConfig(Base):
     @classmethod
     def _validate_provider_model(cls, value: str) -> str:
         provider_model = str(value or "").strip()
-        if not provider_model:
-            raise ValueError("models.catalog[].provider_model is required")
-        Config.parse_provider_model(provider_model)
+        if provider_model:
+            Config.parse_provider_model(provider_model)
         return provider_model
 
     @field_validator("api_key")
     @classmethod
     def _validate_api_key(cls, value: str) -> str:
-        api_key = str(value or "").strip()
-        if not api_key:
-            raise ValueError("models.catalog[].api_key is required")
-        return api_key
+        return str(value or "").strip()
 
     @field_validator("api_base")
     @classmethod
@@ -372,6 +429,20 @@ class ManagedModelConfig(Base):
             seen.add(token)
             clean.append(token)
         return clean or ["network", "429", "5xx"]
+
+    @model_validator(mode="after")
+    def _validate_binding_or_legacy_payload(self) -> "ManagedModelConfig":
+        llm_config_id = str(self.llm_config_id or "").strip()
+        provider_model = str(self.provider_model or "").strip()
+        api_key = str(self.api_key or "").strip()
+        if llm_config_id:
+            self.llm_config_id = llm_config_id
+            return self
+        if not provider_model:
+            raise ValueError("models.catalog[].provider_model or llm_config_id is required")
+        if not api_key:
+            raise ValueError("models.catalog[].api_key is required before migration")
+        return self
 
 
 class RoleModelRoutingConfig(Base):
@@ -513,12 +584,14 @@ class MemoryRetrievalConfig(Base):
     sentence_window: int = 3
     max_context_tokens: int = 1200
     default_load_level: Literal["l0", "l1", "l2"] = "l1"
+    rerank_model_key: str | None = None
     rerank_provider_model: str = ""
 
 
 class MemoryEmbeddingConfig(Base):
     """Embedding source configuration."""
 
+    model_key: str | None = None
     provider_model: str = "openai:text-embedding-3-large"
     batch_size: int = 32
 
@@ -588,6 +661,12 @@ class MemoryAssemblyConfig(Base):
     )
 
 
+class MemoryCatalogSummaryConfig(Base):
+    """Catalog summary model selection for skill/tool layered abstracts."""
+
+    model_key: str | None = None
+
+
 class MemoryToolsConfig(Base):
     """RAG memory runtime configuration."""
 
@@ -606,6 +685,7 @@ class MemoryToolsConfig(Base):
     commit: MemoryCommitConfig = Field(default_factory=MemoryCommitConfig)
     cost: MemoryCostConfig = Field(default_factory=MemoryCostConfig)
     assembly: MemoryAssemblyConfig = Field(default_factory=MemoryAssemblyConfig)
+    catalog_summary: MemoryCatalogSummaryConfig = Field(default_factory=MemoryCatalogSummaryConfig)
     bootstrap_mode: Literal["new_only", "full", "none"] = "new_only"
     retention_days: int | None = None
 
@@ -645,6 +725,20 @@ class MainRuntimeConfig(Base):
     default_max_depth: int = 1
     hard_max_depth: int = 4
 
+
+class ChinaBridgeConfig(Base):
+    enabled: bool = False
+    bind_host: str = "0.0.0.0"
+    public_port: int = 18889
+    control_host: str = "127.0.0.1"
+    control_port: int = 18989
+    control_token: str = ""
+    auto_start: bool = True
+    node_bin: str = "node"
+    npm_client: str = "pnpm"
+    state_dir: str = ".g3ku/china-bridge"
+    log_level: str = "info"
+
 class Config(BaseSettings):
     """Root configuration for g3ku."""
 
@@ -656,6 +750,7 @@ class Config(BaseSettings):
     tool_secrets: dict[str, dict[str, Any]] = Field(default_factory=dict)
     resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
     main_runtime: MainRuntimeConfig = Field(default_factory=MainRuntimeConfig)
+    china_bridge: ChinaBridgeConfig = Field(default_factory=ChinaBridgeConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":
@@ -738,6 +833,13 @@ class Config(BaseSettings):
         managed = self.get_managed_model(model_key)
         if managed is None:
             raise ValueError(f"Unknown model key: {model_key}")
+        if str(managed.llm_config_id or "").strip():
+            from g3ku.llm_config.facade import LLMConfigFacade
+
+            binding = LLMConfigFacade(self.workspace_path).get_binding(self, managed.key)
+            provider_model = str(binding.get("provider_model") or "").strip()
+            if provider_model:
+                return self.parse_provider_model(provider_model)
         return self.parse_provider_model(str(managed.provider_model or "").strip())
 
     def get_role_model_keys(self, role: str) -> list[str]:
@@ -775,6 +877,11 @@ class Config(BaseSettings):
         managed = self.get_managed_model(raw)
         if managed is None:
             raise ValueError(f"Unknown model key: {ref}")
+        if str(managed.llm_config_id or "").strip():
+            from g3ku.llm_config.facade import LLMConfigFacade
+
+            binding = LLMConfigFacade(self.workspace_path).get_binding(self, managed.key)
+            return str(binding.get("provider_model") or "").strip()
         return str(managed.provider_model or "").strip()
 
     def get_provider(self, model_key: str | None = None) -> ProviderConfig | None:
@@ -782,6 +889,15 @@ class Config(BaseSettings):
         managed = self.get_managed_model(model_key)
         if managed is None:
             raise ValueError(f"Unknown model key: {model_key}")
+        if str(managed.llm_config_id or "").strip():
+            from g3ku.llm_config.facade import LLMConfigFacade
+
+            binding = LLMConfigFacade(self.workspace_path).get_binding(self, managed.key)
+            return ProviderConfig(
+                api_key=str(binding.get("api_key") or ""),
+                api_base=binding.get("api_base"),
+                extra_headers=binding.get("extra_headers"),
+            )
         return ProviderConfig(
             api_key=str(managed.api_key or ""),
             api_base=managed.api_base,
@@ -805,6 +921,12 @@ class Config(BaseSettings):
         managed = self.get_managed_model(model_key)
         if managed is None:
             raise ValueError(f"Unknown model key: {model_key}")
+        if str(managed.llm_config_id or "").strip():
+            from g3ku.llm_config.facade import LLMConfigFacade
+
+            binding = LLMConfigFacade(self.workspace_path).get_binding(self, managed.key)
+            api_base = str(binding.get("api_base") or "").strip()
+            return api_base or None
         if managed is not None and managed.api_base:
             return managed.api_base
         provider_id, _ = self.get_model_target(model_key)

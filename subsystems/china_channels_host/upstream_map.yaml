@@ -1,0 +1,41 @@
+schema_version: 1
+upstream:
+  repo: https://github.com/BytePioneer-AI/openclaw-china.git
+  ref: v2026.3.15
+files:
+  - local: src/shared/index.ts
+    upstream: packages/shared/src/index.ts
+    mode: direct_copy
+  - local: src/shared/http/client.ts
+    upstream: packages/shared/src/http/client.ts
+    mode: direct_copy
+  - local: src/shared/logger/logger.ts
+    upstream: packages/shared/src/logger/logger.ts
+    mode: direct_copy
+  - local: src/qqbot/channel.ts
+    upstream: extensions/qqbot/src/channel.ts
+    mode: adapted_copy
+  - local: src/qqbot/bot.ts
+    upstream: extensions/qqbot/src/bot.ts
+    mode: adapted_copy
+  - local: src/dingtalk/channel.ts
+    upstream: extensions/dingtalk/src/channel.ts
+    mode: adapted_copy
+  - local: src/wecom/channel.ts
+    upstream: extensions/wecom/src/channel.ts
+    mode: adapted_copy
+  - local: src/wecom_app/channel.ts
+    upstream: extensions/wecom-app/src/channel.ts
+    mode: adapted_copy
+  - local: src/feishu_china/channel.ts
+    upstream: extensions/feishu/src/channel.ts
+    mode: adapted_copy
+  - local: src/protocol.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/runtime_bridge.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/host.ts
+    upstream: null
+    mode: g3ku_native

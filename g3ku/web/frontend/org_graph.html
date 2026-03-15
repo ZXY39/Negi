@@ -200,47 +200,63 @@
             <section id="view-models" class="view-section" style="display: none;">
                 <header class="content-header resource-header model-page-header">
                     <div>
-                        <h1>模型配置</h1>
-                        <p class="subtitle">管理主 Agent、执行链与检验链可用的模型配置。</p>
-                        <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载模型配置...</p>
+                        <h1>LLM 配置中心</h1>
+                        <p class="subtitle">基于配置记录、模型绑定、角色链与 Memory 模型引用统一管理所有 LLM 能力。</p>
+                        <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载 LLM 配置中心...</p>
                     </div>
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
-                        <button id="model-create-btn" class="toolbar-btn" type="button">新建模型</button>
+                        <button id="llm-config-create-btn" class="toolbar-btn ghost" type="button">新建配置</button>
+                        <button id="model-create-btn" class="toolbar-btn" type="button">新建模型绑定</button>
                         <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消</button>
-                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button">修改模型链</button>
+                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button">保存模型链</button>
+                        <button id="llm-migrate-btn" class="toolbar-btn ghost" type="button">运行迁移</button>
                     </div>
                 </header>
 
-                <div class="resource-layout model-simple-layout">
-                    <section class="resource-detail-panel model-detail-panel">
-                        <div class="model-catalog-shell">
-                            <div class="model-role-summary-panel">
-                                <div id="model-role-editors" class="model-routing-grid"></div>
+                <div class="llm-page-layout">
+                    <section class="resource-detail-panel llm-bindings-panel">
+                        <div class="panel-header model-shared-header">
+                            <div>
+                                <h3>模型绑定</h3>
+                                <p class="subtitle">选择一个 model key 查看详情，或创建新的绑定与配置记录。</p>
                             </div>
-                            <section class="model-shared-panel">
-                                <div class="panel-header model-shared-header">
-                                    <div>
-                                        <h3>共享可用模型</h3>
-                                        <p class="subtitle">这里列出所有可配置模型，可用于角色链编排与详情编辑。</p>
-                                    </div>
-                                    <div class="model-shared-actions">
-                                        <input id="model-search-input" class="resource-search" type="search" placeholder="搜索 Key / Provider / 描述">
-                                    </div>
-                                </div>
-                                <div id="model-list" class="model-shared-list" data-model-available-list="shared"></div>
-                            </section>
+                            <div class="model-shared-actions">
+                                <input id="model-search-input" class="resource-search" type="search" placeholder="搜索 Key / Provider / Capability / 描述">
+                            </div>
+                        </div>
+                        <div id="llm-bindings-list" class="model-shared-list" data-model-available-list="bindings"></div>
+                    </section>
+
+                    <section class="resource-detail-panel llm-editor-panel">
+                        <div id="llm-editor-shell" class="resource-detail-shell">
+                            <div class="empty-state resource-empty">请选择一个模型绑定，或点击“新建配置 / 新建模型绑定”。</div>
                         </div>
                     </section>
+
+                    <aside class="resource-detail-panel llm-routes-panel">
+                        <section class="llm-side-card">
+                            <div class="panel-header model-shared-header">
+                                <div>
+                                    <h3>Role Routes</h3>
+                                    <p class="subtitle">继续使用拖拽排序编排 CEO / Execution / Inspection 的模型链。</p>
+                                </div>
+                            </div>
+                            <div id="model-role-editors" class="model-routing-grid"></div>
+                        </section>
+
+                        <section class="llm-side-card llm-memory-panel-card">
+                            <div class="panel-header model-shared-header">
+                                <div>
+                                    <h3>Memory Models</h3>
+                                    <p class="subtitle">为 Embedding 和 Rerank 分别绑定 capability 对应的模型。</p>
+                                </div>
+                            </div>
+                            <div id="llm-memory-panel" class="llm-memory-shell"></div>
+                        </section>
+                    </aside>
                 </div>
-
-                <div id="model-detail-backdrop" class="model-detail-backdrop" aria-hidden="true"></div>
-                <section class="resource-detail-panel model-detail-dialog" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="model-detail-title" tabindex="-1">
-                    <div id="model-detail-empty" class="empty-state resource-empty">请选择一个模型查看或编辑配置。</div>
-                    <div id="model-detail-content" class="resource-detail-shell"></div>
-                </section>
             </section>
-
             <section id="view-task-details" class="view-section" style="display: none;">
                 <header class="content-header project-header">
                     <div class="header-left">
@@ -358,6 +374,7 @@
 
     <script src="api_client.js"></script>
     <script src="org_graph_app.js"></script>
+    <script src="org_graph_llm.js"></script>
     <script>
         lucide.createIcons();
     </script>

@@ -33,6 +33,7 @@ from langgraph.store.base import (
 )
 from loguru import logger
 
+from g3ku.llm_config.runtime_resolver import resolve_embedding_target, resolve_rerank_target
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
 
 try:
@@ -1320,9 +1321,33 @@ class MemoryManager:
             "split_store": False,
             "observability": False,
         }
+        self._app_config = None
+        self._resolved_embedding_model = str(getattr(config.embedding, "provider_model", "") or "").strip()
         self._dashscope_api_key, self._dashscope_api_base = _load_workspace_dashscope_settings(
             self.workspace
         )
+        try:
+            from g3ku.config.loader import load_config as _load_app_config
+
+            self._app_config = _load_app_config(self.workspace / ".g3ku" / "config.json")
+        except Exception:
+            self._app_config = None
+
+        embedding_model_key = str(getattr(config.embedding, "model_key", "") or "").strip()
+        if self._app_config is not None and embedding_model_key:
+            try:
+                embedding_target = resolve_embedding_target(
+                    self._app_config,
+                    embedding_model_key,
+                    workspace=self.workspace,
+                )
+                self._resolved_embedding_model = embedding_target.resolved_model
+                self._dashscope_api_key = str(
+                    embedding_target.secret_payload.get("api_key", "") or self._dashscope_api_key
+                ).strip()
+                self._dashscope_api_base = str(embedding_target.base_url or self._dashscope_api_base or "").strip() or None
+            except Exception as exc:
+                logger.warning("Memory embedding target resolution failed; using legacy config: {}", exc)
         self._reranker = self._init_reranker()
 
         mem_dir = ensure_dir(self.workspace / "memory")
@@ -1342,7 +1367,7 @@ class MemoryManager:
             sqlite_path=sqlite_path,
             qdrant_path=qdrant_path,
             qdrant_collection=config.store.qdrant_collection,
-            embedding_model=config.embedding.provider_model,
+            embedding_model=self._resolved_embedding_model,
             embedding_batch_size=config.embedding.batch_size,
             dashscope_api_key=self._dashscope_api_key,
             dashscope_api_base=self._dashscope_api_base,
@@ -1397,13 +1422,19 @@ class MemoryManager:
     async def fetch_context_record(self, *, namespace: tuple[str, ...], record_id: str) -> ContextRecordV2 | None:
         return await asyncio.to_thread(self.store._fetch_context_v2, namespace, record_id)
 
-    async def sync_catalog(self, service: Any) -> dict[str, int]:
+    async def sync_catalog(
+        self,
+        service: Any,
+        *,
+        skill_ids: set[str] | None = None,
+        tool_ids: set[str] | None = None,
+    ) -> dict[str, int]:
         if not self._feature_enabled('unified_context') or self.arch_version != 'v2':
             return {'created': 0, 'updated': 0, 'removed': 0}
         from g3ku.runtime.context.catalog import ContextCatalogIndexer
 
         indexer = ContextCatalogIndexer(memory_manager=self, service=service)
-        return await indexer.sync()
+        return await indexer.sync(skill_ids=skill_ids, tool_ids=tool_ids)
 
     async def write_context_assembly_trace(
         self,
@@ -1601,6 +1632,22 @@ class MemoryManager:
             await asyncio.to_thread(self._append_jsonl, self.audit_file, asdict(event))
 
     def _init_reranker(self) -> DashScopeTextReranker | None:
+        model_key = str(getattr(self.config.retrieval, "rerank_model_key", "") or "").strip()
+        if self._app_config is not None and model_key:
+            try:
+                target = resolve_rerank_target(self._app_config, model_key, workspace=self.workspace)
+                api_key = str(target.secret_payload.get("api_key", "") or "").strip()
+                if not api_key:
+                    logger.warning("Resolved rerank target is missing API key: {}", model_key)
+                    return None
+                return DashScopeTextReranker(
+                    api_key=api_key,
+                    model=target.resolved_model,
+                    api_base=target.base_url,
+                )
+            except Exception as exc:
+                logger.warning("Memory rerank target resolution failed; using legacy config: {}", exc)
+
         model = str(getattr(self.config.retrieval, "rerank_provider_model", "") or "").strip()
         if not model:
             return None

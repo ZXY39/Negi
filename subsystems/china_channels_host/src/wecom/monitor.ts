@@ -1,0 +1,1085 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import crypto from "node:crypto";
+
+import { createLogger, type Logger } from "@openclaw-china/shared";
+
+import type { ResolvedWecomAccount, WecomInboundMessage } from "./types.js";
+import type { PluginConfig } from "./config.js";
+import { decryptWecomEncrypted, encryptWecomPlaintext, verifyWecomSignature, computeWecomMsgSignature } from "./crypto.js";
+import { dispatchWecomMessage } from "./bot.js";
+import { tryGetWecomRuntime } from "./runtime.js";
+import { handleTempMediaRequest, rememberAccountPublicBaseUrl } from "./outbound-reply.js";
+
+export type WecomRuntimeEnv = {
+  log?: (message: string) => void;
+  error?: (message: string) => void;
+};
+
+type WecomWebhookTarget = {
+  account: ResolvedWecomAccount;
+  config: PluginConfig;
+  runtime: WecomRuntimeEnv;
+  path: string;
+  statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
+};
+
+type StreamState = {
+  streamId: string;
+  msgid?: string;
+  to?: string;
+  createdAt: number;
+  updatedAt: number;
+  started: boolean;
+  finished: boolean;
+  error?: string;
+  content: string;
+};
+
+type StreamRouteBinding = {
+  sessionKey?: string;
+  runId?: string;
+};
+
+const webhookTargets = new Map<string, WecomWebhookTarget[]>();
+const streams = new Map<string, StreamState>();
+const msgidToStreamId = new Map<string, string>();
+const streamRouteBindings = new Map<string, StreamRouteBinding>();
+const streamBySessionKey = new Map<string, string>();
+const streamByRunId = new Map<string, string>();
+const streamFinalizeTimers = new Map<string, NodeJS.Timeout>();
+
+const STREAM_TTL_MS = 10 * 60 * 1000;
+const STREAM_MAX_BYTES = 20_480;
+const INITIAL_STREAM_WAIT_MS = 800;
+const STREAM_FINISH_GRACE_MS = 2_500;
+
+function normalizeWebhookPath(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "/";
+  const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  if (withSlash.length > 1 && withSlash.endsWith("/")) return withSlash.slice(0, -1);
+  return withSlash;
+}
+
+function normalizeToToken(raw: string): string {
+  const value = raw.trim();
+  if (!value) return "";
+  if (value.startsWith("user:")) {
+    return `user:${value.slice("user:".length).trim().toLowerCase()}`;
+  }
+  if (value.startsWith("group:")) {
+    return `group:${value.slice("group:".length).trim()}`;
+  }
+  return value;
+}
+
+function appendToStream(streamId: string, chunk: string): boolean {
+  const state = streams.get(streamId);
+  if (!state || state.finished) return false;
+  appendStreamContent(state, chunk);
+  return true;
+}
+
+function pruneStreams(): void {
+  const cutoff = Date.now() - STREAM_TTL_MS;
+  for (const [id, state] of streams.entries()) {
+    if (state.updatedAt < cutoff) {
+      const timer = streamFinalizeTimers.get(id);
+      if (timer) {
+        clearTimeout(timer);
+        streamFinalizeTimers.delete(id);
+      }
+      streams.delete(id);
+      unbindActiveStream(id);
+    }
+  }
+  for (const [msgid, id] of msgidToStreamId.entries()) {
+    if (!streams.has(id)) {
+      msgidToStreamId.delete(msgid);
+    }
+  }
+}
+
+function finalizeStreamNow(streamId: string): void {
+  const timer = streamFinalizeTimers.get(streamId);
+  if (timer) {
+    clearTimeout(timer);
+    streamFinalizeTimers.delete(streamId);
+  }
+  const state = streams.get(streamId);
+  if (!state) return;
+  state.finished = true;
+  state.updatedAt = Date.now();
+  unbindActiveStream(streamId);
+}
+
+function scheduleStreamFinalize(streamId: string): void {
+  const existing = streamFinalizeTimers.get(streamId);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  const timer = setTimeout(() => {
+    finalizeStreamNow(streamId);
+  }, STREAM_FINISH_GRACE_MS);
+  streamFinalizeTimers.set(streamId, timer);
+}
+
+function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  const slice = buf.subarray(buf.length - maxBytes);
+  return slice.toString("utf8");
+}
+
+function jsonOk(res: ServerResponse, body: unknown): void {
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * 从 XML 字符串中提取指定标签的文本内容。
+ * 支持 CDATA 和普通文本两种形式。
+ */
+function extractXmlTag(xml: string, tag: string): string | undefined {
+  if (!xml || !tag) return undefined;
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<${escapedTag}(?:\\s[^>]*)?>([\\s\\S]*?)</${escapedTag}>`, "i");
+  const m = re.exec(xml);
+  if (!m) return undefined;
+
+  const body = m[1] ?? "";
+  const cdata = /^<!\[CDATA\[([\s\S]*?)\]\]>$/i.exec(body.trim());
+  if (cdata) return cdata[1] ?? "";
+
+  return body;
+}
+
+function extractXmlTagAll(xml: string, tag: string): string[] {
+  if (!xml || !tag) return [];
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<${escapedTag}(?:\\s[^>]*)?>([\\s\\S]*?)</${escapedTag}>`, "gi");
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const body = m[1] ?? "";
+    const cdata = /^<!\[CDATA\[([\s\S]*?)\]\]>$/i.exec(body.trim());
+    out.push(cdata ? (cdata[1] ?? "") : body);
+  }
+  return out;
+}
+
+function pickFirstNonEmpty(...values: Array<string | undefined>): string {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) return trimmed;
+  }
+  return "";
+}
+
+function parseXmlTextPayload(xml: string): { content: string } | undefined {
+  const textBlock = extractXmlTag(xml, "Text") ?? "";
+  const content = pickFirstNonEmpty(
+    extractXmlTag(textBlock, "Content"),
+    extractXmlTag(xml, "Content")
+  );
+  if (!content) return undefined;
+  return { content };
+}
+
+function parseXmlVoicePayload(xml: string): Record<string, unknown> | undefined {
+  const voiceBlock = extractXmlTag(xml, "Voice") ?? "";
+  const content = pickFirstNonEmpty(
+    extractXmlTag(voiceBlock, "Content"),
+    extractXmlTag(voiceBlock, "Recognition"),
+    extractXmlTag(xml, "Recognition"),
+    extractXmlTag(xml, "Content")
+  );
+  const url = pickFirstNonEmpty(
+    extractXmlTag(voiceBlock, "Url"),
+    extractXmlTag(voiceBlock, "VoiceUrl"),
+    extractXmlTag(xml, "VoiceUrl")
+  );
+  const mediaId = pickFirstNonEmpty(
+    extractXmlTag(voiceBlock, "MediaId"),
+    extractXmlTag(xml, "MediaId")
+  );
+
+  if (!content && !url && !mediaId) return undefined;
+
+  const voice: Record<string, unknown> = {};
+  if (content) voice.content = content;
+  if (url) voice.url = url;
+  if (mediaId) voice.media_id = mediaId;
+  return voice;
+}
+
+function parseXmlImagePayload(xml: string): Record<string, unknown> | undefined {
+  const imageBlock = extractXmlTag(xml, "Image") ?? "";
+  const url = pickFirstNonEmpty(
+    extractXmlTag(imageBlock, "Url"),
+    extractXmlTag(imageBlock, "PicUrl"),
+    extractXmlTag(xml, "PicUrl"),
+    extractXmlTag(xml, "Url")
+  );
+  const mediaId = pickFirstNonEmpty(
+    extractXmlTag(imageBlock, "MediaId"),
+    extractXmlTag(xml, "MediaId")
+  );
+
+  if (!url && !mediaId) return undefined;
+
+  const image: Record<string, unknown> = {};
+  if (url) image.url = url;
+  if (mediaId) image.media_id = mediaId;
+  return image;
+}
+
+function parseXmlFilePayload(xml: string): Record<string, unknown> | undefined {
+  const fileBlock = extractXmlTag(xml, "File") ?? "";
+  const url = pickFirstNonEmpty(
+    extractXmlTag(fileBlock, "Url"),
+    extractXmlTag(fileBlock, "FileUrl"),
+    extractXmlTag(xml, "FileUrl"),
+    extractXmlTag(xml, "Url")
+  );
+  const fileName = pickFirstNonEmpty(
+    extractXmlTag(fileBlock, "FileName"),
+    extractXmlTag(fileBlock, "Name"),
+    extractXmlTag(xml, "FileName")
+  );
+  const mediaId = pickFirstNonEmpty(
+    extractXmlTag(fileBlock, "MediaId"),
+    extractXmlTag(xml, "MediaId")
+  );
+
+  if (!url && !fileName && !mediaId) return undefined;
+
+  const file: Record<string, unknown> = {};
+  if (url) file.url = url;
+  if (fileName) file.filename = fileName;
+  if (mediaId) file.media_id = mediaId;
+  return file;
+}
+
+function parseXmlMixedItems(xml: string): Array<Record<string, unknown>> {
+  const mixedBlock = extractXmlTag(xml, "Mixed");
+  if (!mixedBlock) return [];
+
+  const itemBlocks = [
+    ...extractXmlTagAll(mixedBlock, "MsgItem"),
+    ...extractXmlTagAll(mixedBlock, "msg_item"),
+  ];
+  if (itemBlocks.length === 0) return [];
+
+  const items: Array<Record<string, unknown>> = [];
+  for (const itemBlock of itemBlocks) {
+    const itemType = pickFirstNonEmpty(
+      extractXmlTag(itemBlock, "MsgType"),
+      extractXmlTag(itemBlock, "msgtype"),
+      extractXmlTag(itemBlock, "Type")
+    ).toLowerCase();
+    if (!itemType) continue;
+
+    if (itemType === "text") {
+      const text = parseXmlTextPayload(itemBlock);
+      items.push({ msgtype: "text", text: text ?? { content: "" } });
+      continue;
+    }
+
+    if (itemType === "image") {
+      const image = parseXmlImagePayload(itemBlock);
+      if (image) items.push({ msgtype: "image", image });
+      else items.push({ msgtype: "image" });
+      continue;
+    }
+
+    if (itemType === "file") {
+      const file = parseXmlFilePayload(itemBlock);
+      if (file) items.push({ msgtype: "file", file });
+      else items.push({ msgtype: "file" });
+      continue;
+    }
+
+    if (itemType === "voice") {
+      const voice = parseXmlVoicePayload(itemBlock);
+      if (voice) items.push({ msgtype: "voice", voice });
+      else items.push({ msgtype: "voice" });
+      continue;
+    }
+
+    items.push({ msgtype: itemType });
+  }
+
+  return items;
+}
+
+/**
+ * 读取请求体并解析为统一的 Record 对象。
+ * 同时支持 JSON 和 XML（企微回调标准格式）两种格式。
+ */
+async function readRequestBody(req: IncomingMessage, maxBytes: number) {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  return await new Promise<{ ok: boolean; value?: unknown; raw?: string; error?: string }>((resolve) => {
+    req.on("data", (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        resolve({ ok: false, error: "payload too large" });
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        if (!raw.trim()) {
+          resolve({ ok: false, error: "empty payload" });
+          return;
+        }
+        const trimmed = raw.trim();
+        // 企微回调的消息体是 XML 格式：<xml><Encrypt>...</Encrypt></xml>
+        if (trimmed.startsWith("<")) {
+          const encrypt = pickFirstNonEmpty(extractXmlTag(trimmed, "Encrypt"));
+          if (encrypt) {
+            resolve({ ok: true, value: { Encrypt: encrypt }, raw });
+          } else {
+            resolve({ ok: false, raw, error: "xml body missing Encrypt tag" });
+          }
+          return;
+        }
+        resolve({ ok: true, value: JSON.parse(raw) as unknown, raw });
+      } catch (err) {
+        resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+    req.on("error", (err) => {
+      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    });
+  });
+}
+
+function buildEncryptedJsonReply(params: {
+  account: ResolvedWecomAccount;
+  plaintextJson: unknown;
+  nonce: string;
+  timestamp: string;
+}): { encrypt: string; msgsignature: string; timestamp: string; nonce: string } {
+  const plaintext = JSON.stringify(params.plaintextJson ?? {});
+  const encrypt = encryptWecomPlaintext({
+    encodingAESKey: params.account.encodingAESKey ?? "",
+    receiveId: params.account.receiveId ?? "",
+    plaintext,
+  });
+  const msgsignature = computeWecomMsgSignature({
+    token: params.account.token ?? "",
+    timestamp: params.timestamp,
+    nonce: params.nonce,
+    encrypt,
+  });
+  return {
+    encrypt,
+    msgsignature,
+    timestamp: params.timestamp,
+    nonce: params.nonce,
+  };
+}
+
+function resolveQueryParams(req: IncomingMessage): URLSearchParams {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  return url.searchParams;
+}
+
+function resolvePath(req: IncomingMessage): string {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  return normalizeWebhookPath(url.pathname || "/");
+}
+
+function resolveSignatureParam(params: URLSearchParams): string {
+  return params.get("msg_signature") ?? params.get("msgsignature") ?? params.get("signature") ?? "";
+}
+
+function buildStreamPlaceholderReply(streamId: string): { msgtype: "stream"; stream: { id: string; finish: boolean; content: string } } {
+  return {
+    msgtype: "stream",
+    stream: {
+      id: streamId,
+      finish: false,
+      content: "稍等~",
+    },
+  };
+}
+
+function buildStreamReplyFromState(state: StreamState): { msgtype: "stream"; stream: { id: string; finish: boolean; content?: string } } {
+  const content = truncateUtf8Bytes(state.content, STREAM_MAX_BYTES);
+  const stream: { id: string; finish: boolean; content?: string } = {
+    id: state.streamId,
+    finish: state.finished,
+  };
+  if (content.trim()) {
+    stream.content = content;
+  }
+  return {
+    msgtype: "stream",
+    stream,
+  };
+}
+
+function createStreamId(): string {
+  return crypto.randomBytes(16).toString("hex");
+}
+
+/**
+ * 解析解密后的企微消息明文。
+ * 企微群机器人回调的明文是 XML 格式，需要从 XML 中提取各字段映射为 WecomInboundMessage。
+ * 同时兼容 JSON 格式。
+ */
+function parseWecomPlainMessage(raw: string): WecomInboundMessage {
+  const trimmed = raw.trim();
+
+  // XML 格式：企微群机器人回调的标准格式
+  if (trimmed.startsWith("<")) {
+    return parseWecomXmlMessage(trimmed);
+  }
+
+  // JSON 格式：兼容其他可能的回调场景
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    return parsed as WecomInboundMessage;
+  } catch {
+    return parseWecomXmlMessage(trimmed);
+  }
+}
+
+/**
+ * 从企微 XML 明文中提取字段，映射为 WecomInboundMessage 对象。
+ *
+ * 企微群机器人回调 XML 结构示例：
+ * <xml>
+ *   <From><UserId>xxx</UserId><Name>xxx</Name><Alias>xxx</Alias></From>
+ *   <WebhookUrl>http://...</WebhookUrl>
+ *   <ChatId>xxx</ChatId>
+ *   <GetChatInfoUrl>http://...</GetChatInfoUrl>
+ *   <MsgId>xxx</MsgId>
+ *   <ChatType>group</ChatType>
+ *   <MsgType>text</MsgType>
+ *   <Text><Content>消息内容</Content></Text>
+ * </xml>
+ */
+function parseWecomXmlMessage(xml: string): WecomInboundMessage {
+  const msgtype = pickFirstNonEmpty(
+    extractXmlTag(xml, "MsgType"),
+    extractXmlTag(xml, "msgtype")
+  ).toLowerCase();
+  const chattype = pickFirstNonEmpty(
+    extractXmlTag(xml, "ChatType"),
+    extractXmlTag(xml, "chattype")
+  ).toLowerCase();
+  const chatid = pickFirstNonEmpty(
+    extractXmlTag(xml, "ChatId"),
+    extractXmlTag(xml, "chatid")
+  );
+  const msgid = pickFirstNonEmpty(
+    extractXmlTag(xml, "MsgId"),
+    extractXmlTag(xml, "msgid")
+  );
+  const webhookUrl = pickFirstNonEmpty(
+    extractXmlTag(xml, "WebhookUrl"),
+    extractXmlTag(xml, "response_url")
+  );
+
+  // 提取发送者信息：<From><UserId>xxx</UserId></From>
+  const fromBlock = extractXmlTag(xml, "From") ?? "";
+  const userid = pickFirstNonEmpty(
+    extractXmlTag(fromBlock, "UserId"),
+    extractXmlTag(xml, "FromUserName"),
+    extractXmlTag(xml, "UserId")
+  );
+
+  // 构建基础消息对象
+  const result: Record<string, unknown> = {
+    msgtype,
+    chattype: chattype === "group" ? "group" : "single",
+    chatid,
+    msgid,
+    from: { userid },
+  };
+
+  // 如果有 WebhookUrl，作为 response_url 使用
+  if (webhookUrl) {
+    result.response_url = webhookUrl;
+  }
+
+  // 根据消息类型提取对应内容
+  if (msgtype === "text") {
+    result.text = parseXmlTextPayload(xml) ?? { content: "" };
+  } else if (msgtype === "voice") {
+    result.voice = parseXmlVoicePayload(xml) ?? { content: "" };
+  } else if (msgtype === "image") {
+    const image = parseXmlImagePayload(xml);
+    if (image) result.image = image;
+  } else if (msgtype === "file") {
+    const file = parseXmlFilePayload(xml);
+    if (file) result.file = file;
+  } else if (msgtype === "stream") {
+    const streamBlock = extractXmlTag(xml, "Stream") ?? "";
+    const id = pickFirstNonEmpty(
+      extractXmlTag(streamBlock, "Id"),
+      extractXmlTag(xml, "StreamId"),
+      extractXmlTag(xml, "Id")
+    );
+    result.stream = { id };
+  } else if (msgtype === "event") {
+    const eventBlock = extractXmlTag(xml, "Event") ?? "";
+    const eventtype = pickFirstNonEmpty(
+      extractXmlTag(eventBlock, "EventType"),
+      extractXmlTag(xml, "EventType"),
+      extractXmlTag(xml, "Event")
+    );
+    result.event = { eventtype };
+  } else if (msgtype === "mixed") {
+    const mixedItems = parseXmlMixedItems(xml);
+    if (mixedItems.length > 0) {
+      result.mixed = { msg_item: mixedItems };
+    }
+
+    // 兼容某些 mixed 载荷只有一个 Text 节点时的兜底字段
+    const text = parseXmlTextPayload(xml);
+    if (text) {
+      result.text = text;
+    }
+  }
+
+  return result as WecomInboundMessage;
+}
+
+async function waitForStreamContent(streamId: string, maxWaitMs: number): Promise<void> {
+  if (maxWaitMs <= 0) return;
+  const startedAt = Date.now();
+  await new Promise<void>((resolve) => {
+    const tick = () => {
+      const state = streams.get(streamId);
+      if (!state) return resolve();
+      if (state.error || state.finished || state.content.trim()) return resolve();
+      if (Date.now() - startedAt >= maxWaitMs) return resolve();
+      setTimeout(tick, 25);
+    };
+    tick();
+  });
+}
+
+function appendStreamContent(state: StreamState, nextText: string): void {
+  const content = state.content ? `${state.content}\n\n${nextText}`.trim() : nextText.trim();
+  state.content = truncateUtf8Bytes(content, STREAM_MAX_BYTES);
+  state.updatedAt = Date.now();
+  // If stream finalization is pending, extend grace window for trailing chunks.
+  if (streamFinalizeTimers.has(state.streamId)) {
+    scheduleStreamFinalize(state.streamId);
+  }
+}
+
+function listActiveStreamIdsByTo(to: string): string[] {
+  const normalized = normalizeToToken(to);
+  if (!normalized) return [];
+  const ids: string[] = [];
+  for (const [id, state] of streams.entries()) {
+    if (state.finished) continue;
+    if (normalizeToToken(state.to ?? "") !== normalized) continue;
+    ids.push(id);
+  }
+  return ids;
+}
+
+function pickNewestStreamId(streamIds: string[]): string | undefined {
+  let selected: { id: string; updatedAt: number; createdAt: number } | undefined;
+  for (const id of streamIds) {
+    const state = streams.get(id);
+    if (!state || state.finished) continue;
+    if (
+      !selected ||
+      state.updatedAt > selected.updatedAt ||
+      (state.updatedAt === selected.updatedAt && state.createdAt > selected.createdAt)
+    ) {
+      selected = { id, updatedAt: state.updatedAt, createdAt: state.createdAt };
+    }
+  }
+  return selected?.id;
+}
+
+function bindStreamRouteContext(params: { streamId: string; sessionKey?: string; runId?: string }): void {
+  const streamId = params.streamId.trim();
+  if (!streamId) return;
+  const sessionKey = params.sessionKey?.trim();
+  const runId = params.runId?.trim();
+  const current = streamRouteBindings.get(streamId) ?? {};
+  const next: StreamRouteBinding = {
+    sessionKey: sessionKey || current.sessionKey,
+    runId: runId || current.runId,
+  };
+  streamRouteBindings.set(streamId, next);
+  if (next.sessionKey) {
+    streamBySessionKey.set(next.sessionKey, streamId);
+  }
+  if (next.runId) {
+    streamByRunId.set(next.runId, streamId);
+  }
+}
+
+function unbindActiveStream(streamId: string): void {
+  const timer = streamFinalizeTimers.get(streamId);
+  if (timer) {
+    clearTimeout(timer);
+    streamFinalizeTimers.delete(streamId);
+  }
+  const routeBinding = streamRouteBindings.get(streamId);
+  if (routeBinding?.sessionKey && streamBySessionKey.get(routeBinding.sessionKey) === streamId) {
+    streamBySessionKey.delete(routeBinding.sessionKey);
+  }
+  if (routeBinding?.runId && streamByRunId.get(routeBinding.runId) === streamId) {
+    streamByRunId.delete(routeBinding.runId);
+  }
+  streamRouteBindings.delete(streamId);
+}
+
+export function appendWecomActiveStreamChunk(params: {
+  accountId: string;
+  to: string;
+  chunk: string;
+  sessionKey?: string;
+  runId?: string;
+}): boolean {
+  const chunk = params.chunk.trim();
+  if (!chunk) return false;
+  const to = normalizeToToken(params.to);
+  if (!to) return false;
+
+  const runId = params.runId?.trim();
+  const sessionKey = params.sessionKey?.trim();
+  if (runId) {
+    const streamId = streamByRunId.get(runId);
+    if (streamId && appendToStream(streamId, chunk)) return true;
+
+    // Strict mode: if runId has not been bound yet, only allow deterministic
+    // backfill from the same sessionKey, then persist the runId binding.
+    if (sessionKey) {
+      const sessionStreamId = streamBySessionKey.get(sessionKey);
+      if (sessionStreamId && appendToStream(sessionStreamId, chunk)) {
+        bindStreamRouteContext({
+          streamId: sessionStreamId,
+          sessionKey,
+          runId,
+        });
+        console.warn(
+          `[wecom] append stream chunk recovered run binding by sessionKey: runId=${runId}, sessionKey=${sessionKey}`
+        );
+        return true;
+      }
+    }
+    const toCandidates = listActiveStreamIdsByTo(to);
+    if (toCandidates.length === 1) {
+      console.warn(`[wecom] append stream chunk fallback by to after runId miss: runId=${runId}, to=${to}`);
+      return appendToStream(toCandidates[0]!, chunk);
+    }
+    if (toCandidates.length > 1) {
+      const newest = pickNewestStreamId(toCandidates);
+      if (newest) {
+        console.warn(
+          `[wecom] append stream chunk fallback by newest to after runId miss: runId=${runId}, to=${to}, candidates=${toCandidates.length}`
+        );
+        return appendToStream(newest, chunk);
+      }
+    }
+    return false;
+  }
+
+  if (sessionKey) {
+    const streamId = streamBySessionKey.get(sessionKey);
+    if (streamId && appendToStream(streamId, chunk)) return true;
+  }
+
+  const toCandidates = listActiveStreamIdsByTo(to);
+  if (toCandidates.length === 1) {
+    console.warn(`[wecom] append stream chunk fallback by to without context: to=${to}`);
+    return appendToStream(toCandidates[0]!, chunk);
+  }
+  if (toCandidates.length > 1) {
+    const newest = pickNewestStreamId(toCandidates);
+    if (newest) {
+      console.warn(
+        `[wecom] append stream chunk fallback by newest to without context: to=${to}, candidates=${toCandidates.length}`
+      );
+      return appendToStream(newest, chunk);
+    }
+  }
+
+  return false;
+}
+
+function buildLogger(target: WecomWebhookTarget): Logger {
+  return createLogger("wecom", {
+    log: target.runtime.log,
+    error: target.runtime.error,
+  });
+}
+
+export function registerWecomWebhookTarget(target: WecomWebhookTarget): () => void {
+  const key = normalizeWebhookPath(target.path);
+  const normalizedTarget = { ...target, path: key };
+  const existing = webhookTargets.get(key) ?? [];
+  const next = [...existing, normalizedTarget];
+  webhookTargets.set(key, next);
+  return () => {
+    const updated = (webhookTargets.get(key) ?? []).filter((entry) => entry !== normalizedTarget);
+    if (updated.length > 0) webhookTargets.set(key, updated);
+    else webhookTargets.delete(key);
+  };
+}
+
+export async function handleWecomWebhookRequest(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  pruneStreams();
+
+  if (await handleTempMediaRequest(req, res)) {
+    return true;
+  }
+
+  const path = resolvePath(req);
+  const targets = webhookTargets.get(path);
+  if (!targets || targets.length === 0) return false;
+
+  const query = resolveQueryParams(req);
+  const timestamp = query.get("timestamp") ?? "";
+  const nonce = query.get("nonce") ?? "";
+  const signature = resolveSignatureParam(query);
+
+  const primary = targets[0]!;
+  const logger = buildLogger(primary);
+  logger.debug(`incoming ${req.method} request on ${path} (timestamp=${timestamp}, nonce=${nonce})`);
+
+  if (req.method === "GET") {
+    const echostr = query.get("echostr") ?? "";
+    if (!timestamp || !nonce || !signature || !echostr) {
+      res.statusCode = 400;
+      res.end("missing query params");
+      return true;
+    }
+
+    const target = targets.find((candidate) => {
+      if (!candidate.account.configured || !candidate.account.token) {
+        return false;
+      }
+      const ok = verifyWecomSignature({
+        token: candidate.account.token,
+        timestamp,
+        nonce,
+        encrypt: echostr,
+        signature,
+      });
+      return ok;
+    });
+
+    if (!target || !target.account.encodingAESKey) {
+      res.statusCode = 401;
+      res.end("unauthorized");
+      return true;
+    }
+
+    try {
+      const plain = decryptWecomEncrypted({
+        encodingAESKey: target.account.encodingAESKey,
+        receiveId: target.account.receiveId,
+        encrypt: echostr,
+      });
+      rememberAccountPublicBaseUrl(target.account.accountId, req);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.end(plain);
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.statusCode = 400;
+      res.end(msg || "decrypt failed");
+      return true;
+    }
+  }
+
+  if (req.method !== "POST") {
+    res.statusCode = 405;
+    res.setHeader("Allow", "GET, POST");
+    res.end("Method Not Allowed");
+    return true;
+  }
+
+  if (!timestamp || !nonce || !signature) {
+    res.statusCode = 400;
+    res.end("missing query params");
+    return true;
+  }
+
+  const body = await readRequestBody(req, 1024 * 1024);
+  if (!body.ok) {
+    res.statusCode = body.error === "payload too large" ? 413 : 400;
+    res.end(body.error ?? "invalid payload");
+    return true;
+  }
+
+  // ===== 调试日志：记录完整的请求体 =====
+
+  const record = body.value && typeof body.value === "object" ? (body.value as Record<string, unknown>) : null;
+  const encrypt = record ? String(record.encrypt ?? record.Encrypt ?? "") : "";
+  if (!encrypt) {
+    res.statusCode = 400;
+    res.end("missing encrypt");
+    return true;
+  }
+
+
+  const target = targets.find((candidate) => {
+    if (!candidate.account.token) {
+      return false;
+    }
+    const ok = verifyWecomSignature({
+      token: candidate.account.token,
+      timestamp,
+      nonce,
+      encrypt,
+      signature,
+    });
+    return ok;
+  });
+
+  if (!target) {
+    res.statusCode = 401;
+    res.end("unauthorized");
+    return true;
+  }
+  rememberAccountPublicBaseUrl(target.account.accountId, req);
+
+  if (!target.account.configured || !target.account.token || !target.account.encodingAESKey) {
+    res.statusCode = 500;
+    res.end("wecom not configured");
+    return true;
+  }
+
+  let plain: string;
+  try {
+    plain = decryptWecomEncrypted({
+      encodingAESKey: target.account.encodingAESKey,
+      receiveId: target.account.receiveId,
+      encrypt,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.statusCode = 400;
+    res.end(msg || "decrypt failed");
+    return true;
+  }
+
+  // ===== 调试日志：记录解密后的明文 =====
+
+  const msg = parseWecomPlainMessage(plain);
+  target.statusSink?.({ lastInboundAt: Date.now() });
+
+  const msgtype = String(msg.msgtype ?? "").toLowerCase();
+  const msgid = msg.msgid ? String(msg.msgid) : undefined;
+
+  if (msgtype === "stream") {
+    const streamId = String((msg as { stream?: { id?: string } }).stream?.id ?? "").trim();
+    const state = streamId ? streams.get(streamId) : undefined;
+    const reply = state
+      ? buildStreamReplyFromState(state)
+      : buildStreamReplyFromState({
+          streamId: streamId || "unknown",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          started: true,
+          finished: true,
+          content: "",
+        });
+    const encReply = buildEncryptedJsonReply({
+      account: target.account,
+      plaintextJson: reply,
+      nonce,
+      timestamp,
+    });
+    jsonOk(res, encReply);
+    return true;
+  }
+
+  if (msgid && msgidToStreamId.has(msgid)) {
+    const streamId = msgidToStreamId.get(msgid) ?? "";
+    const reply = buildStreamPlaceholderReply(streamId);
+    jsonOk(
+      res,
+      buildEncryptedJsonReply({
+        account: target.account,
+        plaintextJson: reply,
+        nonce,
+        timestamp,
+      })
+    );
+    return true;
+  }
+
+  if (msgtype === "event") {
+    const eventtype = String((msg as { event?: { eventtype?: string } }).event?.eventtype ?? "").toLowerCase();
+    if (eventtype === "enter_chat") {
+      const welcome = target.account.config.welcomeText?.trim();
+      const reply = welcome ? { msgtype: "text", text: { content: welcome } } : {};
+      jsonOk(
+        res,
+        buildEncryptedJsonReply({
+          account: target.account,
+          plaintextJson: reply,
+          nonce,
+          timestamp,
+        })
+      );
+      return true;
+    }
+
+    const core = tryGetWecomRuntime();
+    if (core) {
+      dispatchWecomMessage({
+        cfg: target.config,
+        account: target.account,
+        msg,
+        core,
+        hooks: {
+          onChunk: () => {
+            // Event callbacks are acknowledged with empty payload; business side
+            // can still use response_url for active replies if needed.
+          },
+          onError: (err: unknown) => {
+            logger.error(`wecom event dispatch failed: ${String(err)}`);
+          },
+        },
+        log: target.runtime.log,
+        error: target.runtime.error,
+      }).catch((err) => {
+        logger.error(`wecom event dispatch failed: ${String(err)}`);
+      });
+    }
+
+    jsonOk(
+      res,
+      buildEncryptedJsonReply({
+        account: target.account,
+        plaintextJson: {},
+        nonce,
+        timestamp,
+      })
+    );
+    return true;
+  }
+
+  const streamId = createStreamId();
+  if (msgid) msgidToStreamId.set(msgid, streamId);
+  const senderId = String(msg.from?.userid ?? "").trim() || "unknown";
+  const chatType = String(msg.chattype ?? "").toLowerCase() === "group" ? "group" : "single";
+  const to = chatType === "group" ? `group:${String(msg.chatid ?? "").trim() || "unknown"}` : `user:${senderId}`;
+  streams.set(streamId, {
+    streamId,
+    msgid,
+    to: normalizeToToken(to),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    started: false,
+    finished: false,
+    content: "",
+  });
+
+  const core = tryGetWecomRuntime();
+
+  if (core) {
+    const state = streams.get(streamId);
+    if (state) state.started = true;
+    let chunkFlush = Promise.resolve();
+
+    const markStreamFinished = async (err?: unknown): Promise<void> => {
+      await chunkFlush.catch(() => undefined);
+      const current = streams.get(streamId);
+      if (!current) return;
+      if (err) {
+        current.error = err instanceof Error ? err.message : String(err);
+        current.content = current.content || `Error: ${current.error}`;
+      }
+      current.updatedAt = Date.now();
+      // Leave a short grace window so trailing message-tool sends can still
+      // append into this stream before we emit final finish=true snapshots.
+      scheduleStreamFinalize(streamId);
+    };
+
+    const hooks = {
+      onRouteContext: (context: { sessionKey?: string; runId?: string }) => {
+        bindStreamRouteContext({
+          streamId,
+          sessionKey: context.sessionKey,
+          runId: context.runId,
+        });
+      },
+      onChunk: (text: string) => {
+        chunkFlush = chunkFlush.then(async () => {
+          const current = streams.get(streamId);
+          if (!current) return;
+          appendStreamContent(current, text);
+          target.statusSink?.({ lastOutboundAt: Date.now() });
+        });
+        return chunkFlush;
+      },
+      onError: (err: unknown) => {
+        chunkFlush = chunkFlush.then(async () => {
+          const current = streams.get(streamId);
+          if (current) {
+            current.error = err instanceof Error ? err.message : String(err);
+            current.content = current.content || `Error: ${current.error}`;
+            current.updatedAt = Date.now();
+          }
+        });
+        logger.error(`wecom agent failed: ${String(err)}`);
+      },
+    };
+
+    dispatchWecomMessage({
+      cfg: target.config,
+      account: target.account,
+      msg,
+      core,
+      hooks,
+      log: target.runtime.log,
+      error: target.runtime.error,
+    })
+      .then(() => {
+        void markStreamFinished();
+      })
+      .catch((err) => {
+        void markStreamFinished(err);
+        logger.error(`wecom agent failed: ${String(err)}`);
+      });
+  } else {
+    const state = streams.get(streamId);
+    if (state) {
+      state.updatedAt = Date.now();
+    }
+    scheduleStreamFinalize(streamId);
+  }
+
+  await waitForStreamContent(streamId, INITIAL_STREAM_WAIT_MS);
+  const state = streams.get(streamId);
+  const initialReply = state && (state.content.trim() || state.error)
+    ? buildStreamReplyFromState(state)
+    : buildStreamPlaceholderReply(streamId);
+
+  const encReply = buildEncryptedJsonReply({
+    account: target.account,
+    plaintextJson: initialReply,
+    nonce,
+    timestamp,
+  });
+  jsonOk(res, encReply);
+
+  return true;
+}

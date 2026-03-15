@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "configs": [
+    {
+      "config_id": "817ee293c6874fae8e40b37cfa643107",
+      "provider_id": "responses",
+      "display_name": "OpenAI Responses",
+      "capability": "chat",
+      "default_model": "gpt-5.4",
+      "last_probe_status": null,
+      "created_at": "2026-03-15T18:24:28.537420Z",
+      "updated_at": "2026-03-15T18:24:28.537420Z"
+    },
+    {
+      "config_id": "8c1a79ab0b11489a947574d6a3dd8a6e",
+      "provider_id": "dashscope_embedding",
+      "display_name": "DashScope Embedding",
+      "capability": "embedding",
+      "default_model": "qwen3-vl-embedding",
+      "last_probe_status": null,
+      "created_at": "2026-03-15T18:24:28.555571Z",
+      "updated_at": "2026-03-15T18:24:28.555571Z"
+    },
+    {
+      "config_id": "dd44249e0bb54e688d5a648eba5d191a",
+      "provider_id": "dashscope_rerank",
+      "display_name": "DashScope Rerank",
+      "capability": "rerank",
+      "default_model": "qwen3-vl-rerank",
+      "last_probe_status": null,
+      "created_at": "2026-03-15T18:24:28.557278Z",
+      "updated_at": "2026-03-15T18:24:28.557278Z"
+    },
+    {
+      "config_id": "3c56395846c74ce6a19d67bbc9402714",
+      "provider_id": "responses",
+      "display_name": "OpenAI Responses",
+      "capability": "chat",
+      "default_model": "gpt-5.4",
+      "last_probe_status": null,
+      "created_at": "2026-03-15T18:27:50.639331Z",
+      "updated_at": "2026-03-15T18:27:50.639331Z"
+    }
+  ]
+}

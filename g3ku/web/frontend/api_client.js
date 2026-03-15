@@ -163,6 +163,103 @@ class ApiClient {
         return this._refreshModelsAfter(this.put(`/api/models/roles/${scope}`, { model_keys: modelKeys, modelKeys }));
     }
 
+    static async getLlmTemplates() {
+        const data = await this.get("/api/llm/templates");
+        return data.items || [];
+    }
+
+    static async getLlmTemplate(providerId) {
+        const data = await this.get(`/api/llm/templates/${encodeURIComponent(providerId)}`);
+        return data.item || null;
+    }
+
+    static async validateLlmDraft(payload) {
+        const data = await this.post("/api/llm/drafts/validate", payload || {});
+        return data.result || null;
+    }
+
+    static async probeLlmDraft(payload) {
+        const data = await this.post("/api/llm/drafts/probe", payload || {});
+        return data.result || null;
+    }
+
+    static async listLlmConfigs() {
+        const data = await this.get("/api/llm/configs");
+        return data.items || [];
+    }
+
+    static async getLlmConfig(configId, { includeSecrets = false } = {}) {
+        const data = await this.get(`/api/llm/configs/${encodeURIComponent(configId)}`, { include_secrets: includeSecrets });
+        return data.item || null;
+    }
+
+    static async createLlmConfig(payload) {
+        const data = await this.post("/api/llm/configs", payload || {});
+        return data.item || null;
+    }
+
+    static async updateLlmConfig(configId, payload) {
+        const data = await this.put(`/api/llm/configs/${encodeURIComponent(configId)}`, payload || {});
+        return data.item || null;
+    }
+
+    static async deleteLlmConfig(configId) {
+        return this.delete(`/api/llm/configs/${encodeURIComponent(configId)}`);
+    }
+
+    static async listLlmBindings() {
+        const data = await this.get("/api/llm/bindings");
+        return { items: data.items || [], routes: data.routes || {} };
+    }
+
+    static async createLlmBinding(payload) {
+        const data = await this.post("/api/llm/bindings", payload || {});
+        return data.item || null;
+    }
+
+    static async updateLlmBinding(modelKey, payload) {
+        const data = await this.put(`/api/llm/bindings/${encodeURIComponent(modelKey)}`, payload || {});
+        return data.item || null;
+    }
+
+    static async enableLlmBinding(modelKey) {
+        const data = await this.post(`/api/llm/bindings/${encodeURIComponent(modelKey)}/enable`);
+        return data.item || null;
+    }
+
+    static async disableLlmBinding(modelKey) {
+        const data = await this.post(`/api/llm/bindings/${encodeURIComponent(modelKey)}/disable`);
+        return data.item || null;
+    }
+
+    static async deleteLlmBinding(modelKey) {
+        return this.delete(`/api/llm/bindings/${encodeURIComponent(modelKey)}`);
+    }
+
+    static async getLlmRoutes() {
+        const data = await this.get("/api/llm/routes");
+        return data.routes || {};
+    }
+
+    static async updateLlmRoute(scope, modelKeys) {
+        const data = await this.put(`/api/llm/routes/${encodeURIComponent(scope)}`, { model_keys: modelKeys, modelKeys });
+        return data.routes || {};
+    }
+
+    static async getLlmMemoryModels() {
+        const data = await this.get("/api/llm/memory");
+        return data.item || null;
+    }
+
+    static async updateLlmMemoryModels(payload) {
+        const data = await this.put("/api/llm/memory", payload || {});
+        return data.item || null;
+    }
+
+    static async runLlmMigration() {
+        return this.post("/api/llm/migrate", {});
+    }
+
     static async getSkills(offset = 0, limit = 200) {
         const data = await this.get("/api/resources/skills", { offset, limit });
         return data.items || [];

@@ -1,0 +1,86 @@
+schema_version: 1
+kind: tool
+name: agent_browser
+display_name: Agent Browser
+description: Run the bundled open-source `agent-browser` CLI to drive websites, capture snapshots, and save browser artifacts from G3KU.
+source:
+  type: git
+  url: https://github.com/vercel-labs/agent-browser.git
+  ref: v0.20.7
+  vendor_dir: main/agent-browser
+current_version:
+  summary: ??????? 0.20.7?
+  compare_rule: ??????? GitHub release tag?`package.json.version` ? vendored ?????????? semver ?? 0.20.7???????????
+  source_of_truth: ?? `main/agent-browser/package.json.version`??? `source.ref=v0.20.7` ???
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem:
+    - workspace
+settings:
+  executable: ''
+  repo_root: main/agent-browser
+  timeout: 300
+  bootstrap_on_first_use: true
+  bootstrap_timeout: 240
+  bootstrap_from_release: true
+  allow_cargo_run: true
+  allow_global_fallback: false
+  default_session: g3ku-agent-browser
+  auto_session: false
+  auto_profile: true
+  profile_root: .g3ku/tool-data/agent_browser/profiles
+  cargo_release: false
+  stdout_json_preview: true
+parameters:
+  type: object
+  properties:
+    args:
+      type: array
+      description: agent-browser CLI arguments, excluding the executable itself.
+      items:
+        type: string
+    working_dir:
+      type: string
+      description: Optional working directory for the command. Relative paths resolve from the G3KU workspace.
+    stdin:
+      type: string
+      description: Optional stdin payload forwarded to the CLI.
+    timeout:
+      type: integer
+      minimum: 1
+      description: Optional timeout override in seconds.
+    session:
+      type: string
+      description: Optional value passed through as `--session` for repository-local browser state isolation.
+    profile:
+      type: string
+      description: Optional override for `--profile`. Relative paths resolve from the G3KU workspace.
+    session_name:
+      type: string
+      description: Optional override for `--session-name` used by agent-browser state persistence.
+  required:
+    - args
+exposure:
+  agent: true
+  main_runtime: true
+governance:
+  family: browser_automation
+  display_name: Browser Automation
+  description: Drive browser automation, page capture, and site interaction through the vendored agent-browser CLI.
+  actions:
+    - id: run
+      label: Run Browser Command
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+        - execution
+toolskill:
+  enabled: true

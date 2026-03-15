@@ -12,6 +12,8 @@ from g3ku.bus.queue import MessageBus
 from g3ku.channels.base import BaseChannel
 from g3ku.config.schema import Config
 
+CHINA_NATIVE_CHANNEL_IDS = {"qq", "dingtalk", "feishu"}
+
 
 class ChannelManager:
     """
@@ -40,6 +42,7 @@ class ChannelManager:
 
     def _init_channels(self) -> None:
         """Initialize channels based on config."""
+        china_bridge_enabled = bool(getattr(self.config, "china_bridge", None) and self.config.china_bridge.enabled)
 
         # Telegram channel
         if self.config.channels.telegram.enabled:
@@ -77,7 +80,7 @@ class ChannelManager:
                 logger.warning("Discord channel not available: {}", e)
 
         # Feishu channel
-        if self.config.channels.feishu.enabled:
+        if self.config.channels.feishu.enabled and not china_bridge_enabled:
             try:
                 from g3ku.channels.feishu import FeishuChannel
                 self.channels["feishu"] = FeishuChannel(
@@ -100,7 +103,7 @@ class ChannelManager:
                 logger.warning("Mochat channel not available: {}", e)
 
         # DingTalk channel
-        if self.config.channels.dingtalk.enabled:
+        if self.config.channels.dingtalk.enabled and not china_bridge_enabled:
             try:
                 from g3ku.channels.dingtalk import DingTalkChannel
                 self.channels["dingtalk"] = DingTalkChannel(
@@ -133,7 +136,7 @@ class ChannelManager:
                 logger.warning("Slack channel not available: {}", e)
 
         # QQ channel
-        if self.config.channels.qq.enabled:
+        if self.config.channels.qq.enabled and not china_bridge_enabled:
             try:
                 from g3ku.channels.qq import QQChannel
                 self.channels["qq"] = QQChannel(
@@ -179,14 +182,16 @@ class ChannelManager:
         except Exception as e:
             logger.error("Failed to start channel {}: {}", name, e)
 
-    async def start_all(self) -> None:
-        """Start all channels and the outbound dispatcher."""
+    async def start_all(self, *, dispatch_outbound: bool = True) -> None:
+        """Start all channels and optionally the outbound dispatcher."""
         if not self.channels:
             logger.warning("No channels enabled")
-            return
+            if not dispatch_outbound:
+                return
 
         # Start outbound dispatcher
-        self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
+        if dispatch_outbound:
+            self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
 
         # Start channels
         tasks = []

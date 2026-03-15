@@ -29,6 +29,14 @@ class ModelConfigTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": [
+                        "list_templates",
+                        "get_template",
+                        "validate_draft",
+                        "probe_draft",
+                        "create_binding",
+                        "update_binding",
+                        "set_memory_models",
+                        "migrate_legacy",
                         "list_models",
                         "get_model",
                         "add_model",
@@ -60,6 +68,11 @@ class ModelConfigTool(Tool):
                     "description": "Scopes for add_model, e.g. ceo, execution, inspection.",
                 },
                 "scope": {"type": "string", "description": "Target scope for set_scope_chain."},
+                "provider_id": {"type": "string", "description": "Provider template id."},
+                "draft": {"type": "object", "description": "New LLM config draft payload."},
+                "binding": {"type": "object", "description": "Binding payload containing key/config_id/enabled/retry settings."},
+                "embedding_model_key": {"type": "string", "description": "Memory embedding model key."},
+                "rerank_model_key": {"type": "string", "description": "Memory rerank model key."},
                 "model_keys": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -72,6 +85,64 @@ class ModelConfigTool(Tool):
     async def execute(self, action: str, **kwargs: Any) -> Any:
         manager = ModelManager.load()
         action_name = str(action or "").strip().lower()
+
+        if action_name == "list_templates":
+            return {"items": manager.list_templates()}
+
+        if action_name == "get_template":
+            return manager.get_template(str(kwargs.get("provider_id") or "").strip())
+
+        if action_name == "validate_draft":
+            return manager.validate_draft(kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {})
+
+        if action_name == "probe_draft":
+            return manager.probe_draft(kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {})
+
+        if action_name == "create_binding":
+            draft = kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {}
+            binding = kwargs.get("binding") if isinstance(kwargs.get("binding"), dict) else {}
+            result = manager.facade.create_binding(manager.config, draft_payload=draft, binding_payload=binding)
+            manager.save()
+            await self._refresh_runtime(kwargs)
+            return result
+
+        if action_name == "update_binding":
+            result = manager.facade.update_binding(
+                manager.config,
+                model_key=str(kwargs.get("key") or "").strip(),
+                draft_payload=kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {},
+            )
+            manager.save()
+            await self._refresh_runtime(kwargs)
+            return result
+
+        if action_name == "set_memory_models":
+            from pathlib import Path
+            import yaml
+            from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
+
+            manifest_path = manager.config.workspace_path / 'tools' / 'memory_runtime' / 'resource.yaml'
+            data = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
+            settings = load_tool_settings_from_manifest(manager.config.workspace_path, 'memory_runtime', MemoryRuntimeSettings)
+            result = manager.facade.set_memory_binding(
+                settings,
+                embedding_model_key=kwargs.get("embedding_model_key"),
+                rerank_model_key=kwargs.get("rerank_model_key"),
+            )
+            payload = data.setdefault('settings', {})
+            payload.setdefault('embedding', {})['model_key'] = result.embedding_model_key
+            payload.setdefault('retrieval', {})['rerank_model_key'] = result.rerank_model_key
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding='utf-8')
+            await self._refresh_runtime(kwargs)
+            return result.model_dump(mode='json')
+
+        if action_name == "migrate_legacy":
+            from g3ku.config.loader import load_config
+
+            cfg = load_config()
+            await self._refresh_runtime(kwargs)
+            return {"ok": True, "workspace": str(cfg.workspace_path)}
 
         if action_name == "list_models":
             return {"items": manager.list_models()}

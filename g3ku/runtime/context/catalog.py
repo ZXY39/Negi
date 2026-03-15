@@ -15,15 +15,32 @@ class ContextCatalogIndexer:
         self._memory_manager = memory_manager
         self._service = service
 
-    async def sync(self) -> dict[str, int]:
+    def _catalog_summary_model_key(self) -> str | None:
+        payload = getattr(self._memory_manager, 'config', None)
+        catalog_summary = getattr(payload, 'catalog_summary', None)
+        value = str(getattr(catalog_summary, 'model_key', '') or '').strip()
+        return value or None
+
+    async def sync(
+        self,
+        *,
+        skill_ids: set[str] | None = None,
+        tool_ids: set[str] | None = None,
+    ) -> dict[str, int]:
         from g3ku.agent.rag_memory import ContextRecordV2
 
         existing = await self._list_existing()
         seen: set[str] = set()
         created = 0
         updated = 0
+        removed = 0
+        skill_filter = {str(item).strip() for item in (skill_ids or set()) if str(item).strip()}
+        tool_filter = {str(item).strip() for item in (tool_ids or set()) if str(item).strip()}
+        subset_mode = bool(skill_filter or tool_filter)
 
         for skill in list(self._service.list_skill_resources() or []):
+            if skill_filter and str(skill.skill_id or '').strip() not in skill_filter:
+                continue
             record_id = f'skill:{skill.skill_id}'
             seen.add(record_id)
             path = str(getattr(skill, 'skill_doc_path', '') or '')
@@ -40,6 +57,7 @@ class ContextCatalogIndexer:
                 text_for_summary,
                 title=getattr(skill, 'display_name', ''),
                 description=getattr(skill, 'description', ''),
+                model_key=self._catalog_summary_model_key(),
             )
             record = ContextRecordV2(
                 record_id=record_id,
@@ -66,6 +84,8 @@ class ContextCatalogIndexer:
             tool_id = str(getattr(family, 'tool_id', '') or '').strip()
             if not tool_id:
                 continue
+            if tool_filter and tool_id not in tool_filter:
+                continue
             record_id = f'tool:{tool_id}'
             seen.add(record_id)
             toolskill = self._service.get_tool_toolskill(tool_id) or {}
@@ -82,6 +102,7 @@ class ContextCatalogIndexer:
                 body,
                 title=getattr(family, 'display_name', ''),
                 description=getattr(family, 'description', ''),
+                model_key=self._catalog_summary_model_key(),
             )
             record = ContextRecordV2(
                 record_id=record_id,
@@ -104,8 +125,16 @@ class ContextCatalogIndexer:
             else:
                 updated += 1
 
-        removed = 0
+        target_record_ids: set[str]
+        if subset_mode:
+            target_record_ids = {f'skill:{skill_id}' for skill_id in skill_filter} | {
+                f'tool:{tool_id}' for tool_id in tool_filter
+            }
+        else:
+            target_record_ids = set(existing)
         for record_id, record in existing.items():
+            if record_id not in target_record_ids:
+                continue
             if record_id in seen:
                 continue
             await self._delete(record.record_id)

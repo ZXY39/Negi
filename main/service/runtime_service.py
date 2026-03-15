@@ -351,6 +351,29 @@ class MainRuntimeService:
         self.reload_resources(session_id=session_id)
         return {'skill_id': str(skill_id or '').strip(), 'file_key': str(file_key or '').strip(), 'path': str(path)}
 
+    async def write_skill_file_async(
+        self,
+        skill_id: str,
+        file_key: str,
+        content: str,
+        *,
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        item = self.write_skill_file(skill_id, file_key, content, session_id=session_id)
+        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
+            try:
+                sync_result = await self.memory_manager.sync_catalog(
+                    self,
+                    skill_ids={str(skill_id or '').strip()},
+                )
+                item['catalog_synced'] = True
+                item['catalog'] = sync_result
+            except Exception:
+                item['catalog_synced'] = False
+        else:
+            item['catalog_synced'] = False
+        return item
+
     def update_skill_policy(self, skill_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles: list[str] | None = None):
         skill = self.get_skill_resource(skill_id)
         if skill is None:

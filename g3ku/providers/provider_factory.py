@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from g3ku.config.schema import Config
+from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.providers.base import LLMProvider
 from g3ku.providers.custom_provider import CustomProvider
 from g3ku.providers.litellm_provider import LiteLLMProvider
 from g3ku.providers.openai_codex_provider import OpenAICodexProvider
-from g3ku.providers.registry import find_by_name
 from g3ku.providers.responses_provider import ResponsesProvider
 
 
@@ -24,6 +24,8 @@ class ProviderTarget:
 
 
 def _resolve_litellm_model(provider_id: str, model_id: str) -> str:
+    from g3ku.providers.registry import find_by_name
+
     spec = find_by_name(provider_id)
     if spec is None:
         return model_id
@@ -40,36 +42,19 @@ def _resolve_litellm_model(provider_id: str, model_id: str) -> str:
     return resolved
 
 
-def _assert_provider_ready(config: Config, provider_id: str, model_key: str) -> None:
-    provider_cfg = config.get_provider(model_key)
-    api_key = (provider_cfg.api_key if provider_cfg else '') or ''
-    api_base = config.get_api_base(model_key)
-    spec = find_by_name(provider_id)
-    if provider_id in {'custom', 'openai_codex'}:
-        return
-    if spec and spec.is_oauth:
-        return
-    if spec and spec.is_local:
-        if not api_base:
-            raise ValueError(f'Local provider {provider_id} requires api_base')
-        return
-    if not api_key:
-        raise ValueError(f'Provider {provider_id} is not configured with an API key')
-
-
 def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTarget:
     provider_ref = str(model_key or '').strip()
-    provider_id, model_id = config.get_model_target(provider_ref)
-    _assert_provider_ready(config, provider_id, provider_ref)
-    provider_cfg = config.get_provider(provider_ref)
-    api_key = (provider_cfg.api_key if provider_cfg else '') or ''
-    api_base = config.get_api_base(provider_ref)
+    target = resolve_chat_target(config, provider_ref)
+    provider_id = target.provider_id
+    model_id = target.resolved_model
+    api_key = str(target.secret_payload.get('api_key', '') or '')
+    api_base = target.base_url
     managed = config.get_model_runtime_profile(provider_ref)
     if managed is not None and not managed.enabled:
         raise ValueError(f'Managed model {provider_ref} is disabled')
-    max_tokens_limit = int(managed.max_tokens) if managed is not None else None
-    default_temperature = float(managed.temperature) if managed is not None else None
-    default_reasoning_effort = str(managed.reasoning_effort) if managed is not None and managed.reasoning_effort is not None else None
+    max_tokens_limit = target.max_tokens_limit
+    default_temperature = target.default_temperature
+    default_reasoning_effort = target.default_reasoning_effort
     retry_on = list(managed.retry_on or []) if managed is not None else ['network', '429', '5xx']
 
     if provider_id == 'custom':
@@ -89,7 +74,7 @@ def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTar
         api_key=api_key or None,
         api_base=api_base,
         default_model=resolved_model,
-        extra_headers=(provider_cfg.extra_headers if provider_cfg else None),
+        extra_headers=target.headers,
         provider_name=provider_id,
     )
     return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on)

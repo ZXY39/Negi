@@ -261,3 +261,35 @@ def test_admin_memory_trace_endpoints_return_payload():
     assembly = client.get('/api/memory/context-assembly-traces?limit=2')
     assert assembly.status_code == 200
     assert assembly.json()['items'][0]['trace_kind'] == 'context_assembly'
+
+
+@pytest.mark.asyncio
+async def test_write_skill_file_async_triggers_targeted_catalog_sync(tmp_path: Path):
+    skill_file = tmp_path / 'demo' / 'SKILL.md'
+    skill_file.parent.mkdir(parents=True, exist_ok=True)
+    skill_file.write_text('before', encoding='utf-8')
+
+    captured: dict[str, object] = {}
+
+    class _Registry:
+        def skill_file_map(self, skill_id: str):
+            assert skill_id == 'demo_skill'
+            return {'skill_doc': skill_file}
+
+    class _MemoryManager:
+        async def sync_catalog(self, service, *, skill_ids=None, tool_ids=None):
+            captured['skill_ids'] = set(skill_ids or set())
+            captured['tool_ids'] = set(tool_ids or set())
+            return {'created': 0, 'updated': 1, 'removed': 0}
+
+    service = object.__new__(MainRuntimeService)
+    service.resource_registry = _Registry()
+    service.memory_manager = _MemoryManager()
+    service.reload_resources = lambda **kwargs: {'ok': True}
+
+    item = await service.write_skill_file_async('demo_skill', 'skill_doc', 'after', session_id='web:shared')
+
+    assert skill_file.read_text(encoding='utf-8') == 'after'
+    assert captured == {'skill_ids': {'demo_skill'}, 'tool_ids': set()}
+    assert item['catalog_synced'] is True
+    assert item['catalog']['updated'] == 1
