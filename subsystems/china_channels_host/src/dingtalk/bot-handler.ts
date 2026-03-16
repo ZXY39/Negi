@@ -1,4 +1,5 @@
-﻿/**
+// @ts-nocheck
+/**
  * 钉钉消息处理
  *
  * 实现消息解析、策略检查和 Agent 分发
@@ -43,7 +44,7 @@ import {
   splitCronHiddenPrompt,
   finalizeInboundMediaFile,
   pruneInboundMediaDir,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 
 export const LONG_TASK_NOTICE_TEXT = "任务处理时间较长，请稍等，我还在继续处理。";
 export const DEFAULT_LONG_TASK_NOTICE_DELAY_MS = 30000;

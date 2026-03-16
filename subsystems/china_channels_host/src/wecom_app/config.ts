@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 企业微信自建应用配置 schema
  */

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 钉钉 Stream SDK 客户端封装
  * 

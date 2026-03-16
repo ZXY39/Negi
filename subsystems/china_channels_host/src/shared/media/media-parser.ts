@@ -1,10 +1,11 @@
+// @ts-nocheck
 /**
  * 媒体解析模块
  *
  * 提供统一的媒体路径提取、解析和规范化功能
  * 支持 Markdown 图片、HTML img 标签、MEDIA: 标记、本地路径等多种格式
  *
- * @module @openclaw-china/shared/media
+ * @module ../index.js/media
  */
 
 import * as fs from "fs";

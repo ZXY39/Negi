@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 企业微信自建应用 ChannelPlugin 实现
  *

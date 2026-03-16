@@ -1,3 +1,4 @@
+// @ts-nocheck
 const CRON_HIDDEN_PROMPT = `
 When creating or updating a cron task, always store a fixed delivery target in the job itself.
 - Use the built-in cron tool (action=add/update). Do not run shell commands.

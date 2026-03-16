@@ -324,6 +324,24 @@ class ApiClient {
     static async reloadResources() {
         return this.post("/api/resources/reload", {}, { session_id: DEFAULT_SESSION_ID });
     }
+
+    static async getChinaChannels() {
+        return this.get("/api/china-bridge/channels");
+    }
+
+    static async getChinaChannel(channelId) {
+        const data = await this.get(`/api/china-bridge/channels/${encodeURIComponent(channelId)}`);
+        return data.item || null;
+    }
+
+    static async updateChinaChannel(channelId, payload) {
+        const data = await this.put(`/api/china-bridge/channels/${encodeURIComponent(channelId)}`, payload || {});
+        return data.item || null;
+    }
+
+    static async testChinaChannel(channelId) {
+        return this.post(`/api/china-bridge/channels/${encodeURIComponent(channelId)}/test`, {});
+    }
 }
 
 window.ApiClient = ApiClient;

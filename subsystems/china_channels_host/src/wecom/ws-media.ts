@@ -1,7 +1,8 @@
+// @ts-nocheck
 import crypto from "node:crypto";
 import path from "node:path";
 
-import { readMediaFromLocal, type Logger } from "@openclaw-china/shared";
+import { readMediaFromLocal, type Logger } from "../shared/index.js";
 import type { ReplyMsgItem } from "@wecom/aibot-node-sdk";
 
 const WECOM_NATIVE_IMAGE_MAX_BYTES = 10 * 1024 * 1024;

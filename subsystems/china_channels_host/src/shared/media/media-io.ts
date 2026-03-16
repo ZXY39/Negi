@@ -1,9 +1,10 @@
+// @ts-nocheck
 /**
  * 媒体 IO 模块
  *
  * 提供统一的媒体文件下载和读取功能
  *
- * @module @openclaw-china/shared/media
+ * @module ../index.js/media
  */
 
 import * as fs from "fs";

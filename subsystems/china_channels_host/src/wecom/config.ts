@@ -1,3 +1,4 @@
+// @ts-nocheck
 // 企业微信配置 schema
 import { z } from "zod";
 

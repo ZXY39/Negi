@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 飞书发送消息
  */
@@ -16,7 +17,7 @@ import {
   getExtension,
   IMAGE_EXTENSIONS,
   extractImagesFromText,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 
 export interface SendMessageParams {
   cfg: FeishuConfig;

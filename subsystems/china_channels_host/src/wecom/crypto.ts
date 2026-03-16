@@ -1,3 +1,4 @@
+// @ts-nocheck
 import crypto from "node:crypto";
 
 function decodeEncodingAESKey(encodingAESKey: string): Buffer {

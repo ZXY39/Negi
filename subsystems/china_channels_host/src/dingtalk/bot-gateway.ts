@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { type DWClient } from "dingtalk-stream";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";

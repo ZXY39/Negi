@@ -136,7 +136,7 @@ class ResourceManager:
         descriptor = self.get_skill(name)
         if descriptor is None or descriptor.main_path is None or not descriptor.main_path.exists():
             raise FileNotFoundError(f"skill not found: {name}")
-        with self.acquire_skill(name):
+        with self.acquire_skill(name, reload_on_release="never"):
             return descriptor.main_path.read_text(encoding="utf-8")
 
     def load_toolskill_body(self, name: str) -> str:
@@ -144,16 +144,16 @@ class ResourceManager:
         descriptor = self.get_tool_descriptor(name)
         if descriptor is None or descriptor.toolskills_main_path is None or not descriptor.toolskills_main_path.exists():
             raise FileNotFoundError(f"toolskill not found: {name}")
-        with self.acquire_tool(name):
+        with self.acquire_tool(name, reload_on_release="never"):
             return descriptor.toolskills_main_path.read_text(encoding="utf-8")
 
-    def acquire_tool(self, name: str):
+    def acquire_tool(self, name: str, *, reload_on_release: str = "always"):
         handle = self._locks.acquire(ResourceKind.TOOL, name)
-        return _ManagedAccessHandle(self, handle)
+        return _ManagedAccessHandle(self, handle, reload_on_release=reload_on_release)
 
-    def acquire_skill(self, name: str):
+    def acquire_skill(self, name: str, *, reload_on_release: str = "always"):
         handle = self._locks.acquire(ResourceKind.SKILL, name)
-        return _ManagedAccessHandle(self, handle)
+        return _ManagedAccessHandle(self, handle, reload_on_release=reload_on_release)
 
     def busy_state(self, kind: ResourceKind, name: str):
         return self._locks.busy_state(kind, name)
@@ -322,15 +322,21 @@ class ResourceManager:
 
 
 class _ManagedAccessHandle:
-    def __init__(self, manager: ResourceManager, handle):
+    def __init__(self, manager: ResourceManager, handle, *, reload_on_release: str = "always"):
         self._manager = manager
         self._handle = handle
+        self._reload_on_release = str(reload_on_release or "always").strip().lower() or "always"
 
     def release(self) -> None:
-        try:
-            self._handle.release()
-        finally:
+        needs_reload = bool(self._handle.release())
+        if self._reload_on_release == "never":
+            return
+        if self._reload_on_release == "pending_delete" and not needs_reload:
+            return
+        if self._reload_on_release == "always":
             self._manager.reload_now(trigger="release")
+            return
+        raise ValueError(f"unsupported reload_on_release mode: {self._reload_on_release}")
 
     def __enter__(self):
         return self

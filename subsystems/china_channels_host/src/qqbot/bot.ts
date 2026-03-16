@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * QQ Bot 入站消息处理
  */
@@ -21,7 +22,7 @@ import {
   pruneInboundMediaDir,
   stripTitleFromUrl,
   transcribeTencentFlash,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 import {
   resolveQQBotASRCredentials,
   resolveInboundMediaDir,

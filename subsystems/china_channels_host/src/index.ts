@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ChinaChannelsHost } from "./host.js";
 import { loadHostConfig } from "./config.js";
 

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 

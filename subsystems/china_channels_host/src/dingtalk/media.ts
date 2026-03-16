@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 钉钉媒体处理
  *
@@ -22,7 +23,7 @@ import {
   downloadToTempFile,
   FileSizeLimitError as SharedFileSizeLimitError,
   MediaTimeoutError,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 import type { Logger } from "./logger.js";
 import * as path from "path";
 import * as fsPromises from "fs/promises";

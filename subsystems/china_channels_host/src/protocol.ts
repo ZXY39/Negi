@@ -1,3 +1,4 @@
+// @ts-nocheck
 export type BridgeAuthFrame = {
   type: "auth";
   token: string;

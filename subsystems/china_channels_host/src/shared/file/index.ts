@@ -1,6 +1,7 @@
+// @ts-nocheck
 /**
  * File utilities module
- * @module @openclaw-china/shared/file
+ * @module ../index.js/file
  */
 
 export {

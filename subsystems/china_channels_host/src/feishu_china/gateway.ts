@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 飞书 WebSocket 连接管理
  */

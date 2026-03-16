@@ -70,11 +70,11 @@ class ResourceAccessHandle:
         self._name = name
         self._released = False
 
-    def release(self) -> None:
+    def release(self) -> bool:
         if self._released:
-            return
+            return False
         self._released = True
-        self._manager.release(self._kind, self._name)
+        return self._manager.release(self._kind, self._name)
 
     def __enter__(self):
         return self
@@ -113,19 +113,22 @@ class ResourceLockManager:
                     record.guard_handle = _open_delete_guard(guard_path)
         return ResourceAccessHandle(self, kind, name)
 
-    def release(self, kind: ResourceKind, name: str) -> None:
+    def release(self, kind: ResourceKind, name: str) -> bool:
         key = (kind.value, name)
+        needs_reload = False
         with self._lock:
             record = self._records.get(key)
             if record is None:
-                return
+                return False
             record.refs = max(0, record.refs - 1)
             if record.refs == 0:
                 _close_delete_guard(record.guard_handle)
                 record.guard_handle = None
                 record.guard_path = None
+                needs_reload = bool(record.pending_delete)
                 if not record.pending_delete:
                     self._records.pop(key, None)
+        return needs_reload
 
     def mark_pending_delete(self, kind: ResourceKind, name: str) -> None:
         with self._lock:

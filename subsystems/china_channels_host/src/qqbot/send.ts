@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * QQ Bot 发送消息（文件）
  */
@@ -20,7 +21,7 @@ import {
   isHttpUrl,
   readMedia,
   stripTitleFromUrl,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";

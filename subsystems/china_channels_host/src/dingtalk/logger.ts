@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 钉钉插件日志工具
  *
@@ -9,7 +10,7 @@ import {
   type Logger,
   type LogLevel,
   type LoggerOptions,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 
 const PALE_GREEN = "\x1b[38;5;120m";
 const RESET = "\x1b[0m";

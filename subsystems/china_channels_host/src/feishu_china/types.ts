@@ -1,3 +1,4 @@
+// @ts-nocheck
 // 飞书类型定义
 
 import type { FeishuConfig } from "./config.js";

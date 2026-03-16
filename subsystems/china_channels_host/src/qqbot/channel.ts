@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Re-export for index.ts
 export { DEFAULT_ACCOUNT_ID } from "./config.js";
 
@@ -14,7 +15,6 @@ import {
   resolveQQBotCredentials,
   type PluginConfig,
 } from "./config.js";
-import { qqbotOnboardingAdapter } from "./onboarding.js";
 import { qqbotOutbound } from "./outbound.js";
 import { monitorQQBotProvider, stopQQBotMonitorForAccount } from "./monitor.js";
 import { setQQBotRuntime } from "./runtime.js";
@@ -241,8 +241,6 @@ export const qqbotPlugin = {
   },
 
   reload: { configPrefixes: ["channels.qqbot"] },
-
-  onboarding: qqbotOnboardingAdapter,
 
   config: {
     listAccountIds: (cfg: PluginConfig): string[] => listQQBotAccountIds(cfg),

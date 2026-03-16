@@ -4,15 +4,92 @@ from pathlib import Path
 from typing import Any
 
 import json
+import shutil
 import yaml
 from fastapi import APIRouter, Body, HTTPException, Query
 
-from g3ku.config.loader import load_config
+from g3ku.config.loader import load_config, save_config
+from g3ku.config.schema import Config
 from g3ku.config.model_manager import ModelManager, VALID_SCOPES
 from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
 from g3ku.shells.web import get_agent, refresh_web_agent_runtime
 
 router = APIRouter()
+
+CHINA_CHANNEL_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        'id': 'qqbot',
+        'config_key': 'qqbot',
+        'attr': 'qqbot',
+        'label': 'QQ Bot',
+        'description': '腾讯 QQ 官方机器人通道',
+        'requirements': (
+            ('appId', ('appId', 'app_id')),
+            ('clientSecret / token', ('clientSecret', 'client_secret', 'token')),
+        ),
+    },
+    {
+        'id': 'dingtalk',
+        'config_key': 'dingtalk',
+        'attr': 'dingtalk',
+        'label': '钉钉',
+        'description': '钉钉机器人与流式接入通道',
+        'requirements': (
+            ('clientId', ('clientId', 'client_id')),
+            ('clientSecret / token', ('clientSecret', 'client_secret', 'token')),
+        ),
+    },
+    {
+        'id': 'wecom',
+        'config_key': 'wecom',
+        'attr': 'wecom',
+        'label': '企业微信机器人',
+        'description': '企业微信智能机器人通道',
+        'requirements': (
+            ('botId / receiveId', ('botId', 'bot_id', 'receiveId', 'receive_id')),
+            ('secret / token', ('secret', 'token', 'encodingAesKey', 'encoding_aes_key')),
+        ),
+    },
+    {
+        'id': 'wecomApp',
+        'config_key': 'wecomApp',
+        'attr': 'wecom_app',
+        'label': '企业微信应用',
+        'description': '企业微信自建应用通道',
+        'requirements': (
+            ('corpId', ('corpId', 'corp_id')),
+            ('corpSecret', ('corpSecret', 'corp_secret')),
+            ('agentId', ('agentId', 'agent_id')),
+        ),
+    },
+    {
+        'id': 'feishuChina',
+        'config_key': 'feishuChina',
+        'attr': 'feishu_china',
+        'label': '飞书',
+        'description': '飞书 / Lark 中国版通道',
+        'requirements': (
+            ('appId', ('appId', 'app_id')),
+            ('appSecret / token', ('appSecret', 'app_secret', 'token')),
+        ),
+    },
+)
+
+CHINA_CHANNEL_INDEX: dict[str, dict[str, Any]] = {
+    item['id']: item
+    for item in CHINA_CHANNEL_SPECS
+}
+CHINA_CHANNEL_ALIASES = {
+    'qqbot': 'qqbot',
+    'dingtalk': 'dingtalk',
+    'wecom': 'wecom',
+    'wecomapp': 'wecomApp',
+    'wecom_app': 'wecomApp',
+    'wecom-app': 'wecomApp',
+    'feishuchina': 'feishuChina',
+    'feishu_china': 'feishuChina',
+    'feishu-china': 'feishuChina',
+}
 
 
 
@@ -51,6 +128,167 @@ def _save_memory_manifest_payload(manager: ModelManager, payload: dict[str, Any]
     manifest_path = _memory_manifest_path(manager)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding='utf-8')
+
+
+def _normalize_china_channel_id(channel_id: str) -> str:
+    raw = str(channel_id or '').strip()
+    key = raw.replace('-', '_').lower()
+    normalized = CHINA_CHANNEL_ALIASES.get(key)
+    if normalized is None:
+        raise HTTPException(status_code=404, detail='china_channel_not_found')
+    return normalized
+
+
+def _china_channel_spec(channel_id: str) -> dict[str, Any]:
+    normalized = _normalize_china_channel_id(channel_id)
+    return CHINA_CHANNEL_INDEX[normalized]
+
+
+def _china_bridge_status_payload() -> dict[str, Any] | None:
+    path = _china_bridge_status_path()
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _china_bridge_runtime_summary(cfg: Config) -> dict[str, Any]:
+    status = _china_bridge_status_payload() or {}
+    dist_entry = cfg.workspace_path / 'subsystems' / 'china_channels_host' / 'dist' / 'index.js'
+    node_path = shutil.which(cfg.china_bridge.node_bin)
+    return {
+        'enabled': bool(cfg.china_bridge.enabled),
+        'public_port': int(cfg.china_bridge.public_port),
+        'control_port': int(cfg.china_bridge.control_port),
+        'node_bin': str(cfg.china_bridge.node_bin or 'node'),
+        'node_found': bool(node_path),
+        'node_path': node_path,
+        'dist_entry': str(dist_entry),
+        'dist_exists': dist_entry.exists(),
+        'running': bool(status.get('running')),
+        'connected': bool(status.get('connected')),
+        'status_path': str(_china_bridge_status_path()),
+        'status_exists': bool(status),
+        'last_error': str(status.get('last_error') or '').strip() or None,
+    }
+
+
+def _channel_has_value(payload: dict[str, Any], candidates: tuple[str, ...]) -> bool:
+    for key in candidates:
+        value = payload.get(key)
+        if value not in (None, '', [], {}, False):
+            return True
+    accounts = payload.get('accounts')
+    if isinstance(accounts, dict):
+        for account_payload in accounts.values():
+            if not isinstance(account_payload, dict):
+                continue
+            for key in candidates:
+                value = account_payload.get(key)
+                if value not in (None, '', [], {}, False):
+                    return True
+    return False
+
+
+def _channel_missing_requirements(channel_id: str, payload: dict[str, Any]) -> list[str]:
+    spec = _china_channel_spec(channel_id)
+    missing: list[str] = []
+    for label, candidates in spec.get('requirements') or ():
+        if not _channel_has_value(payload, tuple(str(item) for item in candidates)):
+            missing.append(str(label))
+    return missing
+
+
+def _serialize_china_channel(cfg: Config, channel_id: str) -> dict[str, Any]:
+    spec = _china_channel_spec(channel_id)
+    channel_model = getattr(cfg.china_bridge.channels, spec['attr'])
+    payload = channel_model.model_dump(by_alias=True, exclude_none=True)
+    enabled = bool(payload.pop('enabled', False))
+    runtime = _china_bridge_runtime_summary(cfg)
+    accounts = payload.get('accounts')
+    account_count = len(accounts) if isinstance(accounts, dict) else 0
+    return {
+        'id': spec['id'],
+        'label': spec['label'],
+        'description': spec['description'],
+        'config_path': f"chinaBridge.channels.{spec['config_key']}",
+        'enabled': enabled,
+        'account_count': account_count,
+        'config': payload,
+        'json_text': json.dumps(payload, ensure_ascii=False, indent=2),
+        'runtime': runtime,
+    }
+
+
+def _test_china_channel(cfg: Config, channel_id: str) -> dict[str, Any]:
+    item = _serialize_china_channel(cfg, channel_id)
+    runtime = item['runtime']
+    if not item['enabled']:
+        return {
+            'status': 'disabled',
+            'title': '当前通信已禁用',
+            'message': '配置已保存，当前渠道保持禁用状态。',
+            'details': [],
+        }
+    missing = _channel_missing_requirements(channel_id, item['config'])
+    if missing:
+        return {
+            'status': 'error',
+            'title': '测试失败',
+            'message': f"配置缺少必要字段：{', '.join(missing)}",
+            'details': missing,
+        }
+    if runtime['running'] and runtime['connected']:
+        return {
+            'status': 'success',
+            'title': '连接成功',
+            'message': '桥接宿主正在运行，内部控制连接已建立。',
+            'details': [],
+        }
+    warnings: list[str] = []
+    if not runtime['node_found']:
+        warnings.append('未找到 Node 可执行文件')
+    if not runtime['dist_exists']:
+        warnings.append('中国通信子系统尚未构建')
+    if not runtime['running']:
+        warnings.append('桥接宿主当前未运行')
+    if warnings:
+        return {
+            'status': 'warning',
+            'title': '测试通过',
+            'message': '配置校验已通过，但本地桥接环境尚未完全就绪。',
+            'details': warnings,
+        }
+    return {
+        'status': 'success',
+        'title': '测试通过',
+        'message': '配置校验已通过，等待宿主完成平台侧连接。',
+        'details': [],
+    }
+
+
+def _update_china_channel_config(cfg: Config, channel_id: str, *, enabled: bool, payload: dict[str, Any]) -> Config:
+    spec = _china_channel_spec(channel_id)
+    config_payload = dict(payload or {})
+    config_payload.pop('enabled', None)
+
+    full_payload = cfg.model_dump(by_alias=True, exclude_none=True)
+    bridge_payload = full_payload.setdefault('chinaBridge', {})
+    channels_payload = bridge_payload.setdefault('channels', {})
+    channels_payload[spec['config_key']] = {
+        **config_payload,
+        'enabled': bool(enabled),
+    }
+    bridge_payload['enabled'] = any(
+        bool((channels_payload.get(item['config_key']) or {}).get('enabled'))
+        for item in CHINA_CHANNEL_SPECS
+    )
+    next_cfg = Config.model_validate(full_payload)
+    save_config(next_cfg)
+    return next_cfg
 
 
 @router.get('/models')
@@ -487,6 +725,48 @@ def _china_bridge_status_path() -> Path:
     return cfg.workspace_path / str(cfg.china_bridge.state_dir or '.g3ku/china-bridge') / 'status.json'
 
 
+@router.get('/china-bridge/channels')
+async def list_china_bridge_channels():
+    cfg = load_config()
+    return {
+        'ok': True,
+        'bridge': _china_bridge_runtime_summary(cfg),
+        'items': [_serialize_china_channel(cfg, item['id']) for item in CHINA_CHANNEL_SPECS],
+    }
+
+
+@router.get('/china-bridge/channels/{channel_id}')
+async def get_china_bridge_channel(channel_id: str):
+    cfg = load_config()
+    return {'ok': True, 'item': _serialize_china_channel(cfg, channel_id)}
+
+
+@router.put('/china-bridge/channels/{channel_id}')
+async def update_china_bridge_channel(channel_id: str, payload: dict = Body(...)):
+    config_payload = payload.get('config') if isinstance(payload.get('config'), dict) else None
+    if config_payload is None:
+        raise HTTPException(status_code=400, detail='config must be a JSON object')
+    cfg = load_config()
+    next_cfg = _update_china_channel_config(
+        cfg,
+        channel_id,
+        enabled=bool(payload.get('enabled')),
+        payload=config_payload,
+    )
+    await _refresh_runtime('admin_china_bridge_channel_update')
+    return {'ok': True, 'item': _serialize_china_channel(next_cfg, channel_id)}
+
+
+@router.post('/china-bridge/channels/{channel_id}/test')
+async def test_china_bridge_channel(channel_id: str):
+    cfg = load_config()
+    return {
+        'ok': True,
+        'item': _serialize_china_channel(cfg, channel_id),
+        'result': _test_china_channel(cfg, channel_id),
+    }
+
+
 @router.get('/china-bridge/status')
 async def get_china_bridge_status():
     path = _china_bridge_status_path()
@@ -510,11 +790,11 @@ async def get_china_bridge_doctor():
         'status_path': str(path),
         'status_exists': path.exists(),
         'channels': {
-            'qqbot': cfg.channels.qqbot.enabled,
-            'dingtalk': cfg.channels.dingtalk.enabled,
-            'wecom': cfg.channels.wecom.enabled,
-            'wecom_app': cfg.channels.wecom_app.enabled,
-            'feishu_china': cfg.channels.feishu_china.enabled,
+            'qqbot': cfg.china_bridge.channels.qqbot.enabled,
+            'dingtalk': cfg.china_bridge.channels.dingtalk.enabled,
+            'wecom': cfg.china_bridge.channels.wecom.enabled,
+            'wecom_app': cfg.china_bridge.channels.wecom_app.enabled,
+            'feishu_china': cfg.china_bridge.channels.feishu_china.enabled,
         },
     }
     if path.exists():

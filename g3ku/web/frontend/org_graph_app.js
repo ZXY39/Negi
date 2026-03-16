@@ -78,6 +78,15 @@ const S = {
     selectedTool: null,
     toolBusy: false,
     toolDirty: false,
+    communications: [],
+    communicationBridge: null,
+    selectedCommunication: null,
+    communicationBusy: false,
+    communicationDirty: false,
+    communicationDraftEnabled: false,
+    communicationDraftText: "",
+    communicationBaselineEnabled: false,
+    communicationBaselineText: "",
 };
 
 const U = {
@@ -91,6 +100,7 @@ const U = {
     viewSkills: document.getElementById("view-skills"),
     viewTools: document.getElementById("view-tools"),
     viewModels: document.getElementById("view-models"),
+    viewCommunications: document.getElementById("view-communications"),
     viewTaskDetails: document.getElementById("view-task-details"),
     modelHint: document.getElementById("sidebar-model-hint"),
     modelRefresh: document.getElementById("model-refresh-btn"),
@@ -155,6 +165,13 @@ const U = {
     toolDrawer: document.querySelector(".tool-detail-panel"),
     toolRefresh: document.getElementById("tool-refresh-btn"),
     toolSave: document.getElementById("tool-save-btn"),
+    communicationList: document.getElementById("communication-list"),
+    communicationBridgeSummary: document.getElementById("communication-bridge-summary"),
+    communicationEmpty: document.getElementById("communication-detail-empty"),
+    communicationDetail: document.getElementById("communication-detail-content"),
+    communicationBackdrop: document.getElementById("communication-detail-backdrop"),
+    communicationDrawer: document.querySelector(".communication-detail-panel"),
+    communicationRefresh: document.getElementById("communication-refresh-btn"),
     toast: document.getElementById("app-toast"),
     toastTitle: document.getElementById("app-toast-title"),
     toastText: document.getElementById("app-toast-text"),
@@ -580,6 +597,11 @@ function setToolDirty(next = true) {
     S.toolDirty = !!next;
     renderToolActions();
     syncDetailSaveButton("tool");
+}
+
+function setCommunicationDirty(next = true) {
+    S.communicationDirty = !!next;
+    renderCommunicationActions();
 }
 
 function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, returnFocus = null }) {
@@ -1692,6 +1714,26 @@ function renderToolActions() {
     syncDetailSaveButton("tool");
 }
 
+function renderCommunicationActions() {
+    syncActionButton(U.communicationRefresh, {
+        idleLabel: "刷新",
+        busyLabel: "刷新中...",
+        busy: S.communicationBusy,
+        disabled: S.communicationBusy,
+    });
+    const saveButton = U.communicationDetail?.querySelector("#communication-save-btn");
+    const hint = U.communicationDetail?.querySelector(".resource-draft-hint");
+    if (saveButton) {
+        saveButton.textContent = S.communicationBusy ? "保存中..." : "保存";
+        saveButton.disabled = !!S.communicationBusy || !S.communicationDirty;
+    }
+    if (hint) {
+        hint.classList.toggle("is-dirty", S.communicationDirty);
+        hint.textContent = S.communicationDirty ? "配置变更已暂存，点击保存后才会写入配置文件并执行连接测试。" : "";
+        hint.hidden = !S.communicationDirty;
+    }
+}
+
 function clearSkillSelection() {
     S.selectedSkill = null;
     S.skillFiles = [];
@@ -1707,6 +1749,17 @@ function clearToolSelection() {
     S.toolDirty = false;
     renderTools();
     renderToolDetail();
+}
+
+function clearCommunicationSelection() {
+    S.selectedCommunication = null;
+    S.communicationDirty = false;
+    S.communicationDraftEnabled = false;
+    S.communicationDraftText = "";
+    S.communicationBaselineEnabled = false;
+    S.communicationBaselineText = "";
+    renderCommunications();
+    renderCommunicationDetail();
 }
 
 function taskStatusLabel(task) {
@@ -2329,6 +2382,402 @@ function renderTools() {
     });
 }
 
+function communicationToastKind(status) {
+    return ({ success: "success", warning: "warn", error: "error", disabled: "info" }[String(status || "").toLowerCase()] || "info");
+}
+
+function communicationRuntimeStatusKey(item) {
+    const runtime = item?.runtime || {};
+    if (!item?.enabled) return "blocked";
+    if (runtime.connected) return "success";
+    if (runtime.running) return "running";
+    return "pending";
+}
+
+function communicationRuntimeLabel(item) {
+    const runtime = item?.runtime || {};
+    if (!item?.enabled) return "已禁用";
+    if (runtime.connected) return "已连接";
+    if (runtime.running) return "桥接运行中";
+    if (runtime.status_exists) return "桥接待连接";
+    return "待测试";
+}
+
+function normalizeCommunicationJsonText(text) {
+    const source = String(text || "").trim();
+    if (!source) return "{}";
+    try {
+        return JSON.stringify(JSON.parse(source), null, 2);
+    } catch {
+        return source;
+    }
+}
+
+const COMMUNICATION_JSON_TEMPLATES = {
+    qqbot: {
+        appId: "your-qq-app-id",
+        clientSecret: "your-qq-client-secret",
+        webhookPath: "/qqbot/callback",
+        mode: "webhook",
+        accounts: {
+            default: {
+                name: "default",
+                token: "your-qq-bot-token",
+                appId: "your-qq-app-id",
+                clientSecret: "your-qq-client-secret",
+            },
+        },
+    },
+    dingtalk: {
+        clientId: "your-dingtalk-client-id",
+        clientSecret: "your-dingtalk-client-secret",
+        connectionMode: "stream",
+        webhookPath: "/dingtalk/callback",
+        accounts: {
+            default: {
+                name: "default",
+                clientId: "your-dingtalk-client-id",
+                clientSecret: "your-dingtalk-client-secret",
+                connectionMode: "stream",
+            },
+        },
+    },
+    wecom: {
+        botId: "your-wecom-bot-id",
+        secret: "your-wecom-bot-secret",
+        token: "your-wecom-token",
+        encodingAesKey: "your-wecom-encoding-aes-key",
+        mode: "ws",
+        webhookPath: "/wecom",
+        accounts: {
+            default: {
+                name: "default",
+                botId: "your-wecom-bot-id",
+                secret: "your-wecom-bot-secret",
+                token: "your-wecom-token",
+                encodingAesKey: "your-wecom-encoding-aes-key",
+                mode: "ws",
+            },
+        },
+    },
+    wecomApp: {
+        corpId: "your-wecom-corp-id",
+        corpSecret: "your-wecom-corp-secret",
+        agentId: 1000001,
+        token: "your-wecom-app-token",
+        encodingAesKey: "your-wecom-app-encoding-aes-key",
+        webhookPath: "/wecom-app",
+        accounts: {
+            default: {
+                name: "default",
+                corpId: "your-wecom-corp-id",
+                corpSecret: "your-wecom-corp-secret",
+                agentId: 1000001,
+                token: "your-wecom-app-token",
+                encodingAesKey: "your-wecom-app-encoding-aes-key",
+            },
+        },
+    },
+    feishuChina: {
+        appId: "your-feishu-app-id",
+        appSecret: "your-feishu-app-secret",
+        token: "your-feishu-verification-token",
+        webhookPath: "/feishu",
+        mode: "websocket",
+        accounts: {
+            default: {
+                name: "default",
+                appId: "your-feishu-app-id",
+                appSecret: "your-feishu-app-secret",
+                token: "your-feishu-verification-token",
+                mode: "websocket",
+            },
+        },
+    },
+};
+
+function getCommunicationTemplate(channelId) {
+    const key = String(channelId || "").trim();
+    const template = COMMUNICATION_JSON_TEMPLATES[key];
+    return template ? JSON.parse(JSON.stringify(template)) : {};
+}
+
+function syncCommunicationDirtyState() {
+    const next =
+        S.communicationDraftEnabled !== S.communicationBaselineEnabled ||
+        normalizeCommunicationJsonText(S.communicationDraftText) !== normalizeCommunicationJsonText(S.communicationBaselineText);
+    setCommunicationDirty(next);
+}
+
+function renderCommunicationBridgeSummary() {
+    if (!U.communicationBridgeSummary) return;
+    const bridge = S.communicationBridge;
+    if (!bridge) {
+        U.communicationBridgeSummary.innerHTML = '<div class="empty-state">正在加载桥接状态...</div>';
+        return;
+    }
+    const statusKey = bridge.connected ? "success" : bridge.running ? "running" : bridge.enabled ? "pending" : "blocked";
+    const statusLabel = bridge.connected ? "已连接" : bridge.running ? "运行中" : bridge.enabled ? "待连接" : "未启用";
+    const statusText = bridge.last_error ? `${statusLabel} · ${bridge.last_error}` : statusLabel;
+    U.communicationBridgeSummary.innerHTML = `
+        <div class="communication-summary-card">
+            <div class="communication-summary-head">
+                <div>
+                    <div class="resource-list-title">中国通信子系统</div>
+                    <div class="resource-list-subtitle">统一负责渠道 webhook / ws / 回发通信</div>
+                </div>
+                <span class="status-badge" data-status="${esc(statusKey)}">${esc(statusText)}</span>
+            </div>
+            <div class="communication-summary-meta">
+                <span>publicPort: ${esc(bridge.public_port)}</span>
+                <span>controlPort: ${esc(bridge.control_port)}</span>
+                <span>${bridge.dist_exists ? "Host 已构建" : "Host 未构建"}</span>
+                <span>${bridge.node_found ? "Node 已就绪" : "Node 未找到"}</span>
+            </div>
+        </div>
+    `;
+}
+
+function renderCommunications() {
+    if (!U.communicationList) return;
+    U.communicationList.innerHTML = "";
+    const items = Array.isArray(S.communications) ? S.communications : [];
+    if (!items.length) {
+        U.communicationList.innerHTML = '<div class="empty-state">暂无可用通信方式。</div>';
+        return;
+    }
+    items.forEach((item) => {
+        const selected = S.selectedCommunication?.id === item.id;
+        const el = document.createElement("button");
+        el.type = "button";
+        el.className = `resource-list-item communication-card${selected ? " selected" : ""}`;
+        el.innerHTML = `
+            <div class="communication-card-head">
+                <div class="resource-list-title">${esc(item.label)}</div>
+                <span class="status-badge" data-status="${esc(communicationRuntimeStatusKey(item))}">${esc(communicationRuntimeLabel(item))}</span>
+            </div>
+            <div class="resource-list-subtitle">${esc(item.description || item.config_path || item.id)}</div>
+            <div class="resource-list-meta">${esc(displayEnabledLabel(item.enabled))} · ${esc(item.config_path || "")} · ${esc(item.account_count || 0)} 个账号</div>
+        `;
+        el.addEventListener("click", () => void openCommunication(item.id));
+        U.communicationList.appendChild(el);
+    });
+}
+
+function renderCommunicationDetail() {
+    if (!S.selectedCommunication) {
+        U.communicationEmpty.style.display = "block";
+        U.communicationDetail.innerHTML = "";
+        setDrawerOpen(U.communicationBackdrop, U.communicationDrawer, false);
+        renderCommunicationActions();
+        return;
+    }
+    U.communicationEmpty.style.display = "none";
+    setDrawerOpen(U.communicationBackdrop, U.communicationDrawer, true);
+    const item = S.selectedCommunication;
+    const runtime = item.runtime || {};
+    const toggleLabel = S.communicationDraftEnabled ? "已启用" : "已禁用";
+    const statusKey = communicationRuntimeStatusKey({ ...item, enabled: S.communicationDraftEnabled });
+    const statusLabel = communicationRuntimeLabel({ ...item, enabled: S.communicationDraftEnabled });
+    U.communicationDetail.innerHTML = `
+        <article class="resource-detail-card detail-modal-shell">
+            <div class="detail-modal-header">
+                <div class="detail-modal-title">
+                    <h2 id="communication-detail-title">${esc(item.label)}</h2>
+                    <p class="subtitle">${esc(item.config_path || item.id)}</p>
+                </div>
+                <div class="detail-modal-actions">
+                    <button type="button" class="toolbar-btn ghost" id="communication-close-btn" data-modal-close>关闭</button>
+                    <button type="button" class="toolbar-btn success" id="communication-save-btn">保存</button>
+                </div>
+            </div>
+            <div class="detail-modal-body">
+                <div class="communication-detail-meta">
+                    <div class="resource-copy-block">
+                        <strong>渠道状态</strong><br>
+                        <span class="status-badge" data-status="${esc(statusKey)}">${esc(toggleLabel)} · ${esc(statusLabel)}</span>
+                    </div>
+                    <div class="resource-copy-block">
+                        <strong>桥接状态</strong><br>
+                        ${esc(runtime.connected ? "内部控制链路已连接" : runtime.running ? "桥接宿主运行中，等待连接" : "桥接宿主未运行或尚未连通")}
+                    </div>
+                </div>
+                <label class="communication-toggle">
+                    <input id="communication-enabled-toggle" type="checkbox" ${S.communicationDraftEnabled ? "checked" : ""}>
+                    <span class="communication-toggle-track" aria-hidden="true"></span>
+                    <span class="communication-toggle-copy">
+                        <strong>启用该通信方式</strong>
+                        <span>${S.communicationDraftEnabled ? "保存后将参与消息收发" : "保存后将停止该通信方式"}</span>
+                    </span>
+                </label>
+                <div class="resource-draft-hint${S.communicationDirty ? " is-dirty" : ""}" ${S.communicationDirty ? "" : "hidden"}></div>
+                <div class="resource-section">
+                    <h3>JSON 配置</h3>
+                    <div class="resource-copy-block">此处仅编辑该渠道的 JSON 配置对象；启用状态请使用上方开关。</div>
+                    <div class="communication-section-head">
+                        <span class="communication-section-spacer" aria-hidden="true"></span>
+                        <button type="button" class="toolbar-btn ghost small" id="communication-load-template-btn">加载模板</button>
+                    </div>
+                    <textarea id="communication-json-editor" rows="18" class="resource-editor communication-json-editor">${esc(S.communicationDraftText)}</textarea>
+                </div>
+            </div>
+        </article>
+    `;
+    const communicationSection = U.communicationDetail.querySelector(".resource-section");
+    const sectionHeading = communicationSection?.querySelector("h3");
+    const sectionCopy = communicationSection?.querySelector(".resource-copy-block");
+    const sectionHead = communicationSection?.querySelector(".communication-section-head");
+    const templateButton = U.communicationDetail.querySelector("#communication-load-template-btn");
+    if (sectionHead && sectionHeading && sectionCopy) {
+        sectionHead.innerHTML = "";
+        sectionHead.append(sectionHeading);
+        if (templateButton) {
+            templateButton.textContent = "加载模板";
+            sectionHead.append(templateButton);
+        }
+        communicationSection.insertBefore(sectionHead, sectionCopy);
+    }
+    U.communicationDetail.querySelector("#communication-close-btn")?.addEventListener("click", clearCommunicationSelection);
+    U.communicationDetail.querySelector("#communication-save-btn")?.addEventListener("click", () => void saveCommunication());
+    U.communicationDetail.querySelector("#communication-enabled-toggle")?.addEventListener("change", (e) => {
+        S.communicationDraftEnabled = !!e.target.checked;
+        syncCommunicationDirtyState();
+        renderCommunicationDetail();
+    });
+    U.communicationDetail.querySelector("#communication-json-editor")?.addEventListener("input", (e) => {
+        S.communicationDraftText = String(e.target.value || "");
+        syncCommunicationDirtyState();
+    });
+    U.communicationDetail.querySelector("#communication-load-template-btn")?.addEventListener("click", () => {
+        const template = getCommunicationTemplate(item.id);
+        S.communicationDraftText = JSON.stringify(template, null, 2);
+        const editor = U.communicationDetail.querySelector("#communication-json-editor");
+        if (editor) editor.value = S.communicationDraftText;
+        syncCommunicationDirtyState();
+        renderCommunicationActions();
+        showToast({
+            title: "模板已加载",
+            text: `${item.label} 的预设模板已填入 JSON 表单，确认后点击保存即可生效。`,
+            kind: "info",
+            durationMs: 2400,
+        });
+    });
+    renderCommunicationActions();
+}
+
+async function loadCommunications({ renderDetail = true } = {}) {
+    if (U.communicationList) U.communicationList.innerHTML = '<div class="empty-state">正在加载通信方式...</div>';
+    const selectedId = S.selectedCommunication?.id || "";
+    try {
+        const payload = await ApiClient.getChinaChannels();
+        S.communicationBridge = payload.bridge || null;
+        S.communications = Array.isArray(payload.items) ? payload.items : [];
+        if (selectedId) {
+            const next = S.communications.find((item) => item.id === selectedId);
+            if (next && !renderDetail) S.selectedCommunication = { ...S.selectedCommunication, ...next };
+            else if (!next) clearCommunicationSelection();
+        }
+        renderCommunicationBridgeSummary();
+        renderCommunications();
+        if (renderDetail) renderCommunicationDetail();
+    } catch (e) {
+        if (U.communicationList) U.communicationList.innerHTML = `<div class="empty-state error">加载通信方式失败：${esc(e.message)}</div>`;
+        if (U.communicationBridgeSummary) U.communicationBridgeSummary.innerHTML = `<div class="empty-state error">桥接状态获取失败：${esc(e.message)}</div>`;
+        showToast({ title: "加载失败", text: e.message || "Unknown error", kind: "error" });
+    } finally {
+        renderCommunicationActions();
+    }
+}
+
+async function openCommunication(channelId, quiet = false) {
+    if (!quiet) {
+        setDrawerOpen(U.communicationBackdrop, U.communicationDrawer, true);
+        U.communicationEmpty.style.display = "none";
+        U.communicationDetail.innerHTML = '<div class="empty-state">正在加载通信配置...</div>';
+    }
+    try {
+        const item = await ApiClient.getChinaChannel(channelId);
+        S.selectedCommunication = item;
+        S.communicationBaselineEnabled = !!item.enabled;
+        S.communicationDraftEnabled = !!item.enabled;
+        S.communicationBaselineText = String(item.json_text || JSON.stringify(item.config || {}, null, 2));
+        S.communicationDraftText = S.communicationBaselineText;
+        S.communicationDirty = false;
+        renderCommunications();
+        renderCommunicationDetail();
+    } catch (e) {
+        U.communicationDetail.innerHTML = `<div class="empty-state error">加载通信配置失败：${esc(e.message)}</div>`;
+        showToast({ title: "加载失败", text: e.message || "Unknown error", kind: "error" });
+    } finally {
+        renderCommunicationActions();
+    }
+}
+
+async function refreshCommunications() {
+    const selectedId = S.selectedCommunication?.id || "";
+    S.communicationBusy = true;
+    renderCommunicationActions();
+    try {
+        await loadCommunications({ renderDetail: false });
+        if (selectedId && S.communications.some((item) => item.id === selectedId)) {
+            await openCommunication(selectedId, true);
+        }
+    } finally {
+        S.communicationBusy = false;
+        renderCommunicationActions();
+    }
+}
+
+async function saveCommunication() {
+    if (S.communicationBusy) return;
+    const item = S.selectedCommunication;
+    const channelId = String(item?.id || "").trim();
+    if (!channelId || !item) {
+        showToast({ title: "保存失败", text: "请先选择一个通信方式。", kind: "error" });
+        return;
+    }
+    if (!S.communicationDirty) {
+        showToast({ title: "没有待保存修改", text: "当前通信配置没有未保存改动。", kind: "info", durationMs: 1800 });
+        return;
+    }
+    let configPayload = {};
+    try {
+        configPayload = JSON.parse(S.communicationDraftText || "{}");
+        if (!configPayload || typeof configPayload !== "object" || Array.isArray(configPayload)) {
+            throw new Error("JSON 配置必须是对象");
+        }
+    } catch (e) {
+        showToast({ title: "JSON 无法保存", text: e.message || "配置格式错误", kind: "error", durationMs: 2800 });
+        return;
+    }
+    S.communicationBusy = true;
+    renderCommunicationActions();
+    showToast({ title: "保存中", text: `正在保存 ${item.label} 配置...`, kind: "info", persistent: true });
+    try {
+        await ApiClient.updateChinaChannel(channelId, {
+            enabled: S.communicationDraftEnabled,
+            config: configPayload,
+        });
+        showToast({ title: "测试连接中", text: `正在测试 ${item.label} 的当前连接状态...`, kind: "info", persistent: true });
+        const probe = await ApiClient.testChinaChannel(channelId);
+        await loadCommunications({ renderDetail: false });
+        await openCommunication(channelId, true);
+        const result = probe?.result || {};
+        const message = [result.message, ...(Array.isArray(result.details) ? result.details : [])].filter(Boolean).join("；");
+        showToast({
+            title: result.title || "保存成功",
+            text: message || `${item.label} 配置已更新`,
+            kind: communicationToastKind(result.status),
+            durationMs: result.status === "error" ? 3200 : 2600,
+        });
+    } catch (e) {
+        showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2800 });
+    } finally {
+        S.communicationBusy = false;
+        renderCommunicationActions();
+    }
+}
+
 function toggleTheme() {
     const html = document.documentElement;
     const dark = html.getAttribute("data-theme") === "dark";
@@ -2764,7 +3213,7 @@ async function refreshTools() {
 }
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, communications: U.viewCommunications, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     S.view = navView;
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
@@ -2785,6 +3234,7 @@ function switchView(view) {
     if (view === "skills") void loadSkills();
     if (view === "tools") void loadTools();
     if (view === "models") void loadModels();
+    if (view === "communications") void loadCommunications();
 }
 
 function bind() {
@@ -2997,9 +3447,11 @@ function bind() {
     [U.toolSearch, U.toolStatus, U.toolRisk].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderTools));
     U.toolRefresh?.addEventListener("click", () => void refreshTools());
     U.toolSave?.addEventListener("click", () => void saveTool());
+    U.communicationRefresh?.addEventListener("click", () => void refreshCommunications());
     U.modelBackdrop?.addEventListener("click", clearModelSelection);
     U.skillBackdrop?.addEventListener("click", clearSkillSelection);
     U.toolBackdrop?.addEventListener("click", clearToolSelection);
+    U.communicationBackdrop?.addEventListener("click", clearCommunicationSelection);
     U.toastClose?.addEventListener("click", closeToast);
     U.confirmBackdrop?.addEventListener("click", (e) => {
         if (e.target === U.confirmBackdrop) closeConfirm();
@@ -3032,6 +3484,7 @@ function bind() {
         }
         if (S.selectedSkill) clearSkillSelection();
         if (S.selectedTool) clearToolSelection();
+        if (S.selectedCommunication) clearCommunicationSelection();
     });
 }
 
@@ -3042,6 +3495,7 @@ function init() {
     icons();
     renderSkillActions();
     renderToolActions();
+    renderCommunicationActions();
     void loadModels();
     void loadTasks();
     initCeoWs();

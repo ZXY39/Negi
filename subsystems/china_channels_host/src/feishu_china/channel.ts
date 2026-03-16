@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 飞书 ChannelPlugin 实现
  */

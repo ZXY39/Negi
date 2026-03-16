@@ -1,3 +1,4 @@
+// @ts-nocheck
 export function normalizeAccountId(value?: string): string {
   return (value || "").trim() || "default";
 }

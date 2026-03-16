@@ -38,6 +38,10 @@
                 <i data-lucide="cpu"></i>
                 <span>模型配置</span>
             </button>
+            <button class="nav-item" data-view="communications" type="button">
+                <i data-lucide="radio-tower"></i>
+                <span>通信配置</span>
+            </button>
 
             <div class="sidebar-spacer"></div>
 
@@ -201,16 +205,13 @@
                 <header class="content-header resource-header model-page-header">
                     <div>
                         <h1>LLM 配置中心</h1>
-                        <p class="subtitle">基于配置记录、模型绑定、角色链与 Memory 模型引用统一管理所有 LLM 能力。</p>
-                        <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载 LLM 配置中心...</p>
+                        <p class="subtitle">选择供应商并维护模型 JSON 配置，再将模型编排到 Role Routes。</p>
+                        <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载模型配置...</p>
                     </div>
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
-                        <button id="llm-config-create-btn" class="toolbar-btn ghost" type="button">新建配置</button>
-                        <button id="model-create-btn" class="toolbar-btn" type="button">新建模型绑定</button>
-                        <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消</button>
-                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button">保存模型链</button>
-                        <button id="llm-migrate-btn" class="toolbar-btn ghost" type="button">运行迁移</button>
+                        <button id="llm-config-create-btn" class="toolbar-btn" type="button">新建配置</button>
+                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button">编辑模型链</button>
                     </div>
                 </header>
 
@@ -218,20 +219,14 @@
                     <section class="resource-detail-panel llm-bindings-panel">
                         <div class="panel-header model-shared-header">
                             <div>
-                                <h3>模型绑定</h3>
-                                <p class="subtitle">选择一个 model key 查看详情，或创建新的绑定与配置记录。</p>
+                                <h3>模型列表</h3>
+                                <p class="subtitle">点击模型查看对应 JSON 配置，或新建一个模型。</p>
                             </div>
                             <div class="model-shared-actions">
-                                <input id="model-search-input" class="resource-search" type="search" placeholder="搜索 Key / Provider / Capability / 描述">
+                                <input id="model-search-input" class="resource-search" type="search" placeholder="搜索模型 Key / Provider / 模型">
                             </div>
                         </div>
                         <div id="llm-bindings-list" class="model-shared-list" data-model-available-list="bindings"></div>
-                    </section>
-
-                    <section class="resource-detail-panel llm-editor-panel">
-                        <div id="llm-editor-shell" class="resource-detail-shell">
-                            <div class="empty-state resource-empty">请选择一个模型绑定，或点击“新建配置 / 新建模型绑定”。</div>
-                        </div>
                     </section>
 
                     <aside class="resource-detail-panel llm-routes-panel">
@@ -244,17 +239,38 @@
                             </div>
                             <div id="model-role-editors" class="model-routing-grid"></div>
                         </section>
-
-                        <section class="llm-side-card llm-memory-panel-card">
-                            <div class="panel-header model-shared-header">
-                                <div>
-                                    <h3>Memory Models</h3>
-                                    <p class="subtitle">为 Embedding 和 Rerank 分别绑定 capability 对应的模型。</p>
-                                </div>
-                            </div>
-                            <div id="llm-memory-panel" class="llm-memory-shell"></div>
-                        </section>
                     </aside>
+                </div>
+
+                <div id="llm-editor-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+                <section class="resource-detail-panel llm-editor-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-label="模型配置编辑器" tabindex="-1">
+                    <div id="llm-editor-shell" class="resource-detail-shell"></div>
+                </section>
+            </section>
+            <section id="view-communications" class="view-section" style="display: none;">
+                <header class="content-header resource-header">
+                    <div>
+                        <h1>通信配置</h1>
+                        <p class="subtitle">统一管理 QQ Bot、钉钉、企微与飞书通信。点击具体渠道后，可编辑 JSON 配置并手动保存。</p>
+                    </div>
+                    <div class="resource-header-actions">
+                        <button id="communication-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
+                    </div>
+                </header>
+
+                <div class="resource-layout full-list-layout">
+                    <aside class="resource-list-panel communication-list-panel full-width-panel">
+                        <div class="resource-controls">
+                            <div id="communication-bridge-summary" class="communication-bridge-summary"></div>
+                        </div>
+                        <div id="communication-list" class="resource-list communication-list"></div>
+                    </aside>
+
+                    <div id="communication-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+                    <section class="resource-detail-panel communication-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="communication-detail-title" tabindex="-1">
+                        <div id="communication-detail-empty" class="empty-state resource-empty">请选择一个通信方式查看或编辑配置。</div>
+                        <div id="communication-detail-content" class="resource-detail-shell"></div>
+                    </section>
                 </div>
             </section>
             <section id="view-task-details" class="view-section" style="display: none;">

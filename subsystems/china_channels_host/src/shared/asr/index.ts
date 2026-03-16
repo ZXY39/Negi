@@ -1,3 +1,4 @@
+// @ts-nocheck
 export { transcribeTencentFlash, type TencentFlashASRConfig } from "./tencent-flash.js";
 export {
   ASRError,

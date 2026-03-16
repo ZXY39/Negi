@@ -104,11 +104,11 @@ class ChinaBridgeTransport:
                 if not text_payload:
                     return
                 if kind in {"tool", "tool_plan", "tool_result", "tool_error"}:
-                    if not bool(getattr(self._app_config.channels, "send_tool_hints", False)):
+                    if not bool(getattr(self._app_config.china_bridge, "send_tool_hints", False)):
                         return
                     mode = "tool_hint"
                 else:
-                    if not bool(getattr(self._app_config.channels, "send_progress", True)):
+                    if not bool(getattr(self._app_config.china_bridge, "send_progress", True)):
                         return
                     mode = "progress"
                 await self._emit(
@@ -159,3 +159,30 @@ class ChinaBridgeTransport:
         result = self._sender(payload)
         if asyncio.iscoroutine(result):
             await result
+
+    async def send_outbound(self, msg) -> None:
+        account_id = str((msg.metadata or {}).get("_china_account_id") or "default").strip() or "default"
+        peer_kind = str((msg.metadata or {}).get("_china_peer_kind") or "user").strip() or "user"
+        peer_id = str((msg.metadata or {}).get("_china_peer_id") or msg.chat_id or "").strip()
+        if not peer_id:
+            return
+        mode = "tool_hint" if bool((msg.metadata or {}).get("_tool_hint")) else ("progress" if bool((msg.metadata or {}).get("_progress")) else "final")
+        await self._emit(
+            build_deliver_frame(
+                event_id=str((msg.metadata or {}).get("_china_event_id") or uuid.uuid4().hex),
+                delivery_id=uuid.uuid4().hex,
+                channel=str(msg.channel or ""),
+                account_id=account_id,
+                target_kind=peer_kind,
+                target_id=peer_id,
+                text=str(msg.content or ""),
+                mode=mode,
+                reply_to=str(msg.reply_to or (msg.metadata or {}).get("message_id") or "").strip() or None,
+                metadata={
+                    "session_key": str((msg.metadata or {}).get("session_key") or ""),
+                    "task_id": str((msg.metadata or {}).get("task_id") or ""),
+                    "progress": bool((msg.metadata or {}).get("_progress")),
+                    "tool_hint": bool((msg.metadata or {}).get("_tool_hint")),
+                },
+            )
+        )

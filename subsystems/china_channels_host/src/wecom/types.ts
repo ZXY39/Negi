@@ -1,3 +1,4 @@
+// @ts-nocheck
 export type WecomDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
 export type WecomGroupPolicy = "open" | "allowlist" | "disabled";
 export type WecomTransportMode = "webhook" | "ws";

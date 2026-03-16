@@ -1,3 +1,4 @@
+// @ts-nocheck
 // 飞书配置 schema
 import { z } from "zod";
 

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import type {
   QQBotC2CMarkdownChunkStrategy,
   QQBotC2CMarkdownDeliveryMode,

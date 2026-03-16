@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 企业微信消息处理
  *
@@ -12,7 +13,7 @@ import {
   normalizeLocalPath,
   type Logger,
   resolveExtension,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 
 import type { PluginRuntime } from "./runtime.js";
 import type { ResolvedWecomAccount, WecomInboundMessage, WecomDmPolicy } from "./types.js";

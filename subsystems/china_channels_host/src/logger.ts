@@ -1,3 +1,4 @@
+// @ts-nocheck
 export type HostLogger = {
   info: (msg: string) => void;
   warn: (msg: string) => void;

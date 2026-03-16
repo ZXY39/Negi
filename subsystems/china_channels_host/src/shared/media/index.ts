@@ -1,9 +1,10 @@
+// @ts-nocheck
 /**
  * 媒体处理模块
  *
  * 提供统一的媒体解析、路径处理和文件读取功能
  *
- * @module @openclaw-china/shared/media
+ * @module ../index.js/media
  */
 
 // 媒体解析

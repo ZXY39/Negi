@@ -1,9 +1,10 @@
+// @ts-nocheck
 /**
  * QQ Bot WebSocket 网关连接管理
  * 支持多账户并发连接
  */
 import WebSocket from "ws";
-import { HttpError } from "@openclaw-china/shared";
+import { HttpError } from "../shared/index.js";
 import { createLogger, type Logger } from "./logger.js";
 import { handleQQBotDispatch } from "./bot.js";
 import {

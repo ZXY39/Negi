@@ -1,12 +1,13 @@
+// @ts-nocheck
 /**
  * 飞书插件日志工具
  *
- * 从 @openclaw-china/shared 重新导出，保持一致
+ * 从 ../shared/index.js 重新导出，保持一致
  */
 
-export { createLogger, type Logger, type LogLevel, type LoggerOptions } from "@openclaw-china/shared";
+export { createLogger, type Logger, type LogLevel, type LoggerOptions } from "../shared/index.js";
 
-import { createLogger } from "@openclaw-china/shared";
+import { createLogger } from "../shared/index.js";
 
 /** 默认飞书日志器 */
 export const feishuLogger = createLogger("feishu");

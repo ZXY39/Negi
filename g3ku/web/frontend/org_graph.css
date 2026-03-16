@@ -1596,15 +1596,50 @@ textarea {
 
 .llm-page-layout {
     display: grid;
-    grid-template-columns: minmax(280px, 340px) minmax(420px, 1fr) minmax(300px, 360px);
-    gap: var(--space-4);
+    grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+    gap: var(--space-6);
+    padding: var(--space-6) var(--space-8);
+    min-height: calc(100vh - 120px);
     align-items: start;
 }
 
 .llm-bindings-panel,
-.llm-editor-panel,
 .llm-routes-panel {
+    display: flex;
+    flex-direction: column;
     min-height: 72vh;
+    min-width: 0;
+}
+
+.llm-bindings-panel {
+    min-width: min(340px, 100%);
+}
+
+.llm-editor-panel {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: min(1120px, calc(100vw - 48px));
+    max-height: calc(100dvh - 48px);
+    min-height: 0;
+    transform: translate(-50%, -48%) scale(0.98);
+    opacity: 0;
+    pointer-events: none;
+    overflow: hidden;
+    padding: 0 !important;
+    z-index: 96;
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.llm-editor-panel.is-open {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, -50%) scale(1);
+}
+
+.llm-routes-panel {
+    min-width: 0;
+    width: auto;
 }
 
 .llm-bindings-panel,
@@ -1631,6 +1666,10 @@ textarea {
 
 .llm-side-card {
     padding: var(--space-4);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 
 .llm-memory-shell,
@@ -1639,6 +1678,18 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.llm-editor-panel .resource-detail-shell {
+    padding: 0 !important;
+    overflow: hidden;
+}
+
+.llm-editor-panel .resource-empty {
+    display: none !important;
 }
 
 .llm-binding-card {
@@ -1713,8 +1764,8 @@ textarea {
 
 .llm-form-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-3);
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: var(--space-4);
 }
 
 .llm-form-grid.single {
@@ -2601,6 +2652,152 @@ textarea {
     color: var(--text-secondary);
     line-height: 1.6;
     white-space: pre-wrap;
+}
+
+.communication-summary-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 18px;
+    border-radius: 18px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 74%, transparent);
+    box-shadow: var(--shadow-sm);
+}
+
+.communication-summary-head,
+.communication-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.communication-summary-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+}
+
+.communication-summary-meta span {
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-panel) 40%, var(--bg-app));
+    border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+}
+
+.communication-list {
+    align-content: start;
+}
+
+.communication-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.communication-detail-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.communication-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.communication-section-head h3 {
+    margin: 0;
+}
+
+.communication-section-spacer {
+    flex: 1 1 auto;
+}
+
+.communication-json-editor {
+    min-height: 360px;
+    font-family: "Fira Code", "Consolas", "SFMono-Regular", ui-monospace, monospace;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    white-space: pre;
+    tab-size: 2;
+}
+
+.communication-toggle {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 16px;
+    border-radius: 18px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 74%, transparent);
+}
+
+.communication-toggle input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.communication-toggle-track {
+    position: relative;
+    width: 52px;
+    height: 30px;
+    border-radius: 999px;
+    flex-shrink: 0;
+    background: color-mix(in srgb, var(--border-color) 80%, var(--bg-app));
+    border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+    transition: background-color 0.22s ease, border-color 0.22s ease;
+}
+
+.communication-toggle-track::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 22px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-sm);
+    transition: transform 0.22s ease;
+}
+
+.communication-toggle input:checked + .communication-toggle-track {
+    background: color-mix(in srgb, var(--brand-primary) 78%, #0ea5e9 22%);
+    border-color: transparent;
+}
+
+.communication-toggle input:checked + .communication-toggle-track::after {
+    transform: translateX(22px);
+}
+
+.communication-toggle-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.communication-toggle-copy strong {
+    color: var(--text-primary);
+    font-size: 0.95rem;
+}
+
+.communication-toggle-copy span {
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+}
+
+@media (max-width: 960px) {
+    .communication-detail-meta {
+        grid-template-columns: minmax(0, 1fr);
+    }
 }
 
 .resource-disclosure {
@@ -3580,4 +3777,38 @@ textarea {
 #artifact-content {
     white-space: pre-wrap;
     min-height: 120px;
+}
+
+.llm-bindings-panel,
+.llm-routes-panel {
+    overflow: hidden;
+}
+
+.model-shared-list {
+    min-height: 0;
+    max-height: calc(100dvh - 320px);
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.model-routing-grid {
+    min-height: 0;
+}
+
+.model-chain-card {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.model-role-section {
+    flex: 1;
+    min-height: 0;
+}
+
+.model-chain-list {
+    min-height: 0;
+    max-height: min(42dvh, 420px);
+    overflow-y: auto;
+    padding-right: 4px;
 }

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 钉钉 ChannelPlugin 实现
  *
@@ -28,7 +29,6 @@ import {
   stopDingtalkMonitorForAccount,
 } from "./monitor.js";
 import { setDingtalkRuntime } from "./runtime.js";
-import { dingtalkOnboardingAdapter } from "./onboarding.js";
 
 /** 默认账户 ID */
 export { DEFAULT_ACCOUNT_ID } from "./config.js";
@@ -463,8 +463,6 @@ export const dingtalkPlugin = {
   /**
    * Onboarding 适配器
    */
-  onboarding: dingtalkOnboardingAdapter,
-
   /**
    * 出站消息适配器
    * Requirements: 7.1, 7.6

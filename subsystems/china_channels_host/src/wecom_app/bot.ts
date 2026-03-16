@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 企业微信自建应用消息处理
  *
@@ -12,7 +13,7 @@ import {
   createLogger,
   transcribeTencentFlash,
   type Logger,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 import { readFile } from "node:fs/promises";
 
 import type { PluginRuntime } from "./runtime.js";

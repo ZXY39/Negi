@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from g3ku.bus.queue import MessageBus
-    from g3ku.config.schema import ChannelsConfig, MultiAgentConfig, ResourceRuntimeConfig
+    from g3ku.config.schema import ChinaBridgeConfig, MultiAgentConfig, ResourceRuntimeConfig
     from g3ku.cron.service import CronService
 
 
@@ -41,7 +41,7 @@ class AgentLoop(AgentRuntimeEngine):
         app_config: Any | None = None,
         cron_service: 'CronService | None' = None,
         session_manager: SessionManager | None = None,
-        channels_config: 'ChannelsConfig | None' = None,
+        channels_config: 'ChinaBridgeConfig | None' = None,
         debug_mode: bool = False,
         middlewares: list[Any] | None = None,
     ) -> None:

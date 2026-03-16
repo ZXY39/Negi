@@ -255,7 +255,7 @@ def onboard(
     console.print("  2. Chat: [cyan]g3ku agent -m \"Hello!\"[/cyan]")
     if project:
         console.print("  3. Commit [cyan].g3ku/config.json[/cyan] and [cyan]memory/[/cyan] for cross-machine sync")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/g3ku#-chat-apps[/dim]")
+    console.print("\n[dim]Need QQ / 钉钉 / 企微 / 飞书接入？使用 `g3ku china-bridge doctor` 检查子系统状态。[/dim]")
 
 def _make_provider(config: Config, *, scope: str = "ceo"):
     """Create the configured BaseChatModel for a runtime scope."""
@@ -412,7 +412,7 @@ def _make_agent_loop(
         resource_config=config.resources,
         cron_service=cron_service,
         session_manager=session_manager,
-        channels_config=config.channels,
+        channels_config=config.china_bridge,
         debug_mode=debug_mode,
         middlewares=middlewares,
     )
@@ -506,18 +506,7 @@ def agent(
     )
 
 
-# ============================================================================
-# Channel Commands
-# ============================================================================
-
-
-from g3ku.shells.channels_cli import build_channels_app
-
-channels_app = build_channels_app(console, _logo())
-app.add_typer(channels_app, name="channels")
-
-
-china_bridge_app = typer.Typer(help="Manage the china channels bridge")
+china_bridge_app = typer.Typer(help="Manage the China communication subsystem")
 app.add_typer(china_bridge_app, name="china-bridge")
 
 
@@ -559,7 +548,7 @@ def china_bridge_doctor():
     table.add_row("public_port", "ok", str(config.china_bridge.public_port))
     table.add_row("control_port", "ok", str(config.china_bridge.control_port))
     for channel_name in ("qqbot", "dingtalk", "wecom", "wecom_app", "feishu_china"):
-        payload = getattr(config.channels, channel_name)
+        payload = getattr(config.china_bridge.channels, channel_name)
         table.add_row(f"channel:{channel_name}", "ok" if payload.enabled else "warn", str(payload.enabled))
     console.print(table)
 

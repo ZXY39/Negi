@@ -1,5 +1,5 @@
 {
-  "generation": 3,
+  "generation": 4,
   "tools": [
     {
       "name": "agent_browser",
@@ -15,7 +15,7 @@
       "busy": false,
       "pendingDelete": false,
       "warnings": [
-        "missing toolskills/SKILL.md: D:\\projects\\G3KU\\tools\\create_async_task_cn"
+        "missing toolskills/SKILL.md: tools\\create_async_task_cn"
       ],
       "errors": []
     },
@@ -97,7 +97,7 @@
       "busy": false,
       "pendingDelete": false,
       "warnings": [
-        "missing toolskills/SKILL.md: D:\\projects\\G3KU\\tools\\task_fetch_cn"
+        "missing toolskills/SKILL.md: tools\\task_fetch_cn"
       ],
       "errors": []
     },
@@ -107,7 +107,7 @@
       "busy": false,
       "pendingDelete": false,
       "warnings": [
-        "missing toolskills/SKILL.md: D:\\projects\\G3KU\\tools\\task_progress_cn"
+        "missing toolskills/SKILL.md: tools\\task_progress_cn"
       ],
       "errors": []
     },
@@ -117,7 +117,7 @@
       "busy": false,
       "pendingDelete": false,
       "warnings": [
-        "missing toolskills/SKILL.md: D:\\projects\\G3KU\\tools\\task_summary_cn"
+        "missing toolskills/SKILL.md: tools\\task_summary_cn"
       ],
       "errors": []
     }
@@ -173,6 +173,14 @@
       "warnings": [
         "missing required bins"
       ],
+      "errors": []
+    },
+    {
+      "name": "update-tool",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
       "errors": []
     },
     {

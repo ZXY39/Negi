@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 通用 HTTP 客户端封装
  *

@@ -18,6 +18,19 @@ class DiscoveryResult:
 
 
 class ResourceRegistry:
+    _FINGERPRINT_IGNORED_DIRS = frozenset({
+        "__pycache__",
+        "node_modules",
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "env",
+        ".pytest_cache",
+        ".ruff_cache",
+    })
+
     def __init__(self, workspace: Path, *, skills_dir: Path, tools_dir: Path, manifest_name: str = "resource.yaml"):
         self.workspace = Path(workspace)
         self.skills_dir = Path(skills_dir)
@@ -196,10 +209,20 @@ class ResourceRegistry:
     @staticmethod
     def _tree_fingerprint(root: Path) -> str:
         digest = hashlib.sha256()
-        for path in sorted(root.rglob("*")):
-            if path.is_dir() or "__pycache__" in path.parts:
-                continue
-            rel = path.relative_to(root).as_posix()
+        files: list[tuple[str, Path]] = []
+        for current, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if name not in ResourceRegistry._FINGERPRINT_IGNORED_DIRS
+            )
+            current_path = Path(current)
+            rel_base = current_path.relative_to(root)
+            for filename in sorted(filenames):
+                path = current_path / filename
+                rel = (rel_base / filename).as_posix() if str(rel_base) != "." else filename
+                files.append((rel, path))
+        for rel, path in files:
             stat = path.stat()
             digest.update(rel.encode("utf-8"))
             digest.update(str(stat.st_mtime_ns).encode("utf-8"))

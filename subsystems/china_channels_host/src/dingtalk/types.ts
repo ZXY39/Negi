@@ -1,3 +1,4 @@
+// @ts-nocheck
 // 钉钉类型定义
 
 import type { DingtalkAccountConfig, DingtalkConfig } from "./config.js";

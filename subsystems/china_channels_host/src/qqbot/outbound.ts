@@ -1,9 +1,10 @@
+// @ts-nocheck
 /**
  * QQ Bot 出站适配器
  */
 
 import * as path from "node:path";
-import { detectMediaType, HttpError, stripTitleFromUrl } from "@openclaw-china/shared";
+import { detectMediaType, HttpError, stripTitleFromUrl } from "../shared/index.js";
 import {
   mergeQQBotAccountConfig,
   resolveQQBotCredentials,

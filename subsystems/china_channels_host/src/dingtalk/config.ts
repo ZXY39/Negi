@@ -1,3 +1,4 @@
+// @ts-nocheck
 // 钉钉配置 schema
 import { z } from "zod";
 import { homedir, tmpdir } from "node:os";

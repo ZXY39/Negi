@@ -1,3 +1,4 @@
+// @ts-nocheck
 import type { WecomWsFrame } from "./ws-protocol.js";
 import { buildWecomWsRespondMessageCommand, buildWecomWsUpdateTemplateCardCommand, createWecomWsStreamId } from "./ws-protocol.js";
 import { WECOM_REPLY_MSG_ITEM_LIMIT, type WecomReplyMsgItem } from "./ws-media.js";

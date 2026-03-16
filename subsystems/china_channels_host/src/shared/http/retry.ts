@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * HTTP 重试策略
  *

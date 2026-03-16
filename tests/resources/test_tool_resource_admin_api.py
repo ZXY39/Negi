@@ -225,7 +225,6 @@ def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
     (workspace / '.g3ku' / 'config.json').write_text(
         json.dumps({
             'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'multiAgent': {'orchestratorModelKey': None}},
-            'channels': {'sendProgress': True, 'sendToolHints': True},
             'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': '', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
             'providers': {},
             'gateway': {'host': '127.0.0.1', 'port': 1, 'heartbeat': {'enabled': True, 'intervalS': 1}},
@@ -261,6 +260,110 @@ def test_admin_memory_trace_endpoints_return_payload():
     assembly = client.get('/api/memory/context-assembly-traces?limit=2')
     assert assembly.status_code == 200
     assert assembly.json()['items'][0]['trace_kind'] == 'context_assembly'
+
+
+def _write_runtime_config(workspace: Path) -> None:
+    (workspace / '.g3ku').mkdir(parents=True, exist_ok=True)
+    (workspace / '.g3ku' / 'config.json').write_text(
+        json.dumps({
+            'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'multiAgent': {'orchestratorModelKey': None}},
+            'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': 'demo-key', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
+            'providers': {'openai': {'apiKey': '', 'apiBase': None, 'extraHeaders': None}},
+            'gateway': {'host': '127.0.0.1', 'port': 1, 'heartbeat': {'enabled': True, 'intervalS': 1}},
+            'toolSecrets': {},
+            'resources': {'enabled': True, 'skillsDir': 'skills', 'toolsDir': 'tools', 'manifestName': 'resource.yaml', 'reload': {'enabled': True, 'pollIntervalMs': 1000, 'debounceMs': 400, 'lazyReloadOnAccess': True, 'keepLastGoodVersion': True}, 'locks': {'lockDir': '.g3ku/resource-locks', 'logicalDeleteGuard': True, 'windowsFsLock': True}, 'statePath': '.g3ku/resources.state.json'},
+            'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4},
+            'chinaBridge': {
+                'enabled': False,
+                'bindHost': '0.0.0.0',
+                'publicPort': 18889,
+                'controlHost': '127.0.0.1',
+                'controlPort': 18989,
+                'controlToken': '',
+                'autoStart': True,
+                'nodeBin': 'node',
+                'npmClient': 'pnpm',
+                'stateDir': '.g3ku/china-bridge',
+                'logLevel': 'info',
+                'sendProgress': True,
+                'sendToolHints': False,
+                'channels': {
+                    'qqbot': {'enabled': False, 'accounts': {}},
+                    'dingtalk': {'enabled': False, 'accounts': {}},
+                    'wecom': {'enabled': False, 'accounts': {}},
+                    'wecomApp': {'enabled': False, 'accounts': {}},
+                    'feishuChina': {'enabled': False, 'accounts': {}},
+                },
+            },
+        }),
+        encoding='utf-8',
+    )
+
+
+def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.get('/api/china-bridge/channels')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert [item['id'] for item in payload['items']] == ['qqbot', 'dingtalk', 'wecom', 'wecomApp', 'feishuChina']
+
+
+def test_china_bridge_channel_save_updates_config_file(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/china-bridge/channels/qqbot',
+        json={'enabled': True, 'config': {'appId': '123456', 'clientSecret': 'demo-secret', 'accounts': {'default': {'token': 'demo-token'}}}},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['item']['enabled'] is True
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['chinaBridge']['enabled'] is True
+    assert saved['chinaBridge']['channels']['qqbot']['enabled'] is True
+    assert saved['chinaBridge']['channels']['qqbot']['appId'] == '123456'
+
+
+def test_china_bridge_channel_test_reports_disabled_or_validated(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    disabled = client.post('/api/china-bridge/channels/qqbot/test')
+    assert disabled.status_code == 200
+    assert disabled.json()['result']['status'] == 'disabled'
+
+    client.put(
+        '/api/china-bridge/channels/qqbot',
+        json={'enabled': True, 'config': {'appId': '123456', 'clientSecret': 'demo-secret'}},
+    )
+    validated = client.post('/api/china-bridge/channels/qqbot/test')
+
+    assert validated.status_code == 200
+    assert validated.json()['result']['status'] in {'success', 'warning'}
 
 
 @pytest.mark.asyncio

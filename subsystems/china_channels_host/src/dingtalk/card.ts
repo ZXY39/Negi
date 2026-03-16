@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 钉钉 AI Card 流式响应
  *

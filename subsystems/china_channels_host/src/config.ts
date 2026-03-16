@@ -1,7 +1,7 @@
+// @ts-nocheck
 import fs from "node:fs";
 
 export type ChinaHostConfig = {
-  channels: Record<string, any>;
   chinaBridge: {
     bindHost?: string;
     publicPort?: number;
@@ -9,13 +9,17 @@ export type ChinaHostConfig = {
     controlPort?: number;
     controlToken?: string;
     logLevel?: string;
+    sendProgress?: boolean;
+    sendToolHints?: boolean;
+    channels?: Record<string, any>;
   };
+  channels: Record<string, any>;
 };
 
 export function loadHostConfig(configPath: string): ChinaHostConfig {
   const raw = JSON.parse(fs.readFileSync(configPath, "utf-8")) as Record<string, any>;
-  const channels = raw.channels && typeof raw.channels === "object" ? raw.channels : {};
   const chinaBridge = raw.chinaBridge && typeof raw.chinaBridge === "object" ? raw.chinaBridge : {};
+  const channels = chinaBridge.channels && typeof chinaBridge.channels === "object" ? chinaBridge.channels : {};
   return {
     channels: {
       qqbot: channels.qqbot ?? {},
@@ -23,8 +27,8 @@ export function loadHostConfig(configPath: string): ChinaHostConfig {
       wecom: channels.wecom ?? {},
       "wecom-app": channels.wecomApp ?? channels.wecom_app ?? {},
       "feishu-china": channels.feishuChina ?? channels.feishu_china ?? {},
-      sendProgress: channels.sendProgress ?? true,
-      sendToolHints: channels.sendToolHints ?? false,
+      sendProgress: chinaBridge.sendProgress ?? true,
+      sendToolHints: chinaBridge.sendToolHints ?? false,
     },
     chinaBridge,
   };

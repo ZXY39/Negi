@@ -32,14 +32,24 @@
       "updated_at": "2026-03-15T18:24:28.557278Z"
     },
     {
-      "config_id": "3c56395846c74ce6a19d67bbc9402714",
+      "config_id": "a6eaf7a0e897417e9279c97e96cd27de",
       "provider_id": "responses",
       "display_name": "OpenAI Responses",
       "capability": "chat",
       "default_model": "gpt-5.4",
-      "last_probe_status": null,
-      "created_at": "2026-03-15T18:27:50.639331Z",
-      "updated_at": "2026-03-15T18:27:50.639331Z"
+      "last_probe_status": "success",
+      "created_at": "2026-03-16T06:29:22.645028Z",
+      "updated_at": "2026-03-16T06:29:22.645028Z"
+    },
+    {
+      "config_id": "02c6b3b82195430ea3a7c52f6d8b2c76",
+      "provider_id": "responses",
+      "display_name": "OpenAI Responses",
+      "capability": "chat",
+      "default_model": "gpt-5.2",
+      "last_probe_status": "success",
+      "created_at": "2026-03-16T06:51:58.823305Z",
+      "updated_at": "2026-03-16T06:51:58.823305Z"
     }
   ]
 }

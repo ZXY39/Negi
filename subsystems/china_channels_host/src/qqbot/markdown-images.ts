@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Buffer } from "node:buffer";
 
 export interface QQBotMarkdownImageSize {

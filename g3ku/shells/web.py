@@ -64,7 +64,7 @@ def get_agent() -> AgentLoop:
             multi_agent_config=config.agents.multi_agent,
             app_config=config,
             resource_config=config.resources,
-            channels_config=config.channels,
+            channels_config=config.china_bridge,
             debug_mode=debug_mode,
             middlewares=middlewares,
         )

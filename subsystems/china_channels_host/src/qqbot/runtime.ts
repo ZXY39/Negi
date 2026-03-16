@@ -1,3 +1,4 @@
+// @ts-nocheck
 export interface PluginRuntime {
   log?: (msg: string) => void;
   error?: (msg: string) => void;

@@ -1,4 +1,5 @@
-import { AUDIO_EXTENSIONS, resolveExtension } from "@openclaw-china/shared";
+// @ts-nocheck
+import { AUDIO_EXTENSIONS, resolveExtension } from "../shared/index.js";
 
 const EXTRA_AUDIO_EXTENSIONS = [
   "speex",

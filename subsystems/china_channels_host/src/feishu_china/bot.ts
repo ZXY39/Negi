@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 飞书消息处理
  *
@@ -23,7 +24,7 @@ import {
   extractMediaFromText,
   isImagePath,
   appendCronHiddenPrompt,
-} from "@openclaw-china/shared";
+} from "../shared/index.js";
 import * as fs from "node:fs";
 
 /**

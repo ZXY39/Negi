@@ -7,6 +7,7 @@ import textwrap
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from types import MethodType
 
 import pytest
 
@@ -108,6 +109,36 @@ def _write_demo_tool(root: Path, *, name: str = 'demo_echo', guide: str = 'Demo 
         encoding='utf-8',
     )
     return tool_root
+
+
+def _write_demo_skill(root: Path, *, name: str = 'demo_skill', guide: str = 'Demo skill guide') -> Path:
+    skill_root = root / 'skills' / name
+    skill_root.mkdir(parents=True, exist_ok=True)
+    (skill_root / 'resource.yaml').write_text(
+        textwrap.dedent(
+            f"""\
+            schema_version: 1
+            kind: skill
+            name: {name}
+            description: Demo skill for resource smoke tests.
+            trigger:
+              keywords: []
+            requires:
+              tools: []
+              bins: []
+              env: []
+            exposure:
+              agent: true
+              main_runtime: true
+            """
+        ),
+        encoding='utf-8',
+    )
+    (skill_root / 'SKILL.md').write_text(
+        f"# {name}\n\n{guide}\n",
+        encoding='utf-8',
+    )
+    return skill_root
 
 
 class _VisibleToolService:
@@ -375,3 +406,115 @@ def test_resource_loader_injects_tool_secrets(tmp_path: Path):
 
     assert runtime.tool_settings == {'restrict_to_workspace': False}
     assert runtime.tool_secrets == {'token': 'demo-secret'}
+
+
+def test_load_context_bodies_skip_release_reload(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+    _write_demo_skill(workspace)
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.start()
+
+    triggers: list[str] = []
+    original_reload_now = manager.reload_now
+
+    def _tracked_reload(self, *, trigger: str = 'manual'):
+        triggers.append(trigger)
+        return original_reload_now(trigger=trigger)
+
+    manager.reload_now = MethodType(_tracked_reload, manager)
+
+    try:
+        tool_body = manager.load_toolskill_body('exec')
+        skill_body = manager.load_skill_body('demo_skill')
+
+        assert '# exec' in tool_body
+        assert 'Demo skill guide' in skill_body
+        assert triggers == []
+
+        with manager.acquire_tool('exec'):
+            pass
+        with manager.acquire_skill('demo_skill'):
+            pass
+
+        assert triggers == ['release', 'release']
+    finally:
+        manager.close()
+
+
+def test_tree_fingerprint_ignores_node_modules(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    tool_root = workspace / 'tools' / 'demo_node_tool'
+    (tool_root / 'main').mkdir(parents=True, exist_ok=True)
+    (tool_root / 'toolskills').mkdir(parents=True, exist_ok=True)
+    (tool_root / 'node_modules' / 'demo-package').mkdir(parents=True, exist_ok=True)
+
+    (tool_root / 'resource.yaml').write_text(
+        textwrap.dedent(
+            """\
+            schema_version: 1
+            kind: tool
+            name: demo_node_tool
+            description: Demo tool with vendored node modules.
+            protocol: mcp
+            mcp:
+              transport: embedded
+            requires:
+              tools: []
+              bins: []
+              env: []
+            permissions:
+              network: false
+              filesystem: []
+            parameters:
+              type: object
+              properties: {}
+              required: []
+            exposure:
+              agent: true
+              main_runtime: true
+            toolskill:
+              enabled: true
+            """
+        ),
+        encoding='utf-8',
+    )
+    (tool_root / 'main' / 'tool.py').write_text(
+        textwrap.dedent(
+            """\
+            async def execute(**kwargs):
+                return 'ok'
+            """
+        ),
+        encoding='utf-8',
+    )
+    (tool_root / 'toolskills' / 'SKILL.md').write_text('# demo_node_tool\n', encoding='utf-8')
+    node_dep = tool_root / 'node_modules' / 'demo-package' / 'index.js'
+    node_dep.write_text('module.exports = 1;\n', encoding='utf-8')
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    first = registry.discover().tools['demo_node_tool'].fingerprint
+
+    time.sleep(0.05)
+    node_dep.write_text('module.exports = 2;\n', encoding='utf-8')
+    second = registry.discover().tools['demo_node_tool'].fingerprint
+
+    time.sleep(0.05)
+    tool_py = tool_root / 'main' / 'tool.py'
+    tool_py.write_text(
+        textwrap.dedent(
+            """\
+            async def execute(**kwargs):
+                return 'updated'
+            """
+        ),
+        encoding='utf-8',
+    )
+    third = registry.discover().tools['demo_node_tool'].fingerprint
+
+    assert second == first
+    assert third != second
