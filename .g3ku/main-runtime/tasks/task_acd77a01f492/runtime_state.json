@@ -1,0 +1,497 @@
+{
+  "task_id": "task:acd77a01f492",
+  "root_node_id": "node:65eadd69bfa4",
+  "updated_at": "2026-03-17T00:57:53+08:00",
+  "paused": false,
+  "pause_requested": false,
+  "cancel_requested": false,
+  "active_node_ids": [
+    "node:65eadd69bfa4"
+  ],
+  "runnable_node_ids": [
+    "node:65eadd69bfa4"
+  ],
+  "waiting_node_ids": [],
+  "frames": [
+    {
+      "node_id": "node:65eadd69bfa4",
+      "depth": 0,
+      "node_kind": "execution",
+      "phase": "waiting_tool_results",
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是一个以 ReAct + 工具调用模式运行的执行节点 (execution node)。\n\n规则：\n- 用户消息包含 JSON 格式的节点上下文。\n- 当工具能帮助你完成节点目标时，请使用工具。\n- 只有当工具列表中确实存在 `spawn_child_nodes` 时，才允许调用它。\n- 如果已经达到节点深度限制，你必须在本地完成任务而不得委派。\n- 严禁泄露隐藏的思维链。\n- 你的最终回复必须是一个精确符合以下形状的单 JSON 对象：\n  {\"status\":\"success\"|\"failed\",\"output\":\"...\"}\n- 不要用 Markdown 代码块包裹最终的 JSON。\n\n\n\n# Retrieved Context (Layered)\n- [skill:skill:add-tool] add-tool\n  L1: Title: add-tool\nSummary: 新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时使用。适用于内置工具与外置工具双模式注册，重点覆盖 `tool_type`、`install_dir`、`resource.yaml`、`toolskills/SKILL.md`、安装/更新流程与删除安全原则。\nKey Points: 添加工具 | 当任务是新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时，使用本规范。 | 本仓库现在区分两类工具： | - `internal`：工具本体位于 `tools/<tool_id>/main/`，可直接进入函数工具列表。 | - `external`：第三方项目安装在 `tools/` 之外，`tools/<tool_id>/` 只负责注册，不包含 `main/`。 | 目标 | - 统一注册入口仍然是 `tools/<tool_id>/`。 | - `resource.yaml` 必须明确工具类型、来源、版本、参数、权限、治理和安装位置。 | - 第三方且需要接收上游更新的工具，默认走 `external`，不要把上游项目继续塞进 `tools/<tool_id>/main/`。 | - `toolskills/SKILL.md` 除了说明如何使用，还必须说明如何安装、如何更新。 | 标准目录 | 内置工具\n  L2: # 添加工具 当任务是新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时，使用本规范。 本仓库现在区分两类工具： - `internal`：工具本体位于 `tools/<tool_id>/main/`，可直接进入函数工具列表。 - `external`：第三方项目安装在 `tools/` 之外，`tools/<tool_id>/` 只负责注册，不包含 `main/`。 ## 目标 - 统一注册入口仍然是 `tools/<tool_id>/`。 - `resource.yaml` 必须明确工具类型、来源、版本、参数、权限、治理和安装位置。 - 第三方且需要接收上游更新的工具，默认走 `external`，不要把上游项目继续塞进 `tools/<tool_id>/main/`。 - `toolskills/SKILL.md` 除了说明如何使用，还必须说明如何安装、如何更新。 ## 标准目录 ### 内置工具 ```text tools/ <tool_id>/ resource.yaml main/ tool.py. toolskills/ SKILL.md \n- [skill:skill:skill-creator] skill-creator\n  L1: Title: skill-creator\nSummary: 面向 G3KU 创建、更新、迁移和校验 `skills/` 与 `tools/` 资源；提供两条明确工作流：一条用于创建 `skills/<skill_id>/`，一条用于接入 `tools/<tool_id>/`。也可把工作流描述、代码、文档、链接、PDF 或现有 skill/tool 转成适配 G3KU 的 skill 或 tool，并在需要时生成可导出的开放标准 SKILL.md 技能。适用于创建 skill、接入 tool、封装现有 CLI 或仓库、自动化重复流程、设计多 agent skill 套件、校验或导出 skill。\nKey Points: Skill Creator | 为 G3KU 创建、更新、迁移、校验与导出 skill / tool 资源。先判断任务属于“创建 skill”还是“接入 tool”，再按对应中文工作流执行。 | 使用原则 | - 先读完用户给出的流程、代码、文档、链接、PDF、示例输入输出和约束，再开始设计。 | - 默认优先产出 **G3KU 本地资源**；只有用户明确需要跨平台分发时，才追加开放标准 `SKILL.md` 技能。 | - 主 `SKILL.md` 只保留入口、分流规则和关键决策；细节步骤、模板和检查项放到 `references/`。 | - 能复用已有脚本、示例和上游资料就复用，不要重复造轮子。 | 先分流 | 路线 A：创建 ski...\n  L2: # Skill Creator 为 G3KU 创建、更新、迁移、校验与导出 skill / tool 资源。先判断任务属于“创建 skill”还是“接入 tool”，再按对应中文工作流执行。 ## 使用原则 - 先读完用户给出的流程、代码、文档、链接、PDF、示例输入输出和约束，再开始设计。 - 默认优先产出 **G3KU 本地资源**；只有用户明确需要跨平台分发时，才追加开放标准 `SKILL.md` 技能。 - 主 `SKILL.md` 只保留入口、分流规则和关键决策；细节步骤、模板和检查项放到 `references/`。 - 能复用已有脚本、示例和上游资料就复用，不要重复造轮子。 ## 先分流 ### 路线 A：创建 skill 在这些情况走“创建 skill”工作流： - 用户要新增或改造 `skills/<skill_id>/` - 用户要把一个工作流、知识域、操作规范或协作模式做成可复用 skill - 用户给的是文档、流程说明、模板、现有 skill、FAQ、执行清单、最佳实践，而不是一个要直接调用的运行时工具 执行时： 1. 先读 `references/create\n- [skill:skill:update-tool] update-tool\n  L1: Title: update-tool\nSummary: 更新、升级、追踪或审核 `tools/<tool_id>/` 下已有工具时使用。适用于按 `tool_type` 区分内置工具与外置工具，依据 `resource.yaml -> source/current_version/install_dir` 查询上游、执行升级，并同步更新 `toolskills/SKILL.md`、版本说明和治理信息。\nKey Points: 更新工具 | 当任务是升级、同步、追踪或审核 `tools/<tool_id>/` 下已有工具时，使用本规范。 | 更新前先看 `resource.yaml` 里的 `tool_type`，再决定走哪条分支。 | 目标 | - 升级判断来自 `source` 和 `current_version`，不是来自印象。 | - 更新后，代码/安装结果、`resource.yaml`、`toolskills/` 三者必须同步。 | - `external` 工具更新的是外部安装目录，不得偷偷改回 vendored 模式。 | 通用步骤 | 1. 读取： | - `tools/<tool_id>/resource.yaml` | - `tools/<tool_id>/toolskills/SKILL.md` | - `tools/<tool_id>/toolskills/references/`\n- [skill:skill:memory] 双层记忆系统：MEMORY.md 保存长期事实并常驻上下文，HISTORY.md 记录事件日志并通过 grep 检索。\n  L1: 用途：为代理提供长期事实记忆与历史事件回忆。结构：memory/MEMORY.md=长期事实（偏好、项目背景、关系），始终载入上下文；memory/HISTORY.md=仅追加事件日志，默认不载入。使用：查询过去事件时用 exec 运行 grep/grep -iE 搜索 HISTORY.md。更新：发现重要稳定事实时，使用 filesystem 优先 action=edit 精确更新 MEMORY.md，必要时 action=write 重写。范围：负责记忆存储、检索与自动整合，不需手动维护历史压缩。\n- [resource:tool:filesystem] Workspace filesystem tool for reading, listing, modifying, deleting files, or creating reviewable patch artifacts.\n  L1: Usage: access or change workspace files via one tool. Actions: read/list for read-only; write for full overwrite; edit for precise unique-text replacement; delete to remove files; propose_patch to generate a reviewable diff artifact instead of direct changes. Inputs: action, path, plus content or old_text/new_text as needed. Scope: workspace-relative file/dir operations. Common failures: missing path, file/dir mismatch, non-unique old_text, permission limits, missing artifact store for propose_patch.\n- [skill:skill:github] GitHub 技能：使用 gh CLI 与 GitHub 交互，重点覆盖 PR、Actions 运行检查、API 查询与 JSON/JQ 结构化输出。\n  L1: 用途：通过 gh CLI 访问 GitHub 数据与工作流状态。范围：PR 检查、Actions 运行查看、gh api 高级查询、--json/--jq 结构化输出。关键用法：不在 git 目录时始终显式传 --repo owner/repo 或直接用 URL；用 gh pr checks 查看 PR CI；gh run list/view/--log-failed 排查工作流失败；gh api 获取子命令未暴露字段；多数命令支持 --json 并可配合 --jq 过滤。\n- [skill:skill:batch-web-planning] 将宽泛的网页调研需求拆分为 2–8 个可独立执行的具体网页调研工作项。\n  L1: 用途: 把大范围网页调研请求规划成可并行或顺序执行的子任务。输入: 宽泛的研究目标或网页调研需求。输出: 2–8 个独立工作项，每项含简短标签与清晰任务陈述。范围: 仅负责规划与拆分，不执行检索、浏览或结果汇总。约束: 每个工作项必须足够具体，并可在单个 worker 会话中完成。\n- [resource:tool:automation] Automation via cron for reminders, recurring agent-run jobs, and one-time scheduled tasks with optional timezone support."
+        },
+        {
+          "role": "user",
+          "content": "{\n  \"task_id\": \"task:acd77a01f492\",\n  \"node_id\": \"node:65eadd69bfa4\",\n  \"node_kind\": \"execution\",\n  \"depth\": 0,\n  \"can_spawn_children\": true,\n  \"goal\": \"将 GitHub 项目 https://github.com/vercel-labs/agent-browser.git 安装/接入为本仓库中的一个工具资源。按当前可见的 add-tool / skill-creator 工作流处理，先判断适合 external 还是 internal 模式；完成必要的仓库检查、工具资源目录设计、resource.yaml、toolskills/SKILL.md、安装/更新说明，并尽量落地到 workspace 中。若发现现有 tools/agent_browser 已存在，请先审查现状并以新增/迁移/修复的方式处理，避免破坏现有结构。任务完成后给出可复用的使用方式与后续维护建议。\",\n  \"prompt\": \"将 GitHub 项目 https://github.com/vercel-labs/agent-browser.git 安装/接入为本仓库中的一个工具资源。按当前可见的 add-tool / skill-creator 工作流处理，先判断适合 external 还是 internal 模式；完成必要的仓库检查、工具资源目录设计、resource.yaml、toolskills/SKILL.md、安装/更新说明，并尽量落地到 workspace 中。若发现现有 tools/agent_browser 已存在，请先审查现状并以新增/迁移/修复的方式处理，避免破坏现有结构。任务完成后给出可复用的使用方式与后续维护建议。\"\n}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_wWJi2XlXyFlV81wM7sQRm6w5|fc_0ad204dc441d1a5c0169b80a4d6d7881a2a9d35e5c68137cd4",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"list\", \"path\": \"tools\", \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_orbu0Ur6smmbzcfJPMPJfCzN|fc_0ad204dc441d1a5c0169b80a4d6d8481a2b90f779439b9958a",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python - <<'PY'\\nimport os, subprocess, json\\nurl='https://github.com/vercel-labs/agent-browser.git'\\ncmd=['git','ls-remote','--heads','--tags',url]\\nres=subprocess.run(cmd, capture_output=True, text=True)\\nprint(json.dumps({'returncode':res.returncode,'stdout':res.stdout[:4000],'stderr':res.stderr[:1000]}))\\nPY\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_wWJi2XlXyFlV81wM7sQRm6w5|fc_0ad204dc441d1a5c0169b80a4d6d7881a2a9d35e5c68137cd4",
+          "name": "filesystem",
+          "content": "DIR  create_async_task_cn\nDIR  cron\nDIR  exec\nDIR  filesystem\nDIR  load_skill_context\nDIR  load_tool_context\nDIR  memory_runtime\nDIR  memory_search\nDIR  message\nDIR  model_config\nDIR  task_fetch_cn\nDIR  task_progress_cn\nDIR  task_summary_cn"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_orbu0Ur6smmbzcfJPMPJfCzN|fc_0ad204dc441d1a5c0169b80a4d6d8481a2b90f779439b9958a",
+          "name": "exec",
+          "content": "STDERR:\n��ʱ��Ӧ�� <<��\r\n\n\nExit code: 1"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_jby7abNU7SwdV9avfvinPigc|fc_0ad204dc441d1a5c0169b80a53ac2c81a2952cad0287e01947",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"git ls-remote --heads --tags https://github.com/vercel-labs/agent-browser.git | head -n 40\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_jby7abNU7SwdV9avfvinPigc|fc_0ad204dc441d1a5c0169b80a53ac2c81a2952cad0287e01947",
+          "name": "exec",
+          "content": "STDERR:\n'head' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���\r\n���������ļ���\r\n\n\nExit code: 255"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_z7iKYyhjCyvwGudgPlMY2rrQ|fc_0ad204dc441d1a5c0169b80a62204481a29e985d1458915b5d",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"git ls-remote --heads --tags https://github.com/vercel-labs/agent-browser.git\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_z7iKYyhjCyvwGudgPlMY2rrQ|fc_0ad204dc441d1a5c0169b80a62204481a29e985d1458915b5d",
+          "name": "exec",
+          "content": "2e74036582315f5422a9005d563171dac36e60ba\trefs/heads/andrewimm/profiling\n7707a2fa3247540c4ef73e1437b96aac66ca73ce\trefs/heads/changeset-release/main\n3a0e51f4a677766f4f95bef96877c93ab6931e9e\trefs/heads/ctate-fix-build\ne8fcc3574cba8748f9bed858e5d0d3bd7b7c44fd\trefs/heads/ctate/0.4.1\n3bda50cea065c63b0a0302af1bca201d9d1618b2\trefs/heads/ctate/0.4.3\n1cac23b20230c2b39b4a430a950800f9640100cf\trefs/heads/ctate/0.4.4\n8b4f9692193f204e20ab015742f761443b4b8231\trefs/heads/ctate/0.5.0\na208f2802c89f7737786b812ee0a3bff0040f99c\trefs/heads/ctate/0.6.0\ndeb96046228563c0b116ef5d0b2607da1fe45776\trefs/heads/ctate/auth-docs\n4ac434e766e16861ccf490a4a0e57a1ad50dd25f\trefs/heads/ctate/auto-release\n8d4a254064666960628b71d913f24e652d3b4761\trefs/heads/ctate/benchmarks\n7701b3f7e50412ed39a070b34687ae00381d1d04\trefs/heads/ctate/better-ax\nac47ea49abd1c3bcfa049293452746d542872d1b\trefs/heads/ctate/better-chat\n7f2eea867df2803d16e7a139016d914ca72808ae\trefs/heads/ctate/better-sandbox\n42f7f9d7cccd51b47b62253cc6b37ec77dd14cde\trefs/heads/ctate/cargo\nda5038c467ade66af52a5aadde8fa7da804a1489\trefs/heads/ctate/cargo-2\n810ef7b83b8afd50fe99337f9edb0d33b92ac76c\trefs/heads/ctate/cdp-url\n95737d9ab9b1d962d077234470cc8150e19419ca\trefs/heads/ctate/chain\n2c0c5a2acc6a3cdb4e555c97aa2b46f6dfda169c\trefs/heads/ctate/changelog-v0.6.0\na00dae396ce742cc6d8e20e273ee61eb48fe02df\trefs/heads/ctate/chromium-playwright-mismatch\nf070f028b9a6370a1f18ad82e99a1324d18efc04\trefs/heads/ctate/config\n068fc74a9cbcc9375e0c73158073da2238d960ac\trefs/heads/ctate/custom-headers\n37b2599e06d7bb15bb6d5a87fd68f7078e382c04\trefs/heads/ctate/daemon-not-found\nf77a8cb6135f8c68ebf0e6c142d3047f4f1030a0\trefs/heads/ctate/debug-session\nac2a324218c17ce284c11ca975115d8a2f40cce6\trefs/heads/ctate/diff\n51831c38506f118f8704c7deaab3ba3fca7e9d31\trefs/heads/ctate/doc-fixes\nd7b4299e4d829cd8ba98fb8cb2274a9a329682a9\trefs/heads/ctate/docs-fix\n599238494b5c3c7305271a7414c77142c0fe699e\trefs/heads/ctate/docs-header\ndf9f256f3b747545bcda32b8eb0e1d8cfaa9f5f9\trefs/heads/ctate/dogfood\n82ab072a4d3b84a2d76731f63ccf80915ebc3bc9\trefs/heads/ctate/faster-ci\n3bbed2f190fef7d474fe54a3ca13b5f02cdd47a8\trefs/heads/ctate/feature-updates\n67ef2155ab09168aa3f3ca6f64b47746a681b6d8\trefs/heads/ctate/fix-204\n0975d66e4188f8594c9194c8f9d4b729a7927284\trefs/heads/ctate/fix-262\nb07e10fbcf46fa733d780b88a2e7d4816a70cf82\trefs/heads/ctate/fix-297\ned126ab76572cdfdfac862f4cb1c07e57695fbd3\trefs/heads/ctate/fix-368\n8e74fbf1588f5f0e6ed29bc685a678a7d289c84d\trefs/heads/ctate/fix-372\n53c828150b19b37a910f267995cf10f1af0b5714\trefs/heads/ctate/fix-384\n145d7981fb4bed8a47338ab08557d2b2e47b0eff\trefs/heads/ctate/fix-402\n2ca035500db89c7a77312141ff10da5b222127ce\trefs/heads/ctate/fix-412\n160bf7104fbdd2d65a616778a2e703e4ec8792c0\trefs/heads/ctate/fix-422\n060713442983e801750991ad3e7365d013183474\trefs/heads/ctate/fix-436\n970e85cd5b893d7cf70e6498904f4756cc9b0be9\trefs/heads/ctate/fix-491\nf57680e165297bc027cfed6e046286bd4fc9209b\trefs/heads/ctate/fix-501\n8d04803beb65c59273ccd99338a50aca705bea84\trefs/heads/ctate/fix-507\n095b90a79647de54d21a5db5d6010cabb20211e5\trefs/heads/ctate/fix-516\nc94d55bbd8508a075777ab4c46cbec4838557b55\trefs/heads/ctate/fix-519\n6ff44855d0f4f27a1e86c798fff7731fea5d4352\trefs/heads/ctate/fix-526\n37fb9da4749e128c6159ba17d9390b84489ed33d\trefs/heads/ctate/fix-617\n6e854a949db82b498aea0a4c65e1620c717371e0\trefs/heads/ctate/fix-634\nd0f61cf4c6b7ff3836ea5cc6b4ca8ee19cfc748d\trefs/heads/ctate/fix-645\nbee74de1a9130171a89281efcd9f6d92e6bf9db3\trefs/heads/ctate/fix-68-pr\n156f5f7eeae749bba1b5bf757a2e37ae6bdbaceb\trefs/heads/ctate/fix-785\nc5b4825d8cd8d28ca6f5b9beaa669287c9c8fd21\trefs/heads/ctate/fix-auto-connect\n745eb974fdb61026dbff352c7fcbb7a5b13ee4f4\trefs/heads/ctate/fix-binary\nba4dbcc85b5cf9e01baaa22767580c7cf90b2de6\trefs/heads/ctate/fix-binary-2\n3142858f3051eae09c5404c68c20ca8f99b65c6c\trefs/heads/ctate/fix-build\n8194a7634485156d0e9e280f752e46750ce68370\trefs/heads/ctate/fix-build-2\n1f419320a93509a92f96384fbb99fad4d778ddda\trefs/heads/ctate/fix-build-3\n4bb4988940155846e2ba33a02dde57e8db997e71\trefs/heads/ctate/fix-ci\n33433f63521fe50d02db40e579dfea6027184b35\trefs/heads/ctate/fix-ci-19034\nb904547d270bc5b8fbbcc9615eaea5efe15d3f6d\trefs/heads/ctate/fix-ci-3\nfd845fe6a0ff83868158a94442b9345b5707130a\trefs/heads/ctate/fix-ci-cache\ndaa1aedf81b883a0923fe51f1b77af30cd6c40a5\trefs/heads/ctate/fix-ci-lagged\n542211d689f22826a40d2c75567500bf00e33db6\trefs/heads/ctate/fix-cmd-wrapper\n2a7f8b7a9676ab704ff39d395a01a6a9bfa5e386\trefs/heads/ctate/fix-cookies-storage\n29cc69c17be7670aadc1941759782bf58ed80392\trefs/heads/ctate/fix-docs\n3432eacc220c2ba9d56d07dfd556dbe0d0c98e6b\trefs/heads/ctate/fix-error\n4ccd8e2717c5215dde21d8057985d707931af250\trefs/heads/ctate/fix-exe\nb5fc1e474df22ad196ef76da0097831124667a05\trefs/heads/ctate/fix-linux-build\n21ea2b02bd614a7fe76e7ef69561c9295f846a96\trefs/heads/ctate/fix-locator-issue\na22f93b338695122aa2e8d9f6b9fa1bc7d37ffa8\trefs/heads/ctate/fix-release-workflow\nf31bd74d0d8c41df838c902cfccdf016024627a7\trefs/heads/ctate/fix-session\n18ec83914e5d08366dee33675baa22ff14a74c02\trefs/heads/ctate/fix-typo\na78857d0beb075f7c6730234848bbd96eb7da71a\trefs/heads/ctate/fix-win-ci\n0ed923dd80713194c61510b97c5c6348cab2068e\trefs/heads/ctate/fix-windows\nc30aa73e1717261f9baa69d2583355f25946c270\trefs/heads/ctate/fix-windows-bug\n7263e56f961a7ca87294211bedbbfe9fc17b6e45\trefs/heads/ctate/fix-write-file\nd84a76994953330ec551f39c3d0f631f7fa286be\trefs/heads/ctate/github-actions\n8e4d39d8012951a2a2d639e740761aa9687b4b59\trefs/heads/ctate/headed\n586893be3ec1d9b8c1341c75191d46b10c8c70ff\trefs/heads/ctate/header-font\n6010526733b5da25edd930a8f1609fc8878fb419\trefs/heads/ctate/improvements-2\ne54499fe31ab8a37d9613dd442b09fbaaf9cf5b6\trefs/heads/ctate/improvements-3\n49ffce062f25c38800b4c46d097b80ce6742f46f\trefs/heads/ctate/ios\n47c9c683e43077581c445cbe5f5cc842093fabd7\trefs/heads/ctate/issue-56\n3c002b7c5f456b5ef70961cb95329da217cfc04b\trefs/heads/ctate/lightpanda\nd723a06351dfd52c1bbe1141a29d8b37286b0802\trefs/heads/ctate/mdx\n66589e8cac32f1dc2bbed21838bc0df244ac3036\trefs/heads/ctate/native-2\nb75564bc485ae71504df8e8cc04b1ffa7114fc22\trefs/heads/ctate/native-experiment\n4392e685e53e09cd799337b780f5793cd25d72eb\trefs/heads/ctate/native-improvements\n7f5e9304edbc4d40b78a115fdd335dd2c876436f\trefs/heads/ctate/next-example-prod\n1b8f69612ef731c6b38768760c7dcc34a161d572\trefs/heads/ctate/next-example-site\n832ab159424570527ca4d2499ff2129531becd61\trefs/heads/ctate/next-guide\nc4bf347067c89724d558ca60440e29ddfce6f598\trefs/heads/ctate/og\n588d5f848a41181a0a717f91e4c4e7a516a2e30b\trefs/heads/ctate/pr-344\n8c3f5ed88fed551d622c4e95777e81e1196b7672\trefs/heads/ctate/prepare-0.16\n80b9d40e7550b518b30ae42b0df0613b6080e44f\trefs/heads/ctate/prepare-v0.14.0\n841507328f2b6e78e146db1be4a8fef4c7313af0\trefs/heads/ctate/prepare-v0.15\n42da3786d88e88fb480d5f85d7c83f0a52814ec3\trefs/heads/ctate/prepare-v0.18\nef1384c9de262cf85f8cc5643727f029f6ee6807\trefs/heads/ctate/prepare-v0.19\n0ea7a0f8a6d90e3a7d6c088b1e495f700ee48c3d\trefs/heads/ctate/prepare-v0.20\n7b9716a5ac686d7b294f409141e834b6f052a5ff\trefs/heads/ctate/provider-flag\n111ad34f4c13c446b8242c3ab1570561b7ba4448\trefs/heads/ctate/release-v0.7.0\n16d30d43cd6147ca2776862843ca2ca608b0ac7c\trefs/heads/ctate/remove-skill-creator\n5e1c6cbee6667b7be3f918b73a789dfd107de6aa\trefs/heads/ctate/sandbox-docs\n881e0987bd8f531c5e43704a4b40fd891fe5406e\trefs/heads/ctate/sandbox-docs-2\nf7cd5dc3b2d44b4260203674d3885d2418d00c42\trefs/heads/ctate/sandbox-docs-4\n997d2acd9b2fdcbbf70c762cfb8fefd35709d1ea\trefs/heads/ctate/sandbox-docs-5\n631cc6aa059bcb833f9862e09de319f0a00a368c\trefs/heads/ctate/scale\n1522b3b3a88c13dc727b93625c62ac4abe77de4b\trefs/heads/ctate/screencast\naec7bed6e78ff74c68ef5f39516857df8134dd5a\trefs/heads/ctate/security-hardening\n1529002bde040ee94b5b94d704243c41a2382b76\trefs/heads/ctate/skill-creator\ncf58b2a835e2f8dbe4b4d9c0dd39f29ee094a700\trefs/heads/ctate/skills-docs\n961b7e5d6bba598bec45913bbb564a4c561590b5\trefs/heads/ctate/slack-skill\nd44a9fb5905b5d2c46ae1c5c68108c73e522aa67\trefs/heads/ctate/sub-help\n2322e5b6395c2c17088d79657ab33302c2e5e508\trefs/heads/ctate/update-readme\n61a7717c3e74fade8a690d1beeb7113dfd8123d3\trefs/heads/ctate/usage\ne5ffb9cc9a90dca6b7e1abf26915d41b2b1c6dba\trefs/heads/ctate/v0.7.0-docs\nf6db2f8b0f40d26835136f1964959486f820d9cb\trefs/heads/ctate/v0.7.3-fix\n19b1a7b2101ceab05c3242ce6c462d9ca8a8eabd\trefs/heads/ctate/v0.7.4-fix\nc7d93ac8323574b60c568c76e8e64a27c4776793\trefs/heads/ctate/v0.7.5-fix-github-tag\nd7bbf0eaf72aa1ebf4b2d555e8dce44a024b8bb3\trefs/heads/ctate/v0.8.0-changelog\n7b603455fad2763eaadf777b45247c2f571d56af\trefs/heads/ctate/v0.8.4\n581e166e8acb694e22ce00e1d2e89e8cd8b0f177\trefs/heads/ctate/vercel\n951edb333be8a40903f240cbdab6175b28adf885\trefs/heads/ctate/vision\ne3a302056b965bb5cffd3b3fecfb538ea334156f\trefs/heads/ctate/web\nc5f51b747e36e5d1807b5deee4ba19960c6f078c\trefs/heads/ctate/web-fix\n20b22bdf760b358de729bc551a086fd357ae7ef4\trefs/heads/ctate/win-8-cores\n47f10d1cba534575caf5549c0349382d86fd4498\trefs/heads/docs/add-plugin-install-instructions\n5cc28926c41d3897be03cea62d8ddfe6657a25db\trefs/heads/eval-base64\nadf174741bfa55d0a67c03bf1a94155b73b4a0d4\trefs/heads/feat/browserbase-region-v2\n60cc0ea9aec987b3351ffea10a18ffb0efc8b8e5\trefs/heads/feat/eval-stdin\nbee74de1a9130171a89281efcd9f6d92e6bf9db3\trefs/heads/feature/persistent-profile\n6f8bacf5a08bb08d14631976b6aa1de4fed8c4e0\trefs/heads/fix/841-snapshot-cursor-wss-hang\nb6046624dc92be9bd2a030a41a2ad064db04ca9e\trefs/heads/fix/broken-pipe-daemon-stderr\n79df456dbec5ccbdd15a7fc61d9ec0e6b2c861ce\trefs/heads/fix/issue-255-1769372742629\n45c4d2c904013251ea9b9c79d2e24c3cfc059dc8\trefs/heads/fix/issue-257-1769365735985\nfbfe9b71cf362ee566c4e7b5f6bd71275d75763e\trefs/heads/fix/issue-257-1769389427438\n35dacca872fb48c73a25dbd35ea60180890e883f\trefs/heads/fix/issue-259-1769365686487\na71bf37f6cf23d97341c204c47f2b7bb4d0a61f0\trefs/heads/fix/issue-261-1769353672681\ne023dfa003754facdcca6ca3a206fe80a1bdd6f0\trefs/heads/fix/issue-261-1769354177203\n25364a69c573e52fdf37034867a374b1af6c7436\trefs/heads/fix/issue-261-1769354313961\ndb53882b78ae6e94dc249c51594bd3f769fd58fa\trefs/heads/fix/issue-261-1769354397568\naeb41\n... (truncated, 9703 more chars)"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_pz5WQcqSJGKEUE7wXBalnKnk|fc_0ad204dc441d1a5c0169b80a72081481a2a673f10281869cd4",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"git ls-remote --tags https://github.com/vercel-labs/agent-browser.git\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_1Vt722bNQPd6fVWhYEuhwJ1N|fc_0ad204dc441d1a5c0169b80a72082081a2a185ebbabada2c7c",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"git clone --depth 1 https://github.com/vercel-labs/agent-browser.git tmp_agent_browser_repo\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_pz5WQcqSJGKEUE7wXBalnKnk|fc_0ad204dc441d1a5c0169b80a72081481a2a673f10281869cd4",
+          "name": "exec",
+          "content": "1ddd859700ebb77a5204c0099e788dd2186838c7\trefs/tags/v0.10.0\n9cbb363190bb39c0f5b4149327d0371cd3fb17ec\trefs/tags/v0.10.0^{}\n203bbc532237e00ad6a91313b2e5353f6a691e44\trefs/tags/v0.11.0\n85340cb432adb58626f7d30c82869e00e27efc8b\trefs/tags/v0.11.0^{}\n2c150bc37725697badd75c4df49132718bc62538\trefs/tags/v0.11.1\n06a32f41912b2f745ef921219b8a3fda5cfa805f\trefs/tags/v0.11.1^{}\nb92c8be96c122564d5352eff81c4539500db6ca7\trefs/tags/v0.12.0\n973203108762e9c7a131cac9b0df9ce202344b5f\trefs/tags/v0.12.0^{}\n68d7f6144a88ca153b2b08250daf2a413ae40521\trefs/tags/v0.13.0\n2b8a51b9a6accb0d8d6c8e7eb5c3e33d9ecd9443\trefs/tags/v0.13.0^{}\n1d645899cce19a411a258676b918c9bdd45c3345\trefs/tags/v0.14.0\n2fe7394dbeb89efb00e56899dd71f32db5ec1dee\trefs/tags/v0.14.0^{}\n11d5ae1bba41c1c4d1555b80be92dbfb3cd80fe1\trefs/tags/v0.15.0\nb59dc4c82c0583b60849d110f27982fac85f1a07\trefs/tags/v0.15.0^{}\nffec0ba979f3ed4b26423cd297af8af1842f90e8\trefs/tags/v0.15.1\n79b05877a81f90780b33ea385ec17f69ff26db8a\trefs/tags/v0.15.1^{}\ne8bc052f043fc776eb653da84a591b78e23175d9\trefs/tags/v0.15.2\nd97e2016f5acdf824b979b1c68961068108b6027\trefs/tags/v0.15.2^{}\nf11fb9be92f7f5af53f1600e7844b66b0acef331\trefs/tags/v0.15.3\n857c0b25df11db4a351c96ff536fba7019495b7d\trefs/tags/v0.15.3^{}\n5543905953a84f8c3915ef8d47d5b4807372dbc9\trefs/tags/v0.16.0\nc10981413f8506d3af87efa00c33fb4084294881\trefs/tags/v0.16.0^{}\n9cd1bfa35b4f1cfd11a463176e9aea9666736d3e\trefs/tags/v0.16.1\na493d02c666286471f974287b725efae88579338\trefs/tags/v0.16.1^{}\ncdaf0e3195548b2585bd80a315885b442ce0ba62\trefs/tags/v0.16.2\n7edc5d596c8961615bce7e76200e49bb219d901a\trefs/tags/v0.16.2^{}\na7e3963cabe98b3e5199ef4b32987bf4ae3e2e3e\trefs/tags/v0.16.3\n794a77e26effa3acabeda81534c3fc65157ad3b2\trefs/tags/v0.16.3^{}\neeb0ee53bbe3531f082bec56637be86440611b89\trefs/tags/v0.17.0\n2bab729f268d82bf90745c6ced1ade36bb872cee\trefs/tags/v0.17.0^{}\n2d4767b97108405b19d71649ea55a53534f5e753\trefs/tags/v0.17.1\n00a0e0707ec69d3b30e25ecc3c58228f23506fbb\trefs/tags/v0.17.1^{}\nea6f459a9d12e7c60505b87b62bb3e8e704d4373\trefs/tags/v0.18.0\nfb7185d860d9190780b625cb08991d0fa56f42f8\trefs/tags/v0.18.0^{}\n4ab3318773820d84bacf9bab446c28bced167a43\trefs/tags/v0.19.0\ne02bc1a10cf8962a2a171d2b515f14e325dc97ab\trefs/tags/v0.19.0^{}\na0f969337490ac7a1d7ec31d29db7a93879aa773\trefs/tags/v0.20.0\n99c732c18810494593ead9dd96ab6f5f0c78b729\trefs/tags/v0.20.0^{}\n7e925c81437a1666782d14d6f6b18afc6a480fc8\trefs/tags/v0.20.1\n974d735af5c9c263e517518e0ddd3b6ac3070a09\trefs/tags/v0.20.1^{}\ne075ffde5a6640b6b73c9788277754eb07c0c73b\trefs/tags/v0.20.10\n1fd8e9d09a3fe434d5edca4415a12af7712ed85a\trefs/tags/v0.20.10^{}\n1cfa52641a3695b6c0dcd6572724cc8107247498\trefs/tags/v0.20.11\n5b74604a5cbf8ced05ef6e954475c1ed3b8f9345\trefs/tags/v0.20.11^{}\nd0266995193eaa0a0d77a7e01491c592f68ca395\trefs/tags/v0.20.12\nebfabe0e62dc31597ba00b6fcf5cdfae150fc6b2\trefs/tags/v0.20.12^{}\n3d9a4fe99735aad130005508ee5bdc9f1ec4b4c4\trefs/tags/v0.20.13\n8163f6cdca1aebb9a77f058f1ae93455bbc00974\trefs/tags/v0.20.13^{}\ne4a9cd83267f22e94a4973d3bc4029217b4d2b9b\trefs/tags/v0.20.2\nfe3c1ddb484f8f601bd12d2152c4d878679724d2\trefs/tags/v0.20.2^{}\nb4f461005750ad290d2712f1c93eda45c3834c1c\trefs/tags/v0.20.3\n17d2785ca03e0fc800333bbc0a3d79b16a911e36\trefs/tags/v0.20.3^{}\n768382e77128b9fe27f855e3e1a0a077c3a604f8\trefs/tags/v0.20.4\n23a8b19de1f24641929470a8803595d576d31da3\trefs/tags/v0.20.4^{}\ne525d2e91e18b430a3bedf16e6a1fee50ca54a3d\trefs/tags/v0.20.5\n5f8e993602e8eee48b69c1f33f9cfb69fa98ed2e\trefs/tags/v0.20.5^{}\n5467b468dc438b8667396f79eb323bbcd810bb02\trefs/tags/v0.20.6\nc23ce448bd9964410ad597b025f4588f2e932a42\trefs/tags/v0.20.6^{}\ndf80f98a6fec82c36d4ac997d8245e262f30c236\trefs/tags/v0.20.7\ne78cc05cec224b15bb78ddb6a079a053ae5c04b2\trefs/tags/v0.20.7^{}\n1636bb8c54575dc9a914635caebd3eeb87353120\trefs/tags/v0.20.8\n77a27fe6a3cc0c967944e991e2fa6dfde75a8c62\trefs/tags/v0.20.8^{}\ndc60617abb0bb2ae551bc0d42ed6e3750f6f4cb1\trefs/tags/v0.20.9\n79f464d47a62875ad3748eb07ed31e7ae580b97d\trefs/tags/v0.20.9^{}\n62f9b4dd6b8c286e695bf26d2c34114660b34652\trefs/tags/v0.6.0\n2d0e91af8d7bd9b53adee3f25114bc97b77dd419\trefs/tags/v0.7.0\n9281f46823e788eca0d626ace1f8d286dc2654ab\trefs/tags/v0.7.0^{}\n4cb01a9a0837533a269eed2b2469dfd644cf4130\trefs/tags/v0.7.2\nf3ed1be40952b8f1f88a9127297c785b02088a28\trefs/tags/v0.7.2^{}\na4740fd6daff20918877bf2c17b1f32462b64463\trefs/tags/v0.7.3\n65d4df84ac7eccd12b16d3f73f864b9db783f94f\trefs/tags/v0.7.3^{}\n8923815d0e5b3e705ae7c59e360a8afc1fd1b217\trefs/tags/v0.7.4\nc0fd1be1326a982c683d3b2c7073747f83d6f60d\trefs/tags/v0.7.4^{}\n3e5b44e1600875798c30c0ad51888bd64dc40676\trefs/tags/v0.7.5\nd10fd2d5451c4182d0826c35261ddf7955009079\trefs/tags/v0.7.5^{}\nd1d02af8af499e79090b6baf1dae769102fa9c36\trefs/tags/v0.7.6\n60534dfd6382d780b7267b708d4c01da7de27bab\trefs/tags/v0.7.6^{}\nde88ecea4e10e89a08392150751c312fb569a360\trefs/tags/v0.8.0\n9a1cc0ed6a02bf84ac2f8261c001c8775431ee33\trefs/tags/v0.8.0^{}\n1f746aeed23f068e0e40f135a4080dcb98551691\trefs/tags/v0.8.1\nddfaa392e442456694fd1d925e13cd912d8856d5\trefs/tags/v0.8.1^{}\n120c10ad9ee66d9ae76dc3d3be30829591a5a4ad\trefs/tags/v0.8.10\n3c6ae7df9dfe29aba51765ddb7bb72b11e8b5a3d\trefs/tags/v0.8.10^{}\naf0f472427ca4b07aafe49cfaaa41bdc7ad70617\trefs/tags/v0.8.2\n28950b8ad2b90e0dbf5155a78b8942fc85a8f50a\trefs/tags/v0.8.2^{}\n9e20cafd41a79cc72576b86a6f7b6b6c019cb42a\trefs/tags/v0.8.3\n523d7d57f1cd557e5ff8308b2dcaa1a4af1e7204\trefs/tags/v0.8.3^{}\n88b5966be603bdcbb1bf04ef807ace34e8f500e7\trefs/tags/v0.8.4\n72cbdc7f89ab8c64a3fddb154a51cf9089c08aed\trefs/tags/v0.8.4^{}\n543cae521d0da2f50ac13e70223d233e3d4cf3bc\trefs/tags/v0.8.5\n32a0207ffa41e60d18033ddda1be3949701fa5e9\trefs/tags/v0.8.5^{}\n134b56224e601813f43c53f29bc4616a583c3870\trefs/tags/v0.8.6\n97fd2828b5edbe1126f7d18b983148fee1129591\trefs/tags/v0.8.6^{}\n94e74a262a260548a3a5cfdab9e99caa6cab5df4\trefs/tags/v0.8.7\nbdf674a27e3a10152707ac53e8ce8ede94927532\trefs/tags/v0.8.7^{}\ne28c1816093ac1605cb43180b17b852332ffbb8e\trefs/tags/v0.8.8\nf770593c668ad9cd0aa05c8a3bb91ebfc710696f\trefs/tags/v0.8.8^{}\n13355416e196a50ffbe62698f39f52826f7eae34\trefs/tags/v0.9.0\n79ef5764fa4f2d3e21f9da412ecb80bfab1fb001\trefs/tags/v0.9.0^{}\n6f64307a1d628b3746be95da51d124eb79c9bce5\trefs/tags/v0.9.1\n76c30690f5539dcb515663b0dec99c0a7c24e0ff\trefs/tags/v0.9.1^{}\ne48fcb65d687cbdbbed6a19585bfbafcd73f5d59\trefs/tags/v0.9.2\nffe29b8a263c79b5e841a545ffa34bb00961eb90\trefs/tags/v0.9.2^{}\n687fe157ec6aeb897bc661485dac0ac0f1a6330b\trefs/tags/v0.9.3\n9c20979bfee98e5e159a4643ef0feec932629473\trefs/tags/v0.9.3^{}\n51826e6fc9bce7b7bbaebd222eff6d69e0860d3c\trefs/tags/v0.9.4\ncdd10ebb54dfc88fba29212cb74ef1d26e415c30\trefs/tags/v0.9.4^{}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1Vt722bNQPd6fVWhYEuhwJ1N|fc_0ad204dc441d1a5c0169b80a72082081a2a185ebbabada2c7c",
+          "name": "exec",
+          "content": "STDERR:\nCloning into 'tmp_agent_browser_repo'..."
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_TjSLxm2sHafoX6DhoJl6KPiE|fc_0ad204dc441d1a5c0169b80a7c673881a2b263a42b0e5098bd",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"list\", \"path\": \"tmp_agent_browser_repo\", \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_Txc9HffduoPRokWvAgKA6ejc|fc_0ad204dc441d1a5c0169b80a7c674c81a284b69106d15024e4",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"git -C tmp_agent_browser_repo rev-parse HEAD\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_h0UvAEuRbQeiCVzvPWgqREZk|fc_0ad204dc441d1a5c0169b80a7c675881a2b7a698a687f019e9",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"git -C tmp_agent_browser_repo remote get-url origin\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_TjSLxm2sHafoX6DhoJl6KPiE|fc_0ad204dc441d1a5c0169b80a7c673881a2b263a42b0e5098bd",
+          "name": "filesystem",
+          "content": "DIR  .changeset\nDIR  .claude-plugin\nDIR  .git\nDIR  .github\nFILE .gitignore\nDIR  .husky\nFILE .prettierrc\nFILE AGENTS.md\nDIR  benchmarks\nDIR  bin\nFILE CHANGELOG.md\nDIR  cli\nDIR  docker\nDIR  docs\nDIR  examples\nFILE LICENSE\nFILE package.json\nFILE pnpm-lock.yaml\nFILE README.md\nDIR  scripts\nDIR  skills"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_Txc9HffduoPRokWvAgKA6ejc|fc_0ad204dc441d1a5c0169b80a7c674c81a284b69106d15024e4",
+          "name": "exec",
+          "content": "0883813cd3cd5072c48d1415b4ae472c3c955666"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_h0UvAEuRbQeiCVzvPWgqREZk|fc_0ad204dc441d1a5c0169b80a7c675881a2b7a698a687f019e9",
+          "name": "exec",
+          "content": "https://github.com/vercel-labs/agent-browser.git"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_3zAfnv1cK1ROJZv2XyrmgoFV|fc_0ad204dc441d1a5c0169b80a81d6fc81a2a94bad8b0251f719",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import json, pathlib; print(pathlib.Path('tmp_agent_browser_repo/package.json').read_text())\\\"\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_TSTPOAuk6LkOolZWXMK56reF|fc_0ad204dc441d1a5c0169b80a81d70c81a2b3c95fe588dd761c",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib; print(pathlib.Path('tmp_agent_browser_repo/README.md').read_text())\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_3zAfnv1cK1ROJZv2XyrmgoFV|fc_0ad204dc441d1a5c0169b80a81d6fc81a2a94bad8b0251f719",
+          "name": "exec",
+          "content": "{\r\n  \"name\": \"agent-browser\",\r\n  \"version\": \"0.20.13\",\r\n  \"description\": \"Headless browser automation CLI for AI agents\",\r\n  \"type\": \"module\",\r\n  \"files\": [\r\n    \"bin\",\r\n    \"scripts\",\r\n    \"skills\"\r\n  ],\r\n  \"bin\": {\r\n    \"agent-browser\": \"./bin/agent-browser.js\"\r\n  },\r\n  \"scripts\": {\r\n    \"version:sync\": \"node scripts/sync-version.js\",\r\n    \"version\": \"npm run version:sync && git add cli/Cargo.toml\",\r\n    \"build:native\": \"npm run version:sync && cargo build --release --manifest-path cli/Cargo.toml && node scripts/copy-native.js\",\r\n    \"build:linux\": \"npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-linux\",\r\n    \"build:macos\": \"npm run version:sync && (cargo build --release --manifest-path cli/Cargo.toml --target aarch64-apple-darwin & cargo build --release --manifest-path cli/Cargo.toml --target x86_64-apple-darwin & wait) && cp cli/target/aarch64-apple-darwin/release/agent-browser bin/agent-browser-darwin-arm64 && cp cli/target/x86_64-apple-darwin/release/agent-browser bin/agent-browser-darwin-x64\",\r\n    \"build:windows\": \"npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-windows\",\r\n    \"build:all-platforms\": \"npm run version:sync && (npm run build:linux & npm run build:windows & wait) && npm run build:macos\",\r\n    \"build:docker\": \"docker build -t agent-browser-builder -f docker/Dockerfile.build .\",\r\n    \"release\": \"npm run version:sync && npm run build:all-platforms && npm publish\",\r\n    \"postinstall\": \"node scripts/postinstall.js\",\r\n    \"changeset\": \"changeset\",\r\n    \"ci:version\": \"changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile\",\r\n    \"ci:publish\": \"pnpm run version:sync && changeset publish\"\r\n  },\r\n  \"keywords\": [\r\n    \"browser\",\r\n    \"automation\",\r\n    \"headless\",\r\n    \"chrome\",\r\n    \"cdp\",\r\n    \"cli\",\r\n    \"agent\"\r\n  ],\r\n  \"license\": \"Apache-2.0\",\r\n  \"repository\": {\r\n    \"type\": \"git\",\r\n    \"url\": \"git+https://github.com/vercel-labs/agent-browser.git\"\r\n  },\r\n  \"bugs\": {\r\n    \"url\": \"https://github.com/vercel-labs/agent-browser/issues\"\r\n  },\r\n  \"homepage\": \"https://github.com/vercel-labs/agent-browser#readme\",\r\n  \"devDependencies\": {\r\n    \"@changesets/cli\": \"^2.29.8\"\r\n  }\r\n}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_TSTPOAuk6LkOolZWXMK56reF|fc_0ad204dc441d1a5c0169b80a81d70c81a2b3c95fe588dd761c",
+          "name": "exec",
+          "content": "# agent-browser\r\n\r\nHeadless browser automation CLI for AI agents. Fast native Rust CLI.\r\n\r\n## Installation\r\n\r\n### Global Installation (recommended)\r\n\r\nInstalls the native Rust binary:\r\n\r\n```bash\r\nnpm install -g agent-browser\r\nagent-browser install  # Download Chrome from Chrome for Testing (first time only)\r\n```\r\n\r\n### Project Installation (local dependency)\r\n\r\nFor projects that want to pin the version in `package.json`:\r\n\r\n```bash\r\nnpm install agent-browser\r\nagent-browser install\r\n```\r\n\r\nThen use via `package.json` scripts or by invoking `agent-browser` directly.\r\n\r\n### Homebrew (macOS)\r\n\r\n```bash\r\nbrew install agent-browser\r\nagent-browser install  # Download Chrome from Chrome for Testing (first time only)\r\n```\r\n\r\n### Cargo (Rust)\r\n\r\n```bash\r\ncargo install agent-browser\r\nagent-browser install  # Download Chrome from Chrome for Testing (first time only)\r\n```\r\n\r\n### From Source\r\n\r\n```bash\r\ngit clone https://github.com/vercel-labs/agent-browser\r\ncd agent-browser\r\npnpm install\r\npnpm build\r\npnpm build:native   # Requires Rust (https://rustup.rs)\r\npnpm link --global  # Makes agent-browser available globally\r\nagent-browser install\r\n```\r\n\r\n### Linux Dependencies\r\n\r\nOn Linux, install system dependencies:\r\n\r\n```bash\r\nagent-browser install --with-deps\r\n```\r\n\r\n### Requirements\r\n\r\n- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). No Playwright or Node.js required for the daemon.\r\n- **Rust** - Only needed when building from source (see From Source above).\r\n\r\n## Quick Start\r\n\r\n```bash\r\nagent-browser open example.com\r\nagent-browser snapshot                    # Get accessibility tree with refs\r\nagent-browser click @e2                   # Click by ref from snapshot\r\nagent-browser fill @e3 \"test@example.com\" # Fill by ref\r\nagent-browser get text @e1                # Get text by ref\r\nagent-browser screenshot page.png\r\nagent-browser close\r\n```\r\n\r\n### Traditional Selectors (also supported)\r\n\r\n```bash\r\nagent-browser click \"#submit\"\r\nagent-browser fill \"#email\" \"test@example.com\"\r\nagent-browser find role button click --name \"Submit\"\r\n```\r\n\r\n## Commands\r\n\r\n### Core Commands\r\n\r\n```bash\r\nagent-browser open <url>              # Navigate to URL (aliases: goto, navigate)\r\nagent-browser click <sel>             # Click element (--new-tab to open in new tab)\r\nagent-browser dblclick <sel>          # Double-click element\r\nagent-browser focus <sel>             # Focus element\r\nagent-browser type <sel> <text>       # Type into element\r\nagent-browser fill <sel> <text>       # Clear and fill\r\nagent-browser press <key>             # Press key (Enter, Tab, Control+a) (alias: key)\r\nagent-browser keyboard type <text>    # Type with real keystrokes (no selector, current focus)\r\nagent-browser keyboard inserttext <text>  # Insert text without key events (no selector)\r\nagent-browser keydown <key>           # Hold key down\r\nagent-browser keyup <key>             # Release key\r\nagent-browser hover <sel>             # Hover element\r\nagent-browser select <sel> <val>      # Select dropdown option\r\nagent-browser check <sel>             # Check checkbox\r\nagent-browser uncheck <sel>           # Uncheck checkbox\r\nagent-browser scroll <dir> [px]       # Scroll (up/down/left/right, --selector <sel>)\r\nagent-browser scrollintoview <sel>    # Scroll element into view (alias: scrollinto)\r\nagent-browser drag <src> <tgt>        # Drag and drop\r\nagent-browser upload <sel> <files>    # Upload files\r\nagent-browser screenshot [path]       # Take screenshot (--full for full page, saves to a temporary directory if no path)\r\nagent-browser screenshot --annotate   # Annotated screenshot with numbered element labels\r\nagent-browser screenshot --screenshot-dir ./shots    # Save to custom directory\r\nagent-browser screenshot --screenshot-format jpeg --screenshot-quality 80\r\nagent-browser pdf <path>              # Save as PDF\r\nagent-browser snapshot                # Accessibility tree with refs (best for AI)\r\nagent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)\r\nagent-browser connect <port>          # Connect to browser via CDP\r\nagent-browser close                   # Close browser (aliases: quit, exit)\r\n```\r\n\r\n### Get Info\r\n\r\n```bash\r\nagent-browser get text <sel>          # Get text content\r\nagent-browser get html <sel>          # Get innerHTML\r\nagent-browser get value <sel>         # Get input value\r\nagent-browser get attr <sel> <attr>   # Get attribute\r\nagent-browser get title               # Get page title\r\nagent-browser get url                 # Get current URL\r\nagent-browser get cdp-url             # Get CDP WebSocket URL (for DevTools, debugging)\r\nagent-browser get count <sel>         # Count matching elements\r\nagent-browser get box <sel>           # Get bounding box\r\nagent-browser get styles <sel>        # Get computed styles\r\n```\r\n\r\n### Check State\r\n\r\n```bash\r\nagent-browser is visible <sel>        # Check if visible\r\nagent-browser is enabled <sel>        # Check if enabled\r\nagent-browser is checked <sel>        # Check if checked\r\n```\r\n\r\n### Find Elements (Semantic Locators)\r\n\r\n```bash\r\nagent-browser find role <role> <action> [value]       # By ARIA role\r\nagent-browser find text <text> <action>               # By text content\r\nagent-browser find label <label> <action> [value]     # By label\r\nagent-browser find placeholder <ph> <action> [value]  # By placeholder\r\nagent-browser find alt <text> <action>                # By alt text\r\nagent-browser find title <text> <action>              # By title attr\r\nagent-browser find testid <id> <action> [value]       # By data-testid\r\nagent-browser find first <sel> <action> [value]       # First match\r\nagent-browser find last <sel> <action> [value]        # Last match\r\nagent-browser find nth <n> <sel> <action> [value]     # Nth match\r\n```\r\n\r\n**Actions:** `click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text`\r\n\r\n**Options:** `--name <name>` (filter role by accessible name), `--exact` (require exact text match)\r\n\r\n**Examples:**\r\n\r\n```bash\r\nagent-browser find role button click --name \"Submit\"\r\nagent-browser find text \"Sign In\" click\r\nagent-browser find label \"Email\" fill \"test@test.com\"\r\nagent-browser find first \".item\" click\r\nagent-browser find nth 2 \"a\" text\r\n```\r\n\r\n### Wait\r\n\r\n```bash\r\nagent-browser wait <selector>         # Wait for element to be visible\r\nagent-browser wait <ms>               # Wait for time (milliseconds)\r\nagent-browser wait --text \"Welcome\"   # Wait for text to appear (substring match)\r\nagent-browser wait --url \"**/dash\"    # Wait for URL pattern\r\nagent-browser wait --load networkidle # Wait for load state\r\nagent-browser wait --fn \"window.ready === true\"  # Wait for JS condition\r\n\r\n# Wait for text/element to disappear\r\nagent-browser wait --fn \"!document.body.innerText.includes('Loading...')\"\r\nagent-browser wait \"#spinner\" --state hidden\r\n```\r\n\r\n**Load states:** `load`, `domcontentloaded`, `networkidle`\r\n\r\n### Clipboard\r\n\r\n```bash\r\nagent-browser clipboard read                      # Read text from clipboard\r\nagent-browser clipboard write \"Hello, World!\"     # Write text to clipboard\r\nagent-browser clipboard copy                      # Copy current selection (Ctrl+C)\r\nagent-browser clipboard paste                     # Paste from clipboard (Ctrl+V)\r\n```\r\n\r\n### Mouse Control\r\n\r\n```bash\r\nagent-browser mouse move <x> <y>      # Move mouse\r\nagent-browser mouse down [button]     # Press button (left/right/middle)\r\nagent-browser mouse up [button]       # Release button\r\nagent-browser mouse wheel <dy> [dx]   # Scroll wheel\r\n```\r\n\r\n### Browser Settings\r\n\r\n```bash\r\nagent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)\r\nagent-browser set device <name>       # Emulate device (\"iPhone 14\")\r\nagent-browser set geo <lat> <lng>     # Set geolocation\r\nagent-browser set offline [on|off]    # Toggle offline mode\r\nagent-browser set headers <json>      # Extra HTTP headers\r\nagent-browser set credentials <u> <p> # HTTP basic auth\r\nagent-browser set media [dark|light]  # Emulate color scheme\r\n```\r\n\r\n### Cookies & Storage\r\n\r\n```bash\r\nagent-browser cookies                 # Get all cookies\r\nagent-browser cookies set <name> <val> # Set cookie\r\nagent-browser cookies clear           # Clear cookies\r\n\r\nagent-browser storage local           # Get all localStorage\r\nagent-browser storage local <key>     # Get specific key\r\nagent-browser storage local set <k> <v>  # Set value\r\nagent-browser storage local clear     # Clear all\r\n\r\nagent-browser storage session         # Same for sessionStorage\r\n```\r\n\r\n### Network\r\n\r\n```bash\r\nagent-browser network route <url>              # Intercept requests\r\nagent-browser network route <url> --abort      # Block requests\r\nagent-browser network route <url> --body <json>  # Mock response\r\nagent-browser network unroute [url]            # Remove routes\r\nagent-browser network requests                 # View tracked requests\r\nagent-browser network requests --filter api    # Filter requests\r\n```\r\n\r\n### Tabs & Windows\r\n\r\n```bash\r\nagent-browser tab                     # List tabs\r\nagent-browser tab new [url]           # New tab (optionally with URL)\r\nagent-browser tab <n>                 # Switch to tab n\r\nagent-browser tab close [n]           # Close tab\r\nagent-browser window new              # New window\r\n```\r\n\r\n### Frames\r\n\r\n```bash\r\nagent-browser frame <sel>             # Switch to iframe\r\nagent-browser frame main              # Back to main frame\r\n```\r\n\r\n### Dialogs\r\n\r\n```bash\r\nagent-browser dialog accept [text]    # Accept (with optional prompt text)\r\nagent-browser dialog dismiss          # Dismiss\r\n```\r\n\r\n### Diff\r\n\r\n```bash\r\nagent-browser diff snapshot                              # Compare current vs last snapshot\r\nagent-browser diff snapshot --baseline before.txt        # Compare current vs saved snapshot file\r\nagent-browser diff snapshot --selector \"#main\" --compact # Scoped snapshot diff\r\nagent-b\n... (truncated, 37817 more chars)"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_SZCtsql5RfCHpOcgjWqosjzh|fc_0ad204dc441d1a5c0169b80a8797a881a29868eab26dc2418e",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib; print(pathlib.Path('tmp_agent_browser_repo/AGENTS.md').read_text())\\\"\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_pIfbqOQSw0UXIJLmSsiJAi9K|fc_0ad204dc441d1a5c0169b80a8797b881a2a7f3fdb9789c755a",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib; print(pathlib.Path('tmp_agent_browser_repo/CHANGELOG.md').read_text()[:12000])\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_SZCtsql5RfCHpOcgjWqosjzh|fc_0ad204dc441d1a5c0169b80a8797a881a29868eab26dc2418e",
+          "name": "exec",
+          "content": "STDERR:\nTraceback (most recent call last):\r\n  File \"<string>\", line 1, in <module>\r\n    import pathlib; print(pathlib.Path('tmp_agent_browser_repo/AGENTS.md').read_text())\r\n                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\r\n  File \"C:\\Users\\LiuXi\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\pathlib\\__init__.py\", line 793, in read_text\r\n    return f.read()\r\n           ~~~~~~^^\r\nUnicodeDecodeError: 'gbk' codec can't decode byte 0x93 in position 362: illegal multibyte sequence\r\n\n\nExit code: 1"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_pIfbqOQSw0UXIJLmSsiJAi9K|fc_0ad204dc441d1a5c0169b80a8797b881a2a7f3fdb9789c755a",
+          "name": "exec",
+          "content": "STDERR:\nTraceback (most recent call last):\r\n  File \"<string>\", line 1, in <module>\r\n    import pathlib; print(pathlib.Path('tmp_agent_browser_repo/CHANGELOG.md').read_text()[:12000])\r\n                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\r\n  File \"C:\\Users\\LiuXi\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\pathlib\\__init__.py\", line 793, in read_text\r\n    return f.read()\r\n           ~~~~~~^^\r\nUnicodeDecodeError: 'gbk' codec can't decode byte 0x93 in position 1107: illegal multibyte sequence\r\n\n\nExit code: 1"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_lQUdjZJmCKHNzdJStamFTUE7|fc_0ad204dc441d1a5c0169b80a93664081a2bc3cea1bb5d9d8b2",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib; print(pathlib.Path('tmp_agent_browser_repo/AGENTS.md').read_text(encoding='utf-8'))\\\"\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_f25CTx6N5A19aHOW1MpZZQYI|fc_0ad204dc441d1a5c0169b80a93664c81a2bf0887a01ddc1265",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib; print(pathlib.Path('tmp_agent_browser_repo/CHANGELOG.md').read_text(encoding='utf-8')[:12000])\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_lQUdjZJmCKHNzdJStamFTUE7|fc_0ad204dc441d1a5c0169b80a93664081a2bc3cea1bb5d9d8b2",
+          "name": "exec",
+          "content": "STDERR:\nTraceback (most recent call last):\r\n  File \"<string>\", line 1, in <module>\r\n    import pathlib; print(pathlib.Path('tmp_agent_browser_repo/AGENTS.md').read_text(encoding='utf-8'))\r\n                    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\nUnicodeEncodeError: 'gbk' codec can't encode character '\\u2713' in position 360: illegal multibyte sequence\r\n\n\nExit code: 1"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_f25CTx6N5A19aHOW1MpZZQYI|fc_0ad204dc441d1a5c0169b80a93664c81a2bf0887a01ddc1265",
+          "name": "exec",
+          "content": "# agent-browser\r\n\r\n## 0.20.13\r\n\r\n### Patch Changes\r\n\r\n- eda956b: ### Bug Fixes\r\n\r\n  - **Network idle detection for cached pages** - Fixed an issue where `poll_network_idle` could return immediately when no network events were observed (e.g. pages served from cache). The idle timer is now only satisfied after a consistent **500 ms idle period** has elapsed, preventing false-positive idle detection. The core polling logic has also been extracted into a standalone `poll_network_idle` function to improve testability (#847)\r\n\r\n## 0.20.12\r\n\r\n### Patch Changes\r\n\r\n- 5fa2396: ### Bug Fixes\r\n\r\n  - Fixed **`snapshot -C`** and **`screenshot --annotate`** hanging when connected over WSS (WebSocket Secure) due to sequential CDP round-trips per interactive element (#842)\r\n\r\n  ### Performance\r\n\r\n  - **`snapshot -C` (cursor-interactive mode)** now batches CDP calls instead of issuing N��2 sequential round-trips per cursor-interactive element, preventing timeouts on high-latency WSS connections (#842)\r\n  - **`screenshot --annotate`** now batches element queries, reducing completion time from potentially 20�C40s (e.g. 50+ buttons over WSS) to within expected bounds (#842)\r\n\r\n## 0.20.11\r\n\r\n### Patch Changes\r\n\r\n- 4b5fc78: ### Bug Fixes\r\n\r\n  - **Material Design checkbox/radio parity** - Restored Playwright-parity behavior for `check`/`uncheck` actions on Material Design controls. These components hide the native `<input>` off-screen and use overlay elements that intercept coordinate-based clicks; the actions now detect this pattern and fall back to a JS `.click()` to correctly toggle state. Also improves `ischecked` to handle nested hidden inputs and ARIA-only checkboxes (#837)\r\n  - **Punctuation handling in `type` command** - Fixed incorrect virtual key (VK) codes being used for punctuation characters (e.g. `.`, `@`) in the `type` action, which previously caused those characters to be dropped or mistyped (#836)\r\n\r\n## 0.20.10\r\n\r\n### Patch Changes\r\n\r\n- a3d9662: ### Bug Fixes\r\n\r\n  - **Restored WebSocket streaming** - Fixed broken WebSocket streaming in the native daemon by keeping the **StreamServer** instance alive so the broadcast channel remains open, and ensuring CDP session IDs and connection status are correctly propagated to stream clients (#826)\r\n  - **Filtered internal Chrome targets** - Fixed auto-connect discovery incorrectly attempting to attach to Chrome-internal pages (e.g. `chrome://`, `chrome-extension://`, `devtools://` URLs), which could cause unexpected connection failures (#827)\r\n\r\n## 0.20.9\r\n\r\n### Patch Changes\r\n\r\n- 51d9ab4: ### Bug Fixes\r\n\r\n  - **Appium v3 iOS capabilities** - Added `appium:` vendor prefix to iOS capabilities (e.g., `appium:automationName`, `appium:deviceName`, `appium:platformVersion`) to comply with the Appium v3 WebDriver protocol requirements (#810)\r\n  - **Snapshot `--selector` scoping** - Fixed `snapshot --selector` so that the output is properly scoped to the matched element's subtree rather than returning the full accessibility tree. The selector now resolves the target DOM node's backend IDs and filters the accessibility tree to only include nodes within that subtree (#825)\r\n\r\n## 0.20.8\r\n\r\n### Patch Changes\r\n\r\n- daf7263: ### Bug Fixes\r\n\r\n  - Fixed **video duration** being reported incorrectly when using real-time ffmpeg encoding for screen recording (#812)\r\n  - Removed obsolete **`BrowserManager` TypeScript API** references that no longer reflect the current CLI-based usage model (#821)\r\n\r\n  ### Documentation\r\n\r\n  - Updated README to replace outdated **`BrowserManager` programmatic API** examples with the current CLI-based approach using `execSync` and `agent-browser` commands (#821)\r\n  - Removed the **Programmatic API** section covering `BrowserManager` screencast and input injection methods, which are no longer part of the public API (#821)\r\n\r\n## 0.20.7\r\n\r\n### Patch Changes\r\n\r\n- 25a1526: ### New Features\r\n\r\n  - **Brave Browser support** - Added auto-discovery of Brave Browser for CDP connections on macOS, Linux, and Windows. The agent will now automatically detect and connect to Brave alongside Chrome, Chromium, and Canary installations (#817)\r\n\r\n  ### Improvements\r\n\r\n  - **Postinstall message** - The post-install message now detects existing Chrome installations on the system. If a compatible browser is found, it confirms the path and notes it will be used automatically instead of prompting an install. If no browser is detected, the warning is clearer and mentions that installation can be skipped when using `--cdp`, `--provider`, `--engine`, or `--executable-path` (#815)\r\n\r\n## 0.20.6\r\n\r\n### Patch Changes\r\n\r\n- fa91c22: ### Bug Fixes\r\n\r\n  - **Stale accessibility tree reference fallback** - Fixed an issue where interacting with an element whose **`backend_node_id`** had become stale (e.g. after the DOM was replaced) would fail with a `Could not compute box model` CDP error. Element resolution now re-queries the accessibility tree using role/name lookup to obtain a fresh node ID before retrying the operation (#806)\r\n\r\n## 0.20.5\r\n\r\n### Patch Changes\r\n\r\n- fc091d2: ### Bug Fixes\r\n\r\n  - **Daemon panic on broken stderr pipe** - Replaced all `eprintln!` calls with `writeln!(std::io::stderr(), ...)` wrapped in `let _ =` to silently discard write errors, preventing the daemon from panicking when the parent process drops the stderr pipe during Chrome launch (#802)\r\n\r\n## 0.20.4\r\n\r\n### Patch Changes\r\n\r\n- e2ebde2: ### Bug Fixes\r\n\r\n  - **Broadcast channel lag handling** - Fixed an issue where **broadcast channel lag** errors were incorrectly treated as stream closure, causing premature termination of event listeners in reload, response body, download, and navigation wait operations. Lagged messages are now skipped and the loop continues instead of breaking (#797)\r\n\r\n  ### Improvements\r\n\r\n  - Removed unused **pnpm setup** steps from the `global-install` CI job, simplifying the workflow configuration (#798)\r\n\r\n## 0.20.3\r\n\r\n### Patch Changes\r\n\r\n- e365909: ### Bug Fixes\r\n\r\n  - **Chrome launch retry** - Chrome will now retry launching up to 3 times with a 500ms delay between attempts, improving resilience against transient startup failures (#791)\r\n  - **Remote CDP snapshot hang** - Resolved an issue where snapshots would hang indefinitely over remote CDP (WSS) connections by removing WebSocket message and frame size limits to accommodate large responses (e.g. `Accessibility.getFullAXTree`), accepting binary frames from remote proxies such as Browserless, and immediately clearing pending commands when the connection closes rather than waiting for the 30-second timeout (#792)\r\n\r\n## 0.20.2\r\n\r\n### Patch Changes\r\n\r\n- 944fa01: ### New Features\r\n\r\n  - **Linux musl (Alpine) builds** - Added pre-built binaries for **linux-musl** targeting both **x64** and **arm64** architectures, enabling native support for Alpine Linux and other musl-based distributions without requiring glibc (#784)\r\n\r\n  ### Improvements\r\n\r\n  - **Consecutive `--auto-connect` commands** - Added support for issuing multiple consecutive `--auto-connect` commands without requiring a full browser relaunch; external connections are now correctly identified and reused (#786)\r\n  - **External browser disconnect behavior** - When using `--auto-connect` or `--cdp`, closing the agent session now disconnects cleanly without shutting down the user's browser process\r\n\r\n  ### Bug Fixes\r\n\r\n  - **Restored `refs` dict in `--json` snapshot output** - The `refs` map containing role and name metadata for referenced elements is now correctly included in JSON snapshot responses (#787)\r\n  - Fixed e2e test assertions for `diff_snapshot` and `domain_filter` to correctly reflect expected behavior (#783)\r\n  - Fixed Chrome temp-dir cleanup test failing on Windows (#766)\r\n\r\n## 0.20.1\r\n\r\n### Patch Changes\r\n\r\n- bd05917: ### Bug Fixes\r\n\r\n  - Fixed **AX tree deserialization** to accept integer `nodeId` and `childIds` values for compatibility with Lightpanda, which sends numeric IDs where Chrome sends strings (#775)\r\n  - Fixed **misleading SIGPIPE comment** to accurately describe the default Rust SIGPIPE behavior and why it is reset to `SIG_DFL` (#776)\r\n  - Fixed **WebM recording output** to use the VP9 codec (`libvpx-vp9`) instead of H.264, producing valid WebM files; also adds a padding filter to ensure even frame dimensions (#779)\r\n\r\n## 0.20.0\r\n\r\n### Minor Changes\r\n\r\n- 235fa88: ### Full Native Rust\r\n\r\n  - **100% native Rust** -- Removed the entire Node.js/Playwright daemon. The Rust native daemon is now the only implementation. No Node.js runtime or Playwright dependency required. (#754)\r\n  - **99x smaller install** -- Install size reduced from 710 MB to 7 MB by eliminating the Node.js dependency tree.\r\n  - **18x less memory** -- Daemon memory usage reduced from 143 MB to 8 MB.\r\n  - **1.6x faster cold start** -- Cold start time reduced from 1002ms to 617ms.\r\n  - **Benchmarks** -- Added benchmark suite comparing native vs Node.js daemon performance.\r\n  - **Chromium installer hardened** -- Fixed zip path traversal vulnerability in Chrome for Testing installer.\r\n\r\n  ### Bug Fixes\r\n\r\n  - Fixed `--headed false` flag not being respected in CLI (#757)\r\n  - Fixed \"not found\" error pattern in `to_ai_friendly_error` incorrectly catching non-element errors (#759)\r\n  - Fixed storage local key lookup parsing and text output (#761)\r\n  - Fixed Lightpanda engine launch with release binaries (#760)\r\n  - Hardened Lightpanda startup timeouts (#762)\r\n\r\n## 0.19.0\r\n\r\n### Minor Changes\r\n\r\n- 56bb92b: ### New Features\r\n\r\n  - **Browserless.io provider** -- Added browserless.io as a browser provider, supported in both Node.js and native daemon paths. Connect to remote Browserless instances with `--provider browserless` or `AGENT_BROWSER_PROVIDER=browserless`. Configurable via `BROWSERLESS_API_KEY`, `BROWSERLESS_API_URL`, and `BROWSERLESS_BROWSER_TYPE` environment variables. (#502, #746)\r\n  - **`clipboard` command** -- Read from and write to the browser clipboard. Supports `read`, `write <text>`, `copy` (\n... (truncated, 2212 more chars)"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_h6pws3hTvTOZPSpZuC4pNb5V|fc_0ad204dc441d1a5c0169b80a9d7fcc81a2a5e0293ff8204899",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib; p=pathlib.Path('tmp_agent_browser_repo/AGENTS.md'); data=p.read_text(encoding='utf-8'); print(data.encode('ascii','ignore').decode())\\\"\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_rAFoxZnK2DLThlq7zjUOZ1cA|fc_0ad204dc441d1a5c0169b80a9d7fe081a2b575695e04b0d5a2",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib; import re; data=pathlib.Path('tmp_agent_browser_repo/README.md').read_text(encoding='utf-8');\\nfor key in ['provider','BROWSERLESS','BROWSERBASE','Browserless','remote','cdp','MCP','stdio']:\\n    if key.lower() in data.lower(): print('FOUND', key)\\n\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_h6pws3hTvTOZPSpZuC4pNb5V|fc_0ad204dc441d1a5c0169b80a9d7fcc81a2a5e0293ff8204899",
+          "name": "exec",
+          "content": "# AGENTS.md\r\n\r\nInstructions for AI coding agents working with this codebase.\r\n\r\n## Package Manager\r\n\r\nThis project uses **pnpm**. Always use `pnpm` instead of `npm` or `yarn` for installing dependencies, running scripts, etc. (e.g., `pnpm install`, `pnpm run build`).\r\n\r\n## Code Style\r\n\r\n- Do not use emojis in code, output, or documentation. Unicode symbols (, , , ) are acceptable.\r\n- CLI colored output uses `cli/src/color.rs`. This module respects the `NO_COLOR` environment variable. Never use hardcoded ANSI color codes.\r\n- CLI flags must always use kebab-case (e.g., `--auto-connect`, `--allow-file-access`). Never use camelCase for flags (e.g., `--autoConnect` is wrong).\r\n\r\n## Documentation\r\n\r\nWhen adding or changing user-facing features (new flags, commands, behaviors, environment variables, etc.), update **all** of the following:\r\n\r\n1. `cli/src/output.rs` -- `--help` output (flags list, examples, environment variables)\r\n2. `README.md` -- Options table, relevant feature sections, examples\r\n3. `skills/agent-browser/SKILL.md` -- so AI agents know about the feature\r\n4. `docs/src/app/` -- the Next.js docs site (MDX pages)\r\n5. Inline doc comments in the relevant source files\r\n\r\nThis applies to changes that either human users or AI agents would need to know about. Do not skip any of these locations.\r\n\r\nIn the `docs/src/app/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site.\r\n\r\n## Architecture\r\n\r\nThis is a Rust codebase. The browser automation daemon lives in `cli/src/native/` (daemon, actions, browser, CDP client, snapshot, state). The `--engine` flag selects Chrome vs Lightpanda. The `install` command downloads Chrome from Chrome for Testing directly.\r\n\r\n## Testing\r\n\r\n### Unit Tests\r\n\r\n```bash\r\ncd cli && cargo test\r\n```\r\n\r\nRuns all unit tests (~320 tests). These are fast and don't require Chrome.\r\n\r\n### End-to-End Tests\r\n\r\n```bash\r\ncd cli && cargo test e2e -- --ignored --test-threads=1\r\n```\r\n\r\nRuns 18 e2e tests that launch real headless Chrome instances and exercise the full native daemon command pipeline. Requirements:\r\n\r\n- Chrome must be installed\r\n- Must run serially (`--test-threads=1`) to avoid Chrome instance contention\r\n- Tests are `#[ignore]`'d so they don't run during normal `cargo test`\r\n\r\nThe e2e tests live in `cli/src/native/e2e_tests.rs` and cover: launch/close, navigation, snapshots, screenshots, form interaction, cookies, storage, tabs, element queries, viewport/emulation, domain filtering, diff, state management, error handling, and Phase 8 commands.\r\n\r\n### Linting and Formatting\r\n\r\n```bash\r\ncd cli && cargo fmt -- --check   # Check formatting\r\ncd cli && cargo clippy            # Lint\r\n```\r\n\r\n<!-- opensrc:start -->\r\n\r\n## Source Code Reference\r\n\r\nSource code for dependencies is available in `opensrc/` for deeper understanding of implementation details.\r\n\r\nSee `opensrc/sources.json` for the list of available packages and their versions.\r\n\r\nUse this source code when you need to understand how a package works internally, not just its types/interface.\r\n\r\n### Fetching Additional Source Code\r\n\r\nTo fetch source code for a package or repository you need to understand, run:\r\n\r\n```bash\r\nnpx opensrc <package>           # npm package (e.g., npx opensrc zod)\r\nnpx opensrc pypi:<package>      # Python package (e.g., npx opensrc pypi:requests)\r\nnpx opensrc crates:<package>    # Rust crate (e.g., npx opensrc crates:serde)\r\nnpx opensrc <owner>/<repo>      # GitHub repo (e.g., npx opensrc vercel/ai)\r\n```\r\n\r\n<!-- opensrc:end -->"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_rAFoxZnK2DLThlq7zjUOZ1cA|fc_0ad204dc441d1a5c0169b80a9d7fe081a2b575695e04b0d5a2",
+          "name": "exec",
+          "content": "(no output)"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_r6UeS2IPAgvZD5s8XugpZw0t|fc_0ad204dc441d1a5c0169b80aa7875881a2a1156d53dec1a39a",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"list\", \"path\": \"tools/agent_browser\", \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_r6UeS2IPAgvZD5s8XugpZw0t|fc_0ad204dc441d1a5c0169b80aa7875881a2a1156d53dec1a39a",
+          "name": "filesystem",
+          "content": "Error: Directory not found: tools/agent_browser"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_62kHQCpy5oKmKYNDotJN6fgK|fc_0ad204dc441d1a5c0169b80ab8d7c481a2b8dc1d83fd1e7d68",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib,re; data=pathlib.Path('tmp_agent_browser_repo/README.md').read_text(encoding='utf-8');\\nlines=data.splitlines();\\nfor i,l in enumerate(lines):\\n    if any(k in l.lower() for k in ['provider','browserless','browserbase','cdp','auto-connect','env']):\\n        print(f'{i+1}: {l}')\\n\\\"\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_gDYpQGnmxH9tYoK9aQHAb6TX|fc_0ad204dc441d1a5c0169b80ab8d7d081a28712633e70357f18",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib; print(pathlib.Path('tmp_agent_browser_repo/skills/agent-browser/SKILL.md').read_text(encoding='utf-8')[:12000])\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_62kHQCpy5oKmKYNDotJN6fgK|fc_0ad204dc441d1a5c0169b80ab8d7c481a2b8dc1d83fd1e7d68",
+          "name": "exec",
+          "content": "(no output)"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_gDYpQGnmxH9tYoK9aQHAb6TX|fc_0ad204dc441d1a5c0169b80ab8d7d081a28712633e70357f18",
+          "name": "exec",
+          "content": "---\r\nname: agent-browser\r\ndescription: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form\", \"click a button\", \"take a screenshot\", \"scrape data from a page\", \"test this web app\", \"login to a site\", \"automate browser actions\", or any task requiring programmatic web interaction.\r\nallowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)\r\n---\r\n\r\n# Browser Automation with agent-browser\r\n\r\nThe CLI uses Chrome/Chromium via CDP directly. Install via `npm i -g agent-browser`, `brew install agent-browser`, or `cargo install agent-browser`. Run `agent-browser install` to download Chrome.\r\n\r\n## Core Workflow\r\n\r\nEvery browser automation follows this pattern:\r\n\r\n1. **Navigate**: `agent-browser open <url>`\r\n2. **Snapshot**: `agent-browser snapshot -i` (get element refs like `@e1`, `@e2`)\r\n3. **Interact**: Use refs to click, fill, select\r\n4. **Re-snapshot**: After navigation or DOM changes, get fresh refs\r\n\r\n```bash\r\nagent-browser open https://example.com/form\r\nagent-browser snapshot -i\r\n# Output: @e1 [input type=\"email\"], @e2 [input type=\"password\"], @e3 [button] \"Submit\"\r\n\r\nagent-browser fill @e1 \"user@example.com\"\r\nagent-browser fill @e2 \"password123\"\r\nagent-browser click @e3\r\nagent-browser wait --load networkidle\r\nagent-browser snapshot -i  # Check result\r\n```\r\n\r\n## Command Chaining\r\n\r\nCommands can be chained with `&&` in a single shell invocation. The browser persists between commands via a background daemon, so chaining is safe and more efficient than separate calls.\r\n\r\n```bash\r\n# Chain open + wait + snapshot in one call\r\nagent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser snapshot -i\r\n\r\n# Chain multiple interactions\r\nagent-browser fill @e1 \"user@example.com\" && agent-browser fill @e2 \"password123\" && agent-browser click @e3\r\n\r\n# Navigate and capture\r\nagent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png\r\n```\r\n\r\n**When to chain:** Use `&&` when you don't need to read the output of an intermediate command before proceeding (e.g., open + wait + screenshot). Run commands separately when you need to parse the output first (e.g., snapshot to discover refs, then interact using those refs).\r\n\r\n## Handling Authentication\r\n\r\nWhen automating a site that requires login, choose the approach that fits:\r\n\r\n**Option 1: Import auth from the user's browser (fastest for one-off tasks)**\r\n\r\n```bash\r\n# Connect to the user's running Chrome (they're already logged in)\r\nagent-browser --auto-connect state save ./auth.json\r\n# Use that auth state\r\nagent-browser --state ./auth.json open https://app.example.com/dashboard\r\n```\r\n\r\nState files contain session tokens in plaintext -- add to `.gitignore` and delete when no longer needed. Set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest.\r\n\r\n**Option 2: Persistent profile (simplest for recurring tasks)**\r\n\r\n```bash\r\n# First run: login manually or via automation\r\nagent-browser --profile ~/.myapp open https://app.example.com/login\r\n# ... fill credentials, submit ...\r\n\r\n# All future runs: already authenticated\r\nagent-browser --profile ~/.myapp open https://app.example.com/dashboard\r\n```\r\n\r\n**Option 3: Session name (auto-save/restore cookies + localStorage)**\r\n\r\n```bash\r\nagent-browser --session-name myapp open https://app.example.com/login\r\n# ... login flow ...\r\nagent-browser close  # State auto-saved\r\n\r\n# Next time: state auto-restored\r\nagent-browser --session-name myapp open https://app.example.com/dashboard\r\n```\r\n\r\n**Option 4: Auth vault (credentials stored encrypted, login by name)**\r\n\r\n```bash\r\necho \"$PASSWORD\" | agent-browser auth save myapp --url https://app.example.com/login --username user --password-stdin\r\nagent-browser auth login myapp\r\n```\r\n\r\n**Option 5: State file (manual save/load)**\r\n\r\n```bash\r\n# After logging in:\r\nagent-browser state save ./auth.json\r\n# In a future session:\r\nagent-browser state load ./auth.json\r\nagent-browser open https://app.example.com/dashboard\r\n```\r\n\r\nSee [references/authentication.md](references/authentication.md) for OAuth, 2FA, cookie-based auth, and token refresh patterns.\r\n\r\n## Essential Commands\r\n\r\n```bash\r\n# Navigation\r\nagent-browser open <url>              # Navigate (aliases: goto, navigate)\r\nagent-browser close                   # Close browser\r\n\r\n# Snapshot\r\nagent-browser snapshot -i             # Interactive elements with refs (recommended)\r\nagent-browser snapshot -i -C          # Include cursor-interactive elements (divs with onclick, cursor:pointer)\r\nagent-browser snapshot -s \"#selector\" # Scope to CSS selector\r\n\r\n# Interaction (use @refs from snapshot)\r\nagent-browser click @e1               # Click element\r\nagent-browser click @e1 --new-tab     # Click and open in new tab\r\nagent-browser fill @e2 \"text\"         # Clear and type text\r\nagent-browser type @e2 \"text\"         # Type without clearing\r\nagent-browser select @e1 \"option\"     # Select dropdown option\r\nagent-browser check @e1               # Check checkbox\r\nagent-browser press Enter             # Press key\r\nagent-browser keyboard type \"text\"    # Type at current focus (no selector)\r\nagent-browser keyboard inserttext \"text\"  # Insert without key events\r\nagent-browser scroll down 500         # Scroll page\r\nagent-browser scroll down 500 --selector \"div.content\"  # Scroll within a specific container\r\n\r\n# Get information\r\nagent-browser get text @e1            # Get element text\r\nagent-browser get url                 # Get current URL\r\nagent-browser get title               # Get page title\r\nagent-browser get cdp-url             # Get CDP WebSocket URL\r\n\r\n# Wait\r\nagent-browser wait @e1                # Wait for element\r\nagent-browser wait --load networkidle # Wait for network idle\r\nagent-browser wait --url \"**/page\"    # Wait for URL pattern\r\nagent-browser wait 2000               # Wait milliseconds\r\nagent-browser wait --text \"Welcome\"    # Wait for text to appear (substring match)\r\nagent-browser wait --fn \"!document.body.innerText.includes('Loading...')\"  # Wait for text to disappear\r\nagent-browser wait \"#spinner\" --state hidden  # Wait for element to disappear\r\n\r\n# Downloads\r\nagent-browser download @e1 ./file.pdf          # Click element to trigger download\r\nagent-browser wait --download ./output.zip     # Wait for any download to complete\r\nagent-browser --download-path ./downloads open <url>  # Set default download directory\r\n\r\n# Viewport & Device Emulation\r\nagent-browser set viewport 1920 1080          # Set viewport size (default: 1280x720)\r\nagent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)\r\nagent-browser set device \"iPhone 14\"          # Emulate device (viewport + user agent)\r\n\r\n# Capture\r\nagent-browser screenshot              # Screenshot to temp dir\r\nagent-browser screenshot --full       # Full page screenshot\r\nagent-browser screenshot --annotate   # Annotated screenshot with numbered element labels\r\nagent-browser screenshot --screenshot-dir ./shots  # Save to custom directory\r\nagent-browser screenshot --screenshot-format jpeg --screenshot-quality 80\r\nagent-browser pdf output.pdf          # Save as PDF\r\n\r\n# Clipboard\r\nagent-browser clipboard read                      # Read text from clipboard\r\nagent-browser clipboard write \"Hello, World!\"     # Write text to clipboard\r\nagent-browser clipboard copy                      # Copy current selection\r\nagent-browser clipboard paste                     # Paste from clipboard\r\n\r\n# Diff (compare page states)\r\nagent-browser diff snapshot                          # Compare current vs last snapshot\r\nagent-browser diff snapshot --baseline before.txt    # Compare current vs saved file\r\nagent-browser diff screenshot --baseline before.png  # Visual pixel diff\r\nagent-browser diff url <url1> <url2>                 # Compare two pages\r\nagent-browser diff url <url1> <url2> --wait-until networkidle  # Custom wait strategy\r\nagent-browser diff url <url1> <url2> --selector \"#main\"  # Scope to element\r\n```\r\n\r\n## Common Patterns\r\n\r\n### Form Submission\r\n\r\n```bash\r\nagent-browser open https://example.com/signup\r\nagent-browser snapshot -i\r\nagent-browser fill @e1 \"Jane Doe\"\r\nagent-browser fill @e2 \"jane@example.com\"\r\nagent-browser select @e3 \"California\"\r\nagent-browser check @e4\r\nagent-browser click @e5\r\nagent-browser wait --load networkidle\r\n```\r\n\r\n### Authentication with Auth Vault (Recommended)\r\n\r\n```bash\r\n# Save credentials once (encrypted with AGENT_BROWSER_ENCRYPTION_KEY)\r\n# Recommended: pipe password via stdin to avoid shell history exposure\r\necho \"pass\" | agent-browser auth save github --url https://github.com/login --username user --password-stdin\r\n\r\n# Login using saved profile (LLM never sees password)\r\nagent-browser auth login github\r\n\r\n# List/show/delete profiles\r\nagent-browser auth list\r\nagent-browser auth show github\r\nagent-browser auth delete github\r\n```\r\n\r\n### Authentication with State Persistence\r\n\r\n```bash\r\n# Login once and save state\r\nagent-browser open https://app.example.com/login\r\nagent-browser snapshot -i\r\nagent-browser fill @e1 \"$USERNAME\"\r\nagent-browser fill @e2 \"$PASSWORD\"\r\nagent-browser click @e3\r\nagent-browser wait --url \"**/dashboard\"\r\nagent-browser state save auth.json\r\n\r\n# Reuse in future sessions\r\nagent-browser state load auth.json\r\nagent-browser open https://app.example.com/dashboard\r\n```\r\n\r\n### Session Persistence\r\n\r\n```bash\r\n# Auto-save/restore cookies and localStorage across browser restarts\r\nagent-browser --session-name myapp open https://app.example.com/login\r\n# ... login flow ...\r\nagent-browser close  # State auto-saved to ~/.agent-browser/sessions/\r\n\r\n# Next time, state is auto-loaded\r\nagent-browser --session-name myapp open https://app.example.com/dashboard\r\n\r\n# Encrypt state at rest\r\nexport AGENT_BROWSER_ENCRYPTION_KEY=$(openssl\n... (truncated, 2319 more chars)"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_X8rUqFykMOvMLFWHGjLAgVlb|fc_0ad204dc441d1a5c0169b80ac37e5481a2b2395c9f42e529b0",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib,re; data=pathlib.Path('tmp_agent_browser_repo/skills/agent-browser/SKILL.md').read_text(encoding='utf-8');\\nfor pat in ['Browserbase','browserbase','browserless','BROWSERBASE','BROWSERLESS','AGENT_BROWSER_PROVIDER','--provider','--cdp','--engine']:\\n    if pat in data: print('FOUND', pat)\\n\\\"\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_0q6wgOviVAx3E2lIl9vtgzvY|fc_0ad204dc441d1a5c0169b80ac37e6481a295ef93f88dcd762e",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib,re; data=pathlib.Path('tmp_agent_browser_repo/README.md').read_text(encoding='utf-8');\\nfor pat in ['AGENT_BROWSER_PROVIDER','BROWSERLESS_API_KEY','BROWSERBASE_API_KEY','--provider','--cdp','--engine','--profile','--session-name','auth save']:\\n    if pat in data: print('FOUND', pat)\\n\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_X8rUqFykMOvMLFWHGjLAgVlb|fc_0ad204dc441d1a5c0169b80ac37e5481a2b2395c9f42e529b0",
+          "name": "exec",
+          "content": "(no output)"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_0q6wgOviVAx3E2lIl9vtgzvY|fc_0ad204dc441d1a5c0169b80ac37e6481a295ef93f88dcd762e",
+          "name": "exec",
+          "content": "(no output)"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_yeaZRKD7yrndfM8XQMl6rMdS|fc_0ad204dc441d1a5c0169b80ac7a75c81a287dd00b10b14c347",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"write\", \"path\": \"tools/agent_browser/resource.yaml\", \"content\": \"tool_id: agent_browser\\nname: agent-browser\\nslug: agent_browser\\ntool_type: external\\nsummary: >-\\n  Register the upstream vercel-labs/agent-browser project as an external browser automation CLI\\n  for AI agents. The tool is installed outside this repository and exposed through documented\\n  shell usage rather than vendored source code.\\ndescription: >-\\n  agent-browser is a native Rust-based browser automation CLI distributed primarily through npm,\\n  Homebrew, and Cargo. It provides a persistent browser daemon plus high-level commands for\\n  navigation, snapshots, semantic element targeting, input, downloads, screenshots, authentication,\\n  storage, network interception, and remote CDP/provider connectivity. Because it is an actively\\n  maintained third-party project with its own release cadence and multi-platform install flows,\\n  it should be integrated in this repository as an external tool registration rather than copying\\n  the upstream code into tools/agent_browser/main/.\\nsource:\\n  type: github\\n  url: https://github.com/vercel-labs/agent-browser\\n  owner: vercel-labs\\n  repo: agent-browser\\n  default_branch: main\\n  vcs: git\\ncurrent_version: 0.20.13\\nupstream_checked:\\n  method: git ls-remote --tags + package.json inspection\\n  package_name: agent-browser\\n  package_version: 0.20.13\\n  commit: 0883813cd3cd5072c48d1415b4ae472c3c955666\\n  checked_at: 2025-02\\ninstall:\\n  mode: external\\n  primary_method: npm\\n  supported_methods:\\n    - npm_global\\n    - npm_local\\n    - homebrew_macos\\n    - cargo\\n    - source_build\\n  install_dir:\\n    npm_global: global package manager location\\n    npm_local: project-local node_modules/.bin\\n    homebrew_macos: Homebrew-managed cellar prefix\\n    cargo: cargo bin directory\\n    source_build: cloned upstream repository outside workspace\\n  executable:\\n    command: agent-browser\\n    discovery:\\n      - agent-browser --help\\n      - agent-browser --version\\n  post_install:\\n    - agent-browser install\\n    - agent-browser install --with-deps   # optional on Linux\\nruntime:\\n  interfaces:\\n    - cli\\n  transport:\\n    - stdio\\n    - background daemon managed by the CLI\\n  languages:\\n    - rust\\n    - javascript (packaging/install scripts only)\\n  platforms:\\n    - macos\\n    - linux\\n    - windows\\n  dependencies:\\n    - Chrome/Chromium or remote CDP/provider target\\n    - network access for browser/download/provider operations when needed\\n  state_locations:\\n    - ~/.agent-browser/\\ncapabilities:\\n  - open and control web pages through a native CLI\\n  - accessibility snapshot output with stable refs for agent-friendly interaction\\n  - click/fill/type/select/keyboard/mouse/tab/frame/dialog operations\\n  - screenshots, annotated screenshots, PDFs, and diffing\\n  - cookies, storage, session persistence, auth vault, and profile reuse\\n  - downloads, network inspection/routing, viewport/device emulation\\n  - connect to existing browsers via CDP or provider integrations when supported upstream\\nusage:\\n  preferred_invocation: agent-browser <command>\\n  examples:\\n    - agent-browser open https://example.com\\n    - agent-browser snapshot -i\\n    - agent-browser click @e2\\n    - agent-browser fill @e3 \\\"user@example.com\\\"\\n    - agent-browser wait --load networkidle\\n    - agent-browser screenshot --annotate\\npermissions:\\n  filesystem: true\\n  network: true\\n  browser_automation: true\\n  subprocess: true\\n  secrets: true\\nrisk_notes:\\n  - Can open websites, submit forms, and interact with authenticated browser sessions.\\n  - Can persist cookies, storage, profiles, or encrypted auth material on disk.\\n  - Browser/provider usage may contact third-party remote services depending on configuration.\\ngovernance:\\n  maintainer: local workspace operator\\n  upstream_maintainer: vercel-labs\\n  review_notes:\\n    - Treat as external unless a deliberate wrapper/main implementation is later added.\\n    - Do not vendor upstream repository into tools/agent_browser/main/ just to mirror releases.\\n    - Keep resource.yaml, version metadata, and toolskills docs aligned on update.\\nupdate_strategy:\\n  check_upstream:\\n    - git ls-remote --tags https://github.com/vercel-labs/agent-browser.git\\n    - inspect upstream package.json version and CHANGELOG.md\\n  upgrade_steps:\\n    - choose desired upstream release/tag\\n    - reinstall or upgrade via npm/homebrew/cargo/source outside this repository\\n    - verify agent-browser --version and basic commands locally\\n    - update current_version, upstream_checked, and toolskills documentation\\nartifacts_in_workspace:\\n  - tools/agent_browser/resource.yaml\\n  - tools/agent_browser/toolskills/SKILL.md\\n\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_yeaZRKD7yrndfM8XQMl6rMdS|fc_0ad204dc441d1a5c0169b80ac7a75c81a287dd00b10b14c347",
+          "name": "filesystem",
+          "content": "Successfully wrote 4534 bytes to D:\\projects\\G3KU\\tools\\agent_browser\\resource.yaml"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_neae9uHADoL5ltmcMnsAhvQ3|fc_0ad204dc441d1a5c0169b80ae7194081a2af241d09ed285cb9",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"write\", \"path\": \"tools/agent_browser/toolskills/SKILL.md\", \"content\": \"---\\nname: agent_browser\\ndescription: Use this tool when a task needs browser automation through the external agent-browser CLI, including navigating websites, taking snapshots, clicking elements, filling forms, capturing screenshots, persisting sessions, or connecting to an existing browser via CDP/provider features.\\nallowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(pnpm dlx agent-browser:*), Bash(cmd /c agent-browser:*), Bash(powershell -Command agent-browser:*)\\n---\\n\\n# agent_browser\\n\\n## What this tool is\\n\\n`agent-browser` is an **external** tool registration for the upstream GitHub project:\\n\\n- Repository: `https://github.com/vercel-labs/agent-browser`\\n- Package: `agent-browser`\\n- Current documented upstream version at integration time: `0.20.13`\\n- Delivery model in this repo: **external**, not vendored\\n\\nThis repository does **not** copy the upstream source into `tools/agent_browser/main/`. Instead, it registers how to install, invoke, verify, and maintain the tool safely.\\n\\n## Why external mode is the right fit\\n\\nChoose external mode because the upstream project is:\\n\\n1. A fast-moving third-party repository with its own release tags and changelog.\\n2. A multi-platform CLI distributed through package managers and compiled native binaries.\\n3. Better maintained by reinstalling/upgrading from upstream than by copying source into this repo.\\n4. Usable directly as a shell tool once installed (`agent-browser ...`).\\n\\nUse internal mode only if this repository later adds a **local wrapper implementation** or API bridge under `tools/agent_browser/main/` for platform-specific orchestration. That is not necessary for the current integration goal.\\n\\n## Install\\n\\nPick one supported install path.\\n\\n### Option A: npm global install\\n\\n```bash\\nnpm install -g agent-browser\\nagent-browser install\\n```\\n\\nNotes:\\n\\n- Recommended by upstream for general CLI usage.\\n- `agent-browser install` downloads Chrome for Testing when needed.\\n- On Linux, if dependencies are missing, try:\\n\\n```bash\\nagent-browser install --with-deps\\n```\\n\\n### Option B: project-local npm install\\n\\n```bash\\nnpm install agent-browser\\nnpx agent-browser install\\n```\\n\\nUse this if you want the project to pin a version in `package.json` instead of relying on a global install.\\n\\n### Option C: Homebrew on macOS\\n\\n```bash\\nbrew install agent-browser\\nagent-browser install\\n```\\n\\n### Option D: Cargo\\n\\n```bash\\ncargo install agent-browser\\nagent-browser install\\n```\\n\\n### Option E: build from source outside this workspace\\n\\n```bash\\ngit clone https://github.com/vercel-labs/agent-browser.git\\ncd agent-browser\\npnpm install\\npnpm build:native\\npnpm link --global\\nagent-browser install\\n```\\n\\nUse this only when you explicitly need source-level debugging, local patching, or a nonstandard build flow.\\n\\n## Verify installation\\n\\nRun at least:\\n\\n```bash\\nagent-browser --version\\nagent-browser --help\\n```\\n\\nThen do a smoke test:\\n\\n```bash\\nagent-browser open https://example.com\\nagent-browser wait --load networkidle\\nagent-browser snapshot -i\\nagent-browser close\\n```\\n\\nExpected outcome:\\n\\n- Version command succeeds.\\n- Browser opens and loads the page.\\n- Snapshot returns accessible element refs such as `@e1`, `@e2`.\\n\\n## Core usage pattern\\n\\nA reliable browser automation loop is:\\n\\n1. Open a page.\\n2. Wait for load or relevant content.\\n3. Snapshot to obtain fresh refs.\\n4. Interact using refs.\\n5. Re-snapshot after page changes.\\n\\nExample:\\n\\n```bash\\nagent-browser open https://example.com/login\\nagent-browser wait --load networkidle\\nagent-browser snapshot -i\\nagent-browser fill @e1 \\\"user@example.com\\\"\\nagent-browser fill @e2 \\\"secret\\\"\\nagent-browser click @e3\\nagent-browser wait --url \\\"**/dashboard\\\"\\nagent-browser snapshot -i\\n```\\n\\n## High-value commands\\n\\n### Navigate and inspect\\n\\n```bash\\nagent-browser open <url>\\nagent-browser get url\\nagent-browser get title\\nagent-browser snapshot -i\\nagent-browser close\\n```\\n\\n### Interaction\\n\\n```bash\\nagent-browser click @e1\\nagent-browser fill @e2 \\\"text\\\"\\nagent-browser type @e2 \\\"text\\\"\\nagent-browser select @e3 \\\"option\\\"\\nagent-browser press Enter\\nagent-browser hover @e4\\nagent-browser scroll down 500\\n```\\n\\n### Capture artifacts\\n\\n```bash\\nagent-browser screenshot\\nagent-browser screenshot --full\\nagent-browser screenshot --annotate\\nagent-browser pdf output.pdf\\n```\\n\\n### Waiting\\n\\n```bash\\nagent-browser wait 2000\\nagent-browser wait --load networkidle\\nagent-browser wait --text \\\"Welcome\\\"\\nagent-browser wait \\\"#spinner\\\" --state hidden\\n```\\n\\n### Sessions, auth, and persistence\\n\\n```bash\\nagent-browser --profile ~/.myapp open https://app.example.com\\nagent-browser --session-name myapp open https://app.example.com\\nagent-browser state save ./auth.json\\nagent-browser state load ./auth.json\\n```\\n\\n### Existing browser / remote connectivity\\n\\nWhen supported by the installed upstream version, use direct connection options such as CDP or provider features instead of launching a fresh local browser.\\n\\nExamples of the kinds of workflows the upstream tool supports:\\n\\n```bash\\nagent-browser get cdp-url\\nagent-browser connect <port>\\nagent-browser --auto-connect snapshot -i\\n```\\n\\nBefore relying on provider-specific flags in automation, confirm the exact flags and environment variables with:\\n\\n```bash\\nagent-browser --help\\n```\\n\\nbecause upstream may add or rename remote connectivity options between releases.\\n\\n## Operational advice for agents\\n\\n- Prefer **refs from `snapshot -i`** over brittle CSS selectors.\\n- Re-run `snapshot -i` after navigation, modal open/close, or major DOM changes.\\n- Use `wait --load networkidle`, `wait --url`, or `wait --text` to reduce timing flakiness.\\n- Store login state in named sessions or profile directories for repeat tasks.\\n- Treat saved auth/state files as secrets.\\n- If you only need a one-off invocation without global install, `npx agent-browser ...` is acceptable.\\n\\n## Security and safety notes\\n\\nThis tool can:\\n\\n- open arbitrary websites,\\n- submit forms,\\n- use authenticated browser state,\\n- read or write persistent session/auth data,\\n- download files,\\n- interact with local or remote browser/provider endpoints.\\n\\nTherefore:\\n\\n- never commit auth state, profiles, or secrets into the repository;\\n- prefer encrypted or ephemeral storage when available;\\n- review remote provider settings before use in sensitive environments.\\n\\n## Maintenance workflow in this repository\\n\\nWhen updating this tool registration:\\n\\n1. Inspect `tools/agent_browser/resource.yaml`.\\n2. Check upstream tags/releases and version metadata.\\n3. Reinstall or upgrade the external tool outside this repository.\\n4. Verify with `agent-browser --version` and a small smoke test.\\n5. Update:\\n   - `tools/agent_browser/resource.yaml`\\n   - `tools/agent_browser/toolskills/SKILL.md`\\n\\n## Suggested upgrade procedure\\n\\n```bash\\ngit ls-remote --tags https://github.com/vercel-labs/agent-browser.git\\nagent-browser --version\\n```\\n\\nThen compare the installed version with upstream `package.json` / release tags / changelog.\\n\\nIf upgrading via npm:\\n\\n```bash\\nnpm install -g agent-browser@latest\\nagent-browser install\\nagent-browser --version\\n```\\n\\nIf upgrading via Homebrew or Cargo, use the corresponding package manager update flow and then rerun the same smoke tests.\\n\\n## Recommended reusable invocation patterns\\n\\n### Quick page exploration\\n\\n```bash\\nagent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser snapshot -i\\n```\\n\\n### Annotated screenshot for debugging\\n\\n```bash\\nagent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser screenshot --annotate\\n```\\n\\n### Form fill workflow\\n\\n```bash\\nagent-browser open https://example.com/form\\nagent-browser wait --load networkidle\\nagent-browser snapshot -i\\nagent-browser fill @e1 \\\"Jane Doe\\\"\\nagent-browser fill @e2 \\\"jane@example.com\\\"\\nagent-browser click @e3\\n```\\n\\n### Session reuse\\n\\n```bash\\nagent-browser --session-name myapp open https://app.example.com\\n```\\n\\n## Maintenance recommendations\\n\\n- Keep this registration in **external** mode unless there is a concrete need for a local wrapper.\\n- Track upstream releases by tag and changelog, not by memory.\\n- Re-verify remote/CDP/provider options on every major or minor upgrade.\\n- If this repo later needs a stable higher-level interface, add a thin local wrapper rather than vendoring the whole upstream repository.\\n\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_neae9uHADoL5ltmcMnsAhvQ3|fc_0ad204dc441d1a5c0169b80ae7194081a2af241d09ed285cb9",
+          "name": "filesystem",
+          "content": "Successfully wrote 8224 bytes to D:\\projects\\G3KU\\tools\\agent_browser\\toolskills\\SKILL.md"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_roFUkbB59Eflr9q7rPlUU2gP|fc_0ad204dc441d1a5c0169b80b1bc9dc81a2b387f548e9b0cba8",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"delete\", \"path\": \"tmp_agent_browser_repo\", \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_roFUkbB59Eflr9q7rPlUU2gP|fc_0ad204dc441d1a5c0169b80b1bc9dc81a2b387f548e9b0cba8",
+          "name": "filesystem",
+          "content": "Error: Not a file: tmp_agent_browser_repo"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_hbpWxXMoAepRN4LSgfi92BmK|fc_0ad204dc441d1a5c0169b80b2732c081a28326be53a123fbee",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"rmdir /s /q tmp_agent_browser_repo\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_hbpWxXMoAepRN4LSgfi92BmK|fc_0ad204dc441d1a5c0169b80b2732c081a28326be53a123fbee",
+          "name": "exec",
+          "content": "Error: Command blocked by safety guard (dangerous pattern detected)"
+        }
+      ],
+      "pending_tool_calls": [],
+      "pending_child_specs": [],
+      "partial_child_results": [],
+      "last_error": ""
+    }
+  ]
+}

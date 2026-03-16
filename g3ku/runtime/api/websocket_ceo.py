@@ -279,9 +279,46 @@ async def ceo_websocket(websocket: WebSocket):
     if load_session is not None:
         persisted_session = load_session(session_id)
         persisted_messages = _build_ceo_snapshot(getattr(persisted_session, 'messages', []))
+    current_turn_task: asyncio.Task[Any] | None = None
 
     async def _safe_send(payload: dict[str, Any]) -> None:
         await websocket.send_json(payload)
+
+    async def _push_stream_event(event_type: str, data: dict[str, Any] | None = None) -> None:
+        try:
+            await stream_queue.put(build_envelope(channel='ceo', session_id=session_id, type=event_type, data=data or {}))
+        except RuntimeError:
+            return
+
+    def _session_is_running() -> bool:
+        status = str(getattr(session.state, 'status', '') or '').strip().lower()
+        return bool(getattr(session.state, 'is_running', False)) or status == 'running'
+
+    def _register_turn_task(task: asyncio.Task[Any]) -> None:
+        register_task = getattr(agent, '_register_active_task', None)
+        if callable(register_task):
+            register_task(session_id, task)
+
+    def _clear_turn_task(task: asyncio.Task[Any]) -> None:
+        nonlocal current_turn_task
+        if current_turn_task is task:
+            current_turn_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+    async def _run_user_turn(user_message: str | UserInputMessage) -> None:
+        try:
+            result = await session.prompt(user_message)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            await _push_stream_event('ceo.error', {'code': 'turn_failed', 'message': str(exc)})
+            return
+        await _push_stream_event('ceo.reply.final', {'text': str(result.output or '')})
 
     async def sender(source_queue: asyncio.Queue[dict[str, Any]]) -> None:
         while True:
@@ -289,15 +326,20 @@ async def ceo_websocket(websocket: WebSocket):
             await _safe_send(payload)
 
     async def relay_session_event(event: AgentEvent) -> None:
+        if event.type == 'control_ack':
+            payload = dict(event.payload or {})
+            await _push_stream_event('ceo.control_ack', payload)
+            return
+        if event.type == 'state_snapshot':
+            state = dict((event.payload or {}).get('state') or {})
+            await _push_stream_event('ceo.state', {'state': state})
+            return
         if not _should_forward_tool_event(session_id=session_id, event=event):
             return
         serialized = _serialize_tool_event(event)
         if serialized is None:
             return
-        try:
-            await stream_queue.put(build_envelope(channel='ceo', session_id=session_id, type='ceo.agent.tool', data=serialized))
-        except RuntimeError:
-            return
+        await _push_stream_event('ceo.agent.tool', serialized)
 
     unsubscribe = session.subscribe(relay_session_event)
     sender_task = asyncio.create_task(sender(queue))
@@ -305,9 +347,17 @@ async def ceo_websocket(websocket: WebSocket):
     try:
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='snapshot.ceo', data={'messages': persisted_messages}))
+        await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='ceo.state', data={'state': session.state_dict()}))
         while True:
             data = await websocket.receive_json()
-            if str(data.get('type') or '') != 'client.user_message':
+            message_type = str(data.get('type') or '')
+            if message_type == 'client.pause_turn':
+                if _session_is_running():
+                    await session.pause()
+                else:
+                    await _push_stream_event('ceo.control_ack', {'action': 'pause', 'accepted': False, 'reason': 'no_active_turn'})
+                continue
+            if message_type != 'client.user_message':
                 continue
             text = str(data.get('text') or '')
             try:
@@ -324,15 +374,20 @@ async def ceo_websocket(websocket: WebSocket):
                 continue
             if not text.strip() and not uploads:
                 continue
+            if _session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
+                await _safe_send(
+                    build_envelope(
+                        channel='ceo',
+                        session_id=session_id,
+                        type='error',
+                        data={'code': 'ceo_turn_in_progress'},
+                    )
+                )
+                continue
             user_message = _build_user_message(text, uploads)
-            result = await runtime_manager.prompt(
-                user_message,
-                session_key=session_id,
-                channel=default_channel or 'web',
-                chat_id=default_chat_id or 'shared',
-            )
-            reply = str(result.output or '')
-            await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='ceo.reply.final', data={'text': reply}))
+            current_turn_task = asyncio.create_task(_run_user_turn(user_message))
+            _register_turn_task(current_turn_task)
+            current_turn_task.add_done_callback(_clear_turn_task)
     except WebSocketDisconnect:
         pass
     finally:

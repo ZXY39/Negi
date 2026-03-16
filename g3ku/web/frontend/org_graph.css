@@ -549,11 +549,12 @@ textarea {
 .tree-container {
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow: auto hidden;
     padding: var(--space-4) var(--space-5) var(--space-5);
     background-color: var(--bg-app);
     cursor: grab;
     touch-action: none;
+    overscroll-behavior: contain;
 }
 
 .tree-container.is-panning {
@@ -573,7 +574,8 @@ textarea {
     min-width: max-content;
     min-height: 100%;
     padding: var(--space-2) var(--space-4) var(--space-6);
-    transform: translate(0, 0);
+    transform: translate(0, 0) scale(1);
+    transform-origin: 0 0;
     will-change: transform;
 }
 
@@ -1344,6 +1346,83 @@ textarea {
     white-space: pre-wrap;
     word-break: break-word;
 }
+
+.task-trace-host {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.task-trace-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.task-trace-step {
+    padding: var(--space-3) var(--space-3) var(--space-3) calc(var(--space-4) + 2px);
+    border-radius: 18px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+}
+
+.task-trace-step[open] {
+    box-shadow: var(--shadow-sm);
+}
+
+.task-trace-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    cursor: pointer;
+    list-style: none;
+}
+
+.task-trace-summary::-webkit-details-marker {
+    display: none;
+}
+
+.task-trace-summary:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 68%, transparent);
+    outline-offset: 3px;
+    border-radius: 12px;
+}
+
+.task-trace-body {
+    display: grid;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+}
+
+.task-trace-field {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.task-trace-label {
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.task-trace-code {
+    min-height: 56px;
+    font-size: 0.85rem;
+    background: color-mix(in srgb, var(--bg-panel) 62%, var(--bg-app));
+}
+
+.task-trace-acceptance {
+    min-height: 72px;
+}
+
+.task-trace-empty {
+    min-height: 96px;
+    margin: 0;
+}
+
 .message .project-card {
     margin-top: var(--space-3);
     background-color: var(--bg-panel);
@@ -3166,6 +3245,53 @@ textarea {
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
     background-color: var(--bg-panel);
     box-shadow: var(--shadow-sm);
+}
+
+.model-chain-card .panel-header {
+    align-items: flex-start;
+}
+
+.model-chain-card-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+}
+
+.model-role-iterations-field {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.model-role-iterations-label {
+    white-space: nowrap;
+}
+
+.model-role-iterations-input {
+    width: 92px;
+    min-height: 34px;
+    padding: 0 10px;
+    border-radius: 12px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface-inner);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: right;
+}
+
+.model-role-iterations-input:disabled {
+    opacity: 0.72;
+    cursor: not-allowed;
+}
+
+.model-role-iterations-input.is-invalid {
+    border-color: color-mix(in srgb, #ef4444 56%, var(--border-strong));
+    box-shadow: 0 0 0 3px color-mix(in srgb, #ef4444 14%, transparent);
 }
 
 .model-chain-list {

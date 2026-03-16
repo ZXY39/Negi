@@ -78,6 +78,8 @@ class ResourceLoader:
         )
 
     def load_tool(self, descriptor: ToolResourceDescriptor, *, services: dict[str, Any] | None = None) -> Tool | None:
+        if not bool(getattr(descriptor, "callable", True)):
+            return None
         if str(descriptor.protocol or "mcp").strip().lower() != "mcp":
             raise RuntimeError(f"unsupported tool protocol for {descriptor.name}: {descriptor.protocol}")
         if str(descriptor.mcp_transport or "embedded").strip().lower() != "embedded":

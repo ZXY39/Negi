@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -15,6 +15,11 @@ ROLE_SCOPE_ALIASES = {
 }
 
 REQUIRED_MODEL_ROLES = ("ceo", "execution", "inspection")
+DEFAULT_ROLE_MAX_ITERATIONS = {
+    "ceo": 40,
+    "execution": 16,
+    "inspection": 16,
+}
 
 
 def normalize_role_scope(value: str) -> str:
@@ -138,6 +143,23 @@ class AgentDefaults(Base):
                 "Example fix: set agents.defaults.runtime to 'langgraph' or remove the field."
             )
         return "langgraph"
+
+
+class RoleIterationConfig(Base):
+    """Per-role loop limits for CEO, execution, and inspection runtimes."""
+
+    ceo: int = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["ceo"], ge=2)
+    execution: int = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["execution"], ge=2)
+    inspection: int = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["inspection"], ge=2)
+
+    @field_validator("ceo", "execution", "inspection", mode="before")
+    @classmethod
+    def _normalize_iterations(cls, value: Any, info: ValidationInfo) -> int:
+        if value is None:
+            return DEFAULT_ROLE_MAX_ITERATIONS[info.field_name]
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_ROLE_MAX_ITERATIONS[info.field_name]
+        return int(value)
 
 
 class ModelFallbackTarget(Base):
@@ -317,6 +339,7 @@ class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    role_iterations: RoleIterationConfig = Field(default_factory=RoleIterationConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
 
 
@@ -655,6 +678,11 @@ class Config(BaseSettings):
     def get_role_model_keys(self, role: str) -> list[str]:
         normalized = normalize_role_scope(role)
         return list(getattr(self.models.roles, normalized))
+
+    def get_role_max_iterations(self, role: str) -> int:
+        normalized = normalize_role_scope(role)
+        value = int(getattr(self.agents.role_iterations, normalized, DEFAULT_ROLE_MAX_ITERATIONS[normalized]) or 0)
+        return max(2, value)
 
     def resolve_role_model_key(self, role: str) -> str:
         refs = self.get_role_model_keys(role)

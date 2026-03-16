@@ -60,7 +60,7 @@ class LoadToolContextTool(_ProjectServiceTool):
 
     @property
     def description(self) -> str:
-        return 'Load the detailed usage guide for a currently visible tool so the 主Agent can use it correctly.'
+        return 'Load the detailed usage guide for a currently visible tool or registered external tool so the 主Agent can install, update, or use it correctly.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -75,15 +75,5 @@ class LoadToolContextTool(_ProjectServiceTool):
     async def execute(self, tool_id: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         service = await self._service()
         session_id = _runtime_session_key(__g3ku_runtime)
-        tool_name = str(tool_id or '').strip()
-        visible = set(service.list_effective_tool_names(session_id=session_id, actor_role='ceo'))
-        if tool_name not in visible:
-            return json.dumps({'ok': False, 'error': f'Tool not visible for 主Agent: {tool_id}'}, ensure_ascii=False)
-        manager = getattr(service, 'resource_manager', None)
-        if manager is None:
-            return json.dumps({'ok': False, 'error': 'Resource manager unavailable'}, ensure_ascii=False)
-        try:
-            content = manager.load_toolskill_body(tool_name)
-        except FileNotFoundError:
-            content = ''
-        return json.dumps({'ok': True, 'tool_id': tool_name, 'content': content}, ensure_ascii=False)
+        payload = service.load_tool_context(actor_role='ceo', session_id=session_id, tool_id=str(tool_id or '').strip())
+        return json.dumps(payload, ensure_ascii=False)

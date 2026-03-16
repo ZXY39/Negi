@@ -94,6 +94,10 @@ class ApiClient {
         return data.task || null;
     }
 
+    static async deleteTask(taskId) {
+        return this.delete(`/api/tasks/${taskId}`);
+    }
+
     static async getTaskArtifacts(taskId) {
         const data = await this.get(`/api/tasks/${taskId}/artifacts`);
         return data.items || [];
@@ -113,6 +117,7 @@ class ApiClient {
             catalog: Array.isArray(data.items) ? data.items : [],
             items: Array.isArray(data.items) ? data.items.map((item) => item.key) : [],
             roles: data.roles || {},
+            roleIterations: data.roleIterations || data.role_iterations || {},
             defaults: {},
         };
     }
@@ -174,8 +179,24 @@ class ApiClient {
         return this._refreshModelsAfter(this.delete(`/api/models/${modelKey}`));
     }
 
-    static async updateModelRoleChain(scope, modelKeys) {
-        return this._refreshModelsAfter(this.put(`/api/models/roles/${scope}`, { model_keys: modelKeys, modelKeys }));
+    static async updateModelRoleChain(scope, payload) {
+        const source = Array.isArray(payload) ? { modelKeys: payload } : (payload && typeof payload === "object" ? payload : {});
+        const modelKeys = Array.isArray(source.modelKeys)
+            ? source.modelKeys
+            : Array.isArray(source.model_keys)
+                ? source.model_keys
+                : undefined;
+        const maxIterations = source.maxIterations ?? source.max_iterations;
+        const body = {};
+        if (modelKeys !== undefined) {
+            body.model_keys = modelKeys;
+            body.modelKeys = modelKeys;
+        }
+        if (maxIterations !== undefined) {
+            body.max_iterations = maxIterations;
+            body.maxIterations = maxIterations;
+        }
+        return this._refreshModelsAfter(this.put(`/api/models/roles/${scope}`, body));
     }
 
     static async getLlmTemplates() {
@@ -224,7 +245,11 @@ class ApiClient {
 
     static async listLlmBindings() {
         const data = await this.get("/api/llm/bindings");
-        return { items: data.items || [], routes: data.routes || {} };
+        return {
+            items: data.items || [],
+            routes: data.routes || {},
+            roleIterations: data.roleIterations || data.role_iterations || {},
+        };
     }
 
     static async createLlmBinding(payload) {
@@ -253,12 +278,34 @@ class ApiClient {
 
     static async getLlmRoutes() {
         const data = await this.get("/api/llm/routes");
-        return data.routes || {};
+        return {
+            routes: data.routes || {},
+            roleIterations: data.roleIterations || data.role_iterations || {},
+        };
     }
 
-    static async updateLlmRoute(scope, modelKeys) {
-        const data = await this.put(`/api/llm/routes/${encodeURIComponent(scope)}`, { model_keys: modelKeys, modelKeys });
-        return data.routes || {};
+    static async updateLlmRoute(scope, payload) {
+        const source = Array.isArray(payload) ? { modelKeys: payload } : (payload && typeof payload === "object" ? payload : {});
+        const modelKeys = Array.isArray(source.modelKeys)
+            ? source.modelKeys
+            : Array.isArray(source.model_keys)
+                ? source.model_keys
+                : undefined;
+        const maxIterations = source.maxIterations ?? source.max_iterations;
+        const body = {};
+        if (modelKeys !== undefined) {
+            body.model_keys = modelKeys;
+            body.modelKeys = modelKeys;
+        }
+        if (maxIterations !== undefined) {
+            body.max_iterations = maxIterations;
+            body.maxIterations = maxIterations;
+        }
+        const data = await this.put(`/api/llm/routes/${encodeURIComponent(scope)}`, body);
+        return {
+            routes: data.routes || {},
+            roleIterations: data.roleIterations || data.role_iterations || {},
+        };
     }
 
     static async getLlmMemoryModels() {

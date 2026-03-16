@@ -1,6 +1,11 @@
 # 工具使用说明
 
-工具通过 `tools/*/resource.yaml` 发现，通过 `main/tool.py` 加载，通过 `toolskills/SKILL.md` 提供调用指引。
+工具通过 `tools/*/resource.yaml` 发现。
+
+- `internal` 工具：通过 `main/tool.py` 加载，并进入 callable tool 列表。
+- `external` 工具：只注册目录和 `toolskills/SKILL.md`，不加载 `main/tool.py`，也不会进入 callable tool 列表。
+
+外置工具的真实安装位置来自 `resource.yaml -> install_dir`。
 
 ## runtime 约定
 

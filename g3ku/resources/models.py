@@ -57,6 +57,9 @@ class ToolResourceDescriptor(BaseResourceDescriptor):
     entrypoint_hash: str = ""
     protocol: str = "mcp"
     mcp_transport: str = "embedded"
+    tool_type: str = "internal"
+    install_dir: Path | None = None
+    callable: bool = True
     toolskills_root: Path | None = None
     toolskills_main_path: Path | None = None
     toolskills_references_root: Path | None = None

@@ -92,6 +92,8 @@ class RuntimeBootstrapBridge:
                 acceptance_model_refs=config.get_role_model_keys('inspection'),
                 default_max_depth=getattr(config.main_runtime, 'default_max_depth', 1),
                 hard_max_depth=getattr(config.main_runtime, 'hard_max_depth', 4),
+                execution_max_iterations=config.get_role_max_iterations('execution'),
+                acceptance_max_iterations=config.get_role_max_iterations('inspection'),
             )
             self._loop.main_task_service = service
         except Exception as exc:

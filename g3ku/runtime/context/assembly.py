@@ -58,6 +58,14 @@ class ContextAssemblyService:
         )
         system_prompt = self._prompt_builder.build(skills=selected_skills)
 
+        external_tools_block, external_trace = self._build_external_tool_block(
+            query_text=query_text,
+            visible_families=list(exposure.get('tool_families') or []),
+            top_k=8,
+        )
+        if external_tools_block:
+            system_prompt = f"{system_prompt}\n\n{external_tools_block}"
+
         archive_block, archive_trace = self._build_archive_block(
             query_text=query_text,
             session=persisted_session,
@@ -103,11 +111,13 @@ class ContextAssemblyService:
             'query': query_text,
             'selected_skills': skill_trace,
             'selected_tools': tool_trace,
+            'external_tools': external_trace,
             'archive_summaries': archive_trace,
             'recent_history_count': len(recent_history),
             'tokens': {
                 'system_prompt': estimate_tokens(system_prompt),
                 'skill_inventory': sum(int(item.get('tokens', 0)) for item in skill_trace),
+                'external_tools': sum(int(item.get('tokens', 0)) for item in external_trace),
                 'archive_summaries': sum(int(item.get('tokens', 0)) for item in archive_trace),
                 'retrieved_context': retrieval_tokens,
             },
@@ -166,6 +176,56 @@ class ContextAssemblyService:
             selected = ranked[:top_k]
             trace = [{'skill_id': getattr(item, 'skill_id', ''), 'score': 0.0, 'tokens': 0} for item in selected]
         return selected, trace
+
+    def _build_external_tool_block(
+        self,
+        *,
+        query_text: str,
+        visible_families: list[Any],
+        top_k: int,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        ranked: list[tuple[float, str, Any]] = []
+        for family in visible_families:
+            if bool(getattr(family, 'callable', True)):
+                continue
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            install_dir = str(getattr(family, 'install_dir', '') or '').strip()
+            if not tool_id or not install_dir:
+                continue
+            score = score_query(
+                query_text,
+                tool_id,
+                getattr(family, 'display_name', ''),
+                getattr(family, 'description', ''),
+                install_dir,
+            )
+            ranked.append((score, tool_id, family))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        if not ranked:
+            return '', []
+
+        lines = ['## 当前已注册的外置工具']
+        trace: list[dict[str, Any]] = []
+        for score, tool_id, family in ranked[: max(1, top_k)]:
+            display_name = str(getattr(family, 'display_name', '') or tool_id).strip() or tool_id
+            description = str(getattr(family, 'description', '') or '').strip()
+            install_dir = str(getattr(family, 'install_dir', '') or '').strip()
+            line = (
+                f"- `{tool_id}` ({display_name}): {description or '外置工具注册项。'} "
+                f"安装目录：`{install_dir}`。如需安装、更新或使用说明，调用 "
+                f"`load_tool_context(tool_id=\"{tool_id}\")`。"
+            )
+            line_tokens = estimate_tokens(line)
+            lines.append(line)
+            trace.append(
+                {
+                    'tool_id': tool_id,
+                    'score': score,
+                    'install_dir': install_dir,
+                    'tokens': line_tokens,
+                }
+            )
+        return '\n'.join(lines), trace
 
     def _build_archive_block(self, *, query_text: str, session: Any | None, top_k: int, token_budget: int) -> tuple[str, list[dict[str, Any]]]:
         if session is None or top_k <= 0:

@@ -1,88 +1,299 @@
+---
+name: agent_browser
+description: Use this tool when a task needs browser automation through the external agent-browser CLI, including navigating websites, taking snapshots, clicking elements, filling forms, capturing screenshots, persisting sessions, or connecting to an existing browser via CDP/provider features.
+allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(pnpm dlx agent-browser:*), Bash(cmd /c agent-browser:*), Bash(powershell -Command agent-browser:*)
+---
+
 # agent_browser
 
-`agent_browser` 是对 vendored 上游项目 `tools/agent_browser/main/agent-browser` 的 G3KU 包装器。主 skill 只保留本工具自己的调用契约；上游仓库自带的各个 skill 被拆成按需加载的 `references/` 文档，避免主 skill 过长。
+## What this tool is
 
-## 何时调用
+`agent-browser` is an **external** tool registration for the upstream GitHub project:
 
-- 需要真实浏览器自动化时调用，例如打开网页、点击、输入、截图、导出 PDF、抓取可访问性快照、读取页面文本、等待页面状态变化。
-- 任务需要跨多次调用维持浏览器上下文时优先使用它，可通过 `session` 或 `session_name` 明确指定会话标识。
-- 需要保留登录态、Cookie、localStorage 或浏览器 profile 时继续使用它。默认会为工具自己的默认会话创建独立 `--profile` 目录。
-- 如果只是读写本地文件，优先用 `filesystem`；如果只是执行普通 shell，优先用 `exec`。
+- Repository: `https://github.com/vercel-labs/agent-browser`
+- Package: `agent-browser`
+- Current documented upstream version at integration time: `0.20.13`
+- Delivery model in this repo: **external**, not vendored
 
-## 参数
+This repository does **not** copy the upstream source into `tools/agent_browser/main/`. Instead, it registers how to install, invoke, verify, and maintain the tool safely.
 
-- `args`: 必填，字符串数组。表示传给 `agent-browser` 的 CLI 参数，不包含可执行文件本身。
-- `working_dir`: 可选，命令工作目录。相对路径按 G3KU 工作区解析，且必须位于工作区内部。
-- `stdin`: 可选，写入标准输入的文本，适合 `eval --stdin` 之类的命令。
-- `timeout`: 可选，超时秒数，默认使用 `tools/agent_browser/resource.yaml` 中的 `settings.timeout`。
-- `session`: 可选，透传为 `--session`，用于隔离 agent-browser 会话。
-- `profile`: 可选，覆盖自动注入的 `--profile`。相对路径按工作区解析。
-- `session_name`: 可选，透传为 `--session-name`，用于 agent-browser 的状态持久化命名。
+## Why external mode is the right fit
 
-## 默认行为
+Choose external mode because the upstream project is:
 
-- 可执行文件解析顺序为：`settings.executable` → 工具目录内仓库的本地二进制 → 首次调用时按仓库 `package.json.version` 下载匹配 release 二进制 → `cargo run --manifest-path cli/Cargo.toml --`。
-- 默认不再依赖 G3KU 运行时会话注入；如需稳定会话，请显式传 `session`，或开启 `settings.auto_session` 使用 `settings.default_session`。
-- Tool 管理页中的治理入口来自 `resource.yaml -> governance`；它与这里的 toolskill 文档互补，不互相替代。
+1. A fast-moving third-party repository with its own release tags and changelog.
+2. A multi-platform CLI distributed through package managers and compiled native binaries.
+3. Better maintained by reinstalling/upgrading from upstream than by copying source into this repo.
+4. Usable directly as a shell tool once installed (`agent-browser ...`).
 
-## 返回结果
+Use internal mode only if this repository later adds a **local wrapper implementation** or API bridge under `tools/agent_browser/main/` for platform-specific orchestration. That is not necessary for the current integration goal.
 
-工具始终返回 JSON 字符串，常见字段如下：
+## Install
 
-- `ok`: 是否执行成功。
-- `command`: 实际执行的完整命令数组。
-- `cwd`: 实际工作目录。
-- `exit_code`: 进程退出码。
-- `stdout`: 标准输出文本。
-- `stderr`: 标准错误文本。
-- `stdout_json`: 当 `stdout` 本身是合法 JSON 时，附带解析后的结构化内容。
-- `error`: 启动失败、参数错误或超时时返回。
+Pick one supported install path.
 
-## 常见失败场景与回退
+### Option A: npm global install
 
-- 仓库二进制不存在：工具会先尝试按仓库版本号下载匹配 release 二进制；如果仍失败，再检查 `cargo` 或 `settings.executable`。
-- 首次运行较慢：如果仓库尚未准备二进制，第一次调用可能需要下载匹配版本文件，或回退到 `cargo run` 编译 Rust CLI。
-- Chrome 未安装：先执行 `args=["install"]`，必要时再补充上游支持的安装参数。
-- 页面交互失败：先执行 `snapshot` 或 `get text` 确认元素引用和页面状态，再继续点击或输入。
-- 需要保存截图、PDF 或导出文件：把输出路径放到工作区内，再配合 `filesystem` 读取或检查产物。
-
-## 与其他工具的关系
-
-- 与 `filesystem` 配合：读取截图、PDF、导出状态文件，或检查工作区中的自动化产物。
-- 与 `exec` 配合：仅在需要诊断二进制、Chrome、环境变量或仓库构建状态时使用；正常浏览器自动化优先直接调用 `agent_browser`。
-
-## References
-
-上游仓库 `tools/agent_browser/main/agent-browser/skills/` 中的所有 skill 都作为本工具的按需 references 提供。默认不要一次性加载全部，只读取与当前任务最相关的一份或少量几份：
-
-- `tools/agent_browser/toolskills/references/agent-browser.md`: 通用网页自动化主流程、认证、状态、快照与常用命令。
-- `tools/agent_browser/toolskills/references/dogfood.md`: 面向 QA / exploratory testing / bug hunt 的系统化测试流程与证据产出。
-- `tools/agent_browser/toolskills/references/electron.md`: Electron 桌面应用自动化，如何连到 CDP 端口并复用同样的快照交互模式。
-- `tools/agent_browser/toolskills/references/slack.md`: Slack 工作区导航、未读检查、频道与消息提取等常见任务。
-- `tools/agent_browser/toolskills/references/vercel-sandbox.md`: 在 Vercel Sandbox microVM 里运行 agent-browser + Chrome 的集成模式。
-
-这些 reference 文件都指回各自的上游原始路径，并说明如果需要更深细节，应继续打开上游 skill 自带的 `references/`、`templates/` 或示例文件。
-
-已镜像的上游 `references/` 子文档位于：
-
-- `tools/agent_browser/toolskills/references/agent-browser/`
-- `tools/agent_browser/toolskills/references/dogfood/`
-- `tools/agent_browser/toolskills/references/slack/`
-
-## 推荐调用示例
-
-```json
-{"args": ["open", "https://example.com"]}
+```bash
+npm install -g agent-browser
+agent-browser install
 ```
 
-```json
-{"args": ["snapshot"]}
+Notes:
+
+- Recommended by upstream for general CLI usage.
+- `agent-browser install` downloads Chrome for Testing when needed.
+- On Linux, if dependencies are missing, try:
+
+```bash
+agent-browser install --with-deps
 ```
 
-```json
-{"args": ["screenshot", "artifacts/example.png"], "working_dir": "."}
+### Option B: project-local npm install
+
+```bash
+npm install agent-browser
+npx agent-browser install
 ```
 
-```json
-{"args": ["eval", "--stdin"], "stdin": "document.title"}
+Use this if you want the project to pin a version in `package.json` instead of relying on a global install.
+
+### Option C: Homebrew on macOS
+
+```bash
+brew install agent-browser
+agent-browser install
 ```
+
+### Option D: Cargo
+
+```bash
+cargo install agent-browser
+agent-browser install
+```
+
+### Option E: build from source outside this workspace
+
+```bash
+git clone https://github.com/vercel-labs/agent-browser.git
+cd agent-browser
+pnpm install
+pnpm build:native
+pnpm link --global
+agent-browser install
+```
+
+Use this only when you explicitly need source-level debugging, local patching, or a nonstandard build flow.
+
+## Verify installation
+
+Run at least:
+
+```bash
+agent-browser --version
+agent-browser --help
+```
+
+Then do a smoke test:
+
+```bash
+agent-browser open https://example.com
+agent-browser wait --load networkidle
+agent-browser snapshot -i
+agent-browser close
+```
+
+Expected outcome:
+
+- Version command succeeds.
+- Browser opens and loads the page.
+- Snapshot returns accessible element refs such as `@e1`, `@e2`.
+
+## Core usage pattern
+
+A reliable browser automation loop is:
+
+1. Open a page.
+2. Wait for load or relevant content.
+3. Snapshot to obtain fresh refs.
+4. Interact using refs.
+5. Re-snapshot after page changes.
+
+Example:
+
+```bash
+agent-browser open https://example.com/login
+agent-browser wait --load networkidle
+agent-browser snapshot -i
+agent-browser fill @e1 "user@example.com"
+agent-browser fill @e2 "secret"
+agent-browser click @e3
+agent-browser wait --url "**/dashboard"
+agent-browser snapshot -i
+```
+
+## High-value commands
+
+### Navigate and inspect
+
+```bash
+agent-browser open <url>
+agent-browser get url
+agent-browser get title
+agent-browser snapshot -i
+agent-browser close
+```
+
+### Interaction
+
+```bash
+agent-browser click @e1
+agent-browser fill @e2 "text"
+agent-browser type @e2 "text"
+agent-browser select @e3 "option"
+agent-browser press Enter
+agent-browser hover @e4
+agent-browser scroll down 500
+```
+
+### Capture artifacts
+
+```bash
+agent-browser screenshot
+agent-browser screenshot --full
+agent-browser screenshot --annotate
+agent-browser pdf output.pdf
+```
+
+### Waiting
+
+```bash
+agent-browser wait 2000
+agent-browser wait --load networkidle
+agent-browser wait --text "Welcome"
+agent-browser wait "#spinner" --state hidden
+```
+
+### Sessions, auth, and persistence
+
+```bash
+agent-browser --profile ~/.myapp open https://app.example.com
+agent-browser --session-name myapp open https://app.example.com
+agent-browser state save ./auth.json
+agent-browser state load ./auth.json
+```
+
+### Existing browser / remote connectivity
+
+When supported by the installed upstream version, use direct connection options such as CDP or provider features instead of launching a fresh local browser.
+
+Examples of the kinds of workflows the upstream tool supports:
+
+```bash
+agent-browser get cdp-url
+agent-browser connect <port>
+agent-browser --auto-connect snapshot -i
+```
+
+Before relying on provider-specific flags in automation, confirm the exact flags and environment variables with:
+
+```bash
+agent-browser --help
+```
+
+because upstream may add or rename remote connectivity options between releases.
+
+## Operational advice for agents
+
+- Prefer **refs from `snapshot -i`** over brittle CSS selectors.
+- Re-run `snapshot -i` after navigation, modal open/close, or major DOM changes.
+- Use `wait --load networkidle`, `wait --url`, or `wait --text` to reduce timing flakiness.
+- Store login state in named sessions or profile directories for repeat tasks.
+- Treat saved auth/state files as secrets.
+- If you only need a one-off invocation without global install, `npx agent-browser ...` is acceptable.
+
+## Security and safety notes
+
+This tool can:
+
+- open arbitrary websites,
+- submit forms,
+- use authenticated browser state,
+- read or write persistent session/auth data,
+- download files,
+- interact with local or remote browser/provider endpoints.
+
+Therefore:
+
+- never commit auth state, profiles, or secrets into the repository;
+- prefer encrypted or ephemeral storage when available;
+- review remote provider settings before use in sensitive environments.
+
+## Maintenance workflow in this repository
+
+When updating this tool registration:
+
+1. Inspect `tools/agent_browser/resource.yaml`.
+2. Check upstream tags/releases and version metadata.
+3. Reinstall or upgrade the external tool outside this repository.
+4. Verify with `agent-browser --version` and a small smoke test.
+5. Update:
+   - `tools/agent_browser/resource.yaml`
+   - `tools/agent_browser/toolskills/SKILL.md`
+
+## Suggested upgrade procedure
+
+```bash
+git ls-remote --tags https://github.com/vercel-labs/agent-browser.git
+agent-browser --version
+```
+
+Then compare the installed version with upstream `package.json` / release tags / changelog.
+
+If upgrading via npm:
+
+```bash
+npm install -g agent-browser@latest
+agent-browser install
+agent-browser --version
+```
+
+If upgrading via Homebrew or Cargo, use the corresponding package manager update flow and then rerun the same smoke tests.
+
+## Recommended reusable invocation patterns
+
+### Quick page exploration
+
+```bash
+agent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+```
+
+### Annotated screenshot for debugging
+
+```bash
+agent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser screenshot --annotate
+```
+
+### Form fill workflow
+
+```bash
+agent-browser open https://example.com/form
+agent-browser wait --load networkidle
+agent-browser snapshot -i
+agent-browser fill @e1 "Jane Doe"
+agent-browser fill @e2 "jane@example.com"
+agent-browser click @e3
+```
+
+### Session reuse
+
+```bash
+agent-browser --session-name myapp open https://app.example.com
+```
+
+## Maintenance recommendations
+
+- Keep this registration in **external** mode unless there is a concrete need for a local wrapper.
+- Track upstream releases by tag and changelog, not by memory.
+- Re-verify remote/CDP/provider options on every major or minor upgrade.
+- If this repo later needs a stable higher-level interface, add a thin local wrapper rather than vendoring the whole upstream repository.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from main.models import NodeRecord
 from main.monitoring.models import LatestTaskNodeOutput, TaskListItem, TaskProgressResult, TaskSummaryResult
 
@@ -76,7 +78,7 @@ class TaskQueryService:
             tree_text=str(tree_text or '(empty tree)'),
             root=snapshot.get('root') if isinstance(snapshot.get('root'), dict) else None,
             latest_node=latest_node,
-            nodes=[item.model_dump(mode='json') for item in nodes],
+            nodes=[self._serialize_node(item) for item in nodes],
             text=text,
         )
 
@@ -108,3 +110,80 @@ class TaskQueryService:
         if failure_reason:
             return failure_reason
         return ''
+
+    def _serialize_node(self, node: NodeRecord) -> dict[str, object]:
+        payload = node.model_dump(mode='json')
+        payload['execution_trace'] = self._execution_trace(node)
+        return payload
+
+    def _execution_trace(self, node: NodeRecord) -> dict[str, object]:
+        tool_output_map = self._tool_output_map(node)
+        tool_steps: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+
+        for entry in list(node.output or []):
+            for call in list(entry.tool_calls or []):
+                tool_call_id = str(call.get('id') or '').strip()
+                if not tool_call_id or tool_call_id in seen_ids:
+                    continue
+                seen_ids.add(tool_call_id)
+                output_text = str(tool_output_map.get(tool_call_id) or '')
+                arguments = call.get('arguments')
+                if isinstance(arguments, (dict, list)):
+                    arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2)
+                else:
+                    arguments_text = str(arguments or '')
+                tool_steps.append(
+                    {
+                        'tool_call_id': tool_call_id,
+                        'tool_name': str(call.get('name') or 'tool'),
+                        'arguments_text': arguments_text,
+                        'output_text': output_text,
+                        'status': self._tool_step_status(output_text, node.status),
+                    }
+                )
+
+        return {
+            'initial_prompt': str(node.prompt or node.goal or ''),
+            'tool_steps': tool_steps,
+            'final_output': self._node_output_text(node),
+            'acceptance_result': str(node.check_result or ''),
+        }
+
+    def _tool_output_map(self, node: NodeRecord) -> dict[str, str]:
+        messages = self._parse_input_messages(node.input)
+        result: dict[str, str] = {}
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('role') or '').strip().lower() != 'tool':
+                continue
+            tool_call_id = str(item.get('tool_call_id') or '').strip()
+            if not tool_call_id:
+                continue
+            content = item.get('content')
+            if isinstance(content, (dict, list)):
+                result[tool_call_id] = json.dumps(content, ensure_ascii=False, indent=2)
+            else:
+                result[tool_call_id] = str(content or '')
+        return result
+
+    @staticmethod
+    def _parse_input_messages(raw: str) -> list[dict[str, object]]:
+        text = str(raw or '').strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    @staticmethod
+    def _tool_step_status(output_text: str, node_status: str) -> str:
+        text = str(output_text or '').strip()
+        if text:
+            return 'error' if text.startswith('Error:') else 'success'
+        if str(node_status or '').strip().lower() == 'in_progress':
+            return 'running'
+        return 'success'

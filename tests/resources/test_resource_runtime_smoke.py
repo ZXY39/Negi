@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from types import MethodType
 
 import pytest
+import yaml
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
 from g3ku.resources import ResourceManager
@@ -106,6 +107,85 @@ def _write_demo_tool(root: Path, *, name: str = 'demo_echo', guide: str = 'Demo 
                 return text
             """
         ),
+        encoding='utf-8',
+    )
+    return tool_root
+
+
+def test_tool_resource_current_version_text_has_no_replacement_question_marks():
+    manifests = sorted((REPO_ROOT / 'tools').rglob('resource.yaml'))
+    assert manifests
+
+    for manifest_path in manifests:
+        raw = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) or {}
+        if not isinstance(raw, dict):
+            continue
+        current_version = raw.get('current_version')
+        if not isinstance(current_version, dict):
+            continue
+        for key in ('summary', 'compare_rule', 'source_of_truth'):
+            value = str(current_version.get(key) or '')
+            assert '?' not in value, f'{manifest_path}:{key} contains replacement question marks: {value}'
+
+
+def _write_demo_external_tool(
+    root: Path,
+    *,
+    name: str = 'external_browser',
+    guide: str = 'External browser guide',
+    install_dir: str | None = None,
+) -> Path:
+    tool_root = root / 'tools' / name
+    (tool_root / 'toolskills').mkdir(parents=True, exist_ok=True)
+    install_path = install_dir or f'.g3ku/external-tools/{name}'
+    (tool_root / 'resource.yaml').write_text(
+        textwrap.dedent(
+            f"""\
+            schema_version: 1
+            kind: tool
+            name: {name}
+            display_name: External Browser
+            description: Registered external browser automation tool.
+            tool_type: external
+            install_dir: {install_path}
+            protocol: mcp
+            mcp:
+              transport: embedded
+            requires:
+              tools: []
+              bins: []
+              env: []
+            permissions:
+              network: true
+              filesystem:
+                - workspace
+            parameters:
+              type: object
+              properties: {{}}
+              required: []
+            exposure:
+              agent: true
+              main_runtime: true
+            governance:
+              family: {name}
+              display_name: External Browser
+              description: Registered external browser automation tool.
+              actions:
+                - id: use
+                  label: Use External Browser
+                  risk_level: medium
+                  destructive: false
+                  allowed_roles:
+                    - ceo
+                    - execution
+            toolskill:
+              enabled: true
+            """
+        ),
+        encoding='utf-8',
+    )
+    (tool_root / 'toolskills' / 'SKILL.md').write_text(
+        f"# {name}\n\n## 何时使用\n\n{guide}\n\n## 安装\n\nInstall it outside the tools directory.\n\n## 更新\n\nPull the upstream project in place.\n\n## 使用\n\nRun it from the configured install_dir.\n",
         encoding='utf-8',
     )
     return tool_root
@@ -318,6 +398,56 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     finally:
         manager.close()
         store.close()
+
+
+def test_external_tool_is_discovered_but_not_loaded_as_callable_instance(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    install_dir = workspace / '.g3ku' / 'external-tools' / 'external_browser'
+    install_dir.mkdir(parents=True, exist_ok=True)
+    _write_demo_external_tool(workspace, install_dir='.g3ku/external-tools/external_browser')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        descriptor = manager.get_tool_descriptor('external_browser')
+        assert descriptor is not None
+        assert descriptor.available is True
+        assert descriptor.tool_type == 'external'
+        assert descriptor.callable is False
+        assert descriptor.install_dir == install_dir.resolve()
+        assert manager.get_tool('external_browser') is None
+        assert 'external_browser' not in manager.tool_instances()
+    finally:
+        manager.close()
+
+
+def test_external_tool_rejects_main_dir_and_install_dir_inside_tools(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+
+    with_main = _write_demo_external_tool(workspace, name='external_with_main')
+    (with_main / 'main').mkdir(parents=True, exist_ok=True)
+
+    inside_tools = _write_demo_external_tool(
+        workspace,
+        name='external_in_tools',
+        install_dir='tools/external_in_tools/runtime',
+    )
+    _ = inside_tools
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    discovered = registry.discover().tools
+
+    with_main_descriptor = discovered['external_with_main']
+    assert with_main_descriptor.available is False
+    assert any('must not contain main/' in err for err in with_main_descriptor.errors)
+
+    inside_tools_descriptor = discovered['external_in_tools']
+    assert inside_tools_descriptor.available is False
+    assert any('outside the tools directory' in err for err in inside_tools_descriptor.errors)
 
 
 @pytest.mark.asyncio

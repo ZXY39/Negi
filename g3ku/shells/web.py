@@ -58,7 +58,7 @@ def get_agent() -> AgentLoop:
             provider_name=provider_name,
             temperature=config.agents.defaults.temperature,
             max_tokens=config.agents.defaults.max_tokens,
-            max_iterations=config.agents.defaults.max_tool_iterations,
+            max_iterations=config.get_role_max_iterations('ceo'),
             memory_window=config.agents.defaults.memory_window,
             reasoning_effort=config.agents.defaults.reasoning_effort,
             multi_agent_config=config.agents.multi_agent,

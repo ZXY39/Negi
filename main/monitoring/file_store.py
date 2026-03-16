@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +11,12 @@ class TaskFileStore:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _safe_task_dir_name(task_id: str) -> str:
+        return str(task_id or '').strip().replace(':', '_').replace('/', '_').replace('\\', '_')
+
     def task_dir(self, task_id: str) -> Path:
-        safe_task_id = str(task_id or '').strip().replace(':', '_').replace('/', '_').replace('\\', '_')
-        path = self.base_dir / safe_task_id
+        path = self.base_dir / self._safe_task_dir_name(task_id)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -49,3 +53,6 @@ class TaskFileStore:
         if not target.exists():
             return None
         return target.read_text(encoding='utf-8')
+
+    def delete_task_files(self, task_id: str) -> None:
+        shutil.rmtree(self.base_dir / self._safe_task_dir_name(task_id), ignore_errors=True)

@@ -130,6 +130,8 @@ class ResourceRegistry:
         entrypoint = main_root / "tool.py"
         toolskills_root = root / "toolskills"
         toolskills_main = toolskills_root / "SKILL.md"
+        tool_type = str(data.get("tool_type") or "internal").strip().lower() or "internal"
+        install_dir = self._resolve_install_dir(data.get("install_dir"))
         descriptor = ToolResourceDescriptor(
             kind=ResourceKind.TOOL,
             name=str(data.get("name") or root.name),
@@ -142,6 +144,9 @@ class ResourceRegistry:
             entrypoint_hash=self._file_hash(entrypoint) if entrypoint.exists() else "",
             protocol=str(data.get("protocol") or "mcp").strip().lower() or "mcp",
             mcp_transport=str(((data.get("mcp") or {}).get("transport") or "embedded")).strip().lower() or "embedded",
+            tool_type=tool_type,
+            install_dir=install_dir,
+            callable=tool_type == "internal",
             toolskills_root=toolskills_root if toolskills_root.exists() else None,
             toolskills_main_path=toolskills_main if toolskills_main.exists() else None,
             toolskills_references_root=(toolskills_root / "references") if (toolskills_root / "references").exists() else None,
@@ -173,14 +178,48 @@ class ResourceRegistry:
             descriptor.errors.append(
                 f"unsupported mcp.transport '{descriptor.mcp_transport}': only 'embedded' is allowed"
             )
-        allowed_children = {self.manifest_name, "toolskills", "main"}
+        if descriptor.tool_type not in {"internal", "external"}:
+            descriptor.available = False
+            descriptor.errors.append(
+                f"unsupported tool_type '{descriptor.tool_type}': only 'internal' or 'external' is allowed"
+            )
+
+        source = dict(data.get("source") or {})
+        source_vendor_dir = str(source.get("vendor_dir") or "").strip()
+        if descriptor.tool_type == "internal":
+            if data.get("install_dir") not in (None, ""):
+                descriptor.available = False
+                descriptor.errors.append("internal tool must not declare install_dir")
+        elif descriptor.tool_type == "external":
+            if source_vendor_dir:
+                descriptor.available = False
+                descriptor.errors.append("external tool must not declare source.vendor_dir")
+            if descriptor.install_dir is None:
+                descriptor.available = False
+                descriptor.errors.append("external tool requires install_dir")
+            else:
+                if self._is_relative_to(descriptor.install_dir, self.tools_dir.resolve()):
+                    descriptor.available = False
+                    descriptor.errors.append("external tool install_dir must be outside the tools directory")
+                elif not descriptor.install_dir.exists():
+                    descriptor.warnings.append("external tool install_dir does not exist yet")
+            if descriptor.main_root is not None:
+                descriptor.available = False
+                descriptor.errors.append(f"external tool must not contain main/: {root}")
+
+        allowed_children = {self.manifest_name, "toolskills"}
+        if descriptor.tool_type == "internal":
+            allowed_children.add("main")
         extra_children = [path.name for path in root.iterdir() if path.name not in allowed_children]
         if extra_children:
             descriptor.warnings.append("unexpected root entries: " + ", ".join(sorted(extra_children)))
-        if descriptor.entrypoint_path is None:
+        if descriptor.tool_type == "internal" and descriptor.entrypoint_path is None:
             descriptor.available = False
             descriptor.errors.append(f"missing main/tool.py: {root}")
-        if descriptor.toolskill_enabled and descriptor.toolskills_main_path is None:
+        if descriptor.tool_type == "external" and descriptor.toolskills_main_path is None:
+            descriptor.available = False
+            descriptor.errors.append(f"external tool missing toolskills/SKILL.md: {root}")
+        elif descriptor.toolskill_enabled and descriptor.toolskills_main_path is None:
             descriptor.warnings.append(f"missing toolskills/SKILL.md: {root}")
         return descriptor
 
@@ -228,3 +267,20 @@ class ResourceRegistry:
             digest.update(str(stat.st_mtime_ns).encode("utf-8"))
             digest.update(str(stat.st_size).encode("utf-8"))
         return digest.hexdigest()
+
+    def _resolve_install_dir(self, raw_value: Any) -> Path | None:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = self.workspace / path
+        return path.resolve(strict=False)
+
+    @staticmethod
+    def _is_relative_to(path: Path, base: Path) -> bool:
+        try:
+            path.relative_to(base)
+            return True
+        except ValueError:
+            return False

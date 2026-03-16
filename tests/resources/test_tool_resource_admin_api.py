@@ -53,6 +53,59 @@ def _build_app(service) -> FastAPI:
     return app
 
 
+def _write_external_tool(workspace: Path, *, name: str = 'external_browser') -> None:
+    root = workspace / 'tools' / name
+    (root / 'toolskills').mkdir(parents=True, exist_ok=True)
+    (workspace / '.g3ku' / 'external-tools' / name).mkdir(parents=True, exist_ok=True)
+    (root / 'resource.yaml').write_text(
+        f"""schema_version: 1
+kind: tool
+name: {name}
+display_name: External Browser
+description: Registered external browser automation tool.
+tool_type: external
+install_dir: .g3ku/external-tools/{name}
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: true
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties: {{}}
+  required: []
+exposure:
+  agent: true
+  main_runtime: true
+governance:
+  family: {name}
+  display_name: External Browser
+  description: Registered external browser automation tool.
+  actions:
+    - id: use
+      label: Use External Browser
+      risk_level: medium
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+toolskill:
+  enabled: true
+""",
+        encoding='utf-8',
+    )
+    (root / 'toolskills' / 'SKILL.md').write_text(
+        '# External Browser\n\n## 何时使用\n\nNeed a browser.\n\n## 安装\n\nInstall outside tools.\n\n## 更新\n\nPull upstream.\n\n## 使用\n\nUse install_dir.\n',
+        encoding='utf-8',
+    )
+
+
 @pytest.mark.asyncio
 async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -79,6 +132,51 @@ async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_pa
         assert payload['tool_id'] == 'exec_runtime'
         assert payload['primary_executor_name'] == 'exec'
         assert '# exec' in payload['content']
+        assert payload['tool_type'] == 'internal'
+        assert payload['install_dir'] is None
+        assert payload['callable'] is True
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_endpoints_expose_external_tool_fields(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _write_external_tool(workspace)
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        client = TestClient(_build_app(service))
+
+        item_response = client.get('/api/resources/tools/external_browser')
+        assert item_response.status_code == 200
+        item = item_response.json()['item']
+        assert item['tool_type'] == 'external'
+        assert item['callable'] is False
+        assert item['install_dir'] == str((workspace / '.g3ku' / 'external-tools' / 'external_browser').resolve())
+
+        toolskill_response = client.get('/api/resources/tools/external_browser/toolskill')
+        assert toolskill_response.status_code == 200
+        payload = toolskill_response.json()
+        assert payload['tool_type'] == 'external'
+        assert payload['callable'] is False
+        assert payload['install_dir'] == str((workspace / '.g3ku' / 'external-tools' / 'external_browser').resolve())
+        assert '## 安装' in payload['content']
     finally:
         await service.close()
         manager.close()
@@ -213,6 +311,64 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
     assert [action.action_id for action in visible[0].actions] == ['read']
 
 
+def test_main_runtime_service_normalizes_short_task_id_for_lookup_and_progress():
+    captured: dict[str, str] = {}
+
+    class _Store:
+        def get_task(self, task_id: str):
+            captured['store_task_id'] = task_id
+            if task_id == 'task:demo':
+                return SimpleNamespace(task_id=task_id)
+            return None
+
+    class _QueryService:
+        def view_progress(self, task_id: str, *, mark_read: bool = True):
+            captured['progress_task_id'] = task_id
+            captured['mark_read'] = str(mark_read)
+            return SimpleNamespace(text=f'progress:{task_id}:{mark_read}')
+
+    service = object.__new__(MainRuntimeService)
+    service.store = _Store()
+    service.query_service = _QueryService()
+
+    task = service.get_task('demo')
+    progress = service.view_progress('demo', mark_read=False)
+
+    assert task is not None
+    assert captured['store_task_id'] == 'task:demo'
+    assert captured['progress_task_id'] == 'task:demo'
+    assert progress == 'progress:task:demo:False'
+
+
+def test_task_rest_endpoint_normalizes_short_task_id():
+    captured: dict[str, str] = {}
+
+    class _StubService:
+        async def startup(self) -> None:
+            return None
+
+        def normalize_task_id(self, task_id: str) -> str:
+            captured['normalized_from'] = task_id
+            return f'task:{task_id}'
+
+        def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False):
+            captured['detail_task_id'] = task_id
+            return {'task': {'task_id': task_id}, 'progress': {'task_id': task_id, 'mark_read': mark_read}}
+
+    from main.api import rest as task_rest
+
+    app = FastAPI()
+    app.include_router(task_rest.router, prefix='/api')
+    task_rest.get_agent = lambda: SimpleNamespace(main_task_service=_StubService())
+
+    client = TestClient(app)
+    response = client.get('/api/tasks/demo')
+
+    assert response.status_code == 200
+    assert captured == {'normalized_from': 'demo', 'detail_task_id': 'task:demo'}
+    assert response.json()['task']['task_id'] == 'task:demo'
+
+
 def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)
@@ -224,7 +380,7 @@ def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
     )
     (workspace / '.g3ku' / 'config.json').write_text(
         json.dumps({
-            'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'multiAgent': {'orchestratorModelKey': None}},
+            'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'roleIterations': {'ceo': 40, 'execution': 16, 'inspection': 16}, 'multiAgent': {'orchestratorModelKey': None}},
             'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': '', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
             'providers': {},
             'gateway': {'host': '127.0.0.1', 'port': 1, 'heartbeat': {'enabled': True, 'intervalS': 1}},
@@ -266,7 +422,7 @@ def _write_runtime_config(workspace: Path) -> None:
     (workspace / '.g3ku').mkdir(parents=True, exist_ok=True)
     (workspace / '.g3ku' / 'config.json').write_text(
         json.dumps({
-            'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'multiAgent': {'orchestratorModelKey': None}},
+            'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'roleIterations': {'ceo': 40, 'execution': 16, 'inspection': 16}, 'multiAgent': {'orchestratorModelKey': None}},
             'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': 'demo-key', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
             'providers': {'openai': {'apiKey': '', 'apiBase': None, 'extraHeaders': None}},
             'gateway': {'host': '127.0.0.1', 'port': 1, 'heartbeat': {'enabled': True, 'intervalS': 1}},
@@ -298,6 +454,70 @@ def _write_runtime_config(workspace: Path) -> None:
         }),
         encoding='utf-8',
     )
+
+
+def test_models_endpoint_returns_role_iterations(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.get('/api/models')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['role_iterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16}
+
+
+def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    config_path = workspace / '.g3ku' / 'config.json'
+    payload = json.loads(config_path.read_text(encoding='utf-8'))
+    payload['agents'].pop('roleIterations', None)
+    config_path.write_text(json.dumps(payload), encoding='utf-8')
+    monkeypatch.chdir(workspace)
+
+    from g3ku.config.loader import load_config
+
+    cfg = load_config()
+
+    assert cfg.get_role_max_iterations('ceo') == 40
+    assert cfg.get_role_max_iterations('execution') == 16
+    assert cfg.get_role_max_iterations('inspection') == 16
+
+    saved = json.loads(config_path.read_text(encoding='utf-8'))
+    assert saved['agents']['roleIterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16}
+
+
+def test_llm_routes_endpoint_updates_role_iterations(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/llm/routes/execution',
+        json={'model_keys': ['m'], 'max_iterations': 22},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['routes']['execution'] == ['m']
+    assert payload['role_iterations']['execution'] == 22
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['agents']['roleIterations']['execution'] == 22
 
 
 def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path, monkeypatch):

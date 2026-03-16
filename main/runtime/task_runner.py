@@ -55,9 +55,15 @@ class TaskRunner:
         if task is None:
             return
         try:
-            await task
+            await asyncio.shield(task)
         except asyncio.CancelledError:
-            return
+            if task.done():
+                return
+            raise
+
+    def is_active(self, task_id: str) -> bool:
+        task = self._active_tasks.get(task_id)
+        return bool(task is not None and not task.done())
 
     async def cancel(self, task_id: str) -> None:
         task_record = self._store.get_task(task_id)

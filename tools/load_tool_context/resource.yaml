@@ -1,15 +1,15 @@
 schema_version: 1
 kind: tool
 name: load_tool_context
-description: 加载当前可见工具的详细使用说明，便于 CEO 正确使用。
+description: 加载当前可见工具或已注册外置工具的详细说明，返回其使用指引以及 tool_type、install_dir、callable 信息。
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: ?????????????????
-  compare_rule: ???????????????????????????????toolskill ????????????????
-  source_of_truth: ????????????resource.yaml ? toolskills ?????
+  summary: 当前版本表示仓库内置实现；更新时需同步代码、参数契约和资源描述。
+  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文案不单独视为版本升级。
+  source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
 requires:
   tools: []
   bins: []
@@ -29,7 +29,7 @@ parameters:
       type: string
     max_tokens:
       type: integer
-      description: 要加载的 tool id。
+      description: 可选的返回 token 预算。
   required:
   - tool_id
 exposure:

@@ -112,6 +112,10 @@ def _model_roles(manager: ModelManager) -> dict[str, list[str]]:
     return {scope: list(getattr(manager.config.models.roles, scope)) for scope in VALID_SCOPES}
 
 
+def _model_role_iterations(manager: ModelManager) -> dict[str, int]:
+    return {scope: manager.config.get_role_max_iterations(scope) for scope in VALID_SCOPES}
+
+
 def _normalize_china_channel_id(channel_id: str) -> str:
     raw = str(channel_id or '').strip()
     key = raw.replace('-', '_').lower()
@@ -276,7 +280,12 @@ def _update_china_channel_config(cfg: Config, channel_id: str, *, enabled: bool,
 @router.get('/models')
 async def list_models():
     manager = ModelManager.load()
-    return {'ok': True, 'items': manager.list_models(), 'roles': _model_roles(manager)}
+    return {
+        'ok': True,
+        'items': manager.list_models(),
+        'roles': _model_roles(manager),
+        'role_iterations': _model_role_iterations(manager),
+    }
 
 
 @router.post('/models')
@@ -361,12 +370,28 @@ async def delete_model(model_key: str):
 @router.put('/models/roles/{scope}')
 async def update_model_roles(scope: str, payload: dict = Body(...)):
     manager = ModelManager.load()
+    raw_model_keys = payload.get('model_keys')
+    if raw_model_keys is None and 'modelKeys' in payload:
+        raw_model_keys = payload.get('modelKeys')
+    raw_max_iterations = payload.get('max_iterations')
+    if raw_max_iterations is None and 'maxIterations' in payload:
+        raw_max_iterations = payload.get('maxIterations')
     try:
-        roles = manager.set_scope_chain(scope, [str(item) for item in (payload.get('model_keys') or [])])
+        roles = manager.update_scope_route(
+            scope,
+            model_keys=[str(item) for item in raw_model_keys] if raw_model_keys is not None else None,
+            max_iterations=raw_max_iterations,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _refresh_runtime('admin_model_roles')
-    return {'ok': True, 'scope': scope, 'roles': roles, 'all_roles': _model_roles(manager)}
+    return {
+        'ok': True,
+        'scope': scope,
+        'roles': roles,
+        'all_roles': _model_roles(manager),
+        'role_iterations': _model_role_iterations(manager),
+    }
 
 
 @router.get('/llm/templates')
@@ -454,7 +479,12 @@ async def delete_llm_config(config_id: str):
 @router.get('/llm/bindings')
 async def list_llm_bindings():
     manager = ModelManager.load()
-    return {'ok': True, 'items': manager.list_models(), 'routes': manager.facade.get_routes(manager.config)}
+    return {
+        'ok': True,
+        'items': manager.list_models(),
+        'routes': manager.facade.get_routes(manager.config),
+        'role_iterations': _model_role_iterations(manager),
+    }
 
 
 @router.post('/llm/bindings')
@@ -519,19 +549,37 @@ async def delete_llm_binding(model_key: str):
 @router.get('/llm/routes')
 async def get_llm_routes():
     manager = ModelManager.load()
-    return {'ok': True, 'routes': manager.facade.get_routes(manager.config)}
+    return {
+        'ok': True,
+        'routes': manager.facade.get_routes(manager.config),
+        'role_iterations': _model_role_iterations(manager),
+    }
 
 
 @router.put('/llm/routes/{scope}')
 async def update_llm_route(scope: str, payload: dict = Body(...)):
     manager = ModelManager.load()
+    raw_model_keys = payload.get('model_keys')
+    if raw_model_keys is None and 'modelKeys' in payload:
+        raw_model_keys = payload.get('modelKeys')
+    raw_max_iterations = payload.get('max_iterations')
+    if raw_max_iterations is None and 'maxIterations' in payload:
+        raw_max_iterations = payload.get('maxIterations')
     try:
-        routes = manager.facade.set_route(manager.config, scope, [str(item) for item in (payload.get('model_keys') or [])])
+        route = manager.update_scope_route(
+            scope,
+            model_keys=[str(item) for item in raw_model_keys] if raw_model_keys is not None else None,
+            max_iterations=raw_max_iterations,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    manager.save()
     await _refresh_runtime('admin_llm_route_update')
-    return {'ok': True, 'routes': routes}
+    return {
+        'ok': True,
+        'route': route,
+        'routes': manager.facade.get_routes(manager.config),
+        'role_iterations': _model_role_iterations(manager),
+    }
 
 
 @router.get('/llm/memory')

@@ -23,6 +23,8 @@ class NodeRunner:
         tool_provider,
         execution_model_refs: list[str],
         acceptance_model_refs: list[str],
+        execution_max_iterations: int = 16,
+        acceptance_max_iterations: int | None = None,
         context_enricher=None,
     ) -> None:
         self._store = store
@@ -31,6 +33,8 @@ class NodeRunner:
         self._tool_provider = tool_provider
         self._execution_model_refs = list(execution_model_refs or [])
         self._acceptance_model_refs = list(acceptance_model_refs or []) or list(execution_model_refs or [])
+        self._execution_max_iterations = max(2, int(execution_max_iterations or 16))
+        self._acceptance_max_iterations = max(2, int(acceptance_max_iterations or self._execution_max_iterations))
         self._context_enricher = context_enricher
 
     async def run_node(self, task_id: str, node_id: str) -> NodeFinalResult:
@@ -52,6 +56,7 @@ class NodeRunner:
                 tools=tools,
                 model_refs=self._model_refs_for(node),
                 runtime_context=self._runtime_context(task=task, node=node),
+                max_iterations=self._max_iterations_for(node),
             )
             if (self._store.get_task(task_id) or task).cancel_requested:
                 return self._mark_failed(task_id, node.node_id, reason='canceled')
@@ -109,6 +114,9 @@ class NodeRunner:
 
     def _model_refs_for(self, node: NodeRecord) -> list[str]:
         return list(self._acceptance_model_refs if node.node_kind == KIND_ACCEPTANCE else self._execution_model_refs)
+
+    def _max_iterations_for(self, node: NodeRecord) -> int:
+        return int(self._acceptance_max_iterations if node.node_kind == KIND_ACCEPTANCE else self._execution_max_iterations)
 
     def _runtime_context(self, *, task, node: NodeRecord) -> dict[str, Any]:
         return {

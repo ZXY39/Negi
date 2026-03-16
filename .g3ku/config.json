@@ -9,6 +9,11 @@
       "memoryWindow": 100,
       "reasoningEffort": "high"
     },
+    "roleIterations": {
+      "ceo": 40,
+      "execution": 16,
+      "inspection": 16
+    },
     "multiAgent": {
       "orchestratorModelKey": null
     }

@@ -21,6 +21,7 @@ def refresh_loop_runtime_config(loop, *, force: bool = False, reason: str = "run
     loop.model = model_name
     loop.temperature = config.agents.defaults.temperature
     loop.max_tokens = config.agents.defaults.max_tokens
+    loop.max_iterations = config.get_role_max_iterations("ceo")
     loop.reasoning_effort = config.agents.defaults.reasoning_effort
     loop._runtime_model_revision = revision
     loop._runtime_default_model_key = config.resolve_role_model_key("ceo")

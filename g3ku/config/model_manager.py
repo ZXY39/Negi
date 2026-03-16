@@ -207,26 +207,50 @@ class ModelManager:
         return item
 
     def set_scope_chain(self, scope: str, model_keys: list[str]) -> dict[str, Any]:
+        return self.update_scope_route(scope, model_keys=model_keys)
+
+    def set_scope_max_iterations(self, scope: str, max_iterations: int) -> dict[str, Any]:
+        return self.update_scope_route(scope, max_iterations=max_iterations)
+
+    def update_scope_route(
+        self,
+        scope: str,
+        *,
+        model_keys: list[str] | None = None,
+        max_iterations: int | None = None,
+    ) -> dict[str, Any]:
         normalized_scope = _normalize_scope(scope)
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for ref in model_keys:
-            key = str(ref or "").strip()
-            if not key or key in seen:
-                continue
-            model = self._require_model(key)
-            if not model.enabled:
-                raise ValueError(f"Disabled model cannot be assigned to roles: {key}")
-            seen.add(key)
-            cleaned.append(key)
-        if not cleaned:
-            raise ValueError("model_keys must not be empty")
-        setattr(self.config.models.roles, normalized_scope, cleaned)
+        updated = False
+        if model_keys is not None:
+            cleaned: list[str] = []
+            seen: set[str] = set()
+            for ref in model_keys:
+                key = str(ref or "").strip()
+                if not key or key in seen:
+                    continue
+                model = self._require_model(key)
+                if not model.enabled:
+                    raise ValueError(f"Disabled model cannot be assigned to roles: {key}")
+                seen.add(key)
+                cleaned.append(key)
+            if not cleaned:
+                raise ValueError("model_keys must not be empty")
+            setattr(self.config.models.roles, normalized_scope, cleaned)
+            updated = True
+        if max_iterations is not None:
+            clean_iterations = int(max_iterations)
+            if clean_iterations < 2:
+                raise ValueError("max_iterations must be >= 2")
+            setattr(self.config.agents.role_iterations, normalized_scope, clean_iterations)
+            updated = True
+        if not updated:
+            raise ValueError("model_keys or max_iterations must be provided")
         self._revalidate()
         self.save()
         return {
             "scope": normalized_scope,
             "model_keys": list(getattr(self.config.models.roles, normalized_scope)),
+            "max_iterations": self.config.get_role_max_iterations(normalized_scope),
         }
 
     def add_model_to_scope(self, key: str, scope: str) -> None:
@@ -263,4 +287,3 @@ class ModelManager:
 
     def _revalidate(self) -> None:
         self.config = Config.model_validate(self.config.model_dump(mode="python"))
-

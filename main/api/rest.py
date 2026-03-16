@@ -40,6 +40,7 @@ async def get_task(task_id: str, mark_read: bool = Query(False)):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
+    task_id = service.normalize_task_id(task_id)
     payload = service.get_task_detail_payload(task_id, mark_read=bool(mark_read))
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
@@ -50,6 +51,7 @@ async def get_task(task_id: str, mark_read: bool = Query(False)):
 async def pause_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
+    task_id = service.normalize_task_id(task_id)
     record = await service.pause_task(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
@@ -60,6 +62,7 @@ async def pause_task(task_id: str):
 async def resume_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
+    task_id = service.normalize_task_id(task_id)
     record = await service.resume_task(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
@@ -70,10 +73,29 @@ async def resume_task(task_id: str):
 async def cancel_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
+    task_id = service.normalize_task_id(task_id)
     record = await service.cancel_task(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}
+
+
+@router.delete('/tasks/{task_id}')
+async def delete_task(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    try:
+        record = await service.delete_task(task_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail in {'task_not_paused', 'task_still_stopping'}:
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return {'ok': True, 'deleted': True, 'task': record.model_dump(mode='json')}
 
 
 @router.get('/tasks/{task_id}/artifacts')
@@ -81,6 +103,7 @@ async def list_artifacts(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
+    task_id = service.normalize_task_id(task_id)
     items = service.list_artifacts(task_id)
     return {'ok': True, 'items': [item.model_dump(mode='json') for item in items]}
 
@@ -90,6 +113,7 @@ async def get_artifact(task_id: str, artifact_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
+    task_id = service.normalize_task_id(task_id)
     artifact = service.get_artifact(artifact_id)
     if artifact is None or artifact.task_id != task_id:
         raise HTTPException(status_code=404, detail='artifact_not_found')
@@ -101,6 +125,7 @@ async def get_artifact(task_id: str, artifact_id: str):
 async def apply_patch_artifact(task_id: str, artifact_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
+    task_id = service.normalize_task_id(task_id)
     try:
         result = await service.apply_patch_artifact(task_id, artifact_id)
     except ValueError as exc:

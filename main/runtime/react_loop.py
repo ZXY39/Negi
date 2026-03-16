@@ -41,10 +41,12 @@ class ReActToolLoop:
         tools: dict[str, Tool],
         model_refs: list[str],
         runtime_context: dict[str, Any],
+        max_iterations: int | None = None,
     ) -> NodeFinalResult:
         tool_schemas = [tool.to_schema() for tool in tools.values()]
         breaker = RepeatedActionCircuitBreaker()
-        for _ in range(self._max_iterations):
+        limit = max(2, int(max_iterations or self._max_iterations))
+        for _ in range(limit):
             self._check_pause_or_cancel(task.task_id)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(messages, ensure_ascii=False, indent=2))
             self._log_service.upsert_frame(

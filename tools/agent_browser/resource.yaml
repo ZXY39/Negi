@@ -1,86 +1,117 @@
-schema_version: 1
-kind: tool
-name: agent_browser
-display_name: Agent Browser
-description: Run the bundled open-source `agent-browser` CLI to drive websites, capture snapshots, and save browser artifacts from G3KU.
+tool_id: agent_browser
+name: agent-browser
+slug: agent_browser
+tool_type: external
+summary: >-
+  Register the upstream vercel-labs/agent-browser project as an external browser automation CLI
+  for AI agents. The tool is installed outside this repository and exposed through documented
+  shell usage rather than vendored source code.
+description: >-
+  agent-browser is a native Rust-based browser automation CLI distributed primarily through npm,
+  Homebrew, and Cargo. It provides a persistent browser daemon plus high-level commands for
+  navigation, snapshots, semantic element targeting, input, downloads, screenshots, authentication,
+  storage, network interception, and remote CDP/provider connectivity. Because it is an actively
+  maintained third-party project with its own release cadence and multi-platform install flows,
+  it should be integrated in this repository as an external tool registration rather than copying
+  the upstream code into tools/agent_browser/main/.
 source:
-  type: git
-  url: https://github.com/vercel-labs/agent-browser.git
-  ref: v0.20.7
-  vendor_dir: main/agent-browser
-current_version:
-  summary: ??????? 0.20.7?
-  compare_rule: ??????? GitHub release tag?`package.json.version` ? vendored ?????????? semver ?? 0.20.7???????????
-  source_of_truth: ?? `main/agent-browser/package.json.version`??? `source.ref=v0.20.7` ???
-protocol: mcp
-mcp:
-  transport: embedded
-requires:
-  tools: []
-  bins: []
-  env: []
+  type: github
+  url: https://github.com/vercel-labs/agent-browser
+  owner: vercel-labs
+  repo: agent-browser
+  default_branch: main
+  vcs: git
+current_version: 0.20.13
+upstream_checked:
+  method: git ls-remote --tags + package.json inspection
+  package_name: agent-browser
+  package_version: 0.20.13
+  commit: 0883813cd3cd5072c48d1415b4ae472c3c955666
+  checked_at: 2025-02
+install:
+  mode: external
+  primary_method: npm
+  supported_methods:
+    - npm_global
+    - npm_local
+    - homebrew_macos
+    - cargo
+    - source_build
+  install_dir:
+    npm_global: global package manager location
+    npm_local: project-local node_modules/.bin
+    homebrew_macos: Homebrew-managed cellar prefix
+    cargo: cargo bin directory
+    source_build: cloned upstream repository outside workspace
+  executable:
+    command: agent-browser
+    discovery:
+      - agent-browser --help
+      - agent-browser --version
+  post_install:
+    - agent-browser install
+    - agent-browser install --with-deps   # optional on Linux
+runtime:
+  interfaces:
+    - cli
+  transport:
+    - stdio
+    - background daemon managed by the CLI
+  languages:
+    - rust
+    - javascript (packaging/install scripts only)
+  platforms:
+    - macos
+    - linux
+    - windows
+  dependencies:
+    - Chrome/Chromium or remote CDP/provider target
+    - network access for browser/download/provider operations when needed
+  state_locations:
+    - ~/.agent-browser/
+capabilities:
+  - open and control web pages through a native CLI
+  - accessibility snapshot output with stable refs for agent-friendly interaction
+  - click/fill/type/select/keyboard/mouse/tab/frame/dialog operations
+  - screenshots, annotated screenshots, PDFs, and diffing
+  - cookies, storage, session persistence, auth vault, and profile reuse
+  - downloads, network inspection/routing, viewport/device emulation
+  - connect to existing browsers via CDP or provider integrations when supported upstream
+usage:
+  preferred_invocation: agent-browser <command>
+  examples:
+    - agent-browser open https://example.com
+    - agent-browser snapshot -i
+    - agent-browser click @e2
+    - agent-browser fill @e3 "user@example.com"
+    - agent-browser wait --load networkidle
+    - agent-browser screenshot --annotate
 permissions:
+  filesystem: true
   network: true
-  filesystem:
-    - workspace
-settings:
-  executable: ''
-  repo_root: main/agent-browser
-  timeout: 300
-  bootstrap_on_first_use: true
-  bootstrap_timeout: 240
-  bootstrap_from_release: true
-  allow_cargo_run: true
-  allow_global_fallback: false
-  default_session: g3ku-agent-browser
-  auto_session: true
-  auto_profile: true
-  profile_root: .g3ku/tool-data/agent_browser/profiles
-  cargo_release: false
-  stdout_json_preview: true
-parameters:
-  type: object
-  properties:
-    args:
-      type: array
-      description: agent-browser CLI arguments, excluding the executable itself.
-      items:
-        type: string
-    working_dir:
-      type: string
-      description: Optional working directory for the command. Relative paths resolve from the G3KU workspace.
-    stdin:
-      type: string
-      description: Optional stdin payload forwarded to the CLI.
-    timeout:
-      type: integer
-      minimum: 1
-      description: Optional timeout override in seconds.
-    session:
-      type: string
-      description: Optional value passed through as `--session` for repository-local browser state isolation.
-    profile:
-      type: string
-      description: Optional override for `--profile`. Relative paths resolve from the G3KU workspace.
-    session_name:
-      type: string
-      description: Optional override for `--session-name` used by agent-browser state persistence.
-  required:
-    - args
-exposure:
-  agent: true
-  main_runtime: true
+  browser_automation: true
+  subprocess: true
+  secrets: true
+risk_notes:
+  - Can open websites, submit forms, and interact with authenticated browser sessions.
+  - Can persist cookies, storage, profiles, or encrypted auth material on disk.
+  - Browser/provider usage may contact third-party remote services depending on configuration.
 governance:
-  family: browser_automation
-  display_name: Browser Automation
-  description: Drive browser automation, page capture, and site interaction through the vendored agent-browser CLI.
-  actions:
-    - id: run
-      label: Run Browser Command
-      risk_level: high
-      destructive: true
-      allowed_roles:
-        - ceo
-        - execution
-toolskill:
-  enabled: true
+  maintainer: local workspace operator
+  upstream_maintainer: vercel-labs
+  review_notes:
+    - Treat as external unless a deliberate wrapper/main implementation is later added.
+    - Do not vendor upstream repository into tools/agent_browser/main/ just to mirror releases.
+    - Keep resource.yaml, version metadata, and toolskills docs aligned on update.
+update_strategy:
+  check_upstream:
+    - git ls-remote --tags https://github.com/vercel-labs/agent-browser.git
+    - inspect upstream package.json version and CHANGELOG.md
+  upgrade_steps:
+    - choose desired upstream release/tag
+    - reinstall or upgrade via npm/homebrew/cargo/source outside this repository
+    - verify agent-browser --version and basic commands locally
+    - update current_version, upstream_checked, and toolskills documentation
+artifacts_in_workspace:
+  - tools/agent_browser/resource.yaml
+  - tools/agent_browser/toolskills/SKILL.md

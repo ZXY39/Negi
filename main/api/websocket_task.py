@@ -22,6 +22,7 @@ async def task_websocket(websocket: WebSocket, task_id: str):
         await websocket.close(code=4503)
         return
     await service.startup()
+    task_id = service.normalize_task_id(task_id)
     payload = service.get_task_detail_payload(task_id, mark_read=False)
     if payload is None:
         await websocket.send_json(build_envelope(channel='task', session_id=requested_session_id or 'web:shared', task_id=task_id, seq=after_seq, type='error', data={'code': 'task_not_found'}))

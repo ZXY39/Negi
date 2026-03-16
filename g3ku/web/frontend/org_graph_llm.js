@@ -53,6 +53,7 @@
         bindings: [],
         bindingMap: {},
         routes: EMPTY_MODEL_ROLES(),
+        roleIterations: DEFAULT_ROLE_ITERATIONS(),
         editor: emptyEditorState(),
         eventsBound: false,
       };
@@ -110,11 +111,14 @@
     S.modelCatalog.catalog = chatBindings.map((item) => ({ ...item, key: trim(item.key) }));
     S.modelCatalog.items = chatBindings.map((item) => trim(item.key));
     S.modelCatalog.roles = normalizeAllModelRoles(state.routes || EMPTY_MODEL_ROLES());
+    S.modelCatalog.roleIterations = normalizeRoleIterations(state.roleIterations || DEFAULT_ROLE_ITERATIONS());
     if (S.modelCatalog.roleEditing) {
       S.modelCatalog.roleDrafts = normalizeAllModelRoles(S.modelCatalog.roleDrafts || EMPTY_MODEL_ROLES());
+      S.modelCatalog.roleIterationDrafts = normalizeRoleIterations(S.modelCatalog.roleIterationDrafts || DEFAULT_ROLE_ITERATIONS());
       syncModelRoleDraftState();
     } else {
       S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+      S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
       S.modelCatalog.rolesDirty = false;
     }
     S.modelCatalog.defaults = {
@@ -639,6 +643,7 @@
     const editing = !!S.modelCatalog.roleEditing;
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
       const chain = modelScopeChain(scope.key);
+      const maxIterations = modelScopeIterations(scope.key);
       return `
         <section class="model-chain-card">
           <div class="panel-header">
@@ -646,7 +651,22 @@
               <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
               <p class="subtitle">${escv(chain[0] ? `默认：${chain[0]}` : "尚未配置")}</p>
             </div>
-            <span class="policy-chip neutral">${chain.length} 个模型</span>
+            <div class="model-chain-card-meta">
+              <span class="policy-chip neutral">${chain.length} 个模型</span>
+              <label class="model-role-iterations-field">
+                <span class="model-role-iterations-label">最大轮数</span>
+                <input
+                  class="model-role-iterations-input"
+                  type="number"
+                  min="2"
+                  step="1"
+                  inputmode="numeric"
+                  value="${escv(maxIterations)}"
+                  ${editing ? "" : "disabled"}
+                  data-model-role-iterations="${scope.key}"
+                >
+              </label>
+            </div>
           </div>
           <div class="model-role-section">
             <div class="model-role-section-title">ROLE CHAIN</div>
@@ -681,6 +701,7 @@
       state.templates = Array.isArray(templates) ? templates : [];
       state.bindings = Array.isArray(bindingPayload?.items) ? bindingPayload.items : [];
       state.routes = normalizeAllModelRoles(bindingPayload?.routes || EMPTY_MODEL_ROLES());
+      state.roleIterations = normalizeRoleIterations(bindingPayload?.roleIterations || bindingPayload?.role_iterations || DEFAULT_ROLE_ITERATIONS());
       mapify();
     } catch (error) {
       state.error = error.message || "加载失败";
@@ -1007,6 +1028,14 @@
       renderAll();
       return;
     }
+    try {
+      syncRoleIterationDraftsFromInputs({ requireValid: true });
+    } catch (error) {
+      llmState().error = error.message || "保存失败";
+      showToast({ title: "保存失败", text: llmState().error, kind: "error" });
+      renderAll();
+      return;
+    }
     if (!S.modelCatalog.rolesDirty) {
       cancelModelRoleEditing();
       renderAll();
@@ -1023,9 +1052,13 @@
       });
       let routes = null;
       for (const scope of MODEL_SCOPES.map((item) => item.key)) {
-        routes = await ApiClient.updateLlmRoute(scope, normalizeModelRoleChain(S.modelCatalog.roleDrafts[scope] || []));
+        routes = await ApiClient.updateLlmRoute(scope, {
+          modelKeys: normalizeModelRoleChain(S.modelCatalog.roleDrafts[scope] || []),
+          maxIterations: modelScopeIterations(scope, "draft"),
+        });
       }
-      llmState().routes = normalizeAllModelRoles(routes || EMPTY_MODEL_ROLES());
+      llmState().routes = normalizeAllModelRoles(routes?.routes || EMPTY_MODEL_ROLES());
+      llmState().roleIterations = normalizeRoleIterations(routes?.roleIterations || DEFAULT_ROLE_ITERATIONS());
       S.modelCatalog.roleEditing = false;
       S.modelCatalog.rolesDirty = false;
       showToast({ title: "保存成功", text: "模型链已更新", kind: "success" });

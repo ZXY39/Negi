@@ -6,6 +6,10 @@ const MODEL_SCOPES = [
 
 const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
 const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+const DEFAULT_ROLE_ITERATIONS = () => ({ ceo: 40, execution: 16, inspection: 16 });
+const TREE_SCALE_MIN = 0.6;
+const TREE_SCALE_MAX = 1.8;
+const TREE_SCALE_FACTOR = 1.12;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -15,11 +19,22 @@ const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     });
     return next;
 };
+const cloneRoleIterations = (iterations = DEFAULT_ROLE_ITERATIONS()) => {
+    const defaults = DEFAULT_ROLE_ITERATIONS();
+    const next = DEFAULT_ROLE_ITERATIONS();
+    MODEL_SCOPES.forEach(({ key }) => {
+        const value = Number(iterations?.[key]);
+        next[key] = Number.isInteger(value) && value >= 2 ? value : defaults[key];
+    });
+    return next;
+};
 
 const S = {
     view: "ceo",
     ceoWs: null,
     ceoPendingTurns: [],
+    ceoTurnActive: false,
+    ceoPauseBusy: false,
     ceoUploads: [],
     ceoUploadBusy: false,
     taskWs: null,
@@ -43,6 +58,8 @@ const S = {
         catalog: [],
         roles: EMPTY_MODEL_ROLES(),
         roleDrafts: EMPTY_MODEL_ROLES(),
+        roleIterations: DEFAULT_ROLE_ITERATIONS(),
+        roleIterationDrafts: DEFAULT_ROLE_ITERATIONS(),
         defaults: DEFAULT_MODEL_DEFAULTS(),
         loading: false,
         saving: false,
@@ -65,6 +82,8 @@ const S = {
         offsetY: 0,
         baseOffsetX: 0,
         baseOffsetY: 0,
+        scale: 1,
+        baseScale: 1,
         moved: false,
         suppressClickNodeId: null,
     },
@@ -144,10 +163,12 @@ const U = {
     detail: document.getElementById("agent-detail-view"),
     adRole: document.getElementById("ad-role"),
     adStatus: document.getElementById("ad-status"),
-    adInput: document.getElementById("ad-input"),
-    adOutput: document.getElementById("ad-output"),
-    adCheck: document.getElementById("ad-check"),
-    adLogs: document.getElementById("ad-logs"),
+    adFlow: document.getElementById("ad-input"),
+    adAcceptance: document.getElementById("ad-check"),
+    adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
+    adAcceptanceHeading: document.getElementById("ad-check")?.closest(".agent-detail-section")?.querySelector("h4"),
+    adOutputSection: document.getElementById("ad-output")?.closest(".agent-detail-section"),
+    adLogsSection: document.getElementById("ad-logs")?.closest(".agent-detail-section"),
     nodeEmpty: document.getElementById("task-node-empty"),
     closeAgent: document.getElementById("close-agent-btn"),
     skillSearch: document.getElementById("skill-search-input"),
@@ -196,6 +217,7 @@ const roleKey = (v) => (["ceo", "inspection", "checker"].includes(String(v).toLo
 const roleLabel = (v) => ({ ceo: "主Agent", execution: "执行", inspection: "检验" }[roleKey(v)]);
 const pStatus = (v) => String(v || "").trim().toLowerCase();
 const MD_TOKEN_MARKER = "\uE000";
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 function safeHref(value) {
     const href = String(value || "").trim();
@@ -457,8 +479,97 @@ function renderPendingCeoUploads() {
         `;
     }
     if (U.ceoAttach) U.ceoAttach.disabled = !!S.ceoUploadBusy;
-    if (U.ceoSend) U.ceoSend.disabled = !!S.ceoUploadBusy;
+    syncCeoPrimaryButton();
     icons();
+}
+
+function syncCeoPrimaryButton() {
+    if (!U.ceoSend) return;
+    const isPause = !!S.ceoTurnActive;
+    const label = S.ceoPauseBusy ? "暂停中" : isPause ? "暂停" : "发送";
+    const icon = isPause ? "pause" : "send";
+    U.ceoSend.innerHTML = `<i data-lucide="${icon}"></i> ${label}`;
+    U.ceoSend.disabled = !!S.ceoUploadBusy || !!S.ceoPauseBusy;
+    U.ceoSend.setAttribute("aria-label", isPause ? "暂停当前 CEO 会话" : "发送消息");
+    icons();
+}
+
+function finalizePausedCeoTurn(text = "已暂停") {
+    const turn = S.ceoPendingTurns.shift();
+    if (!turn?.textEl || !turn.flowEl) return;
+    turn.finalized = true;
+    turn.textEl.textContent = String(text || "已暂停");
+    turn.textEl.classList.remove("pending");
+    if (turn.steps > 0) {
+        turn.flowEl.hidden = false;
+        turn.flowEl.open = false;
+        updateCeoTurnMeta(turn, "Paused");
+    } else {
+        turn.flowEl.hidden = true;
+    }
+    scrollCeoFeedToBottom();
+}
+
+function applyCeoState(state = {}) {
+    const status = String(state?.status || "").trim().toLowerCase();
+    const running = !!state?.is_running || status === "running";
+    const paused = !!state?.paused || status === "paused";
+    S.ceoTurnActive = running;
+    if (!running) S.ceoPauseBusy = false;
+    if (running) ensureActiveCeoTurn();
+    if (paused) finalizePausedCeoTurn();
+    syncCeoPrimaryButton();
+}
+
+function handleCeoControlAck(payload = {}) {
+    const action = String(payload?.action || "").trim().toLowerCase();
+    if (action !== "pause") return;
+    S.ceoPauseBusy = false;
+    if (payload?.accepted === false) {
+        syncCeoPrimaryButton();
+        showToast({ title: "暂停失败", text: "当前没有可暂停的 CEO 回合。", kind: "error" });
+        return;
+    }
+    S.ceoTurnActive = false;
+    finalizePausedCeoTurn();
+    syncCeoPrimaryButton();
+}
+
+function handleCeoError(payload = {}) {
+    S.ceoTurnActive = false;
+    S.ceoPauseBusy = false;
+    syncCeoPrimaryButton();
+    finalizeCeoTurn(`运行出错：${String(payload?.message || "unknown error")}`);
+}
+
+function requestCeoPause() {
+    if (!S.ceoTurnActive || S.ceoPauseBusy) return;
+    if (!S.ceoWs || S.ceoWs.readyState !== WebSocket.OPEN) {
+        addMsg("Connection is not ready yet. Please try again in a moment.", "system");
+        initCeoWs();
+        return;
+    }
+    try {
+        S.ceoPauseBusy = true;
+        syncCeoPrimaryButton();
+        S.ceoWs.send(JSON.stringify({
+            type: "client.pause_turn",
+            session_id: "web:shared",
+        }));
+    } catch (e) {
+        S.ceoPauseBusy = false;
+        syncCeoPrimaryButton();
+        addMsg(`Failed to pause message: ${e.message || "unknown error"}`, "system");
+        initCeoWs();
+    }
+}
+
+function handleCeoPrimaryAction() {
+    if (S.ceoTurnActive) {
+        requestCeoPause();
+        return;
+    }
+    sendCeoMessage();
 }
 
 async function handleCeoFileSelection(event) {
@@ -606,6 +717,9 @@ function appendCeoToolEvent(event = {}) {
 }
 
 function finalizeCeoTurn(text) {
+    S.ceoTurnActive = false;
+    S.ceoPauseBusy = false;
+    syncCeoPrimaryButton();
     const turn = S.ceoPendingTurns.shift();
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true });
@@ -725,6 +839,20 @@ function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "dang
     U.confirmBackdrop.hidden = false;
     U.confirmBackdrop.classList.add("is-open");
     window.requestAnimationFrame(() => U.confirmCancel?.focus());
+}
+
+function configureTaskDetailSections() {
+    if (U.adFlowHeading) U.adFlowHeading.innerHTML = '<i data-lucide="workflow"></i> 执行流程';
+    if (U.adAcceptanceHeading) U.adAcceptanceHeading.innerHTML = '<i data-lucide="shield-check"></i> 验收结果';
+    if (U.adFlow) {
+        U.adFlow.classList.remove("code-block");
+        U.adFlow.classList.add("task-trace-host");
+    }
+    if (U.adAcceptance) U.adAcceptance.classList.add("task-trace-acceptance");
+    if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、验收结果和工件。";
+    if (U.adOutputSection) U.adOutputSection.hidden = true;
+    if (U.adLogsSection) U.adLogsSection.hidden = true;
+    icons();
 }
 
 function resourceSelectLabel(select) {
@@ -1012,6 +1140,10 @@ function activeModelRoles() {
     return S.modelCatalog.roleEditing ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
 }
 
+function activeRoleIterations() {
+    return S.modelCatalog.roleEditing ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
+}
+
 function modelScopeChain(scope, source = "active") {
     const roles = source === "draft"
         ? S.modelCatalog.roleDrafts
@@ -1019,6 +1151,17 @@ function modelScopeChain(scope, source = "active") {
             ? S.modelCatalog.roles
             : activeModelRoles();
     return Array.isArray(roles?.[scope]) ? [...roles[scope]] : [];
+}
+
+function modelScopeIterations(scope, source = "active") {
+    const iterations = source === "draft"
+        ? S.modelCatalog.roleIterationDrafts
+        : source === "committed"
+            ? S.modelCatalog.roleIterations
+            : activeRoleIterations();
+    const defaults = DEFAULT_ROLE_ITERATIONS();
+    const value = Number(iterations?.[scope]);
+    return Number.isInteger(value) && value >= 2 ? value : defaults[scope];
 }
 
 function modelScopeContains(scope, ref, source = "active") {
@@ -1046,6 +1189,10 @@ function normalizeAllModelRoles(roles = EMPTY_MODEL_ROLES()) {
     return next;
 }
 
+function normalizeRoleIterations(iterations = DEFAULT_ROLE_ITERATIONS()) {
+    return cloneRoleIterations(iterations);
+}
+
 function modelRolesEqual(left, right) {
     return MODEL_SCOPES.every(({ key }) => {
         const leftChain = normalizeModelRoleChain(left?.[key] || []);
@@ -1055,8 +1202,16 @@ function modelRolesEqual(left, right) {
     });
 }
 
+function modelRoleIterationsEqual(left, right) {
+    const leftNormalized = normalizeRoleIterations(left);
+    const rightNormalized = normalizeRoleIterations(right);
+    return MODEL_SCOPES.every(({ key }) => leftNormalized[key] === rightNormalized[key]);
+}
+
 function syncModelRoleDraftState() {
-    S.modelCatalog.rolesDirty = !!S.modelCatalog.roleEditing && !modelRolesEqual(S.modelCatalog.roleDrafts, S.modelCatalog.roles);
+    const rolesChanged = !modelRolesEqual(S.modelCatalog.roleDrafts, S.modelCatalog.roles);
+    const iterationsChanged = !modelRoleIterationsEqual(S.modelCatalog.roleIterationDrafts, S.modelCatalog.roleIterations);
+    S.modelCatalog.rolesDirty = !!S.modelCatalog.roleEditing && (rolesChanged || iterationsChanged);
 }
 
 function modelCatalogHeadersKey(headers) {
@@ -1121,6 +1276,11 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
     const payload = data && typeof data === "object" ? data : {};
     const { catalog, aliasMap } = normalizeCatalogEntries(Array.isArray(payload.catalog) ? payload.catalog : []);
     const rolesPayload = payload.roles && typeof payload.roles === "object" ? payload.roles : {};
+    const roleIterationsPayload = payload.roleIterations && typeof payload.roleIterations === "object"
+        ? payload.roleIterations
+        : payload.role_iterations && typeof payload.role_iterations === "object"
+            ? payload.role_iterations
+            : {};
     const nextRoles = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
         nextRoles[key] = remapModelRefs(
@@ -1135,11 +1295,14 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
         : [];
     S.modelCatalog.catalog = catalog;
     S.modelCatalog.roles = normalizeAllModelRoles(nextRoles);
+    S.modelCatalog.roleIterations = normalizeRoleIterations(roleIterationsPayload);
     if (preserveRoleDrafts && S.modelCatalog.roleEditing) {
         S.modelCatalog.roleDrafts = normalizeAllModelRoles(S.modelCatalog.roleDrafts);
+        S.modelCatalog.roleIterationDrafts = normalizeRoleIterations(S.modelCatalog.roleIterationDrafts);
         syncModelRoleDraftState();
     } else {
         S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+        S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
         S.modelCatalog.roleEditing = false;
         S.modelCatalog.rolesDirty = false;
     }
@@ -1187,6 +1350,7 @@ function renderModelRoleEditors() {
     const editing = !!S.modelCatalog.roleEditing;
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
         const chain = modelScopeChain(scope.key);
+        const maxIterations = modelScopeIterations(scope.key);
         const defaultText = S.modelCatalog.defaults[scope.key]
             ? `当前首选 ${S.modelCatalog.defaults[scope.key]}`
             : "未配置当前首选";
@@ -1217,7 +1381,22 @@ function renderModelRoleEditors() {
                         <h3>${esc(scope.label)}</h3>
                         <p class="subtitle">${esc(defaultText)}</p>
                     </div>
-                    <span class="policy-chip neutral">${chain.length} 个候选</span>
+                    <div class="model-chain-card-meta">
+                        <span class="policy-chip neutral">${chain.length} 个候选</span>
+                        <label class="model-role-iterations-field">
+                            <span class="model-role-iterations-label">最大轮数</span>
+                            <input
+                                class="model-role-iterations-input"
+                                type="number"
+                                min="2"
+                                step="1"
+                                inputmode="numeric"
+                                value="${esc(String(maxIterations))}"
+                                ${editing ? "" : "disabled"}
+                                data-model-role-iterations="${scope.key}"
+                            >
+                        </label>
+                    </div>
                 </div>
                 <div class="model-role-section">
                     <div class="model-role-section-title">当前角色链</div>
@@ -1553,9 +1732,53 @@ function updateRoleChainDraft(scope, nextChain) {
     syncModelDetailScopeToggles();
 }
 
+function updateRoleIterationDraft(scope, value, { render = true } = {}) {
+    if (!S.modelCatalog.roleEditing) return false;
+    const normalizedScope = String(scope || "").trim();
+    const cleanValue = Number.parseInt(String(value || "").trim(), 10);
+    if (!normalizedScope || !Number.isInteger(cleanValue) || cleanValue < 2) return false;
+    S.modelCatalog.roleIterationDrafts[normalizedScope] = cleanValue;
+    syncModelRoleDraftState();
+    if (render) renderModelCatalog();
+    return true;
+}
+
+function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
+    if (!U.modelRoleEditors) return false;
+    let changed = false;
+    const fields = [...U.modelRoleEditors.querySelectorAll("[data-model-role-iterations]")];
+    fields.forEach((field) => {
+        if (!(field instanceof HTMLInputElement)) return;
+        const scope = String(field.dataset.modelRoleIterations || "").trim();
+        if (!scope) return;
+        const rawValue = String(field.value || "").trim();
+        const cleanValue = Number.parseInt(rawValue, 10);
+        const scopeLabel = MODEL_SCOPES.find((item) => item.key === scope)?.label || scope;
+        const invalid = !rawValue || !Number.isInteger(cleanValue) || cleanValue < 2;
+        if (invalid) {
+            field.classList.add("is-invalid");
+            field.setCustomValidity("最大轮数必须是不小于 2 的整数");
+            if (requireValid) {
+                field.reportValidity();
+                throw new Error(`${scopeLabel} 最大轮数必须是不小于 2 的整数`);
+            }
+            return;
+        }
+        field.classList.remove("is-invalid");
+        field.setCustomValidity("");
+        if (modelScopeIterations(scope, "draft") !== cleanValue) {
+            S.modelCatalog.roleIterationDrafts[scope] = cleanValue;
+            changed = true;
+        }
+    });
+    if (changed) syncModelRoleDraftState();
+    return changed;
+}
+
 function startModelRoleEditing() {
     S.modelCatalog.roleEditing = true;
     S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+    S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
     syncModelRoleDraftState();
     renderModelCatalog();
 }
@@ -1563,6 +1786,7 @@ function startModelRoleEditing() {
 function cancelModelRoleEditing() {
     S.modelCatalog.roleEditing = false;
     S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+    S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
     S.modelCatalog.rolesDirty = false;
     finishModelDrag();
     renderModelCatalog();
@@ -1573,12 +1797,16 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
     const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
     if (!targets.length) return;
     const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
+    const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {
         let payload = null;
         for (const scope of targets) {
-            payload = await ApiClient.updateModelRoleChain(scope, normalizeModelRoleChain(roleSource[scope] || []));
+            payload = await ApiClient.updateModelRoleChain(scope, {
+                modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
+                maxIterations: iterationSource[scope],
+            });
         }
         if (payload) applyModelCatalog(payload);
         hint(successText);
@@ -1596,6 +1824,13 @@ async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.roleEditing) {
         startModelRoleEditing();
         hint("已进入模型链编辑模式。");
+        return;
+    }
+    try {
+        syncRoleIterationDraftsFromInputs({ requireValid: true });
+    } catch (e) {
+        S.modelCatalog.error = e.message || "save failed";
+        hint(`妯″瀷閰嶇疆閿欒锛?{S.modelCatalog.error}`, true);
         return;
     }
     if (!S.modelCatalog.rolesDirty) {
@@ -1750,15 +1985,26 @@ function initCeoWs() {
     S.ceoWs.onmessage = (ev) => {
         const payload = JSON.parse(ev.data);
         if (payload.type === "snapshot.ceo") renderCeoSnapshot(payload.data?.messages || []);
+        if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {});
+        if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
         if (payload.type === "ceo.agent.tool") appendCeoToolEvent(payload.data || {});
+        if (payload.type === "ceo.error") handleCeoError(payload.data || {});
         if (payload.type === "ceo.reply.final") finalizeCeoTurn(payload.data?.text || "");
         if (payload.type === "task.summary.changed" && S.view === "tasks") void loadTasks();
         if (payload.type === "task.artifact.applied" && payload.data?.task_id === S.currentTaskId) void loadTaskArtifacts();
     };
-    S.ceoWs.onclose = () => window.setTimeout(() => S.view === "ceo" && initCeoWs(), 1000);
+    S.ceoWs.onclose = () => {
+        S.ceoPauseBusy = false;
+        syncCeoPrimaryButton();
+        window.setTimeout(() => S.view === "ceo" && initCeoWs(), 1000);
+    };
 }
 
 function sendCeoMessage() {
+    if (S.ceoTurnActive) {
+        requestCeoPause();
+        return;
+    }
     const text = String(U.ceoInput.value || "");
     const uploads = normalizeUploadList(S.ceoUploads);
     if (!text.trim() && !uploads.length) return;
@@ -1791,14 +2037,17 @@ function sendCeoMessage() {
         renderPendingCeoUploads();
         const turn = createPendingCeoTurn();
         if (turn) S.ceoPendingTurns.push(turn);
+        S.ceoTurnActive = true;
+        S.ceoPauseBusy = false;
+        syncCeoPrimaryButton();
     } catch (e) {
         addMsg(`Failed to send message: ${e.message || "unknown error"}`, "system");
         initCeoWs();
     }
 }
-﻿const canPause = (task) => !!task && !task.is_paused && pStatus(task.status) === "in_progress";
+const canPause = (task) => !!task && !task.is_paused && pStatus(task.status) === "in_progress";
 const canResume = (task) => !!task && !!task.is_paused;
-const canCancel = (task) => !!task && ["in_progress"].includes(pStatus(task.status));
+const canDelete = (task) => !!task && !!task.is_paused;
 
 function taskStatusKey(task) {
     if (!task) return "unknown";
@@ -1990,26 +2239,57 @@ function updateTaskToolbar() {
             ? selected.some((task) => canPause(task))
             : action === "resume"
                 ? selected.some((task) => canResume(task))
-                : selected.some((task) => canCancel(task));
+                : selected.some((task) => canDelete(task));
         button.disabled = S.taskBusy || !enabled;
     });
     setTaskMenuVisibility();
 }
 
 function primaryTaskAction(task) {
-    if (canPause(task)) return { action: "pause", label: "Pause", tone: "warn" };
-    if (canResume(task)) return { action: "resume", label: "Resume", tone: "success" };
+    if (canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
+    if (canResume(task)) return { action: "resume", label: "开始", tone: "success" };
     return null;
 }
 
 function taskActionText(action) {
-    return ({ pause: "Pause", resume: "Resume", cancel: "Cancel" }[action] || "Action");
+    return ({ pause: "暂停", resume: "开始", delete: "删除" }[action] || "操作");
+}
+
+function taskActionSuccessTitle(action) {
+    return action === "delete" ? "删除成功" : `${taskActionText(action)}成功`;
+}
+
+function taskActionFailureTitle(action) {
+    return action === "delete" ? "删除失败" : `${taskActionText(action)}失败`;
+}
+
+function taskActionErrorText(action, error) {
+    const message = String(error?.message || error || "").trim();
+    if (action === "delete") {
+        if (message.includes("task_still_stopping")) return "任务仍在停止中，请稍后再删";
+        if (message.includes("task_not_paused")) return "仅暂停中的任务可删除";
+        if (message.includes("task_not_found")) return "任务不存在或已被删除";
+    }
+    return message || "Unknown error";
+}
+
+function isTaskDetailVisible() {
+    return !!U.viewTaskDetails?.classList.contains("active");
+}
+
+function handleDeletedTasks(taskIds = []) {
+    const ids = new Set(taskIds.map((item) => String(item || "")));
+    if (!ids.size) return;
+    if (!ids.has(String(S.currentTaskId || ""))) return;
+    S.currentTaskId = null;
+    resetTaskView();
+    if (isTaskDetailVisible()) switchView("tasks");
 }
 
 async function requestTaskAction(taskId, action) {
     if (action === "pause") return ApiClient.pauseTask(taskId);
     if (action === "resume") return ApiClient.resumeTask(taskId);
-    if (action === "cancel") return ApiClient.cancelTask(taskId);
+    if (action === "delete") return ApiClient.deleteTask(taskId);
     throw new Error(`Unsupported task action: ${action}`);
 }
 
@@ -2044,7 +2324,7 @@ function renderTasks() {
                     ${primaryAction ? `<button class="project-action-btn ${primaryAction.tone}" type="button" data-action="${primaryAction.action}" ${S.taskBusy ? "disabled" : ""}>${primaryAction.label}</button>` : ""}
                 </div>
                 <div class="pc-actions-right">
-                    <button class="project-action-btn danger" type="button" data-action="cancel" ${S.taskBusy || !canCancel(task) ? "disabled" : ""}>Cancel</button>
+                    ${canDelete(task) ? `<button class="project-action-btn danger" type="button" data-action="delete" ${S.taskBusy ? "disabled" : ""}>删除</button>` : ""}
                 </div>
             </div>
         `;
@@ -2059,7 +2339,7 @@ function renderTasks() {
         });
         el.querySelectorAll(".project-action-btn").forEach((btn) => btn.addEventListener("click", async (e) => {
             e.stopPropagation();
-            await runTaskAction(task.task_id, btn.dataset.action);
+            await runTaskAction(task.task_id, btn.dataset.action, { returnFocus: btn });
         }));
         el.addEventListener("click", () => {
             if (S.multiSelectMode) {
@@ -2086,45 +2366,110 @@ async function loadTasks() {
     }
 }
 
-async function runTaskAction(taskId, action) {
+async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
+    if (!taskId || !action) return;
+    if (action === "delete") {
+        openConfirm({
+            title: "删除任务",
+            text: "删除后将移除任务记录、树快照和工件文件，且无法恢复。",
+            confirmLabel: "删除",
+            confirmKind: "danger",
+            returnFocus,
+            onConfirm: () => performTaskAction(taskId, action),
+        });
+        return;
+    }
+    await performTaskAction(taskId, action);
+}
+
+async function performTaskAction(taskId, action) {
     if (!taskId || !action) return;
     S.taskBusy = true;
     renderTasks();
     try {
         await requestTaskAction(taskId, action);
-        showToast({ title: `${taskActionText(action)} done`, text: taskId, kind: action === "cancel" ? "warn" : "success" });
+        showToast({ title: taskActionSuccessTitle(action), text: taskId, kind: "success" });
         await loadTasks();
-        if (S.currentTaskId === taskId) {
+        if (action === "delete") {
+            handleDeletedTasks([taskId]);
+        } else if (S.currentTaskId === taskId) {
             await loadTaskDetail(taskId, { preserveView: true, reopenSocket: false });
             await loadTaskArtifacts();
         }
     } catch (e) {
-        showToast({ title: `${taskActionText(action)} failed`, text: e.message || "Unknown error", kind: "error" });
+        showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, e), kind: "error" });
     } finally {
         S.taskBusy = false;
         renderTasks();
     }
 }
 
-async function runTaskBatchAction(action) {
+async function runTaskBatchAction(action, { returnFocus = null } = {}) {
     closeTaskMenus();
     const selected = getSelectedTasks();
     const eligible = selected.filter((task) => {
         if (action === "pause") return canPause(task);
         if (action === "resume") return canResume(task);
-        if (action === "cancel") return canCancel(task);
+        if (action === "delete") return canDelete(task);
         return false;
     });
     if (!eligible.length) {
         showToast({ title: "No eligible tasks", text: "Current selection cannot perform this action.", kind: "warn" });
         return;
     }
+    if (action === "delete") {
+        openConfirm({
+            title: "删除任务",
+            text: "删除后将移除任务记录、树快照和工件文件，且无法恢复。",
+            confirmLabel: "删除",
+            confirmKind: "danger",
+            returnFocus,
+            onConfirm: () => performTaskBatchAction(action, eligible),
+        });
+        return;
+    }
+    await performTaskBatchAction(action, eligible);
+}
+
+async function performTaskBatchAction(action, eligible) {
     S.taskBusy = true;
     renderTasks();
     try {
-        await Promise.allSettled(eligible.map((task) => requestTaskAction(task.task_id, action)));
-        showToast({ title: `${taskActionText(action)} batch done`, text: `${eligible.length} tasks updated`, kind: "success" });
+        const results = await Promise.allSettled(eligible.map((task) => requestTaskAction(task.task_id, action)));
+        const succeeded = results
+            .map((result, index) => (result.status === "fulfilled" ? eligible[index].task_id : ""))
+            .filter(Boolean);
+        const failed = results
+            .map((result, index) => (result.status === "rejected" ? { taskId: eligible[index].task_id, error: result.reason } : null))
+            .filter(Boolean);
         await loadTasks();
+        if (action === "delete") {
+            handleDeletedTasks(succeeded);
+        } else if (S.currentTaskId && succeeded.includes(S.currentTaskId)) {
+            await loadTaskDetail(S.currentTaskId, { preserveView: true, reopenSocket: false });
+            await loadTaskArtifacts();
+        }
+        if (failed.length && !succeeded.length) {
+            showToast({
+                title: taskActionFailureTitle(action),
+                text: taskActionErrorText(action, failed[0].error),
+                kind: "error",
+            });
+            return;
+        }
+        if (failed.length) {
+            showToast({
+                title: action === "delete" ? "删除完成" : `${taskActionText(action)}完成`,
+                text: `${succeeded.length} 个任务成功，${failed.length} 个失败`,
+                kind: "warn",
+            });
+            return;
+        }
+        showToast({
+            title: taskActionSuccessTitle(action),
+            text: action === "delete" ? `已删除 ${succeeded.length} 个任务` : `${succeeded.length} 个任务已更新`,
+            kind: "success",
+        });
     } finally {
         S.taskBusy = false;
         renderTasks();
@@ -2144,12 +2489,20 @@ function resetTaskView() {
     S.tree = null;
     S.treeView = null;
     S.selectedNodeId = null;
+    S.treePan.active = false;
+    S.treePan.originNodeId = null;
     S.treePan.offsetX = 0;
     S.treePan.offsetY = 0;
     S.treePan.baseOffsetX = 0;
     S.treePan.baseOffsetY = 0;
+    S.treePan.scale = 1;
+    S.treePan.baseScale = 1;
+    S.treePan.moved = false;
+    S.treePan.suppressClickNodeId = null;
     U.tree.innerHTML = '<div class="empty-state">Waiting for task tree...</div>';
     U.feedTitle.textContent = "Node Details";
+    if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">选择任务树中的节点后，这里会显示执行流程。</div>';
+    if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
     if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
     if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
@@ -2188,7 +2541,10 @@ function bindTreePan() {
     const state = S.treePan;
     const applyPan = () => {
         const canvas = U.tree?.querySelector(".execution-tree");
-        if (canvas) canvas.style.transform = `translate(${Math.round(state.offsetX)}px, ${Math.round(state.offsetY)}px)`;
+        if (canvas) {
+            canvas.style.transformOrigin = "0 0";
+            canvas.style.transform = `translate(${Math.round(state.offsetX)}px, ${Math.round(state.offsetY)}px) scale(${state.scale})`;
+        }
     };
     window.addEventListener("mousemove", (e) => {
         if (!state.active) return;
@@ -2221,6 +2577,29 @@ function bindTreePan() {
     U.tree.addEventListener("dragstart", (e) => {
         if (e.target.closest(".execution-tree-node")) e.preventDefault();
     });
+    U.tree.addEventListener("wheel", (e) => {
+        const canvas = U.tree?.querySelector(".execution-tree");
+        if (!canvas) return;
+        e.preventDefault();
+        const rect = U.tree.getBoundingClientRect();
+        const pointerX = e.clientX - rect.left;
+        const pointerY = e.clientY - rect.top;
+        const nextScale = clamp(
+            e.deltaY < 0 ? state.scale * TREE_SCALE_FACTOR : state.scale / TREE_SCALE_FACTOR,
+            TREE_SCALE_MIN,
+            TREE_SCALE_MAX,
+        );
+        if (Math.abs(nextScale - state.scale) < 0.001) return;
+        const contentX = (pointerX - state.offsetX) / state.scale;
+        const contentY = (pointerY - state.offsetY) / state.scale;
+        state.scale = nextScale;
+        state.baseScale = nextScale;
+        state.offsetX = pointerX - contentX * nextScale;
+        state.offsetY = pointerY - contentY * nextScale;
+        state.baseOffsetX = state.offsetX;
+        state.baseOffsetY = state.offsetY;
+        applyPan();
+    }, { passive: false });
     U.tree.__applyPan = applyPan;
 }
 
@@ -2231,6 +2610,112 @@ function nodeOutputText(node) {
     return String(node.final_output || "");
 }
 
+function truncateNodeTitle(text, maxChars = 20) {
+    const chars = Array.from(String(text || ""));
+    if (chars.length <= maxChars) return chars.join("");
+    return `${chars.slice(0, maxChars).join("")}…`;
+}
+
+function resolveNodeTitle(node, detail) {
+    const goal = String(detail?.goal || "").trim();
+    const fullTitle = goal || String(node?.title || node?.node_id || "").trim() || String(node?.node_id || "");
+    return {
+        goal: goal || fullTitle,
+        fullTitle,
+        title: truncateNodeTitle(fullTitle, 20),
+    };
+}
+
+function buildNodeExecutionTrace(node, detail) {
+    const source = detail?.execution_trace && typeof detail.execution_trace === "object" ? detail.execution_trace : {};
+    const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps : [];
+    return {
+        initial_prompt: String(source.initial_prompt ?? detail?.prompt ?? detail?.goal ?? node?.input ?? ""),
+        tool_steps: toolSteps.map((step) => ({
+            tool_call_id: String(step?.tool_call_id || ""),
+            tool_name: String(step?.tool_name || "tool"),
+            arguments_text: String(step?.arguments_text || ""),
+            output_text: String(step?.output_text || ""),
+            status: ["running", "success", "error"].includes(String(step?.status || ""))
+                ? String(step.status)
+                : "info",
+        })),
+        final_output: String(source.final_output ?? detail?.final_output ?? nodeOutputText(detail) ?? nodeOutputText(node) ?? ""),
+        acceptance_result: String(source.acceptance_result ?? detail?.check_result ?? node?.check_result ?? ""),
+    };
+}
+
+function traceStatusLabel(status) {
+    return ({
+        info: "已记录",
+        running: "执行中",
+        success: "成功",
+        error: "失败",
+    }[String(status || "")] || "已记录");
+}
+
+function nodeFinalTraceStatus(node) {
+    if (String(node?.state || "") === "in_progress") return "running";
+    if (String(node?.state || "") === "failed") return "error";
+    return "success";
+}
+
+function renderTraceField(label, value, emptyText = "暂无内容") {
+    const text = String(value || "").trim() || emptyText;
+    return `
+        <div class="task-trace-field">
+            <div class="task-trace-label">${esc(label)}</div>
+            <div class="code-block task-trace-code">${esc(text)}</div>
+        </div>
+    `;
+}
+
+function renderTraceStep({ title, status = "info", open = false, bodyHtml = "" }) {
+    return `
+        <details class="interaction-step task-trace-step ${esc(status)}"${open ? " open" : ""}>
+            <summary class="task-trace-summary">
+                <span class="interaction-step-title">${esc(title)}</span>
+                <span class="interaction-step-status">${esc(traceStatusLabel(status))}</span>
+            </summary>
+            <div class="task-trace-body">${bodyHtml}</div>
+        </details>
+    `;
+}
+
+function renderExecutionTrace(node) {
+    if (!U.adFlow) return;
+    const trace = node?.executionTrace || buildNodeExecutionTrace(node, node);
+    const steps = [
+        renderTraceStep({
+            title: "初始提示词",
+            status: "info",
+            open: false,
+            bodyHtml: renderTraceField("内容", trace.initial_prompt, "暂无初始提示词"),
+        }),
+        ...trace.tool_steps.map((step) => renderTraceStep({
+            title: `使用工具 · ${step.tool_name || "tool"}`,
+            status: step.status || "info",
+            open: false,
+            bodyHtml: [
+                renderTraceField("参数", step.arguments_text, "无参数"),
+                renderTraceField("工具输出", step.output_text, step.status === "running" ? "等待工具输出…" : "暂无工具输出"),
+            ].join(""),
+        })),
+        renderTraceStep({
+            title: "最终输出",
+            status: nodeFinalTraceStatus(node),
+            open: true,
+            bodyHtml: renderTraceField("内容", trace.final_output, "暂无最终输出"),
+        }),
+    ];
+    U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
+}
+
+function renderAcceptanceResult(text) {
+    if (!U.adAcceptance) return;
+    U.adAcceptance.textContent = String(text || "").trim() || "暂无验收结果";
+}
+
 function buildExecutionTree(rawTree) {
     if (!rawTree) return null;
     const nodeRecords = Array.isArray(S.currentTaskProgress?.nodes) ? S.currentTaskProgress.nodes : [];
@@ -2238,37 +2723,20 @@ function buildExecutionTree(rawTree) {
     const walk = (node) => {
         const detail = nodeMap.get(String(node.node_id || "")) || {};
         const status = String(node.status || detail.status || "unknown").trim().toLowerCase() || "unknown";
+        const title = resolveNodeTitle(node, detail);
         return {
             node_id: node.node_id,
-            title: node.title || detail.goal || node.node_id,
+            title: title.title,
+            fullTitle: title.fullTitle,
+            goal: title.goal,
             kind: detail.node_kind || "execution",
             state: status,
             display_state: status.toUpperCase(),
-            input: node.input || detail.input || "",
-            output: node.output || detail.final_output || nodeOutputText(detail) || "-",
-            check: node.check_result || detail.check_result || "-",
-            log: Array.isArray(detail.output) ? detail.output.map((entry) => ({ kind: entry.tool_calls?.length ? "tool" : "log", ts: entry.created_at, content: entry.content || "" })) : [],
+            executionTrace: buildNodeExecutionTrace(node, detail),
             children: Array.isArray(node.children) ? node.children.map(walk) : [],
         };
     };
     return walk(rawTree);
-}
-
-function renderNodeLogs(rows) {
-    U.adLogs.innerHTML = "";
-    if (!Array.isArray(rows) || !rows.length) {
-        U.adLogs.innerHTML = '<div class="empty-state" style="padding: 10px;">No logs yet.</div>';
-        return;
-    }
-    rows.forEach((row) => {
-        const el = document.createElement("div");
-        el.className = "feed-card type-info";
-        const kind = String(row.kind || "log");
-        const ts = row.ts ? new Date(row.ts).toLocaleTimeString() : "";
-        el.innerHTML = `<div class="card-header"><span>${esc(kind.toUpperCase())}</span><span>${esc(ts)}</span></div><div class="card-content">${esc(String(row.content || ""))}</div>`;
-        U.adLogs.appendChild(el);
-    });
-    icons();
 }
 
 function renderTree() {
@@ -2285,6 +2753,7 @@ function renderTree() {
     rootList.className = "execution-tree-list";
     const walk = (node) => {
         const title = String(node.title || node.node_id || "");
+        const fullTitle = String(node.fullTitle || title);
         const displayState = String(node.display_state || node.state || "").toUpperCase();
         const item = document.createElement("li");
         item.className = "execution-tree-item";
@@ -2293,6 +2762,7 @@ function renderTree() {
         el.className = `execution-tree-node${S.selectedNodeId === node.node_id ? " selected" : ""}`;
         el.dataset.id = node.node_id;
         el.dataset.kind = node.kind || "execution";
+        el.title = fullTitle;
         el.setAttribute("aria-pressed", S.selectedNodeId === node.node_id ? "true" : "false");
         el.innerHTML = `<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.state || "")}">${esc(displayState)}</span></span>`;
         el.addEventListener("click", (e) => {
@@ -2316,7 +2786,8 @@ function renderTree() {
     };
     rootList.appendChild(walk(S.treeView));
     wrapper.appendChild(rootList);
-    wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px)`;
+    wrapper.style.transformOrigin = "0 0";
+    wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
     U.tree.innerHTML = "";
     U.tree.appendChild(wrapper);
     if (S.selectedNodeId) {
@@ -2386,16 +2857,15 @@ function showAgent(node) {
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
-    U.adRole.textContent = node.title || node.node_id || "Node";
+    U.adRole.textContent = node.fullTitle || node.title || node.node_id || "Node";
     U.adStatus.textContent = String(node.display_state || node.state || "").toUpperCase();
     U.adStatus.dataset.status = node.state || "";
-    U.adInput.textContent = node.input || "-";
-    U.adOutput.textContent = node.output || "-";
-    U.adCheck.textContent = node.check || "-";
-    U.feedTitle.textContent = `Node: ${node.title || node.node_id || ""}`;
-    renderNodeLogs(node.log || []);
+    renderExecutionTrace(node);
+    renderAcceptanceResult(node.executionTrace?.acceptance_result || "");
+    U.feedTitle.textContent = `Node: ${node.fullTitle || node.title || node.node_id || ""}`;
     renderArtifacts();
     setTaskDetailOpen(true);
+    icons();
 }
 
 function hideAgent() {
@@ -3392,7 +3862,7 @@ function bind() {
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
     U.artifactApply?.addEventListener("click", () => void applySelectedArtifact());
-    U.ceoSend?.addEventListener("click", sendCeoMessage);
+    U.ceoSend?.addEventListener("click", handleCeoPrimaryAction);
     U.ceoAttach?.addEventListener("click", () => {
         if (S.ceoUploadBusy) return;
         U.ceoFileInput?.click();
@@ -3406,10 +3876,13 @@ function bind() {
     U.ceoInput?.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            sendCeoMessage();
+            handleCeoPrimaryAction();
         }
     });
-    U.ceoInput?.addEventListener("input", syncCeoInputHeight);
+    U.ceoInput?.addEventListener("input", () => {
+        syncCeoInputHeight();
+        syncCeoPrimaryButton();
+    });
     U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);
     U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);
@@ -3443,6 +3916,24 @@ function bind() {
                 updateRoleChainDraft(scope, chain);
             }
             return;
+        }
+    });
+    U.modelRoleEditors?.addEventListener("input", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        const field = e.target.closest("[data-model-role-iterations]");
+        if (!(field instanceof HTMLInputElement)) return;
+        syncRoleIterationDraftsFromInputs({ requireValid: false });
+    });
+    U.modelRoleEditors?.addEventListener("change", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        const field = e.target.closest("[data-model-role-iterations]");
+        if (!(field instanceof HTMLInputElement)) return;
+        try {
+            syncRoleIterationDraftsFromInputs({ requireValid: true });
+            renderModelCatalog();
+        } catch (error) {
+            S.modelCatalog.error = error.message || "save failed";
+            hint(`妯″瀷閰嶇疆閿欒锛?{S.modelCatalog.error}`, true);
         }
     });
     U.modelRoleEditors?.addEventListener("dragstart", (e) => {
@@ -3598,7 +4089,7 @@ function bind() {
         renderTasks();
     }));
     U.taskBatchMenu?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
-        await runTaskBatchAction(button.dataset.batchAction);
+        await runTaskBatchAction(button.dataset.batchAction, { returnFocus: button });
     }));
     U.closeAgent?.addEventListener("click", () => clearAgentSelection());
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
@@ -3649,10 +4140,12 @@ function bind() {
     });
     renderPendingCeoUploads();
     syncCeoInputHeight();
+    syncCeoPrimaryButton();
 }
 
 function init() {
     enhanceResourceSelects();
+    configureTaskDetailSections();
     bind();
     bindTreePan();
     icons();

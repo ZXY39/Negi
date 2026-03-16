@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 from typing import Any, Callable
@@ -48,6 +49,8 @@ class MainRuntimeService:
         default_max_depth: int = 1,
         hard_max_depth: int = 4,
         max_iterations: int = 16,
+        execution_max_iterations: int | None = None,
+        acceptance_max_iterations: int | None = None,
     ) -> None:
         self._chat_backend = chat_backend
         self._app_config = app_config
@@ -74,6 +77,8 @@ class MainRuntimeService:
             tool_provider=self._tool_provider,
             execution_model_refs=list(execution_model_refs or ['execution']),
             acceptance_model_refs=list(acceptance_model_refs or execution_model_refs or ['inspection']),
+            execution_max_iterations=execution_max_iterations if execution_max_iterations is not None else max_iterations,
+            acceptance_max_iterations=acceptance_max_iterations if acceptance_max_iterations is not None else (execution_max_iterations if execution_max_iterations is not None else max_iterations),
             context_enricher=self._enrich_node_messages,
         )
         self.task_runner = TaskRunner(store=self.store, log_service=self.log_service, node_runner=self.node_runner)
@@ -163,19 +168,49 @@ class MainRuntimeService:
         return self.store.get_task(record.task_id) or record
 
     async def cancel_task(self, task_id: str) -> TaskRecord | None:
+        task_id = self.normalize_task_id(task_id)
         await self.task_runner.cancel(task_id)
         return self.get_task(task_id)
 
     async def pause_task(self, task_id: str) -> TaskRecord | None:
+        task_id = self.normalize_task_id(task_id)
         await self.task_runner.pause(task_id)
         return self.get_task(task_id)
 
     async def resume_task(self, task_id: str) -> TaskRecord | None:
+        task_id = self.normalize_task_id(task_id)
         await self.task_runner.resume(task_id)
         return self.get_task(task_id)
 
+    async def delete_task(self, task_id: str) -> TaskRecord | None:
+        task_id = self.normalize_task_id(task_id)
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        if not bool(task.is_paused):
+            raise ValueError('task_not_paused')
+        if self.task_runner.is_active(task_id):
+            try:
+                await asyncio.wait_for(self.task_runner.wait(task_id), timeout=2.0)
+            except asyncio.TimeoutError as exc:
+                raise ValueError('task_still_stopping') from exc
+        if self.task_runner.is_active(task_id):
+            raise ValueError('task_still_stopping')
+        artifacts = self.list_artifacts(task_id)
+        self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
+        self.file_store.delete_task_files(task_id)
+        self.store.delete_task(task_id)
+        return task
+
     def get_task(self, task_id: str) -> TaskRecord | None:
+        task_id = self.normalize_task_id(task_id)
         return self.store.get_task(task_id)
+
+    def normalize_task_id(self, task_id: str) -> str:
+        raw = str(task_id or '').strip()
+        if not raw or raw.startswith('task:') or ':' in raw:
+            return raw
+        return f'task:{raw}'
 
     def bind_resource_manager(self, resource_manager) -> None:
         self._resource_manager = resource_manager
@@ -192,6 +227,8 @@ class MainRuntimeService:
         self._hard_max_depth = max(self._default_max_depth, int(getattr(config.main_runtime, 'hard_max_depth', self._default_max_depth) or self._default_max_depth))
         self.node_runner._execution_model_refs = list(config.get_role_model_keys('execution'))
         self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
+        self.node_runner._execution_max_iterations = config.get_role_max_iterations('execution')
+        self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
         if self._resource_manager is not None and hasattr(self._resource_manager, 'bind_app_config'):
             self._resource_manager.bind_app_config(config)
         self.resource_registry.refresh_from_current_resources()
@@ -215,15 +252,38 @@ class MainRuntimeService:
         subject = self._subject(actor_role=actor_role, session_id=session_id)
         families = []
         for family in self.resource_registry.list_tool_families():
+            callable_family = bool(getattr(family, 'callable', True))
             actions = [
                 action
                 for action in family.actions
-                if set(action.executor_names) & visible_names
-                and self.policy_engine.evaluate_tool_action(subject=subject, tool_id=family.tool_id, action_id=action.action_id).allowed
+                if (
+                    self.policy_engine.evaluate_tool_action(
+                        subject=subject,
+                        tool_id=family.tool_id,
+                        action_id=action.action_id,
+                    ).allowed
+                    and (
+                        not callable_family
+                        or bool(set(action.executor_names) & visible_names)
+                    )
+                )
             ]
             if actions:
                 families.append(family.model_copy(update={'actions': actions}))
         return families
+
+    def _visible_tool_family_map(self, *, actor_role: str, session_id: str) -> dict[str, Any]:
+        mapping: dict[str, Any] = {}
+        for family in self.list_visible_tool_families(actor_role=actor_role, session_id=session_id):
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            if tool_id:
+                mapping[tool_id] = family
+            for action in list(getattr(family, 'actions', []) or []):
+                for executor_name in list(getattr(action, 'executor_names', []) or []):
+                    name = str(executor_name or '').strip()
+                    if name and name not in mapping:
+                        mapping[name] = family
+        return mapping
 
     def load_skill_context(self, *, actor_role: str, session_id: str, skill_id: str) -> dict[str, Any]:
         visible = {item.skill_id: item for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)}
@@ -276,17 +336,21 @@ class MainRuntimeService:
 
     def load_tool_context(self, *, actor_role: str, session_id: str, tool_id: str) -> dict[str, Any]:
         tool_name = str(tool_id or '').strip()
-        visible = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        visible = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
         if tool_name not in visible:
             return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
             return {'ok': False, 'error': 'Resource manager unavailable'}
         toolskill = self.get_tool_toolskill(tool_name) or {}
         content = str(toolskill.get('content') or '')
+        resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
         return {
             'ok': True,
-            'tool_id': tool_name,
+            'tool_id': resolved_tool_id,
             'content': content,
+            'tool_type': toolskill.get('tool_type'),
+            'install_dir': toolskill.get('install_dir'),
+            'callable': toolskill.get('callable'),
         }
 
     def load_tool_context_v2(
@@ -300,13 +364,14 @@ class MainRuntimeService:
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
         tool_name = str(tool_id or '').strip()
-        visible = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        visible = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
         if tool_name not in visible:
             return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
             return {'ok': False, 'error': 'Resource manager unavailable'}
         toolskill = self.get_tool_toolskill(tool_name) or {}
         content = str(toolskill.get('content') or '')
+        resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
         payload = layered_body_payload(
             body=content,
             level=level,
@@ -318,13 +383,16 @@ class MainRuntimeService:
         )
         return {
             'ok': True,
-            'tool_id': tool_name,
-            'uri': f'g3ku://resource/tool/{tool_name}',
+            'tool_id': resolved_tool_id,
+            'uri': f'g3ku://resource/tool/{resolved_tool_id}',
             'level': payload['level'],
             'content': payload['content'],
             'l0': payload['l0'],
             'l1': payload['l1'],
             'path': payload['path'],
+            'tool_type': toolskill.get('tool_type'),
+            'install_dir': toolskill.get('install_dir'),
+            'callable': toolskill.get('callable'),
         }
 
     def list_skill_resources(self) -> list[Any]:
@@ -433,6 +501,7 @@ class MainRuntimeService:
         executor_name = self._tool_family_executor_name(family)
         content = ''
         path = ''
+        descriptor = None
         if executor_name and self._resource_manager is not None:
             try:
                 content = self._resource_manager.load_toolskill_body(executor_name)
@@ -441,12 +510,26 @@ class MainRuntimeService:
             descriptor = self._resource_manager.get_tool_descriptor(executor_name)
             if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
                 path = str(descriptor.toolskills_main_path)
+        if descriptor is None and self._resource_manager is not None:
+            descriptor = self._resource_manager.get_tool_descriptor(str(getattr(family, 'tool_id', '') or '').strip())
+            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
+                path = str(descriptor.toolskills_main_path)
+        tool_type = str(getattr(family, 'tool_type', getattr(descriptor, 'tool_type', 'internal')) or 'internal')
+        install_dir = str(
+            getattr(family, 'install_dir', None)
+            or getattr(descriptor, 'install_dir', '')
+            or ''
+        ).strip() or None
+        callable_flag = bool(getattr(family, 'callable', getattr(descriptor, 'callable', True)))
         return {
             'tool_id': family.tool_id,
             'primary_executor_name': executor_name,
             'content': content,
             'path': path,
             'description': family.description,
+            'tool_type': tool_type,
+            'install_dir': install_dir,
+            'callable': callable_flag,
         }
 
     def update_tool_policy(self, tool_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles_by_action: dict[str, list[str]] | None = None):
@@ -511,6 +594,7 @@ class MainRuntimeService:
         return {'ok': True, 'items': items, 'trace_kind': trace_kind, 'limit': max(1, int(limit))}
 
     def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False) -> dict[str, Any] | None:
+        task_id = self.normalize_task_id(task_id)
         task = self.get_task(task_id)
         if task is None:
             return None
@@ -524,12 +608,14 @@ class MainRuntimeService:
         }
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
+        task_id = self.normalize_task_id(task_id)
         return self.store.list_artifacts(task_id)
 
     def get_artifact(self, artifact_id: str) -> TaskArtifactRecord | None:
         return self.store.get_artifact(artifact_id)
 
     async def apply_patch_artifact(self, task_id: str, artifact_id: str) -> dict[str, Any] | None:
+        task_id = self.normalize_task_id(task_id)
         artifact = self.get_artifact(artifact_id)
         if artifact is None or artifact.task_id != task_id:
             return None
@@ -616,6 +702,7 @@ class MainRuntimeService:
         return '\n'.join(f'- {item.task_id}：{item.brief}' for item in items)
 
     def view_progress(self, task_id: str, *, mark_read: bool = True) -> str:
+        task_id = self.normalize_task_id(task_id)
         payload = self.query_service.view_progress(task_id, mark_read=mark_read)
         if payload is None:
             return f'Error: Task not found: {task_id}'

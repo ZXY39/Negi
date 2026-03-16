@@ -75,6 +75,9 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
                 'description': str(governance.get('description') or descriptor.description),
                 'enabled': bool(descriptor.enabled),
                 'available': bool(descriptor.available),
+                'tool_type': str(getattr(descriptor, 'tool_type', 'internal') or 'internal'),
+                'install_dir': str(getattr(descriptor, 'install_dir', '') or '') or None,
+                'callable': bool(getattr(descriptor, 'callable', True)),
                 'source_path': str(descriptor.root),
                 'actions': OrderedDict(),
                 'metadata': {'sources': [descriptor.root.name], 'warnings': list(descriptor.warnings), 'errors': list(descriptor.errors)},
@@ -82,6 +85,12 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
         )
         family['enabled'] = bool(family['enabled']) and bool(descriptor.enabled)
         family['available'] = bool(family['available']) or bool(descriptor.available)
+        family['callable'] = bool(family['callable']) or bool(getattr(descriptor, 'callable', True))
+        if bool(getattr(descriptor, 'callable', True)):
+            family['tool_type'] = 'internal'
+            family['install_dir'] = None
+        elif not family.get('install_dir'):
+            family['install_dir'] = str(getattr(descriptor, 'install_dir', '') or '') or None
         if descriptor.root.name not in family['metadata']['sources']:
             family['metadata']['sources'].append(descriptor.root.name)
         for action in list(governance.get('actions') or []):
@@ -115,6 +124,9 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
                 primary_executor_name=_primary_executor_name(actions),
                 enabled=payload['enabled'],
                 available=payload['available'],
+                tool_type=payload['tool_type'],
+                install_dir=payload['install_dir'],
+                callable=payload['callable'],
                 source_path=payload['source_path'],
                 actions=actions,
                 metadata=payload['metadata'],

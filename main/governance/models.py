@@ -56,6 +56,9 @@ class ToolFamilyRecord(Model):
     primary_executor_name: str = ''
     enabled: bool = True
     available: bool = True
+    tool_type: str = 'internal'
+    install_dir: str | None = None
+    callable: bool = True
     source_path: str
     actions: list[ToolActionRecord] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

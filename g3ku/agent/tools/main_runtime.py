@@ -84,7 +84,7 @@ class LoadToolContextTool(_MainRuntimeTool):
 
     @property
     def description(self) -> str:
-        return 'Load layered context for a currently visible tool. Defaults to L1 overview; use level=l2 for query-aware excerpts.'
+        return 'Load layered context for a currently visible tool or registered external tool. Returns the usage guide together with tool_type, install_dir, and callable status.'
 
     @property
     def parameters(self) -> dict[str, Any]:

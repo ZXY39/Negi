@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from g3ku.config.schema import Config
+from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_ITERATIONS
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
 
 
@@ -291,6 +291,11 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "memoryWindow": cfg.agents.defaults.memory_window,
                 "reasoningEffort": cfg.agents.defaults.reasoning_effort,
             },
+            "roleIterations": {
+                "ceo": cfg.get_role_max_iterations("ceo"),
+                "execution": cfg.get_role_max_iterations("execution"),
+                "inspection": cfg.get_role_max_iterations("inspection"),
+            },
             "multiAgent": {
                 "orchestratorModelKey": cfg.agents.multi_agent.orchestrator_model_key,
             },
@@ -395,6 +400,27 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         )
 
 
+def _ensure_role_iterations_defaults(raw_data: dict[str, Any]) -> bool:
+    agents = raw_data.get("agents")
+    if not isinstance(agents, dict):
+        return False
+    current = agents.get("roleIterations")
+    fallback = current if isinstance(current, dict) else agents.get("role_iterations")
+    fallback_payload = fallback if isinstance(fallback, dict) else {}
+    next_payload: dict[str, int] = {}
+    for scope, default in DEFAULT_ROLE_MAX_ITERATIONS.items():
+        value = fallback_payload.get(scope, default)
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            normalized = default
+        next_payload[scope] = normalized if normalized >= 2 else default
+    if current == next_payload:
+        return False
+    agents["roleIterations"] = next_payload
+    return True
+
+
 def build_project_config_from_example(example_path: Path | None = None) -> Config:
     """Build a strict project config from the checked-in example file."""
     path = example_path or get_example_config_path()
@@ -415,6 +441,7 @@ def load_config(config_path: Path | None = None) -> Config:
     migrated_llm, changed = migrate_raw_config_if_needed(deepcopy(raw_data), workspace=Path.cwd())
     if changed:
         raw_data = migrated_llm
+    changed = _ensure_role_iterations_defaults(raw_data) or changed
     migrated = _migrate_config(deepcopy(raw_data))
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(migrated, cfg)
