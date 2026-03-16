@@ -5,13 +5,12 @@ from typing import Any
 
 import json
 import shutil
-import yaml
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.schema import Config
 from g3ku.config.model_manager import ModelManager, VALID_SCOPES
-from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
+from g3ku.llm_config.facade import MEMORY_EMBEDDING_CONFIG_ID, MEMORY_RERANK_CONFIG_ID
 from g3ku.shells.web import get_agent, refresh_web_agent_runtime
 
 router = APIRouter()
@@ -111,23 +110,6 @@ async def _refresh_runtime(reason: str) -> None:
 
 def _model_roles(manager: ModelManager) -> dict[str, list[str]]:
     return {scope: list(getattr(manager.config.models.roles, scope)) for scope in VALID_SCOPES}
-
-
-def _memory_manifest_path(manager: ModelManager) -> Path:
-    return manager.config.workspace_path / 'tools' / 'memory_runtime' / 'resource.yaml'
-
-
-def _load_memory_manifest_payload(manager: ModelManager) -> tuple[dict[str, Any], MemoryRuntimeSettings]:
-    manifest_path = _memory_manifest_path(manager)
-    data = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
-    settings = load_tool_settings_from_manifest(manager.config.workspace_path, 'memory_runtime', MemoryRuntimeSettings)
-    return (data or {}), settings
-
-
-def _save_memory_manifest_payload(manager: ModelManager, payload: dict[str, Any]) -> None:
-    manifest_path = _memory_manifest_path(manager)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding='utf-8')
 
 
 def _normalize_china_channel_id(channel_id: str) -> str:
@@ -556,28 +538,21 @@ async def update_llm_route(scope: str, payload: dict = Body(...)):
 async def get_llm_memory_binding():
     manager = ModelManager.load()
     try:
-        _payload, settings = _load_memory_manifest_payload(manager)
+        result = manager.facade.get_memory_binding()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'ok': True, 'item': manager.facade.get_memory_binding(settings).model_dump(mode='json')}
+    return {'ok': True, 'item': result.model_dump(mode='json')}
 
 
 @router.put('/llm/memory')
-async def update_llm_memory_binding(payload: dict = Body(...)):
+async def update_llm_memory_binding(payload: dict | None = Body(default=None)):
     manager = ModelManager.load()
     try:
-        manifest_payload, settings = _load_memory_manifest_payload(manager)
-        result = manager.facade.set_memory_binding(
-            settings,
-            embedding_model_key=payload.get('embedding_model_key'),
-            rerank_model_key=payload.get('rerank_model_key'),
-        )
-        settings_payload = manifest_payload.setdefault('settings', {})
-        embedding_payload = settings_payload.setdefault('embedding', {})
-        retrieval_payload = settings_payload.setdefault('retrieval', {})
-        embedding_payload['model_key'] = result.embedding_model_key
-        retrieval_payload['rerank_model_key'] = result.rerank_model_key
-        _save_memory_manifest_payload(manager, manifest_payload)
+        result = manager.facade.get_memory_binding()
+        if not result.embedding_config_id or result.embedding_config_id != MEMORY_EMBEDDING_CONFIG_ID:
+            raise ValueError('memory embedding config is missing')
+        if not result.rerank_config_id or result.rerank_config_id != MEMORY_RERANK_CONFIG_ID:
+            raise ValueError('memory rerank config is missing')
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _refresh_runtime('admin_llm_memory_update')

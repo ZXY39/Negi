@@ -29,7 +29,7 @@ class RuntimeAgentSession:
             reasoning_effort=getattr(loop, "reasoning_effort", None),
         )
         self._listeners: set[Callable[[AgentEvent], Awaitable[None] | None]] = set()
-        self._last_prompt: str = ""
+        self._last_prompt: str | UserInputMessage = ""
         self._event_log: list[dict] = []
         self._pending_tool_names: dict[str, str] = {}
         self._tool_seq: int = 0
@@ -208,7 +208,7 @@ class RuntimeAgentSession:
 
         await refresh_web_agent_runtime(force=False, reason="prompt")
         user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
-        self._last_prompt = user_input.content
+        self._last_prompt = user_input
         self._event_log = []
         self._pending_tool_names.clear()
         self._state.is_running = True
@@ -259,7 +259,12 @@ class RuntimeAgentSession:
         persisted_session = None
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-            persisted_session.add_message("user", user_text)
+            persisted_session.add_message(
+                "user",
+                user_text,
+                attachments=list(user_input.attachments or []),
+                metadata=dict(user_input.metadata or {}),
+            )
             persisted_session.add_message("assistant", output)
             self._loop.sessions.save(persisted_session)
         except Exception:

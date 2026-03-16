@@ -141,6 +141,23 @@ def _write_demo_skill(root: Path, *, name: str = 'demo_skill', guide: str = 'Dem
     return skill_root
 
 
+def _load_agent_browser_handler(workspace: Path):
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+
+    tool_root = workspace / 'tools' / 'agent_browser'
+    (tool_root / 'main').mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO_ROOT / 'tools' / 'agent_browser' / 'resource.yaml', tool_root / 'resource.yaml')
+    shutil.copy2(REPO_ROOT / 'tools' / 'agent_browser' / 'main' / 'tool.py', tool_root / 'main' / 'tool.py')
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['agent_browser']
+    tool = ResourceLoader(workspace).load_tool(descriptor)
+
+    assert tool is not None
+    return tool._handler
+
+
 class _VisibleToolService:
     def __init__(self):
         self.resource_manager = None
@@ -518,3 +535,222 @@ def test_tree_fingerprint_ignores_node_modules(tmp_path: Path):
 
     assert second == first
     assert third != second
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_auto_generated_profile_forces_matching_session(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    handler = _load_agent_browser_handler(workspace)
+    assert handler._settings.auto_session is True
+
+    handler._settings = handler._settings.model_copy(update={'auto_session': False})
+    argv = handler._inject_global_flags(
+        argv=['open', 'https://example.com'],
+        session=None,
+        profile=None,
+        session_name=None,
+    )
+
+    expected_profile = workspace / '.g3ku' / 'tool-data' / 'agent_browser' / 'profiles' / 'g3ku-agent-browser'
+
+    assert argv[:4] == [
+        '--profile',
+        str(expected_profile),
+        '--session',
+        'g3ku-agent-browser',
+    ]
+    assert expected_profile.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_explicit_relative_profile_resolves_from_workspace(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    handler = _load_agent_browser_handler(workspace)
+
+    argv = handler._inject_global_flags(
+        argv=['open', 'https://example.com'],
+        session=None,
+        profile='.g3ku/tool-data/agent_browser/profiles/custom-profile',
+        session_name=None,
+    )
+
+    expected_profile = workspace / '.g3ku' / 'tool-data' / 'agent_browser' / 'profiles' / 'custom-profile'
+
+    assert argv[:4] == [
+        '--profile',
+        str(expected_profile),
+        '--session',
+        'g3ku-agent-browser',
+    ]
+    assert expected_profile.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    handler = _load_agent_browser_handler(workspace)
+
+    run_calls: list[dict[str, object]] = []
+    close_calls: list[dict[str, object]] = []
+
+    async def _fake_resolve_command_prefix(self):
+        return ['agent-browser']
+
+    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds):
+        run_calls.append(
+            {
+                'command_prefix': list(command_prefix),
+                'args': list(args),
+                'cwd': str(cwd),
+                'timeout_seconds': timeout_seconds,
+            }
+        )
+        return {
+            'ok': False,
+            'timed_out': True,
+            'error': f'agent-browser timed out after {timeout_seconds} seconds',
+            'command': [*command_prefix, *args],
+            'cwd': str(cwd),
+        }
+
+    async def _fake_close_session(self, *, command_prefix, cwd, env, session):
+        close_calls.append(
+            {
+                'command_prefix': list(command_prefix),
+                'cwd': str(cwd),
+                'session': session,
+            }
+        )
+        return {
+            'ok': True,
+            'exit_code': 0,
+            'stdout': 'Browser closed',
+            'stderr': '',
+            'command': [*command_prefix, '--session', session, 'close'],
+            'cwd': str(cwd),
+        }
+
+    handler._resolve_command_prefix = MethodType(_fake_resolve_command_prefix, handler)
+    handler._run_command = MethodType(_fake_run_command, handler)
+    handler._close_session = MethodType(_fake_close_session, handler)
+
+    payload = json.loads(await handler.execute(args=['open', 'https://example.com']))
+    expected_profile = workspace / '.g3ku' / 'tool-data' / 'agent_browser' / 'profiles' / 'g3ku-agent-browser'
+
+    assert run_calls == [
+        {
+            'command_prefix': ['agent-browser'],
+            'args': [
+                '--profile',
+                str(expected_profile),
+                '--session',
+                'g3ku-agent-browser',
+                'open',
+                'https://example.com',
+            ],
+            'cwd': str(workspace),
+            'timeout_seconds': 300,
+        }
+    ]
+    assert close_calls == [
+        {
+            'command_prefix': ['agent-browser'],
+            'cwd': str(workspace),
+            'session': 'g3ku-agent-browser',
+        }
+    ]
+    assert payload['timed_out'] is True
+    assert payload['session_cleanup']['ok'] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    handler = _load_agent_browser_handler(workspace)
+
+    run_calls: list[dict[str, object]] = []
+    close_calls: list[str] = []
+
+    async def _fake_resolve_command_prefix(self):
+        return ['agent-browser']
+
+    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds):
+        run_calls.append(
+            {
+                'command_prefix': list(command_prefix),
+                'args': list(args),
+                'cwd': str(cwd),
+                'timeout_seconds': timeout_seconds,
+            }
+        )
+        if len(run_calls) == 1:
+            return {
+                'ok': False,
+                'exit_code': 1,
+                'stdout': '',
+                'stderr': "⚠ --profile ignored: daemon already running. Use 'agent-browser close' first to restart with new options.",
+                'command': [*command_prefix, *args],
+                'cwd': str(cwd),
+            }
+        return {
+            'ok': True,
+            'exit_code': 0,
+            'stdout': '{"navigated":true}',
+            'stderr': '',
+            'stdout_json': {'navigated': True},
+            'command': [*command_prefix, *args],
+            'cwd': str(cwd),
+        }
+
+    async def _fake_close_session(self, *, command_prefix, cwd, env, session):
+        close_calls.append(session)
+        return {
+            'ok': True,
+            'exit_code': 0,
+            'stdout': 'Browser closed',
+            'stderr': '',
+            'command': [*command_prefix, '--session', session, 'close'],
+            'cwd': str(cwd),
+        }
+
+    handler._resolve_command_prefix = MethodType(_fake_resolve_command_prefix, handler)
+    handler._run_command = MethodType(_fake_run_command, handler)
+    handler._close_session = MethodType(_fake_close_session, handler)
+
+    payload = json.loads(await handler.execute(args=['open', 'https://example.com']))
+    expected_profile = workspace / '.g3ku' / 'tool-data' / 'agent_browser' / 'profiles' / 'g3ku-agent-browser'
+
+    assert run_calls == [
+        {
+            'command_prefix': ['agent-browser'],
+            'args': [
+                '--profile',
+                str(expected_profile),
+                '--session',
+                'g3ku-agent-browser',
+                'open',
+                'https://example.com',
+            ],
+            'cwd': str(workspace),
+            'timeout_seconds': 300,
+        },
+        {
+            'command_prefix': ['agent-browser'],
+            'args': [
+                '--profile',
+                str(expected_profile),
+                '--session',
+                'g3ku-agent-browser',
+                'open',
+                'https://example.com',
+            ],
+            'cwd': str(workspace),
+            'timeout_seconds': 300,
+        },
+    ]
+    assert close_calls == ['g3ku-agent-browser']
+    assert payload['ok'] is True
+    assert payload['retried_after_session_cleanup'] is True
+    assert payload['initial_attempt']['exit_code'] == 1
+    assert 'daemon already running' in payload['initial_attempt']['stderr']
+    assert payload['session_cleanup']['ok'] is True

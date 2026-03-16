@@ -69,7 +69,16 @@
                     </div>
 
                     <div class="chat-input-area">
-                        <textarea id="ceo-input" rows="1" placeholder="输入你的任务，例如：让 OpenClaw 分析当前代码问题并创建异步任务"></textarea>
+                        <div class="ceo-composer">
+                            <div id="ceo-upload-list" class="ceo-upload-list" hidden aria-live="polite"></div>
+                            <div class="ceo-input-row">
+                                <input id="ceo-file-input" type="file" multiple hidden>
+                                <button id="ceo-attach-btn" class="ceo-attach-btn" type="button" aria-label="上传附件">
+                                    <i data-lucide="paperclip"></i>
+                                </button>
+                                <textarea id="ceo-input" rows="1" placeholder="输入你的任务，可保留换行；也可以上传图片或文件作为补充"></textarea>
+                            </div>
+                        </div>
                         <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
                             <i data-lucide="send"></i> 发送
                         </button>
@@ -210,6 +219,7 @@
                     </div>
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
+                        <button id="llm-memory-settings-btn" class="toolbar-btn ghost" type="button">记忆模型设置</button>
                         <button id="llm-config-create-btn" class="toolbar-btn" type="button">新建配置</button>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button">编辑模型链</button>
                     </div>

@@ -48,10 +48,8 @@ settings:
     sentence_window: 3
     max_context_tokens: 1200
     default_load_level: l1
-    rerank_model_key: memory_rerank_default
   embedding:
     batch_size: 32
-    model_key: memory_embedding_default
   isolation:
     mode: session
     namespace_template:

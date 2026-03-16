@@ -49,6 +49,10 @@ class CeoFrontDoorRunner:
             return "\n".join(parts).strip()
         return str(value or "")
 
+    @staticmethod
+    def _model_content(value: Any) -> Any:
+        return value if isinstance(value, list) else str(value or '')
+
     def _resolve_ceo_model_client(self) -> tuple[Any, list[str]]:
         refresh_loop_runtime_config(self._loop, force=False, reason="ceo_model_client")
         app_config = getattr(self._loop, 'app_config', None)
@@ -129,7 +133,7 @@ class CeoFrontDoorRunner:
         messages: list[dict[str, Any]] = [
             {'role': 'system', 'content': system_prompt},
             *persisted_history,
-            {'role': 'user', 'content': str(user_input.content or '')},
+            {'role': 'user', 'content': self._model_content(getattr(user_input, 'content', ''))},
         ]
         token = self._loop.tools.push_runtime_context(
             {

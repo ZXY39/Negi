@@ -19,6 +19,8 @@ from g3ku.llm_config.service import ConfigService, TemplateService
 
 
 MASKED_SECRET_VALUE = "********"
+MEMORY_EMBEDDING_CONFIG_ID = "memory_embedding_default"
+MEMORY_RERANK_CONFIG_ID = "memory_rerank_default"
 
 
 def _store_root(workspace: Path | None = None) -> Path:
@@ -200,22 +202,36 @@ class LLMConfigFacade:
         setattr(config.models.roles, normalized, [str(item).strip() for item in model_keys if str(item).strip()])
         return self.get_routes(config)
 
-    def get_memory_binding(self, settings: Any) -> MemoryModelBinding:
+    def get_memory_binding(self) -> MemoryModelBinding:
+        embedding = self._get_optional_record(MEMORY_EMBEDDING_CONFIG_ID)
+        rerank = self._get_optional_record(MEMORY_RERANK_CONFIG_ID)
         return MemoryModelBinding(
-            embedding_model_key=getattr(settings.embedding, "model_key", None),
-            rerank_model_key=getattr(settings.retrieval, "rerank_model_key", None),
+            embedding_config_id=embedding.config_id if embedding is not None else None,
+            embedding_provider_model=self._provider_model_from_record(embedding),
+            rerank_config_id=rerank.config_id if rerank is not None else None,
+            rerank_provider_model=self._provider_model_from_record(rerank),
         )
 
-    def set_memory_binding(
-        self,
-        settings: Any,
-        *,
-        embedding_model_key: str | None = None,
-        rerank_model_key: str | None = None,
-    ) -> MemoryModelBinding:
-        settings.embedding.model_key = str(embedding_model_key or "").strip() or None
-        settings.retrieval.rerank_model_key = str(rerank_model_key or "").strip() or None
-        return self.get_memory_binding(settings)
+    def resolve_memory_target(self, capability: str) -> RuntimeTarget:
+        normalized = str(capability or "").strip().lower()
+        if normalized == "embedding":
+            expected_capability = "embedding"
+            config_id = MEMORY_EMBEDDING_CONFIG_ID
+        elif normalized == "rerank":
+            expected_capability = "rerank"
+            config_id = MEMORY_RERANK_CONFIG_ID
+        else:
+            raise ValueError(f"Unsupported memory capability: {capability}")
+        record = self.repository.get(config_id)
+        if record.capability.value != expected_capability:
+            raise ValueError(
+                f"Memory config {config_id} is not configured for {expected_capability} capability"
+            )
+        return self._runtime_target(
+            model_key=config_id,
+            record=record,
+            retry_on=[],
+        )
 
     def export_runtime_config(self, config_id: str) -> GenericRuntimeConfig:
         return self.config_service.export_config(config_id, include_secrets=True)
@@ -225,6 +241,53 @@ class LLMConfigFacade:
         if binding is None or not str(getattr(binding, "llm_config_id", "") or "").strip():
             raise ValueError(f"Unknown model key: {model_key}")
         record = self.repository.get(binding.llm_config_id)
+        return self._runtime_target(
+            model_key=model_key,
+            record=record,
+            retry_on=list(getattr(binding, "retry_on", []) or []),
+        )
+
+    def _binding_payload(self, binding: Any, record: NormalizedProviderConfig) -> dict[str, Any]:
+        api_key = str(record.auth.get("api_key", "") or "")
+        return {
+            "key": binding.key,
+            "llm_config_id": record.config_id,
+            "provider_model": self._provider_model_from_record(record),
+            "api_key": MASKED_SECRET_VALUE if api_key else "",
+            "api_base": record.base_url,
+            "extra_headers": record.headers,
+            "enabled": binding.enabled,
+            "max_tokens": record.parameters.get("max_tokens"),
+            "temperature": record.parameters.get("temperature"),
+            "reasoning_effort": record.parameters.get("reasoning_effort"),
+            "retry_on": list(binding.retry_on or []),
+            "description": binding.description,
+            "capability": record.capability.value,
+            "auth_mode": record.auth_mode.value,
+            "config_id": record.config_id,
+        }
+
+    def _get_optional_record(self, config_id: str) -> NormalizedProviderConfig | None:
+        try:
+            return self.repository.get(config_id)
+        except Exception:
+            return None
+
+    def _provider_model_from_record(self, record: NormalizedProviderConfig | None) -> str:
+        if record is None:
+            return ""
+        provider_id = record.provider_id
+        if provider_id in {"dashscope_embedding", "dashscope_rerank"}:
+            provider_id = "dashscope"
+        return f"{provider_id}:{record.default_model}"
+
+    def _runtime_target(
+        self,
+        *,
+        model_key: str,
+        record: NormalizedProviderConfig,
+        retry_on: list[str],
+    ) -> RuntimeTarget:
         return RuntimeTarget(
             model_key=model_key,
             config_id=record.config_id,
@@ -243,32 +306,9 @@ class LLMConfigFacade:
                 if record.parameters.get("reasoning_effort") is not None and str(record.parameters.get("reasoning_effort")).strip()
                 else None
             ),
-            retry_on=list(getattr(binding, "retry_on", []) or []),
+            retry_on=list(retry_on),
             extra_options=dict(record.extra_options),
         )
-
-    def _binding_payload(self, binding: Any, record: NormalizedProviderConfig) -> dict[str, Any]:
-        api_key = str(record.auth.get("api_key", "") or "")
-        provider_id = record.provider_id
-        if provider_id in {"dashscope_embedding", "dashscope_rerank"}:
-            provider_id = "dashscope"
-        return {
-            "key": binding.key,
-            "llm_config_id": record.config_id,
-            "provider_model": f"{provider_id}:{record.default_model}",
-            "api_key": MASKED_SECRET_VALUE if api_key else "",
-            "api_base": record.base_url,
-            "extra_headers": record.headers,
-            "enabled": binding.enabled,
-            "max_tokens": record.parameters.get("max_tokens"),
-            "temperature": record.parameters.get("temperature"),
-            "reasoning_effort": record.parameters.get("reasoning_effort"),
-            "retry_on": list(binding.retry_on or []),
-            "description": binding.description,
-            "capability": record.capability.value,
-            "auth_mode": record.auth_mode.value,
-            "config_id": record.config_id,
-        }
 
     def _merge_draft(self, current: NormalizedProviderConfig, patch: dict[str, Any]) -> ProviderConfigDraft:
         api_key = patch.get("api_key")

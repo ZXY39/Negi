@@ -33,7 +33,10 @@ from langgraph.store.base import (
 )
 from loguru import logger
 
-from g3ku.llm_config.runtime_resolver import resolve_embedding_target, resolve_rerank_target
+from g3ku.llm_config.runtime_resolver import (
+    resolve_memory_embedding_target,
+    resolve_memory_rerank_target,
+)
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
 
 try:
@@ -1321,33 +1324,25 @@ class MemoryManager:
             "split_store": False,
             "observability": False,
         }
-        self._app_config = None
-        self._resolved_embedding_model = str(getattr(config.embedding, "provider_model", "") or "").strip()
+        self._resolved_embedding_model = ""
         self._dashscope_api_key, self._dashscope_api_base = _load_workspace_dashscope_settings(
             self.workspace
         )
+
         try:
-            from g3ku.config.loader import load_config as _load_app_config
-
-            self._app_config = _load_app_config(self.workspace / ".g3ku" / "config.json")
-        except Exception:
-            self._app_config = None
-
-        embedding_model_key = str(getattr(config.embedding, "model_key", "") or "").strip()
-        if self._app_config is not None and embedding_model_key:
-            try:
-                embedding_target = resolve_embedding_target(
-                    self._app_config,
-                    embedding_model_key,
-                    workspace=self.workspace,
-                )
-                self._resolved_embedding_model = embedding_target.resolved_model
-                self._dashscope_api_key = str(
-                    embedding_target.secret_payload.get("api_key", "") or self._dashscope_api_key
-                ).strip()
-                self._dashscope_api_base = str(embedding_target.base_url or self._dashscope_api_base or "").strip() or None
-            except Exception as exc:
-                logger.warning("Memory embedding target resolution failed; using legacy config: {}", exc)
+            embedding_target = resolve_memory_embedding_target(workspace=self.workspace)
+            provider_id = _normalize_provider_id(embedding_target.provider_id)
+            if provider_id in {"dashscope_embedding", "dashscope_rerank"}:
+                provider_id = "dashscope"
+            self._resolved_embedding_model = (
+                f"{provider_id}:{embedding_target.resolved_model}" if provider_id else embedding_target.resolved_model
+            )
+            self._dashscope_api_key = str(
+                embedding_target.secret_payload.get("api_key", "") or self._dashscope_api_key
+            ).strip()
+            self._dashscope_api_base = str(embedding_target.base_url or self._dashscope_api_base or "").strip() or None
+        except Exception as exc:
+            logger.warning("Memory embedding target resolution failed: {}", exc)
         self._reranker = self._init_reranker()
 
         mem_dir = ensure_dir(self.workspace / "memory")
@@ -1632,30 +1627,17 @@ class MemoryManager:
             await asyncio.to_thread(self._append_jsonl, self.audit_file, asdict(event))
 
     def _init_reranker(self) -> DashScopeTextReranker | None:
-        model_key = str(getattr(self.config.retrieval, "rerank_model_key", "") or "").strip()
-        if self._app_config is not None and model_key:
-            try:
-                target = resolve_rerank_target(self._app_config, model_key, workspace=self.workspace)
-                api_key = str(target.secret_payload.get("api_key", "") or "").strip()
-                if not api_key:
-                    logger.warning("Resolved rerank target is missing API key: {}", model_key)
-                    return None
-                return DashScopeTextReranker(
-                    api_key=api_key,
-                    model=target.resolved_model,
-                    api_base=target.base_url,
-                )
-            except Exception as exc:
-                logger.warning("Memory rerank target resolution failed; using legacy config: {}", exc)
-
-        model = str(getattr(self.config.retrieval, "rerank_provider_model", "") or "").strip()
-        if not model:
+        try:
+            target = resolve_memory_rerank_target(workspace=self.workspace)
+        except Exception as exc:
+            logger.warning("Memory rerank target resolution failed: {}", exc)
             return None
+        model = str(target.resolved_model or "").strip()
         if not _is_dashscope_rerank_model(model):
             logger.warning("Unsupported rerank model configured for memory retrieval: {}", model)
             return None
         _, model_id = _split_provider_model(model, default_provider="dashscope")
-        api_key = self._dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "").strip()
+        api_key = str(target.secret_payload.get("api_key", "") or self._dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "")).strip()
         if not api_key:
             logger.warning(
                 "DashScope rerank requested but API key is missing; rerank disabled "
@@ -1666,7 +1648,7 @@ class MemoryManager:
         return DashScopeTextReranker(
             api_key=api_key,
             model=model_id,
-            api_base=self._dashscope_api_base,
+            api_base=str(target.base_url or self._dashscope_api_base or "").strip() or None,
         )
 
     def _rerank_items(self, *, query: str, items: list[SearchItem], top_n: int) -> list[SearchItem]:

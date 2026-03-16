@@ -33,7 +33,7 @@ settings:
   allow_cargo_run: true
   allow_global_fallback: false
   default_session: g3ku-agent-browser
-  auto_session: false
+  auto_session: true
   auto_profile: true
   profile_root: .g3ku/tool-data/agent_browser/profiles
   cargo_release: false

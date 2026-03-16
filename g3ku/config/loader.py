@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from g3ku.config.schema import Config
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
-from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
 
 
 def _project_config_path() -> Path:
@@ -87,6 +88,23 @@ def _provider_payload(cfg: Config, provider_name: str) -> dict[str, object]:
     }
 
 
+_LEGACY_MODEL_PAYLOAD_FIELDS = (
+    "providerModel",
+    "provider_model",
+    "apiKey",
+    "api_key",
+    "apiBase",
+    "api_base",
+    "extraHeaders",
+    "extra_headers",
+    "maxTokens",
+    "max_tokens",
+    "temperature",
+    "reasoningEffort",
+    "reasoning_effort",
+)
+
+
 def _ensure_no_legacy_model_fields(raw_data: dict[str, Any]) -> None:
     legacy_paths = (
         ("agents", "defaults", "model"),
@@ -153,19 +171,6 @@ def _referenced_provider_names(cfg: Config) -> list[str]:
         provider_name, _ = cfg.parse_provider_model(provider_model)
         names.add(provider_name)
 
-    try:
-        memory_cfg = load_tool_settings_from_manifest(cfg.workspace_path, "memory_runtime", MemoryRuntimeSettings)
-    except Exception:
-        memory_cfg = None
-
-    if memory_cfg is not None and memory_cfg.enabled:
-        for value in (memory_cfg.embedding.provider_model, memory_cfg.retrieval.rerank_provider_model):
-            provider_model = str(value or "").strip()
-            if not provider_model:
-                continue
-            provider_name, _ = cfg.parse_provider_model(provider_model)
-            names.add(provider_name)
-
     for provider_name, payload in cfg.providers.model_dump().items():
         if isinstance(payload, dict) and any(value not in (None, "", {}, []) for value in payload.values()):
             names.add(str(provider_name))
@@ -173,19 +178,88 @@ def _referenced_provider_names(cfg: Config) -> list[str]:
     return sorted(names)
 
 
+def _raw_uses_legacy_model_payload(raw_data: dict[str, Any]) -> bool:
+    models = raw_data.get("models") if isinstance(raw_data.get("models"), dict) else None
+    catalog = (models or {}).get("catalog")
+    if not isinstance(catalog, list):
+        return False
+    for item in catalog:
+        if isinstance(item, dict) and any(field_name in item for field_name in _LEGACY_MODEL_PAYLOAD_FIELDS):
+            return True
+    return False
+
+
+def _legacy_auth_mode(provider_id: str) -> str:
+    if provider_id in {"openai_codex", "github_copilot"}:
+        return "oauth_cache"
+    return "api_key"
+
+
+def _normalize_legacy_model_bindings(cfg: Config) -> bool:
+    from g3ku.llm_config.models import ProviderConfigDraft
+    from g3ku.llm_config.facade import LLMConfigFacade
+
+    facade = LLMConfigFacade(cfg.workspace_path)
+    changed = False
+    for item in cfg.models.catalog:
+        if str(item.llm_config_id or "").strip():
+            continue
+        provider_id, model_id = cfg.parse_provider_model(str(item.provider_model or "").strip())
+        provider_cfg = getattr(cfg.providers, provider_id, None)
+        draft = ProviderConfigDraft(
+            provider_id=provider_id,
+            capability="chat",
+            auth_mode=_legacy_auth_mode(provider_id),
+            api_key=str(
+                item.api_key
+                or (provider_cfg.api_key if provider_cfg is not None else "")
+                or ""
+            ).strip(),
+            base_url=str(
+                item.api_base
+                or (provider_cfg.api_base if provider_cfg is not None else "")
+                or ""
+            ).strip(),
+            default_model=model_id,
+            parameters={
+                "timeout_s": 8,
+                "temperature": float(item.temperature),
+                "max_tokens": int(item.max_tokens),
+                **(
+                    {"reasoning_effort": str(item.reasoning_effort).strip()}
+                    if item.reasoning_effort is not None and str(item.reasoning_effort).strip()
+                    else {}
+                ),
+            },
+            extra_headers=dict(
+                item.extra_headers
+                or (provider_cfg.extra_headers if provider_cfg is not None else {})
+                or {}
+            ),
+            extra_options={},
+        )
+        validation = facade.config_service.validate_draft(draft)
+        if not validation.valid or validation.normalized_preview is None:
+            raise ValueError(f"Failed to normalize model binding for {item.key}")
+        record = validation.normalized_preview.model_copy(
+            update={
+                "config_id": uuid4().hex,
+                "created_at": datetime.now(UTC),
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        facade.repository.save(record, last_probe_status=None)
+        item.llm_config_id = record.config_id
+        changed = True
+    return changed
+
+
 def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[str, list[str]]]:
     catalog = [
         {
             "key": item.key,
             "llmConfigId": item.llm_config_id,
-            "providerModel": item.provider_model,
-            "apiKey": item.api_key,
-            "apiBase": item.api_base,
-            "extraHeaders": item.extra_headers,
             "enabled": item.enabled,
-            "maxTokens": item.max_tokens,
-            "temperature": item.temperature,
-            "reasoningEffort": item.reasoning_effort,
             "retryOn": list(item.retry_on or []),
             "description": item.description,
         }
@@ -344,7 +418,7 @@ def load_config(config_path: Path | None = None) -> Config:
     migrated = _migrate_config(deepcopy(raw_data))
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(migrated, cfg)
-    if changed:
+    if changed or _raw_uses_legacy_model_payload(raw_data):
         save_config(cfg, expected_path)
     return cfg
 
@@ -354,6 +428,7 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     path = config_path or get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    _normalize_legacy_model_bindings(config)
     data = _runtime_config_payload(config)
 
     with open(path, "w", encoding="utf-8") as f:

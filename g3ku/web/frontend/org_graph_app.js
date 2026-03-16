@@ -20,6 +20,8 @@ const S = {
     view: "ceo",
     ceoWs: null,
     ceoPendingTurns: [],
+    ceoUploads: [],
+    ceoUploadBusy: false,
     taskWs: null,
     currentTaskId: null,
     tasks: [],
@@ -94,6 +96,9 @@ const U = {
     theme: document.getElementById("theme-toggle"),
     ceoFeed: document.getElementById("ceo-chat-feed"),
     ceoInput: document.getElementById("ceo-input"),
+    ceoAttach: document.getElementById("ceo-attach-btn"),
+    ceoFileInput: document.getElementById("ceo-file-input"),
+    ceoUploadList: document.getElementById("ceo-upload-list"),
     ceoSend: document.getElementById("ceo-send-btn"),
     viewCeo: document.getElementById("view-ceo"),
     viewTasks: document.getElementById("view-tasks-list"),
@@ -377,12 +382,119 @@ function hint(text, err = false) {
     U.modelHint.style.color = err ? "var(--danger, #ff6b6b)" : "";
 }
 
-function addMsg(text, role, { markdown = false } = {}) {
+function formatFileSize(value) {
+    const size = Number(value || 0);
+    if (!Number.isFinite(size) || size <= 0) return "";
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function hasRenderableText(value) {
+    return String(value || "").trim().length > 0;
+}
+
+function normalizeUploadList(items = []) {
+    return Array.isArray(items) ? items.filter((item) => item && typeof item === "object" && item.path) : [];
+}
+
+function summarizeUploads(items = []) {
+    const uploads = normalizeUploadList(items);
+    if (!uploads.length) return "已附加附件";
+    const imageCount = uploads.filter((item) => String(item.kind || "") === "image").length;
+    const fileCount = uploads.length - imageCount;
+    const parts = [];
+    if (imageCount) parts.push(`${imageCount} 张图片`);
+    if (fileCount) parts.push(`${fileCount} 个文件`);
+    return parts.length ? `已附加 ${parts.join("，")}` : "已附加附件";
+}
+
+function renderChatAttachments(items = []) {
+    const uploads = normalizeUploadList(items);
+    if (!uploads.length) return "";
+    return `
+        <div class="chat-attachment-list" role="list">
+            ${uploads.map((item) => `
+                <div class="chat-attachment-pill" role="listitem">
+                    <span class="chat-attachment-kind">${String(item.kind || "") === "image" ? "图片" : "文件"}</span>
+                    <span class="chat-attachment-name">${esc(String(item.name || item.path || "附件"))}</span>
+                    <span class="chat-attachment-size">${esc(formatFileSize(item.size))}</span>
+                </div>
+            `).join("")}
+        </div>
+    `;
+}
+
+function syncCeoInputHeight() {
+    if (!U.ceoInput) return;
+    U.ceoInput.style.height = "auto";
+    U.ceoInput.style.height = `${Math.min(U.ceoInput.scrollHeight, 200)}px`;
+}
+
+function renderPendingCeoUploads() {
+    if (!U.ceoUploadList) return;
+    const uploads = normalizeUploadList(S.ceoUploads);
+    U.ceoUploadList.hidden = !uploads.length && !S.ceoUploadBusy;
+    U.ceoUploadList.setAttribute("aria-busy", S.ceoUploadBusy ? "true" : "false");
+    if (!uploads.length && !S.ceoUploadBusy) {
+        U.ceoUploadList.innerHTML = "";
+    } else {
+        const status = S.ceoUploadBusy ? '<div class="ceo-upload-status">附件上传中...</div>' : "";
+        U.ceoUploadList.innerHTML = `
+            ${status}
+            <div class="ceo-upload-chip-list" role="list">
+                ${uploads.map((item, index) => `
+                    <div class="ceo-upload-chip" role="listitem">
+                        <span class="ceo-upload-kind">${String(item.kind || "") === "image" ? "图片" : "文件"}</span>
+                        <span class="ceo-upload-name">${esc(String(item.name || item.path || "附件"))}</span>
+                        <span class="ceo-upload-size">${esc(formatFileSize(item.size))}</span>
+                        <button type="button" class="ceo-upload-remove" data-upload-remove="${index}" aria-label="移除附件">
+                            <i data-lucide="x"></i>
+                        </button>
+                    </div>
+                `).join("")}
+            </div>
+        `;
+    }
+    if (U.ceoAttach) U.ceoAttach.disabled = !!S.ceoUploadBusy;
+    if (U.ceoSend) U.ceoSend.disabled = !!S.ceoUploadBusy;
+    icons();
+}
+
+async function handleCeoFileSelection(event) {
+    const files = [...(event?.target?.files || [])];
+    if (!files.length) return;
+    S.ceoUploadBusy = true;
+    renderPendingCeoUploads();
+    try {
+        const uploaded = await ApiClient.uploadCeoFiles(files);
+        S.ceoUploads = [...normalizeUploadList(S.ceoUploads), ...normalizeUploadList(uploaded)];
+        renderPendingCeoUploads();
+        showToast({ title: "上传完成", text: `已添加 ${uploaded.length} 个附件`, kind: "success" });
+    } catch (e) {
+        addMsg(`附件上传失败：${e.message || "unknown error"}`, "system");
+    } finally {
+        S.ceoUploadBusy = false;
+        renderPendingCeoUploads();
+        if (U.ceoFileInput) U.ceoFileInput.value = "";
+    }
+}
+
+function removePendingCeoUpload(index) {
+    const next = normalizeUploadList(S.ceoUploads);
+    if (index < 0 || index >= next.length) return;
+    next.splice(index, 1);
+    S.ceoUploads = next;
+    renderPendingCeoUploads();
+}
+
+function addMsg(text, role, { markdown = false, attachments = [] } = {}) {
     const el = document.createElement("div");
     el.className = `message ${role}`;
     const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
     const content = markdown ? renderMarkdown(text) : esc(text);
-    el.innerHTML = `<div class="avatar"><i data-lucide="${role === "system" ? "cpu" : "user"}"></i></div><div class="${contentClass}">${content}</div>`;
+    const attachmentMarkup = renderChatAttachments(attachments);
+    el.innerHTML = `<div class="avatar"><i data-lucide="${role === "system" ? "cpu" : "user"}"></i></div><div class="${contentClass}">${content}${attachmentMarkup}</div>`;
     U.ceoFeed.appendChild(el);
     icons();
     U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
@@ -398,8 +510,8 @@ function renderCeoSnapshot(messages = []) {
     resetCeoFeed();
     messages.forEach((item) => {
         const role = String(item?.role || "").trim().toLowerCase();
-        const content = String(item?.content || "").trim();
-        if (!content) return;
+        const content = String(item?.content || "");
+        if (!content.trim()) return;
         if (role === "user") {
             addMsg(content, "user");
             return;
@@ -616,6 +728,8 @@ function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "dang
 }
 
 function resourceSelectLabel(select) {
+    const explicitLabel = String(select?.dataset?.resourceSelectLabel || "").trim();
+    if (explicitLabel) return explicitLabel;
     const map = {
         "skill-risk-filter": "Skill risk filter",
         "skill-status-filter": "Skill status filter",
@@ -649,20 +763,33 @@ function syncResourceSelectUI(select) {
     if (!shell) return;
     const trigger = shell.querySelector(".resource-select-trigger");
     const valueEl = shell.querySelector(".resource-select-value");
+    const menu = shell.querySelector(".resource-select-menu");
     const optionButtons = [...shell.querySelectorAll(".resource-select-option")];
     const selectedOption = select.selectedOptions?.[0] || [...select.options].find((option) => option.value === select.value) || select.options[0];
     const selectedValue = String(selectedOption?.value ?? "");
+    const isDisabled = !!select.disabled;
 
     if (valueEl) valueEl.textContent = String(selectedOption?.textContent || "").trim();
+    shell.classList.toggle("is-disabled", isDisabled);
     if (trigger) {
+        trigger.disabled = isDisabled;
+        trigger.setAttribute("aria-disabled", isDisabled ? "true" : "false");
         trigger.dataset.value = selectedValue;
         trigger.setAttribute("aria-label", `${resourceSelectLabel(select)}: ${String(selectedOption?.textContent || "").trim()}`);
+        if (isDisabled) trigger.setAttribute("aria-expanded", "false");
+    }
+    if (menu && isDisabled) {
+        menu.hidden = true;
+        shell.classList.remove("is-open");
+        if (S.openResourceSelectId === select.id) S.openResourceSelectId = "";
     }
     optionButtons.forEach((button) => {
         const isSelected = String(button.dataset.value || "") === selectedValue;
+        button.disabled = isDisabled;
+        button.setAttribute("aria-disabled", isDisabled ? "true" : "false");
         button.classList.toggle("is-selected", isSelected);
         button.setAttribute("aria-selected", isSelected ? "true" : "false");
-        button.tabIndex = isSelected ? 0 : -1;
+        button.tabIndex = !isDisabled && isSelected ? 0 : -1;
     });
 }
 
@@ -683,6 +810,7 @@ function focusResourceSelectOption(shell, direction = "selected") {
 
 function setResourceSelectValue(select, value, { close = true } = {}) {
     if (!(select instanceof HTMLSelectElement)) return;
+    if (select.disabled) return;
     const nextValue = String(value ?? "");
     if (select.value !== nextValue) {
         select.value = nextValue;
@@ -696,6 +824,7 @@ function setResourceSelectValue(select, value, { close = true } = {}) {
 
 function openResourceSelect(select, { focus = "selected" } = {}) {
     if (!(select instanceof HTMLSelectElement)) return;
+    if (select.disabled) return;
     const shell = select.closest(".resource-select-shell");
     if (!shell) return;
     const trigger = shell.querySelector(".resource-select-trigger");
@@ -793,11 +922,13 @@ function buildResourceSelect(select) {
     });
 
     trigger.addEventListener("click", () => {
+        if (select.disabled) return;
         const isOpen = shell.classList.contains("is-open");
         if (isOpen) closeResourceSelects({ restoreFocus: true });
         else openResourceSelect(select);
     });
     trigger.addEventListener("keydown", (e) => {
+        if (select.disabled) return;
         if (e.key === "ArrowDown") {
             e.preventDefault();
             openResourceSelect(select, { focus: "first" });
@@ -1628,17 +1759,36 @@ function initCeoWs() {
 }
 
 function sendCeoMessage() {
-    const text = String(U.ceoInput.value || "").trim();
-    if (!text) return;
-    addMsg(text, "user");
-    U.ceoInput.value = "";
+    const text = String(U.ceoInput.value || "");
+    const uploads = normalizeUploadList(S.ceoUploads);
+    if (!text.trim() && !uploads.length) return;
+    if (S.ceoUploadBusy) {
+        addMsg("附件仍在上传，请稍候再发送。", "system");
+        return;
+    }
     if (!S.ceoWs || S.ceoWs.readyState !== WebSocket.OPEN) {
         addMsg("Connection is not ready yet. Please try again in a moment.", "system");
         initCeoWs();
         return;
     }
     try {
-        S.ceoWs.send(JSON.stringify({ type: "client.user_message", session_id: "web:shared", text }));
+        S.ceoWs.send(JSON.stringify({
+            type: "client.user_message",
+            session_id: "web:shared",
+            text,
+            uploads: uploads.map((item) => ({
+                name: item.name,
+                path: item.path,
+                mime_type: item.mime_type,
+                kind: item.kind,
+                size: item.size,
+            })),
+        }));
+        addMsg(hasRenderableText(text) ? text : summarizeUploads(uploads), "user", { attachments: uploads });
+        U.ceoInput.value = "";
+        S.ceoUploads = [];
+        syncCeoInputHeight();
+        renderPendingCeoUploads();
         const turn = createPendingCeoTurn();
         if (turn) S.ceoPendingTurns.push(turn);
     } catch (e) {
@@ -3243,12 +3393,23 @@ function bind() {
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
     U.artifactApply?.addEventListener("click", () => void applySelectedArtifact());
     U.ceoSend?.addEventListener("click", sendCeoMessage);
+    U.ceoAttach?.addEventListener("click", () => {
+        if (S.ceoUploadBusy) return;
+        U.ceoFileInput?.click();
+    });
+    U.ceoFileInput?.addEventListener("change", (e) => void handleCeoFileSelection(e));
+    U.ceoUploadList?.addEventListener("click", (e) => {
+        const remove = e.target.closest("[data-upload-remove]");
+        if (!remove) return;
+        removePendingCeoUpload(Number(remove.dataset.uploadRemove));
+    });
     U.ceoInput?.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             sendCeoMessage();
         }
     });
+    U.ceoInput?.addEventListener("input", syncCeoInputHeight);
     U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);
     U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);
@@ -3486,6 +3647,8 @@ function bind() {
         if (S.selectedTool) clearToolSelection();
         if (S.selectedCommunication) clearCommunicationSelection();
     });
+    renderPendingCeoUploads();
+    syncCeoInputHeight();
 }
 
 function init() {

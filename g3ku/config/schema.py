@@ -400,7 +400,7 @@ class MemoryEmbeddingConfig(Base):
     """Embedding source configuration."""
 
     model_key: str | None = None
-    provider_model: str = "openai:text-embedding-3-large"
+    provider_model: str = ""
     batch_size: int = 32
 
 

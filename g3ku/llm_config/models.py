@@ -167,5 +167,7 @@ class ModelBindingDraft(StrictModel):
 
 
 class MemoryModelBinding(StrictModel):
-    embedding_model_key: str | None = None
-    rerank_model_key: str | None = None
+    embedding_config_id: str | None = None
+    embedding_provider_model: str = ""
+    rerank_config_id: str | None = None
+    rerank_provider_model: str = ""

@@ -1,3 +1,7 @@
-2026/03/16-14:33:04.425 a00 Reusing MANIFEST D:\projects\G3KU\.g3ku\tool-data\agent_browser\profiles\g3ku-agent-browser\Default\Local Storage\leveldb/MANIFEST-000001
-2026/03/16-14:33:04.436 a00 Recovering log #3
-2026/03/16-14:33:04.637 a00 Reusing old log D:\projects\G3KU\.g3ku\tool-data\agent_browser\profiles\g3ku-agent-browser\Default\Local Storage\leveldb/000003.log 
+2026/03/16-16:40:16.914 306c Reusing MANIFEST d:\zxy\project\G3ku\.g3ku\tool-data\agent_browser\profiles\g3ku-agent-browser\Default\Local Storage\leveldb/MANIFEST-000001
+2026/03/16-16:40:16.927 306c Recovering log #3
+2026/03/16-16:40:16.928 306c Level-0 table #3: started
+2026/03/16-16:40:16.964 306c Level-0 table #3: 20363 bytes OK
+2026/03/16-16:40:17.034 306c Delete type=0 #3
+2026/03/16-16:41:15.952 3490 Level-0 table #6: started
+2026/03/16-16:41:15.987 3490 Level-0 table #6: 19372 bytes OK

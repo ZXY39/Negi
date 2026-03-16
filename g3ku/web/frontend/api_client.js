@@ -13,12 +13,17 @@ class ApiClient {
         return url;
     }
 
-    static async _request(method, path, { params = {}, body } = {}) {
+    static async _request(method, path, { params = {}, body, headers = {} } = {}) {
         const url = this._buildUrl(path, params);
+        const requestHeaders = { ...headers };
+        const isFormData = body instanceof FormData;
+        if (body !== undefined && !isFormData && !requestHeaders["Content-Type"]) {
+            requestHeaders["Content-Type"] = "application/json";
+        }
         const response = await fetch(url.toString(), {
             method,
-            headers: { "Content-Type": "application/json" },
-            body: body === undefined ? undefined : JSON.stringify(body),
+            headers: requestHeaders,
+            body: body === undefined ? undefined : (isFormData ? body : JSON.stringify(body)),
         });
         if (!response.ok) {
             const payload = await response.json().catch(() => ({}));
@@ -53,6 +58,16 @@ class ApiClient {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;
         return `${protocol}//${host}/api/ws/tasks/${encodeURIComponent(taskId)}?session_id=${DEFAULT_SESSION_ID}`;
+    }
+
+    static async uploadCeoFiles(files = []) {
+        const formData = new FormData();
+        [...files].forEach((file) => formData.append("files", file));
+        const data = await this._request("POST", "/api/ceo/uploads", {
+            params: { session_id: DEFAULT_SESSION_ID },
+            body: formData,
+        });
+        return data.items || [];
     }
 
     static async getTasks(scope = 1) {

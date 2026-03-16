@@ -12,26 +12,6 @@
       "updated_at": "2026-03-15T18:24:28.537420Z"
     },
     {
-      "config_id": "8c1a79ab0b11489a947574d6a3dd8a6e",
-      "provider_id": "dashscope_embedding",
-      "display_name": "DashScope Embedding",
-      "capability": "embedding",
-      "default_model": "qwen3-vl-embedding",
-      "last_probe_status": null,
-      "created_at": "2026-03-15T18:24:28.555571Z",
-      "updated_at": "2026-03-15T18:24:28.555571Z"
-    },
-    {
-      "config_id": "dd44249e0bb54e688d5a648eba5d191a",
-      "provider_id": "dashscope_rerank",
-      "display_name": "DashScope Rerank",
-      "capability": "rerank",
-      "default_model": "qwen3-vl-rerank",
-      "last_probe_status": null,
-      "created_at": "2026-03-15T18:24:28.557278Z",
-      "updated_at": "2026-03-15T18:24:28.557278Z"
-    },
-    {
       "config_id": "a6eaf7a0e897417e9279c97e96cd27de",
       "provider_id": "responses",
       "display_name": "OpenAI Responses",
@@ -50,6 +30,26 @@
       "last_probe_status": "success",
       "created_at": "2026-03-16T06:51:58.823305Z",
       "updated_at": "2026-03-16T06:51:58.823305Z"
+    },
+    {
+      "config_id": "memory_embedding_default",
+      "provider_id": "dashscope_embedding",
+      "display_name": "DashScope Embedding",
+      "capability": "embedding",
+      "default_model": "qwen3-vl-embedding",
+      "last_probe_status": null,
+      "created_at": "2026-03-15T18:24:28.555571Z",
+      "updated_at": "2026-03-16T09:18:35.746445Z"
+    },
+    {
+      "config_id": "memory_rerank_default",
+      "provider_id": "dashscope_rerank",
+      "display_name": "DashScope Rerank",
+      "capability": "rerank",
+      "default_model": "qwen3-vl-rerank",
+      "last_probe_status": null,
+      "created_at": "2026-03-15T18:24:28.557278Z",
+      "updated_at": "2026-03-16T09:18:35.756771Z"
     }
   ]
 }

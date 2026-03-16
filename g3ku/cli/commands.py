@@ -304,18 +304,6 @@ def _memory_startup_self_check(config: Config) -> None:
             return "dashscope"
         return None
 
-    def _provider_from_model_key(model_key: str | None) -> str | None:
-        key = str(model_key or "").strip()
-        if not key:
-            return None
-        try:
-            from g3ku.llm_config.facade import LLMConfigFacade
-
-            binding = LLMConfigFacade(config.workspace_path).get_binding(config, key)
-            return _provider_from_model(str(binding.get("provider_model") or ""))
-        except Exception:
-            return None
-
     def _provider_has_key(provider_id: str | None) -> bool:
         if not provider_id:
             return True
@@ -324,8 +312,14 @@ def _memory_startup_self_check(config: Config) -> None:
         has_env_key = any(os.environ.get(name, "").strip() for name in env_map.get(provider_id, []))
         return has_cfg_key or has_env_key
 
-    embed_model = str(mem_cfg.embedding.provider_model or "").strip()
-    provider_id = _provider_from_model_key(getattr(mem_cfg.embedding, "model_key", None)) or _provider_from_model(embed_model)
+    try:
+        from g3ku.llm_config.facade import LLMConfigFacade
+
+        memory_binding = LLMConfigFacade(config.workspace_path).get_memory_binding()
+    except Exception:
+        memory_binding = None
+
+    provider_id = _provider_from_model(str(getattr(memory_binding, "embedding_provider_model", "") or ""))
     if not provider_id:
         return
 
@@ -342,8 +336,7 @@ def _memory_startup_self_check(config: Config) -> None:
             "[yellow]Memory self-check warning:[/yellow] embedding provider "
             f"'{provider_id}' has no API key configured. Dense retrieval may fallback to sparse-only."
         )
-    rerank_model = str(getattr(mem_cfg.retrieval, "rerank_provider_model", "") or "").strip()
-    rerank_provider = _provider_from_model_key(getattr(mem_cfg.retrieval, "rerank_model_key", None)) or _provider_from_model(rerank_model)
+    rerank_provider = _provider_from_model(str(getattr(memory_binding, "rerank_provider_model", "") or ""))
     if mode == "rag" and rerank_provider and not _provider_has_key(rerank_provider):
         console.print(
             "[yellow]Memory self-check warning:[/yellow] rerank provider "

@@ -18,14 +18,7 @@
       {
         "key": "gpt-5.4",
         "llmConfigId": "a6eaf7a0e897417e9279c97e96cd27de",
-        "providerModel": "",
-        "apiKey": "",
-        "apiBase": null,
-        "extraHeaders": null,
         "enabled": true,
-        "maxTokens": 4096,
-        "temperature": 0.1,
-        "reasoningEffort": null,
         "retryOn": [
           "network",
           "429",
@@ -36,14 +29,7 @@
       {
         "key": "gpt-5.2",
         "llmConfigId": "02c6b3b82195430ea3a7c52f6d8b2c76",
-        "providerModel": "",
-        "apiKey": "",
-        "apiBase": null,
-        "extraHeaders": null,
         "enabled": true,
-        "maxTokens": 4096,
-        "temperature": 0.1,
-        "reasoningEffort": null,
         "retryOn": [
           "network",
           "429",
@@ -68,11 +54,6 @@
     }
   },
   "providers": {
-    "openai": {
-      "apiKey": "",
-      "apiBase": null,
-      "extraHeaders": null
-    },
     "responses": {
       "apiKey": "",
       "apiBase": null,

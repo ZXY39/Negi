@@ -117,23 +117,7 @@ class ModelConfigTool(Tool):
             return result
 
         if action_name == "set_memory_models":
-            from pathlib import Path
-            import yaml
-            from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
-
-            manifest_path = manager.config.workspace_path / 'tools' / 'memory_runtime' / 'resource.yaml'
-            data = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
-            settings = load_tool_settings_from_manifest(manager.config.workspace_path, 'memory_runtime', MemoryRuntimeSettings)
-            result = manager.facade.set_memory_binding(
-                settings,
-                embedding_model_key=kwargs.get("embedding_model_key"),
-                rerank_model_key=kwargs.get("rerank_model_key"),
-            )
-            payload = data.setdefault('settings', {})
-            payload.setdefault('embedding', {})['model_key'] = result.embedding_model_key
-            payload.setdefault('retrieval', {})['rerank_model_key'] = result.rerank_model_key
-            manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            manifest_path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding='utf-8')
+            result = manager.facade.get_memory_binding()
             await self._refresh_runtime(kwargs)
             return result.model_dump(mode='json')
 

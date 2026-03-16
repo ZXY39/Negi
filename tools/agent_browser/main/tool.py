@@ -25,7 +25,7 @@ class AgentBrowserSettings(Base):
     allow_cargo_run: bool = True
     allow_global_fallback: bool = False
     default_session: str = 'g3ku-agent-browser'
-    auto_session: bool = False
+    auto_session: bool = True
     auto_profile: bool = True
     profile_root: str = '.g3ku/tool-data/agent_browser/profiles'
     cargo_release: bool = False
@@ -33,6 +33,9 @@ class AgentBrowserSettings(Base):
 
 
 class AgentBrowserTool(Tool):
+    _DAEMON_RESTART_WARNING = 'ignored: daemon already running'
+    _SESSION_CLEANUP_TIMEOUT_SECONDS = 15
+
     def __init__(self, workspace: Path, source_root: Path, settings: AgentBrowserSettings):
         self._workspace = Path(workspace)
         self._source_root = Path(source_root)
@@ -93,48 +96,99 @@ class AgentBrowserTool(Tool):
             profile=profile,
             session_name=session_name,
         )
+        resolved_session = self._extract_flag_value(prefixed_args, '--session')
+        command_name = str(argv[0] or '').strip().lower()
+        can_cleanup_session = bool(resolved_session) and command_name not in {'close', 'quit', 'exit'}
         env = self._build_env()
-        command = [*command_prefix, *prefixed_args]
         timeout_seconds = int(timeout or self._settings.timeout)
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(cwd),
+            payload = await self._run_command(
+                command_prefix=command_prefix,
+                args=prefixed_args,
+                cwd=cwd,
                 env=env,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdin=stdin,
+                timeout_seconds=timeout_seconds,
             )
         except FileNotFoundError as exc:
             return self._error_payload(f'Failed to start agent-browser: {exc}')
         except Exception as exc:
             return self._error_payload(f'Failed to start agent-browser: {exc}')
 
+        if payload.get('timed_out'):
+            if can_cleanup_session:
+                payload['session_cleanup'] = await self._close_session(
+                    command_prefix=command_prefix,
+                    cwd=cwd,
+                    env=env,
+                    session=resolved_session,
+                )
+            return json.dumps(payload, ensure_ascii=False)
+
+        if can_cleanup_session and self._should_retry_after_session_cleanup(payload):
+            initial_attempt = {
+                'exit_code': payload.get('exit_code'),
+                'stderr': payload.get('stderr', ''),
+            }
+            cleanup_payload = await self._close_session(
+                command_prefix=command_prefix,
+                cwd=cwd,
+                env=env,
+                session=resolved_session,
+            )
+            try:
+                payload = await self._run_command(
+                    command_prefix=command_prefix,
+                    args=prefixed_args,
+                    cwd=cwd,
+                    env=env,
+                    stdin=stdin,
+                    timeout_seconds=timeout_seconds,
+                )
+            except FileNotFoundError as exc:
+                return self._error_payload(f'Failed to start agent-browser: {exc}')
+            except Exception as exc:
+                return self._error_payload(f'Failed to start agent-browser: {exc}')
+            payload['retried_after_session_cleanup'] = True
+            payload['initial_attempt'] = initial_attempt
+            payload['session_cleanup'] = cleanup_payload
+        return json.dumps(payload, ensure_ascii=False)
+
+    async def _run_command(
+        self,
+        *,
+        command_prefix: list[str],
+        args: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        stdin: str | None,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        command = [*command_prefix, *args]
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(cwd),
+            env=env,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
         stdin_bytes = stdin.encode('utf-8') if stdin is not None else None
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(stdin_bytes), timeout=timeout_seconds)
         except asyncio.TimeoutError:
-            process.kill()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                pass
-            return json.dumps(
-                {
-                    'ok': False,
-                    'error': f'agent-browser timed out after {timeout_seconds} seconds',
-                    'command': command,
-                    'cwd': str(cwd),
-                },
-                ensure_ascii=False,
-            )
+            await self._terminate_process(process)
+            return {
+                'ok': False,
+                'timed_out': True,
+                'error': f'agent-browser timed out after {timeout_seconds} seconds',
+                'command': command,
+                'cwd': str(cwd),
+            }
         except asyncio.CancelledError:
-            process.kill()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                pass
+            await self._terminate_process(process)
             raise
 
         stdout_text = stdout.decode('utf-8', errors='replace')
@@ -151,7 +205,43 @@ class AgentBrowserTool(Tool):
             stdout_json = self._try_parse_json(stdout_text)
             if stdout_json is not None:
                 payload['stdout_json'] = stdout_json
-        return json.dumps(payload, ensure_ascii=False)
+        return payload
+
+    async def _close_session(
+        self,
+        *,
+        command_prefix: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        session: str,
+    ) -> dict[str, Any]:
+        try:
+            return await self._run_command(
+                command_prefix=command_prefix,
+                args=['--session', session, 'close'],
+                cwd=cwd,
+                env=env,
+                stdin=None,
+                timeout_seconds=self._SESSION_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            return {
+                'ok': False,
+                'error': f'Failed to close agent-browser session {session!r}: {exc}',
+                'command': [*command_prefix, '--session', session, 'close'],
+                'cwd': str(cwd),
+            }
+
+    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
 
     async def _resolve_command_prefix(self) -> list[str] | None:
         explicit = str(self._settings.executable or '').strip()
@@ -272,15 +362,20 @@ class AgentBrowserTool(Tool):
     ) -> list[str]:
         result = list(argv)
         command_name = result[0] if result else ''
+        auto_profile_applies = (
+            not str(profile or '').strip()
+            and self._settings.auto_profile
+            and command_name not in {'install', '--help', 'help', 'version', '--version'}
+        )
 
         resolved_session = str(session or '').strip()
-        if not resolved_session and self._settings.auto_session:
+        if not resolved_session and (self._settings.auto_session or auto_profile_applies):
             resolved_session = str(self._settings.default_session or '').strip()
         if resolved_session and '--session' not in result:
             result = ['--session', resolved_session, *result]
 
-        resolved_profile = str(profile or '').strip()
-        if not resolved_profile and self._settings.auto_profile and command_name not in {'install', '--help', 'help', 'version', '--version'}:
+        resolved_profile = self._resolve_profile_path(profile)
+        if auto_profile_applies:
             resolved_profile = str(self._default_profile_path(resolved_session))
         if resolved_profile and '--profile' not in result:
             result = ['--profile', resolved_profile, *result]
@@ -309,10 +404,33 @@ class AgentBrowserTool(Tool):
         profile_path.mkdir(parents=True, exist_ok=True)
         return profile_path
 
+    def _resolve_profile_path(self, profile: str | None) -> str:
+        value = str(profile or '').strip()
+        if not value:
+            return ''
+        profile_path = Path(value).expanduser()
+        if not profile_path.is_absolute():
+            profile_path = self._workspace / profile_path
+        profile_path.mkdir(parents=True, exist_ok=True)
+        return str(profile_path.resolve())
+
     @staticmethod
     def _slugify(value: str) -> str:
         normalized = re.sub(r'[^A-Za-z0-9._-]+', '-', value).strip('-._')
         return normalized or 'default'
+
+    @staticmethod
+    def _extract_flag_value(argv: list[str], flag: str) -> str:
+        for index, item in enumerate(argv):
+            if item == flag and index + 1 < len(argv):
+                return str(argv[index + 1]).strip()
+        return ''
+
+    def _should_retry_after_session_cleanup(self, payload: dict[str, Any]) -> bool:
+        if payload.get('ok') or payload.get('timed_out'):
+            return False
+        stderr_text = str(payload.get('stderr') or '')
+        return self._DAEMON_RESTART_WARNING in stderr_text
 
     @staticmethod
     def _try_parse_json(payload: str) -> Any | None:
