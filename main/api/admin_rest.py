@@ -716,6 +716,19 @@ async def disable_skill(skill_id: str, session_id: str = Query('web:shared')):
     return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
+@router.delete('/resources/skills/{skill_id}')
+async def delete_skill(skill_id: str, session_id: str = Query('web:shared')):
+    service = _service()
+    await service.startup()
+    try:
+        item = await service.delete_skill_resource_async(skill_id, session_id=session_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if detail == 'skill_not_found' else 409 if detail == 'skill_busy' else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    return {'ok': True, 'item': item}
+
+
 @router.get('/resources/tools')
 async def list_tools():
     service = _service()
@@ -879,6 +892,19 @@ async def disable_tool(tool_id: str, session_id: str = Query('web:shared')):
     if item is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
     return {'ok': True, 'item': item.model_dump(mode='json')}
+
+
+@router.delete('/resources/tools/{tool_id}')
+async def delete_tool(tool_id: str, session_id: str = Query('web:shared')):
+    service = _service()
+    await service.startup()
+    try:
+        item = await service.delete_tool_resource_async(tool_id, session_id=session_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if detail == 'tool_not_found' else 409 if detail == 'tool_busy' else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    return {'ok': True, 'item': item}
 
 
 @router.post('/resources/reload')

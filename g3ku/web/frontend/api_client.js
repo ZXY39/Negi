@@ -420,6 +420,10 @@ class ApiClient {
         return this.post(`/api/resources/skills/${skillId}/disable`, {}, { session_id: this.getActiveSessionId() });
     }
 
+    static async deleteSkill(skillId) {
+        return this.delete(`/api/resources/skills/${skillId}`, { session_id: this.getActiveSessionId() });
+    }
+
     static async getTools(offset = 0, limit = 200) {
         const data = await this.get("/api/resources/tools", { offset, limit });
         return data.items || [];
@@ -444,6 +448,10 @@ class ApiClient {
 
     static async disableTool(toolId) {
         return this.post(`/api/resources/tools/${toolId}/disable`, {}, { session_id: this.getActiveSessionId() });
+    }
+
+    static async deleteTool(toolId) {
+        return this.delete(`/api/resources/tools/${toolId}`, { session_id: this.getActiveSessionId() });
     }
 
     static async reloadResources() {

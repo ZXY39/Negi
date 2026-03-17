@@ -105,6 +105,15 @@ class TaskEventRegistry:
         for queue in list(self._global_task_subscribers.get(key, set())):
             queue.put_nowait(dict(payload))
 
+    async def forget_task(self, session_id: str, task_id: str) -> None:
+        async with self._lock:
+            session_key = str(session_id or 'web:shared')
+            task_key = str(task_id or '')
+            self._task_subscribers.pop((session_key, task_key), None)
+            self._task_seq.pop((session_key, task_key), None)
+            self._global_task_subscribers.pop(task_key, None)
+            self._global_task_seq.pop(task_key, None)
+
     async def close(self) -> None:
         async with self._lock:
             self._ceo_subscribers.clear()

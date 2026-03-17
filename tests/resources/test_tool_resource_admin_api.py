@@ -107,6 +107,35 @@ toolskill:
     )
 
 
+def _write_skill(workspace: Path, *, name: str = 'demo_skill') -> None:
+    root = workspace / 'skills' / name
+    root.mkdir(parents=True, exist_ok=True)
+    (root / 'resource.yaml').write_text(
+        f"""schema_version: 1
+kind: skill
+name: {name}
+description: Demo skill for admin delete tests.
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools: []
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true
+""",
+        encoding='utf-8',
+    )
+    (root / 'SKILL.md').write_text(
+        '# Demo Skill\n\nThis skill is used by tests.\n',
+        encoding='utf-8',
+    )
+
+
 @pytest.mark.asyncio
 async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -749,3 +778,98 @@ async def test_write_skill_file_async_triggers_targeted_catalog_sync(tmp_path: P
     assert captured == {'skill_ids': {'demo_skill'}, 'tool_ids': set()}
     assert item['catalog_synced'] is True
     assert item['catalog']['updated'] == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_skill_delete_endpoint_removes_files_and_syncs_catalog(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _write_skill(workspace, name='demo_skill')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    captured: dict[str, object] = {}
+
+    class _MemoryManager:
+        async def sync_catalog(self, service, *, skill_ids=None, tool_ids=None):
+            captured['skill_ids'] = set(skill_ids or set())
+            captured['tool_ids'] = set(tool_ids or set())
+            return {'created': 0, 'updated': 0, 'removed': 1}
+
+    try:
+        await service.startup()
+        service.memory_manager = _MemoryManager()
+        client = TestClient(_build_app(service))
+
+        response = client.delete('/api/resources/skills/demo_skill', params={'session_id': 'web:shared'})
+
+        assert response.status_code == 200
+        payload = response.json()['item']
+        assert payload['skill_id'] == 'demo_skill'
+        assert payload['catalog_synced'] is True
+        assert payload['catalog']['removed'] == 1
+        assert captured == {'skill_ids': {'demo_skill'}, 'tool_ids': set()}
+        assert not (workspace / 'skills' / 'demo_skill').exists()
+        assert service.get_skill_resource('demo_skill') is None
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _write_external_tool(workspace, name='external_browser')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    captured: dict[str, object] = {}
+
+    class _MemoryManager:
+        async def sync_catalog(self, service, *, skill_ids=None, tool_ids=None):
+            captured['skill_ids'] = set(skill_ids or set())
+            captured['tool_ids'] = set(tool_ids or set())
+            return {'created': 0, 'updated': 0, 'removed': 1}
+
+    try:
+        await service.startup()
+        service.memory_manager = _MemoryManager()
+        client = TestClient(_build_app(service))
+
+        response = client.delete('/api/resources/tools/external_browser', params={'session_id': 'web:shared'})
+
+        assert response.status_code == 200
+        payload = response.json()['item']
+        assert payload['tool_id'] == 'external_browser'
+        assert payload['catalog_synced'] is True
+        assert payload['catalog']['removed'] == 1
+        assert captured == {'skill_ids': set(), 'tool_ids': {'external_browser'}}
+        assert not (workspace / 'tools' / 'external_browser').exists()
+        assert not (workspace / '.g3ku' / 'external-tools' / 'external_browser').exists()
+        assert service.get_tool_family('external_browser') is None
+    finally:
+        await service.close()
+        manager.close()

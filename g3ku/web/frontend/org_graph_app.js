@@ -10,6 +10,7 @@ const DEFAULT_ROLE_ITERATIONS = () => ({ ceo: 40, execution: 16, inspection: 16 
 const TREE_SCALE_MIN = 0.6;
 const TREE_SCALE_MAX = 1.8;
 const TREE_SCALE_FACTOR = 1.12;
+const RESOURCE_PAGE_SIZES = [20, 50, 100];
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -109,10 +110,14 @@ const S = {
     selectedSkillFile: "",
     skillBusy: false,
     skillDirty: false,
+    skillPage: 1,
+    skillPageSize: RESOURCE_PAGE_SIZES[0],
     tools: [],
     selectedTool: null,
     toolBusy: false,
     toolDirty: false,
+    toolPage: 1,
+    toolPageSize: RESOURCE_PAGE_SIZES[0],
     communications: [],
     communicationBridge: null,
     selectedCommunication: null,
@@ -204,6 +209,10 @@ const U = {
     skillRisk: document.getElementById("skill-risk-filter"),
     skillStatus: document.getElementById("skill-status-filter"),
     skillList: document.getElementById("skill-list"),
+    skillPageSize: document.getElementById("skill-page-size"),
+    skillPageInfo: document.getElementById("skill-page-info"),
+    skillPagePrev: document.getElementById("skill-page-prev"),
+    skillPageNext: document.getElementById("skill-page-next"),
     skillEmpty: document.getElementById("skill-detail-empty"),
     skillDetail: document.getElementById("skill-detail-content"),
     skillBackdrop: document.getElementById("skill-detail-backdrop"),
@@ -214,6 +223,10 @@ const U = {
     toolStatus: document.getElementById("tool-status-filter"),
     toolRisk: document.getElementById("tool-risk-filter"),
     toolList: document.getElementById("tool-list"),
+    toolPageSize: document.getElementById("tool-page-size"),
+    toolPageInfo: document.getElementById("tool-page-info"),
+    toolPagePrev: document.getElementById("tool-page-prev"),
+    toolPageNext: document.getElementById("tool-page-next"),
     toolEmpty: document.getElementById("tool-detail-empty"),
     toolDetail: document.getElementById("tool-detail-content"),
     toolBackdrop: document.getElementById("tool-detail-backdrop"),
@@ -260,6 +273,108 @@ function formatSessionTime(value) {
 function normalizeInt(value, fallback = 0) {
     const next = Number(value);
     return Number.isFinite(next) ? Math.trunc(next) : Math.trunc(fallback);
+}
+
+function normalizeResourcePageSize(value, fallback = RESOURCE_PAGE_SIZES[0]) {
+    const next = normalizeInt(value, fallback);
+    return RESOURCE_PAGE_SIZES.includes(next) ? next : fallback;
+}
+
+function paginateResources(items, page, pageSize) {
+    const total = Array.isArray(items) ? items.length : 0;
+    const size = normalizeResourcePageSize(pageSize, RESOURCE_PAGE_SIZES[0]);
+    const totalPages = Math.max(1, Math.ceil(total / size));
+    const currentPage = clamp(normalizeInt(page, 1), 1, totalPages);
+    const startIndex = total ? ((currentPage - 1) * size) + 1 : 0;
+    const endIndex = total ? Math.min(currentPage * size, total) : 0;
+    const startOffset = total ? startIndex - 1 : 0;
+    return {
+        total,
+        pageSize: size,
+        totalPages,
+        currentPage,
+        startIndex,
+        endIndex,
+        items: total ? items.slice(startOffset, startOffset + size) : [],
+    };
+}
+
+function syncResourcePagination(kind, meta) {
+    const isSkill = kind === "skill";
+    const pageInfo = isSkill ? U.skillPageInfo : U.toolPageInfo;
+    const prevBtn = isSkill ? U.skillPagePrev : U.toolPagePrev;
+    const nextBtn = isSkill ? U.skillPageNext : U.toolPageNext;
+    const pageSizeSelect = isSkill ? U.skillPageSize : U.toolPageSize;
+    const pageSize = isSkill ? S.skillPageSize : S.toolPageSize;
+
+    if (pageInfo) {
+        pageInfo.textContent = meta.total
+            ? `第 ${meta.currentPage}/${meta.totalPages} 页 · 显示 ${meta.startIndex}-${meta.endIndex} / 共 ${meta.total} 项`
+            : "共 0 项";
+    }
+    if (prevBtn) prevBtn.disabled = meta.currentPage <= 1 || meta.total === 0;
+    if (nextBtn) nextBtn.disabled = meta.currentPage >= meta.totalPages || meta.total === 0;
+    if (pageSizeSelect instanceof HTMLSelectElement) {
+        const nextValue = String(pageSize);
+        if (pageSizeSelect.value !== nextValue) pageSizeSelect.value = nextValue;
+        syncResourceSelectUI(pageSizeSelect);
+    }
+}
+
+function resetSkillPagination() {
+    S.skillPage = 1;
+    renderSkills();
+}
+
+function resetToolPagination() {
+    S.toolPage = 1;
+    renderTools();
+}
+
+function setSkillPage(page) {
+    const meta = paginateResources(filterSkills(), page, S.skillPageSize);
+    S.skillPage = meta.currentPage;
+    renderSkills();
+    U.skillList?.scrollTo?.({ top: 0, behavior: "auto" });
+}
+
+function setToolPage(page) {
+    const meta = paginateResources(filterTools(), page, S.toolPageSize);
+    S.toolPage = meta.currentPage;
+    renderTools();
+    U.toolList?.scrollTo?.({ top: 0, behavior: "auto" });
+}
+
+function setSkillPageSize(value) {
+    S.skillPageSize = normalizeResourcePageSize(value, S.skillPageSize);
+    S.skillPage = 1;
+    renderSkills();
+    U.skillList?.scrollTo?.({ top: 0, behavior: "auto" });
+}
+
+function setToolPageSize(value) {
+    S.toolPageSize = normalizeResourcePageSize(value, S.toolPageSize);
+    S.toolPage = 1;
+    renderTools();
+    U.toolList?.scrollTo?.({ top: 0, behavior: "auto" });
+}
+
+function ensureSkillPageForItem(skillId) {
+    const targetId = String(skillId || "").trim();
+    if (!targetId) return;
+    const items = filterSkills();
+    const index = items.findIndex((item) => item.skill_id === targetId);
+    if (index < 0) return;
+    S.skillPage = Math.floor(index / S.skillPageSize) + 1;
+}
+
+function ensureToolPageForItem(toolId) {
+    const targetId = String(toolId || "").trim();
+    if (!targetId) return;
+    const items = filterTools();
+    const index = items.findIndex((item) => item.tool_id === targetId);
+    if (index < 0) return;
+    S.toolPage = Math.floor(index / S.toolPageSize) + 1;
 }
 
 function applyTaskDefaultsPayload(payload = {}) {
@@ -1030,13 +1145,11 @@ function syncDetailSaveButton(kind) {
 function setSkillDirty(next = true) {
     S.skillDirty = !!next;
     renderSkillActions();
-    syncDetailSaveButton("skill");
 }
 
 function setToolDirty(next = true) {
     S.toolDirty = !!next;
     renderToolActions();
-    syncDetailSaveButton("tool");
 }
 
 function setCommunicationDirty(next = true) {
@@ -1075,8 +1188,10 @@ function resourceSelectLabel(select) {
     const map = {
         "skill-risk-filter": "Skill risk filter",
         "skill-status-filter": "Skill status filter",
+        "skill-page-size": "Skill 每页数量",
         "tool-status-filter": "Tool status filter",
         "tool-risk-filter": "Tool risk filter",
+        "tool-page-size": "Tool 每页数量",
         "task-depth-select": "Task tree depth",
     };
     return map[String(select?.id || "").trim()] || "Resource filter";
@@ -2760,6 +2875,13 @@ function renderSkillActions() {
         busy: S.skillBusy,
         disabled: S.skillBusy || !S.selectedSkill || !S.skillDirty,
     });
+    const deleteButton = U.skillDetail?.querySelector("#skill-delete-btn");
+    if (deleteButton) {
+        deleteButton.textContent = S.skillBusy ? "Deleting..." : "Delete";
+        deleteButton.disabled = S.skillBusy || !S.selectedSkill;
+    }
+    const toggleButton = U.skillDetail?.querySelector(S.selectedSkill?.enabled ? "#skill-disable-btn" : "#skill-enable-btn");
+    if (toggleButton) toggleButton.disabled = S.skillBusy || !S.selectedSkill;
     syncDetailSaveButton("skill");
 }
 
@@ -2776,6 +2898,13 @@ function renderToolActions() {
         busy: S.toolBusy,
         disabled: S.toolBusy || !S.selectedTool || !S.toolDirty,
     });
+    const deleteButton = U.toolDetail?.querySelector("#tool-delete-btn");
+    if (deleteButton) {
+        deleteButton.textContent = S.toolBusy ? "Deleting..." : "Delete";
+        deleteButton.disabled = S.toolBusy || !S.selectedTool;
+    }
+    const toggleButton = U.toolDetail?.querySelector(S.selectedTool?.enabled ? "#tool-disable-btn" : "#tool-enable-btn");
+    if (toggleButton) toggleButton.disabled = S.toolBusy || !S.selectedTool;
     syncDetailSaveButton("tool");
 }
 
@@ -3898,9 +4027,12 @@ function displayEnabledLabel(enabled, available = true) {
 
 function renderSkills() {
     U.skillList.innerHTML = "";
-    const items = filterSkills();
-    if (!items.length) return void (U.skillList.innerHTML = '<div class="empty-state">没有匹配的 Skill。</div>');
-    items.forEach((skill) => {
+    const meta = paginateResources(filterSkills(), S.skillPage, S.skillPageSize);
+    S.skillPage = meta.currentPage;
+    S.skillPageSize = meta.pageSize;
+    syncResourcePagination("skill", meta);
+    if (!meta.total) return void (U.skillList.innerHTML = '<div class="empty-state">没有匹配的 Skill。</div>');
+    meta.items.forEach((skill) => {
         const el = document.createElement("button");
         el.type = "button";
         el.className = `resource-list-item${S.selectedSkill?.skill_id === skill.skill_id ? " selected" : ""}`;
@@ -3932,9 +4064,12 @@ function filterTools() {
 
 function renderTools() {
     U.toolList.innerHTML = "";
-    const items = filterTools();
-    if (!items.length) return void (U.toolList.innerHTML = '<div class="empty-state">没有匹配的 Tool。</div>');
-    items.forEach((tool) => {
+    const meta = paginateResources(filterTools(), S.toolPage, S.toolPageSize);
+    S.toolPage = meta.currentPage;
+    S.toolPageSize = meta.pageSize;
+    syncResourcePagination("tool", meta);
+    if (!meta.total) return void (U.toolList.innerHTML = '<div class="empty-state">没有匹配的 Tool。</div>');
+    meta.items.forEach((tool) => {
         const el = document.createElement("button");
         el.type = "button";
         el.className = `resource-list-item${S.selectedTool?.tool_id === tool.tool_id ? " selected" : ""}`;
@@ -4396,6 +4531,7 @@ function renderSkillDetail() {
                     ${S.selectedSkill.enabled
                         ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
                         : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`}
+                    <button type="button" class="toolbar-btn danger" id="skill-delete-btn">Delete</button>
                 </div>
                 <div class="resource-draft-hint${S.skillDirty ? " is-dirty" : ""}" ${S.skillDirty ? "" : "hidden"}></div>
                 <div class="resource-section">
@@ -4428,6 +4564,7 @@ function renderSkillDetail() {
         setSkillDirty(true);
         renderSkillDetail();
     });
+    U.skillDetail.querySelector("#skill-delete-btn")?.addEventListener("click", () => void requestDeleteSkill());
     U.skillDetail.querySelectorAll(".skill-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const nextRoles = new Set(allowedRoles);
         if (e.target.checked) nextRoles.add(e.target.dataset.role);
@@ -4457,7 +4594,10 @@ async function loadSkills({ renderDetail = true } = {}) {
         S.skills = await ApiClient.getSkills(0, 300);
         if (selectedId) {
             const next = S.skills.find((skill) => skill.skill_id === selectedId);
-            if (next) S.selectedSkill = next;
+            if (next) {
+                S.selectedSkill = next;
+                ensureSkillPageForItem(selectedId);
+            }
             else clearSkillSelection();
         }
         renderSkills();
@@ -4479,6 +4619,7 @@ async function openSkill(skillId, quiet = false) {
     try {
         const [skill, files] = await Promise.all([ApiClient.getSkill(skillId), ApiClient.getSkillFiles(skillId)]);
         S.selectedSkill = skill;
+        ensureSkillPageForItem(skillId);
         S.skillFiles = files;
         S.selectedSkillFile = files[0]?.file_key || "";
         S.skillContents = {};
@@ -4534,6 +4675,44 @@ async function saveSkill() {
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Skill save failed", text: e.message || "Unknown error" });
         showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
+    } finally {
+        S.skillBusy = false;
+        renderSkillActions();
+    }
+}
+
+function requestDeleteSkill() {
+    const selectedId = String(S.selectedSkill?.skill_id || "").trim();
+    const displayName = String(S.selectedSkill?.display_name || selectedId || "Skill").trim();
+    if (!selectedId || S.skillBusy) return;
+    const detail = S.skillDirty
+        ? "Delete this skill and discard its unsaved changes? This will also remove its files and catalog entry."
+        : "Delete this skill? This will also remove its files and catalog entry.";
+    openConfirm({
+        title: "Delete Skill",
+        text: detail,
+        confirmLabel: "Delete",
+        confirmKind: "danger",
+        returnFocus: U.skillRefresh,
+        onConfirm: () => performDeleteSkill(selectedId, displayName),
+    });
+}
+
+async function performDeleteSkill(skillId, displayName) {
+    if (!skillId) return;
+    S.skillBusy = true;
+    renderSkillActions();
+    showToast({ title: "Deleting", text: `Removing ${displayName || skillId}...`, kind: "info", persistent: true });
+    try {
+        await ApiClient.deleteSkill(skillId);
+        clearSkillSelection();
+        await loadSkills({ renderDetail: false });
+        addNotice({ kind: "resource_saved", title: "Skill deleted", text: displayName || skillId });
+        showToast({ title: "Deleted", text: `${displayName || skillId} was removed.`, kind: "success", durationMs: 2200 });
+    } catch (e) {
+        addNotice({ kind: "resource_failed", title: "Skill delete failed", text: e.message || "Unknown error" });
+        showToast({ title: "Delete failed", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
+        throw e;
     } finally {
         S.skillBusy = false;
         renderSkillActions();
@@ -4624,6 +4803,15 @@ function renderToolDetail() {
                 </div>
             </div>
         </article>`;
+    const toolStatusRow = U.toolDetail.querySelector(".resource-status-row");
+    if (toolStatusRow && !toolStatusRow.querySelector("#tool-delete-btn")) {
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "toolbar-btn danger";
+        deleteButton.id = "tool-delete-btn";
+        deleteButton.textContent = "Delete";
+        toolStatusRow.appendChild(deleteButton);
+    }
     U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
     U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => void saveTool());
     U.toolDetail.querySelector("#tool-enable-btn")?.addEventListener("click", () => {
@@ -4636,6 +4824,7 @@ function renderToolDetail() {
         setToolDirty(true);
         renderToolDetail();
     });
+    U.toolDetail.querySelector("#tool-delete-btn")?.addEventListener("click", () => void requestDeleteTool());
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
         if (!action) return;
@@ -4662,6 +4851,7 @@ async function loadTools({ renderDetail = true } = {}) {
                     primary_executor_name: S.selectedTool?.primary_executor_name || next.primary_executor_name || "",
                     toolskill_content: S.selectedTool?.toolskill_content || "",
                 };
+                ensureToolPageForItem(selectedId);
             }
             else clearToolSelection();
         }
@@ -4691,6 +4881,7 @@ async function openTool(toolId, quiet = false) {
             primary_executor_name: toolskill?.primary_executor_name || tool?.primary_executor_name || "",
             toolskill_content: toolskill?.content || "",
         };
+        ensureToolPageForItem(toolId);
         S.toolDirty = false;
         renderTools();
         renderToolDetail();
@@ -4741,6 +4932,44 @@ async function saveTool() {
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Tool save failed", text: e.message || "Unknown error" });
         showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
+    } finally {
+        S.toolBusy = false;
+        renderToolActions();
+    }
+}
+
+function requestDeleteTool() {
+    const selectedId = String(S.selectedTool?.tool_id || "").trim();
+    const displayName = String(S.selectedTool?.display_name || selectedId || "Tool").trim();
+    if (!selectedId || S.toolBusy) return;
+    const detail = S.toolDirty
+        ? "Delete this tool and discard its unsaved permission changes? This will also remove its files and catalog entry."
+        : "Delete this tool? This will also remove its files and catalog entry.";
+    openConfirm({
+        title: "Delete Tool",
+        text: detail,
+        confirmLabel: "Delete",
+        confirmKind: "danger",
+        returnFocus: U.toolRefresh,
+        onConfirm: () => performDeleteTool(selectedId, displayName),
+    });
+}
+
+async function performDeleteTool(toolId, displayName) {
+    if (!toolId) return;
+    S.toolBusy = true;
+    renderToolActions();
+    showToast({ title: "Deleting", text: `Removing ${displayName || toolId}...`, kind: "info", persistent: true });
+    try {
+        await ApiClient.deleteTool(toolId);
+        clearToolSelection();
+        await loadTools({ renderDetail: false });
+        addNotice({ kind: "resource_saved", title: "Tool deleted", text: displayName || toolId });
+        showToast({ title: "Deleted", text: `${displayName || toolId} was removed.`, kind: "success", durationMs: 2200 });
+    } catch (e) {
+        addNotice({ kind: "resource_failed", title: "Tool delete failed", text: e.message || "Unknown error" });
+        showToast({ title: "Delete failed", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
+        throw e;
     } finally {
         S.toolBusy = false;
         renderToolActions();
@@ -5089,10 +5318,16 @@ function bind() {
     }));
     U.closeAgent?.addEventListener("click", () => clearAgentSelection());
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
-    [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderSkills));
+    [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetSkillPagination));
+    U.skillPageSize?.addEventListener("change", (e) => setSkillPageSize(e.target.value));
+    U.skillPagePrev?.addEventListener("click", () => setSkillPage(S.skillPage - 1));
+    U.skillPageNext?.addEventListener("click", () => setSkillPage(S.skillPage + 1));
     U.skillRefresh?.addEventListener("click", () => void refreshSkills());
     U.skillSave?.addEventListener("click", () => void saveSkill());
-    [U.toolSearch, U.toolStatus, U.toolRisk].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", renderTools));
+    [U.toolSearch, U.toolStatus, U.toolRisk].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetToolPagination));
+    U.toolPageSize?.addEventListener("change", (e) => setToolPageSize(e.target.value));
+    U.toolPagePrev?.addEventListener("click", () => setToolPage(S.toolPage - 1));
+    U.toolPageNext?.addEventListener("click", () => setToolPage(S.toolPage + 1));
     U.toolRefresh?.addEventListener("click", () => void refreshTools());
     U.toolSave?.addEventListener("click", () => void saveTool());
     U.communicationRefresh?.addEventListener("click", () => void refreshCommunications());

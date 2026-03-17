@@ -433,6 +433,18 @@ textarea {
     display: flex;
     align-items: center;
     gap: var(--space-4);
+    min-width: 0;
+    overflow: hidden;
+}
+
+.header-left > div {
+    min-width: 0;
+}
+
+.project-header h1 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .back-btn {
@@ -453,6 +465,7 @@ textarea {
     display: flex;
     align-items: center;
     gap: var(--space-4);
+    flex-shrink: 0;
 }
 
 .stat-pill {
@@ -465,6 +478,8 @@ textarea {
     font-size: 0.875rem;
     color: var(--text-secondary);
     font-weight: 500;
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .stat-pill i {
@@ -4362,13 +4377,43 @@ textarea {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: var(--space-3);
     border-top: 1px solid var(--border-color);
 }
 
+.resource-pagination-group,
+.resource-pagination-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.resource-pagination-group {
+    flex: 0 1 auto;
+}
+
+.resource-pagination-group .resource-select-shell,
+.resource-pagination-group .resource-select {
+    min-width: 132px;
+}
+
+.resource-pagination-actions {
+    flex: 0 0 auto;
+}
+
+.resource-pagination-label {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
 .resource-page-indicator {
+    flex: 1 1 220px;
     font-size: 0.85rem;
     color: var(--text-secondary);
+    text-align: center;
 }
 
 .resource-empty {
@@ -4485,6 +4530,13 @@ textarea {
 
 .task-token-modal.is-open {
     transform: translate(-50%, -50%) scale(1);
+}
+
+/* Token 模态窗口：backdrop 不模糊，仅半透明遮罩 */
+#task-token-backdrop.detail-backdrop {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(2, 6, 23, 0.45);
 }
 
 .task-token-shell {

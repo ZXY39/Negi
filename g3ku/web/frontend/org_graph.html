@@ -198,6 +198,22 @@
                         </div>
 
                         <div id="skill-list" class="resource-list"></div>
+                        <div class="resource-pagination" aria-label="Skills pagination">
+                            <div class="resource-pagination-group">
+                                <span class="resource-pagination-label">每页</span>
+                                <select id="skill-page-size" class="resource-select"
+                                    data-resource-select-label="Skill 每页数量">
+                                    <option value="20">20 条</option>
+                                    <option value="50">50 条</option>
+                                    <option value="100">100 条</option>
+                                </select>
+                            </div>
+                            <div id="skill-page-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                            <div class="resource-pagination-actions">
+                                <button id="skill-page-prev" class="toolbar-btn ghost" type="button">上一页</button>
+                                <button id="skill-page-next" class="toolbar-btn ghost" type="button">下一页</button>
+                            </div>
+                        </div>
                     </aside>
 
                     <div id="skill-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
@@ -243,6 +259,22 @@
                         </div>
 
                         <div id="tool-list" class="resource-list"></div>
+                        <div class="resource-pagination" aria-label="Tools pagination">
+                            <div class="resource-pagination-group">
+                                <span class="resource-pagination-label">每页</span>
+                                <select id="tool-page-size" class="resource-select"
+                                    data-resource-select-label="Tool 每页数量">
+                                    <option value="20">20 条</option>
+                                    <option value="50">50 条</option>
+                                    <option value="100">100 条</option>
+                                </select>
+                            </div>
+                            <div id="tool-page-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                            <div class="resource-pagination-actions">
+                                <button id="tool-page-prev" class="toolbar-btn ghost" type="button">上一页</button>
+                                <button id="tool-page-next" class="toolbar-btn ghost" type="button">下一页</button>
+                            </div>
+                        </div>
                     </aside>
 
                     <div id="tool-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>

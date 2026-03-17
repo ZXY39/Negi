@@ -1,5 +1,0 @@
-（node:8646a6f7dabd,success）
-|-（node:07ba36068c2b,success）
-  |-（node:b910e3cec05e,success）
-|-（node:3304a9b476f6,success）
-  |-（node:302f8dcae72d,success）

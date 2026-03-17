@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.agent.tools.base import Tool
 from g3ku.content import ContentNavigationService
+from g3ku.resources.models import ResourceKind
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.context.summarizer import layered_body_payload
 from main.governance import (
@@ -236,6 +238,7 @@ class MainRuntimeService:
         self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
         self.file_store.delete_task_files(task_id)
         self.store.delete_task(task_id)
+        await self.registry.forget_task(task.session_id, task_id)
         return task
 
     async def wait_for_task(self, task_id: str) -> TaskRecord | None:
@@ -565,6 +568,145 @@ class MainRuntimeService:
             item['catalog_synced'] = False
         return item
 
+    def _workspace_root(self) -> Path:
+        manager = getattr(self, '_resource_manager', None)
+        workspace = getattr(manager, 'workspace', None)
+        return Path(workspace).resolve(strict=False) if workspace is not None else Path.cwd().resolve()
+
+    def _resource_base_dir(self, kind: ResourceKind) -> Path:
+        manager = getattr(self, '_resource_manager', None)
+        registry = getattr(manager, '_registry', None)
+        if kind is ResourceKind.SKILL:
+            candidate = getattr(registry, 'skills_dir', None)
+            fallback = self._workspace_root() / 'skills'
+        else:
+            candidate = getattr(registry, 'tools_dir', None)
+            fallback = self._workspace_root() / 'tools'
+        return Path(candidate or fallback).resolve(strict=False)
+
+    @staticmethod
+    def _is_relative_to(path: Path, base: Path) -> bool:
+        try:
+            path.relative_to(base)
+        except ValueError:
+            return False
+        return True
+
+    def _resolve_workspace_path(self, raw_path: str | Path | None) -> Path:
+        path = Path(raw_path or '').expanduser()
+        if not path.is_absolute():
+            path = self._workspace_root() / path
+        return path.resolve(strict=False)
+
+    def _resolve_resource_root(self, raw_path: str | Path | None, *, kind: ResourceKind) -> Path:
+        resolved = self._resolve_workspace_path(raw_path)
+        base_dir = self._resource_base_dir(kind)
+        if not self._is_relative_to(resolved, base_dir):
+            raise ValueError(f'{kind.value}_path_outside_workspace')
+        if resolved == base_dir:
+            raise ValueError(f'{kind.value}_path_invalid')
+        return resolved
+
+    def _resource_is_busy(self, kind: ResourceKind, *names: str) -> bool:
+        manager = getattr(self, '_resource_manager', None)
+        if manager is None or not hasattr(manager, 'busy_state'):
+            return False
+        for raw_name in names:
+            name = str(raw_name or '').strip()
+            if not name:
+                continue
+            try:
+                state = manager.busy_state(kind, name)
+            except Exception:
+                continue
+            if bool(getattr(state, 'busy', False)):
+                return True
+        return False
+
+    def _delete_path(self, path: Path, *, deleted_paths: list[str]) -> None:
+        if not path.exists():
+            return
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            raise ValueError(f'resource_delete_failed:{path}:{exc}') from exc
+        deleted_paths.append(str(path))
+
+    def _collect_workspace_delete_path(
+        self,
+        raw_path: str | Path | None,
+        *,
+        delete_paths: set[Path],
+        skipped_paths: list[str],
+    ) -> None:
+        text = str(raw_path or '').strip()
+        if not text:
+            return
+        resolved = self._resolve_workspace_path(text)
+        workspace_root = self._workspace_root()
+        if not self._is_relative_to(resolved, workspace_root):
+            skipped_paths.append(str(resolved))
+            return
+        if resolved == workspace_root:
+            skipped_paths.append(str(resolved))
+            return
+        delete_paths.add(resolved)
+
+    def delete_skill_resource(self, skill_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        skill = self.get_skill_resource(skill_id)
+        if skill is None:
+            raise ValueError('skill_not_found')
+        target_skill_id = str(skill.skill_id or '').strip()
+        if self._resource_is_busy(ResourceKind.SKILL, target_skill_id):
+            raise ValueError('skill_busy')
+
+        before_state = self.capture_resource_tree_state()
+        skill_root = self._resolve_resource_root(skill.source_path, kind=ResourceKind.SKILL)
+        deleted_paths: list[str] = []
+        self._delete_path(skill_root, deleted_paths=deleted_paths)
+        refresh_result = self.refresh_changed_resources(
+            before_state,
+            trigger='skill-delete',
+            session_id=session_id,
+        )
+        self.governance_store.delete_role_policies_for_resource(
+            resource_kind='skill',
+            resource_id=target_skill_id,
+        )
+        return {
+            'skill_id': target_skill_id,
+            'path': str(skill_root),
+            'deleted_paths': deleted_paths,
+            'resources': refresh_result,
+        }
+
+    async def delete_skill_resource_async(
+        self,
+        skill_id: str,
+        *,
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        target_skill_id = str(skill_id or '').strip()
+        item = self.delete_skill_resource(target_skill_id, session_id=session_id)
+        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
+            try:
+                sync_result = await self.memory_manager.sync_catalog(
+                    self,
+                    skill_ids={target_skill_id},
+                )
+                item['catalog_synced'] = True
+                item['catalog'] = sync_result
+            except Exception:
+                item['catalog_synced'] = False
+        else:
+            item['catalog_synced'] = False
+        return item
+
     def update_skill_policy(self, skill_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles: list[str] | None = None):
         skill = self.get_skill_resource(skill_id)
         if skill is None:
@@ -654,6 +796,96 @@ class MainRuntimeService:
             'install_dir': install_dir,
             'callable': callable_flag,
         }
+
+    def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        family = self.get_tool_family(tool_id)
+        if family is None:
+            raise ValueError('tool_not_found')
+
+        target_tool_id = str(family.tool_id or '').strip()
+        descriptor_names: set[str] = {
+            str(getattr(family, 'primary_executor_name', '') or '').strip(),
+            target_tool_id,
+        }
+        for action in list(getattr(family, 'actions', []) or []):
+            descriptor_names.update(
+                str(name or '').strip()
+                for name in list(getattr(action, 'executor_names', []) or [])
+                if str(name or '').strip()
+            )
+        descriptor_names.discard('')
+
+        if self._resource_is_busy(ResourceKind.TOOL, *sorted(descriptor_names)):
+            raise ValueError('tool_busy')
+
+        before_state = self.capture_resource_tree_state()
+        delete_paths: set[Path] = set()
+        skipped_paths: list[str] = []
+        delete_paths.add(self._resolve_resource_root(family.source_path, kind=ResourceKind.TOOL))
+
+        manager = getattr(self, '_resource_manager', None)
+        for descriptor_name in sorted(descriptor_names):
+            descriptor = (
+                manager.get_tool_descriptor(descriptor_name)
+                if manager is not None and hasattr(manager, 'get_tool_descriptor')
+                else None
+            )
+            if descriptor is None:
+                continue
+            delete_paths.add(self._resolve_resource_root(descriptor.root, kind=ResourceKind.TOOL))
+            self._collect_workspace_delete_path(
+                getattr(descriptor, 'install_dir', None),
+                delete_paths=delete_paths,
+                skipped_paths=skipped_paths,
+            )
+        self._collect_workspace_delete_path(
+            getattr(family, 'install_dir', None),
+            delete_paths=delete_paths,
+            skipped_paths=skipped_paths,
+        )
+
+        deleted_paths: list[str] = []
+        for path in sorted(delete_paths, key=lambda item: (len(str(item)), str(item)), reverse=True):
+            self._delete_path(path, deleted_paths=deleted_paths)
+
+        refresh_result = self.refresh_changed_resources(
+            before_state,
+            trigger='tool-delete',
+            session_id=session_id,
+        )
+        self.governance_store.delete_role_policies_for_resource(
+            resource_kind='tool_family',
+            resource_id=target_tool_id,
+        )
+        return {
+            'tool_id': target_tool_id,
+            'path': str(self._resolve_resource_root(family.source_path, kind=ResourceKind.TOOL)),
+            'deleted_paths': deleted_paths,
+            'skipped_paths': skipped_paths,
+            'resources': refresh_result,
+        }
+
+    async def delete_tool_resource_async(
+        self,
+        tool_id: str,
+        *,
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        target_tool_id = str(tool_id or '').strip()
+        item = self.delete_tool_resource(target_tool_id, session_id=session_id)
+        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
+            try:
+                sync_result = await self.memory_manager.sync_catalog(
+                    self,
+                    tool_ids={target_tool_id},
+                )
+                item['catalog_synced'] = True
+                item['catalog'] = sync_result
+            except Exception:
+                item['catalog_synced'] = False
+        else:
+            item['catalog_synced'] = False
+        return item
 
     def update_tool_policy(self, tool_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles_by_action: dict[str, list[str]] | None = None):
         family = self.get_tool_family(tool_id)

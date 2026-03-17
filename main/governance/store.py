@@ -135,6 +135,14 @@ class GovernanceStore:
                     (record.policy_id, record.actor_role, record.resource_kind, record.resource_id, record.action_id, record.effect, record.source, record.updated_at, record.model_dump_json()),
                 )
 
+    def delete_role_policies_for_resource(self, *, resource_kind: str, resource_id: str) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                'DELETE FROM role_policy_matrix WHERE resource_kind = ? AND resource_id = ?',
+                (str(resource_kind or ''), str(resource_id or '')),
+            )
+            return int(getattr(cursor, 'rowcount', 0) or 0)
+
     def list_role_policies(self) -> list[RolePolicyMatrixRecord]:
         rows = self._fetchall('SELECT payload_json FROM role_policy_matrix ORDER BY actor_role, resource_kind, resource_id, action_id ASC')
         return [self._parse(row['payload_json'], RolePolicyMatrixRecord) for row in rows]
