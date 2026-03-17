@@ -13,6 +13,7 @@ from g3ku.resources import ResourceManager
 from g3ku.session.manager import Session
 from main.api import admin_rest
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
+from main.models import TaskRecord
 from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -133,6 +134,32 @@ exposure:
     (root / 'SKILL.md').write_text(
         '# Demo Skill\n\nThis skill is used by tests.\n',
         encoding='utf-8',
+    )
+
+
+def _running_task_record(
+    *,
+    task_id: str,
+    session_id: str,
+    title: str,
+    created_at: str = '2026-03-17T00:00:00',
+) -> TaskRecord:
+    return TaskRecord(
+        task_id=task_id,
+        session_id=session_id,
+        title=title,
+        user_request=title,
+        status='in_progress',
+        root_node_id=f'node:{task_id}',
+        max_depth=1,
+        cancel_requested=False,
+        pause_requested=False,
+        is_paused=False,
+        is_unread=True,
+        brief_text='',
+        created_at=created_at,
+        updated_at=created_at,
+        metadata={},
     )
 
 
@@ -828,6 +855,56 @@ async def test_admin_skill_delete_endpoint_removes_files_and_syncs_catalog(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_admin_skill_delete_endpoint_rejects_running_task_usage(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _write_skill(workspace, name='demo_skill')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        visible = {
+            item.skill_id
+            for item in service.list_visible_skill_resources(actor_role='execution', session_id='web:shared')
+        }
+        assert 'demo_skill' in visible
+        service.store.upsert_task(
+            _running_task_record(
+                task_id='task:busy-skill',
+                session_id='web:shared',
+                title='Busy skill task',
+            )
+        )
+        client = TestClient(_build_app(service))
+
+        response = client.delete('/api/resources/skills/demo_skill', params={'session_id': 'web:shared'})
+
+        assert response.status_code == 409
+        payload = response.json()['detail']
+        assert payload['code'] == 'skill_in_use'
+        assert payload['resource_id'] == 'demo_skill'
+        assert payload['usage']['tasks'][0]['task_id'] == 'task:busy-skill'
+        assert not payload['usage']['ceo_sessions']
+        assert (workspace / 'skills' / 'demo_skill').exists()
+        assert service.get_skill_resource('demo_skill') is not None
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
@@ -870,6 +947,74 @@ async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(
         assert not (workspace / 'tools' / 'external_browser').exists()
         assert not (workspace / '.g3ku' / 'external-tools' / 'external_browser').exists()
         assert service.get_tool_family('external_browser') is None
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _write_external_tool(workspace, name='external_browser')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    session_id = 'web:ceo-delete-demo'
+    session_path = workspace / 'sessions' / 'web_ceo_delete_demo.jsonl'
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+
+    class _StubSessionManager:
+        def __init__(self):
+            self._session = Session(key=session_id, metadata={'title': '删除测试会话'})
+
+        def get_path(self, key: str) -> Path:
+            assert key == session_id
+            return session_path
+
+        def get_or_create(self, key: str):
+            assert key == session_id
+            return self._session
+
+    service.bind_runtime_loop(
+        SimpleNamespace(
+            _active_tasks={session_id: {object()}},
+            sessions=_StubSessionManager(),
+        )
+    )
+
+    try:
+        await service.startup()
+        visible = {
+            item.tool_id
+            for item in service.list_visible_tool_families(actor_role='ceo', session_id=session_id)
+        }
+        assert 'external_browser' in visible
+        client = TestClient(_build_app(service))
+
+        response = client.delete('/api/resources/tools/external_browser', params={'session_id': 'web:shared'})
+
+        assert response.status_code == 409
+        payload = response.json()['detail']
+        assert payload['code'] == 'tool_in_use'
+        assert payload['resource_id'] == 'external_browser'
+        assert not payload['usage']['tasks']
+        assert payload['usage']['ceo_sessions'][0]['session_id'] == session_id
+        assert payload['usage']['ceo_sessions'][0]['title'] == '删除测试会话'
+        assert (workspace / 'tools' / 'external_browser').exists()
+        assert service.get_tool_family('external_browser') is not None
     finally:
         await service.close()
         manager.close()

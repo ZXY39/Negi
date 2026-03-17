@@ -100,6 +100,22 @@ def _service():
     return service
 
 
+def _resource_delete_http_error(exc: ValueError) -> HTTPException:
+    payload = getattr(exc, 'payload', None)
+    if isinstance(payload, dict):
+        code = str(payload.get('code') or '').strip()
+        if code in {'skill_not_found', 'tool_not_found'}:
+            status_code = 404
+        elif code in {'skill_busy', 'tool_busy', 'skill_in_use', 'tool_in_use'}:
+            status_code = 409
+        else:
+            status_code = 400
+        return HTTPException(status_code=status_code, detail=payload)
+    detail = str(exc)
+    status_code = 404 if detail in {'skill_not_found', 'tool_not_found'} else 409 if detail in {'skill_busy', 'tool_busy'} else 400
+    return HTTPException(status_code=status_code, detail=detail)
+
+
 async def _refresh_runtime(reason: str) -> None:
     try:
         await refresh_web_agent_runtime(force=True, reason=reason)
@@ -723,9 +739,7 @@ async def delete_skill(skill_id: str, session_id: str = Query('web:shared')):
     try:
         item = await service.delete_skill_resource_async(skill_id, session_id=session_id)
     except ValueError as exc:
-        detail = str(exc)
-        status_code = 404 if detail == 'skill_not_found' else 409 if detail == 'skill_busy' else 400
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+        raise _resource_delete_http_error(exc) from exc
     return {'ok': True, 'item': item}
 
 
@@ -901,9 +915,7 @@ async def delete_tool(tool_id: str, session_id: str = Query('web:shared')):
     try:
         item = await service.delete_tool_resource_async(tool_id, session_id=session_id)
     except ValueError as exc:
-        detail = str(exc)
-        status_code = 404 if detail == 'tool_not_found' else 409 if detail == 'tool_busy' else 400
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+        raise _resource_delete_http_error(exc) from exc
     return {'ok': True, 'item': item}
 
 

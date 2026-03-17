@@ -95,6 +95,7 @@ class RuntimeBootstrapBridge:
                 execution_max_iterations=config.get_role_max_iterations('execution'),
                 acceptance_max_iterations=config.get_role_max_iterations('inspection'),
             )
+            service.bind_runtime_loop(self._loop)
             self._loop.main_task_service = service
         except Exception as exc:
             self._loop.main_task_service = None

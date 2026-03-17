@@ -36,6 +36,26 @@ from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
 
+class ResourceDeleteBlockedError(ValueError):
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        resource_kind: str,
+        resource_id: str,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.payload = {
+            'code': str(code or '').strip(),
+            'message': str(message or '').strip(),
+            'resource_kind': str(resource_kind or '').strip(),
+            'resource_id': str(resource_id or '').strip(),
+            'usage': dict(usage or {}),
+        }
+
+
 class MainRuntimeService:
     def __init__(
         self,
@@ -99,6 +119,7 @@ class MainRuntimeService:
         )
         self.task_runner = TaskRunner(store=self.store, log_service=self.log_service, node_runner=self.node_runner)
         self._started = False
+        self._runtime_loop = None
 
     async def startup(self) -> None:
         if self._started:
@@ -266,6 +287,9 @@ class MainRuntimeService:
     def bind_resource_manager(self, resource_manager) -> None:
         self._resource_manager = resource_manager
         self.resource_registry.bind_resource_manager(resource_manager)
+
+    def bind_runtime_loop(self, loop: Any | None) -> None:
+        self._runtime_loop = loop
 
     def ensure_runtime_config_current(self, force: bool = False, reason: str = 'runtime') -> bool:
         config, revision, changed = get_runtime_config(force=force)
@@ -624,6 +648,216 @@ class MainRuntimeService:
                 return True
         return False
 
+    @staticmethod
+    def _display_role_label(role: str) -> str:
+        return {
+            'ceo': '主Agent',
+            'execution': '执行',
+            'inspection': '检验',
+        }.get(str(role or '').strip().lower(), str(role or '').strip())
+
+    def _running_task_records(self) -> list[TaskRecord]:
+        try:
+            tasks = self.store.list_tasks()
+        except Exception:
+            return []
+        return [
+            task
+            for task in tasks
+            if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress' and not bool(getattr(task, 'is_paused', False))
+        ]
+
+    def _running_ceo_session_ids(self) -> list[str]:
+        loop = getattr(self, '_runtime_loop', None)
+        active_tasks = getattr(loop, '_active_tasks', None)
+        if not isinstance(active_tasks, dict):
+            return []
+        session_ids: set[str] = set()
+        for raw_session_id, bucket in active_tasks.items():
+            session_id = str(raw_session_id or '').strip()
+            if not session_id.startswith('web:'):
+                continue
+            if not bucket:
+                continue
+            session_ids.add(session_id)
+        return sorted(session_ids)
+
+    def _session_title(self, session_id: str) -> str:
+        loop = getattr(self, '_runtime_loop', None)
+        session_manager = getattr(loop, 'sessions', None)
+        if session_manager is None:
+            return session_id
+        get_path = getattr(session_manager, 'get_path', None)
+        if callable(get_path):
+            try:
+                path = get_path(session_id)
+                if path is not None and not Path(path).exists():
+                    return session_id
+            except Exception:
+                return session_id
+        get_or_create = getattr(session_manager, 'get_or_create', None)
+        if not callable(get_or_create):
+            return session_id
+        try:
+            session = get_or_create(session_id)
+        except Exception:
+            return session_id
+        metadata = getattr(session, 'metadata', None) or {}
+        title = str(metadata.get('title') or '').strip() if isinstance(metadata, dict) else ''
+        return title or str(getattr(session, 'key', '') or '').strip() or session_id
+
+    def _skill_visible_roles_for_task(self, task: TaskRecord, skill_id: str) -> list[str]:
+        roles: list[str] = []
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        for actor_role in ('execution', 'inspection'):
+            visible_ids = {
+                str(getattr(item, 'skill_id', '') or '').strip()
+                for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)
+            }
+            if skill_id in visible_ids:
+                roles.append(actor_role)
+        return roles
+
+    def _tool_visible_roles_for_task(self, task: TaskRecord, tool_id: str) -> list[str]:
+        roles: list[str] = []
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        for actor_role in ('execution', 'inspection'):
+            visible_ids = {
+                str(getattr(item, 'tool_id', '') or '').strip()
+                for item in self.list_visible_tool_families(actor_role=actor_role, session_id=session_id)
+            }
+            if tool_id in visible_ids:
+                roles.append(actor_role)
+        return roles
+
+    @classmethod
+    def _format_usage_message(
+        cls,
+        *,
+        resource_label: str,
+        display_name: str,
+        usage: dict[str, list[dict[str, Any]]],
+    ) -> str:
+        tasks = list(usage.get('tasks') or [])
+        ceo_sessions = list(usage.get('ceo_sessions') or [])
+        blockers: list[str] = []
+        if tasks:
+            blockers.append(f'{len(tasks)} 个进行中的任务')
+        if ceo_sessions:
+            blockers.append(f'{len(ceo_sessions)} 个正在运行的主Agent会话')
+        message = f'无法删除{resource_label}“{display_name}”，当前有{"、".join(blockers)}正在使用。'
+        previews: list[str] = []
+        if tasks:
+            task_text = '；'.join(
+                (
+                    f"{str(item.get('title') or item.get('task_id') or '未命名任务').strip()} ({str(item.get('task_id') or '').strip()})"
+                    + (
+                        f" / {'、'.join(cls._display_role_label(role) for role in list(item.get('actor_roles') or []))}"
+                        if list(item.get('actor_roles') or [])
+                        else ''
+                    )
+                )
+                for item in tasks[:3]
+            )
+            if len(tasks) > 3:
+                task_text += f'；等 {len(tasks)} 个'
+            previews.append(f'任务：{task_text}')
+        if ceo_sessions:
+            ceo_text = '；'.join(
+                f"{str(item.get('title') or item.get('session_id') or '未命名会话').strip()} ({str(item.get('session_id') or '').strip()})"
+                for item in ceo_sessions[:3]
+            )
+            if len(ceo_sessions) > 3:
+                ceo_text += f'；等 {len(ceo_sessions)} 个'
+            previews.append(f'主Agent：{ceo_text}')
+        return f"{message} {' '.join(previews)}".strip()
+
+    def _skill_usage_summary(self, skill_id: str) -> dict[str, list[dict[str, Any]]]:
+        usage: dict[str, list[dict[str, Any]]] = {'tasks': [], 'ceo_sessions': []}
+        for task in self._running_task_records():
+            actor_roles = self._skill_visible_roles_for_task(task, skill_id)
+            if not actor_roles:
+                continue
+            usage['tasks'].append(
+                {
+                    'task_id': str(getattr(task, 'task_id', '') or '').strip(),
+                    'title': str(getattr(task, 'title', '') or '').strip(),
+                    'session_id': str(getattr(task, 'session_id', '') or '').strip(),
+                    'actor_roles': actor_roles,
+                }
+            )
+        for session_id in self._running_ceo_session_ids():
+            visible_ids = {
+                str(getattr(item, 'skill_id', '') or '').strip()
+                for item in self.list_visible_skill_resources(actor_role='ceo', session_id=session_id)
+            }
+            if skill_id not in visible_ids:
+                continue
+            usage['ceo_sessions'].append(
+                {
+                    'session_id': session_id,
+                    'title': self._session_title(session_id),
+                }
+            )
+        return usage
+
+    def _tool_usage_summary(self, tool_id: str) -> dict[str, list[dict[str, Any]]]:
+        usage: dict[str, list[dict[str, Any]]] = {'tasks': [], 'ceo_sessions': []}
+        for task in self._running_task_records():
+            actor_roles = self._tool_visible_roles_for_task(task, tool_id)
+            if not actor_roles:
+                continue
+            usage['tasks'].append(
+                {
+                    'task_id': str(getattr(task, 'task_id', '') or '').strip(),
+                    'title': str(getattr(task, 'title', '') or '').strip(),
+                    'session_id': str(getattr(task, 'session_id', '') or '').strip(),
+                    'actor_roles': actor_roles,
+                }
+            )
+        for session_id in self._running_ceo_session_ids():
+            visible_ids = {
+                str(getattr(item, 'tool_id', '') or '').strip()
+                for item in self.list_visible_tool_families(actor_role='ceo', session_id=session_id)
+            }
+            if tool_id not in visible_ids:
+                continue
+            usage['ceo_sessions'].append(
+                {
+                    'session_id': session_id,
+                    'title': self._session_title(session_id),
+                }
+            )
+        return usage
+
+    def _raise_if_skill_in_use(self, skill) -> None:
+        target_skill_id = str(getattr(skill, 'skill_id', '') or '').strip()
+        display_name = str(getattr(skill, 'display_name', '') or target_skill_id).strip() or target_skill_id
+        usage = self._skill_usage_summary(target_skill_id)
+        if not usage['tasks'] and not usage['ceo_sessions']:
+            return
+        raise ResourceDeleteBlockedError(
+            code='skill_in_use',
+            message=self._format_usage_message(resource_label='Skill', display_name=display_name, usage=usage),
+            resource_kind='skill',
+            resource_id=target_skill_id,
+            usage=usage,
+        )
+
+    def _raise_if_tool_in_use(self, family) -> None:
+        target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+        display_name = str(getattr(family, 'display_name', '') or target_tool_id).strip() or target_tool_id
+        usage = self._tool_usage_summary(target_tool_id)
+        if not usage['tasks'] and not usage['ceo_sessions']:
+            return
+        raise ResourceDeleteBlockedError(
+            code='tool_in_use',
+            message=self._format_usage_message(resource_label='工具', display_name=display_name, usage=usage),
+            resource_kind='tool',
+            resource_id=target_tool_id,
+            usage=usage,
+        )
+
     def _delete_path(self, path: Path, *, deleted_paths: list[str]) -> None:
         if not path.exists():
             return
@@ -663,6 +897,7 @@ class MainRuntimeService:
         if skill is None:
             raise ValueError('skill_not_found')
         target_skill_id = str(skill.skill_id or '').strip()
+        self._raise_if_skill_in_use(skill)
         if self._resource_is_busy(ResourceKind.SKILL, target_skill_id):
             raise ValueError('skill_busy')
 
@@ -804,6 +1039,7 @@ class MainRuntimeService:
             raise ValueError('tool_not_found')
 
         target_tool_id = str(family.tool_id or '').strip()
+        self._raise_if_tool_in_use(family)
         descriptor_names: set[str] = {
             str(getattr(family, 'primary_executor_name', '') or '').strip(),
             target_tool_id,

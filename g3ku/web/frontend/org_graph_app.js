@@ -1168,6 +1168,15 @@ function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "dang
     window.requestAnimationFrame(() => U.confirmCancel?.focus());
 }
 
+function resourceDeleteErrorText(error) {
+    const payload = error?.data;
+    if (payload && typeof payload === "object") {
+        const message = String(payload.message || "").trim();
+        if (message) return message;
+    }
+    return error?.message || "Unknown error";
+}
+
 function configureTaskDetailSections() {
     if (U.adFlowHeading) U.adFlowHeading.innerHTML = '<i data-lucide="workflow"></i> 执行流程';
     if (U.adAcceptanceHeading) U.adAcceptanceHeading.innerHTML = '<i data-lucide="shield-check"></i> 验收结果';
@@ -2877,7 +2886,7 @@ function renderSkillActions() {
     });
     const deleteButton = U.skillDetail?.querySelector("#skill-delete-btn");
     if (deleteButton) {
-        deleteButton.textContent = S.skillBusy ? "Deleting..." : "Delete";
+        deleteButton.textContent = S.skillBusy ? "删除中..." : "删除";
         deleteButton.disabled = S.skillBusy || !S.selectedSkill;
     }
     const toggleButton = U.skillDetail?.querySelector(S.selectedSkill?.enabled ? "#skill-disable-btn" : "#skill-enable-btn");
@@ -2900,7 +2909,7 @@ function renderToolActions() {
     });
     const deleteButton = U.toolDetail?.querySelector("#tool-delete-btn");
     if (deleteButton) {
-        deleteButton.textContent = S.toolBusy ? "Deleting..." : "Delete";
+        deleteButton.textContent = S.toolBusy ? "删除中..." : "删除";
         deleteButton.disabled = S.toolBusy || !S.selectedTool;
     }
     const toggleButton = U.toolDetail?.querySelector(S.selectedTool?.enabled ? "#tool-disable-btn" : "#tool-enable-btn");
@@ -3494,6 +3503,7 @@ function resetTaskView() {
     if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
     if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
     if (U.artifactApply) U.artifactApply.hidden = true;
+    refreshTaskDetailScrollRegions();
     if (U.taskTokenButton) U.taskTokenButton.disabled = true;
     if (U.taskTokenSummaryText) U.taskTokenSummaryText.textContent = "任务级 token 消耗会在这里实时刷新。";
     if (U.taskTokenContent) U.taskTokenContent.innerHTML = '<div class="empty-state">请选择一个任务后查看 token 统计。</div>';
@@ -3747,6 +3757,51 @@ function renderTraceStep({ title, status = "info", open = false, bodyHtml = "" }
     `;
 }
 
+function toPixels(value) {
+    const parsed = Number.parseFloat(String(value || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function setScrollViewportLimit(container, itemSelector, visibleCount, measureItem = null) {
+    if (!(container instanceof HTMLElement)) return;
+    container.style.maxHeight = "";
+    const items = Array.from(container.querySelectorAll(itemSelector)).filter((item) => item instanceof HTMLElement);
+    if (!items.length || visibleCount <= 0) return;
+    const styles = window.getComputedStyle(container);
+    const gap = toPixels(styles.rowGap || styles.gap);
+    const targetCount = Math.min(visibleCount, items.length);
+    let height = 0;
+    for (let index = 0; index < targetCount; index += 1) {
+        const item = items[index];
+        const measured = measureItem ? Number(measureItem(item, index)) : item.getBoundingClientRect().height;
+        height += measured > 0 ? measured : 0;
+        if (index < targetCount - 1) height += gap;
+    }
+    if (height > 0) container.style.maxHeight = `${Math.ceil(height)}px`;
+}
+
+function traceStepSummaryHeight(step) {
+    if (!(step instanceof HTMLElement)) return 0;
+    const summary = step.querySelector(".task-trace-summary");
+    const summaryHeight = summary instanceof HTMLElement ? summary.getBoundingClientRect().height : step.getBoundingClientRect().height;
+    const styles = window.getComputedStyle(step);
+    return summaryHeight
+        + toPixels(styles.paddingTop)
+        + toPixels(styles.paddingBottom)
+        + toPixels(styles.borderTopWidth)
+        + toPixels(styles.borderBottomWidth);
+}
+
+function refreshTaskDetailScrollRegions() {
+    const traceList = U.adFlow?.querySelector(".task-trace-list");
+    if (traceList instanceof HTMLElement) {
+        setScrollViewportLimit(traceList, ".task-trace-step", 10, traceStepSummaryHeight);
+    }
+    if (U.artifactList instanceof HTMLElement) {
+        setScrollViewportLimit(U.artifactList, ".artifact-item", 5);
+    }
+}
+
 function renderExecutionTrace(node) {
     if (!U.adFlow) return;
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node);
@@ -3774,6 +3829,7 @@ function renderExecutionTrace(node) {
         }),
     ];
     U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
+    refreshTaskDetailScrollRegions();
 }
 
 function renderAcceptanceResult(text) {
@@ -3878,6 +3934,7 @@ function renderArtifacts() {
         U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
         if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
         if (U.artifactApply) U.artifactApply.hidden = true;
+        refreshTaskDetailScrollRegions();
         return;
     }
     S.taskArtifacts.forEach((artifact) => {
@@ -3888,6 +3945,7 @@ function renderArtifacts() {
         button.addEventListener("click", () => void selectArtifact(artifact.artifact_id));
         U.artifactList.appendChild(button);
     });
+    refreshTaskDetailScrollRegions();
 }
 
 async function loadTaskArtifacts() {
@@ -4531,7 +4589,7 @@ function renderSkillDetail() {
                     ${S.selectedSkill.enabled
                         ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
                         : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`}
-                    <button type="button" class="toolbar-btn danger" id="skill-delete-btn">Delete</button>
+                    <button type="button" class="toolbar-btn danger" id="skill-delete-btn">删除</button>
                 </div>
                 <div class="resource-draft-hint${S.skillDirty ? " is-dirty" : ""}" ${S.skillDirty ? "" : "hidden"}></div>
                 <div class="resource-section">
@@ -4686,12 +4744,12 @@ function requestDeleteSkill() {
     const displayName = String(S.selectedSkill?.display_name || selectedId || "Skill").trim();
     if (!selectedId || S.skillBusy) return;
     const detail = S.skillDirty
-        ? "Delete this skill and discard its unsaved changes? This will also remove its files and catalog entry."
-        : "Delete this skill? This will also remove its files and catalog entry.";
+        ? "确认删除该 Skill 并丢弃未保存的修改？相关文件和 catalog 条目也会一起移除。"
+        : "确认删除该 Skill？相关文件和 catalog 条目也会一起移除。";
     openConfirm({
-        title: "Delete Skill",
+        title: "删除 Skill",
         text: detail,
-        confirmLabel: "Delete",
+        confirmLabel: "删除",
         confirmKind: "danger",
         returnFocus: U.skillRefresh,
         onConfirm: () => performDeleteSkill(selectedId, displayName),
@@ -4702,16 +4760,17 @@ async function performDeleteSkill(skillId, displayName) {
     if (!skillId) return;
     S.skillBusy = true;
     renderSkillActions();
-    showToast({ title: "Deleting", text: `Removing ${displayName || skillId}...`, kind: "info", persistent: true });
+    showToast({ title: "正在删除", text: `正在移除 ${displayName || skillId}...`, kind: "info", persistent: true });
     try {
         await ApiClient.deleteSkill(skillId);
         clearSkillSelection();
         await loadSkills({ renderDetail: false });
-        addNotice({ kind: "resource_saved", title: "Skill deleted", text: displayName || skillId });
-        showToast({ title: "Deleted", text: `${displayName || skillId} was removed.`, kind: "success", durationMs: 2200 });
+        addNotice({ kind: "resource_saved", title: "Skill 已删除", text: displayName || skillId });
+        showToast({ title: "已删除", text: `${displayName || skillId} 已移除。`, kind: "success", durationMs: 2200 });
     } catch (e) {
-        addNotice({ kind: "resource_failed", title: "Skill delete failed", text: e.message || "Unknown error" });
-        showToast({ title: "Delete failed", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
+        const message = resourceDeleteErrorText(e);
+        addNotice({ kind: "resource_failed", title: "删除 Skill 失败", text: message });
+        showToast({ title: "删除失败", text: message, kind: "error", durationMs: 3200 });
         throw e;
     } finally {
         S.skillBusy = false;
@@ -4809,7 +4868,7 @@ function renderToolDetail() {
         deleteButton.type = "button";
         deleteButton.className = "toolbar-btn danger";
         deleteButton.id = "tool-delete-btn";
-        deleteButton.textContent = "Delete";
+        deleteButton.textContent = "删除";
         toolStatusRow.appendChild(deleteButton);
     }
     U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
@@ -4943,12 +5002,12 @@ function requestDeleteTool() {
     const displayName = String(S.selectedTool?.display_name || selectedId || "Tool").trim();
     if (!selectedId || S.toolBusy) return;
     const detail = S.toolDirty
-        ? "Delete this tool and discard its unsaved permission changes? This will also remove its files and catalog entry."
-        : "Delete this tool? This will also remove its files and catalog entry.";
+        ? "确认删除该工具并丢弃未保存的权限修改？相关文件和 catalog 条目也会一起移除。"
+        : "确认删除该工具？相关文件和 catalog 条目也会一起移除。";
     openConfirm({
-        title: "Delete Tool",
+        title: "删除工具",
         text: detail,
-        confirmLabel: "Delete",
+        confirmLabel: "删除",
         confirmKind: "danger",
         returnFocus: U.toolRefresh,
         onConfirm: () => performDeleteTool(selectedId, displayName),
@@ -4959,16 +5018,17 @@ async function performDeleteTool(toolId, displayName) {
     if (!toolId) return;
     S.toolBusy = true;
     renderToolActions();
-    showToast({ title: "Deleting", text: `Removing ${displayName || toolId}...`, kind: "info", persistent: true });
+    showToast({ title: "正在删除", text: `正在移除 ${displayName || toolId}...`, kind: "info", persistent: true });
     try {
         await ApiClient.deleteTool(toolId);
         clearToolSelection();
         await loadTools({ renderDetail: false });
-        addNotice({ kind: "resource_saved", title: "Tool deleted", text: displayName || toolId });
-        showToast({ title: "Deleted", text: `${displayName || toolId} was removed.`, kind: "success", durationMs: 2200 });
+        addNotice({ kind: "resource_saved", title: "工具已删除", text: displayName || toolId });
+        showToast({ title: "已删除", text: `${displayName || toolId} 已移除。`, kind: "success", durationMs: 2200 });
     } catch (e) {
-        addNotice({ kind: "resource_failed", title: "Tool delete failed", text: e.message || "Unknown error" });
-        showToast({ title: "Delete failed", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
+        const message = resourceDeleteErrorText(e);
+        addNotice({ kind: "resource_failed", title: "删除工具失败", text: message });
+        showToast({ title: "删除失败", text: message, kind: "error", durationMs: 3200 });
         throw e;
     } finally {
         S.toolBusy = false;
@@ -5384,6 +5444,7 @@ function init() {
     enhanceResourceSelects();
     configureTaskDetailSections();
     bind();
+    window.addEventListener("resize", refreshTaskDetailScrollRegions);
     bindTreePan();
     icons();
     renderTaskDepthControl();

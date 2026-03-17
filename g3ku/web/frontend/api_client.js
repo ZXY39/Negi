@@ -38,7 +38,17 @@ class ApiClient {
         });
         if (!response.ok) {
             const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.detail || payload.message || `HTTP ${response.status}`);
+            const detail = payload.detail !== undefined ? payload.detail : payload.message;
+            const message = typeof detail === "string"
+                ? detail
+                : (detail && typeof detail === "object" && typeof detail.message === "string" && detail.message.trim())
+                    ? detail.message.trim()
+                    : payload.message || `HTTP ${response.status}`;
+            const error = new Error(message);
+            if (detail && typeof detail === "object") error.data = detail;
+            error.status = response.status;
+            error.payload = payload;
+            throw error;
         }
         return response.json();
     }
