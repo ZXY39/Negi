@@ -24,10 +24,18 @@ class NodeFinalResult(Model):
     output: str = ''
 
 
+class FinalAcceptanceState(Model):
+    required: bool = False
+    prompt: str = ''
+    node_id: str = ''
+    status: str = 'pending'
+
+
 class SpawnChildSpec(Model):
     goal: str
     prompt: str
-    acceptance_prompt: str
+    acceptance_prompt: str = ''
+    requires_acceptance: bool | None = None
 
 
 class SpawnChildResult(Model):
@@ -122,3 +130,19 @@ class NodeRecord(Model):
     @property
     def outputs(self) -> list[NodeOutputEntry]:
         return self.output
+
+
+def normalize_final_acceptance_metadata(value: Any) -> FinalAcceptanceState:
+    payload = value.model_dump(mode='json') if isinstance(value, FinalAcceptanceState) else (dict(value) if isinstance(value, dict) else {})
+    prompt = str(payload.get('prompt') or '').strip()
+    raw_required = payload.get('required')
+    required = bool(raw_required) or (raw_required in {None, ''} and bool(prompt))
+    status = str(payload.get('status') or 'pending').strip().lower()
+    if status not in {'pending', 'running', 'passed', 'failed'}:
+        status = 'pending'
+    return FinalAcceptanceState(
+        required=required,
+        prompt=prompt,
+        node_id=str(payload.get('node_id') or '').strip(),
+        status=status,
+    )

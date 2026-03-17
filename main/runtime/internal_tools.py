@@ -21,26 +21,54 @@ class SpawnChildNodesTool(Tool):
 
     @property
     def description(self) -> str:
-        return '并发创建多个子节点；每个成功子节点都会自动触发对应的验收节点。仅在任务可拆成独立范围时使用，子节点提示词应传路径或引用，不要内联待读正文。'
+        return '并发创建多个子节点。只有在子任务范围广、复杂度高或需要复核时，才为该子节点追加验收节点。'
 
     @property
     def parameters(self) -> dict[str, Any]:
         child_schema = {
             'type': 'object',
             'properties': {
-                'goal': {'type': 'string', 'description': '子节点目标。'},
-                'prompt': {'type': 'string', 'description': '发送给子节点执行大模型的提示词。给出明确范围、文件路径/目录/引用或搜索线索，不要直接粘贴待读取文件全文。'},
-                'acceptance_prompt': {'type': 'string', 'description': '发送给验收节点的提示词。说明验收标准，可引用子节点输出摘要或引用地址。'},
+                'goal': {
+                    'type': 'string',
+                    'description': '子节点目标。',
+                },
+                'prompt': {
+                    'type': 'string',
+                    'description': '发送给子节点执行模型的提示词。只传文件路径、目录路径、artifact/content 引用、搜索线索和交付要求，不要直接内联待读正文。',
+                },
+                'requires_acceptance': {
+                    'type': 'boolean',
+                    'description': '是否需要为该子节点追加验收节点。仅在范围广、复杂度高或需要一致性复核时设为 true。',
+                },
+                'acceptance_prompt': {
+                    'type': 'string',
+                    'description': '发送给验收节点的提示词。仅当 requires_acceptance=true 时必填，用于说明验收标准。',
+                },
             },
-            'required': ['goal', 'prompt', 'acceptance_prompt'],
+            'required': ['goal', 'prompt'],
         }
         return {
             'type': 'object',
             'properties': {
-                'children': {'type': 'array', 'items': child_schema, 'minItems': 1},
+                'children': {
+                    'type': 'array',
+                    'items': child_schema,
+                    'minItems': 1,
+                },
             },
             'required': ['children'],
         }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        for index, item in enumerate(list((params or {}).get('children') or [])):
+            if not isinstance(item, dict):
+                continue
+            requires_acceptance = item.get('requires_acceptance')
+            acceptance_prompt = str(item.get('acceptance_prompt') or '').strip()
+            if requires_acceptance is True and not acceptance_prompt:
+                errors.append(f'children[{index}].acceptance_prompt is required when requires_acceptance=true')
+        return errors
 
     async def execute(self, children: list[dict[str, Any]], __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}

@@ -21,7 +21,7 @@ from main.governance import (
     list_effective_tool_names,
 )
 from main.ids import new_node_id, new_task_id
-from main.models import NodeRecord, TaskArtifactRecord, TaskRecord, TokenUsageSummary
+from main.models import NodeRecord, TaskArtifactRecord, TaskRecord, TokenUsageSummary, normalize_final_acceptance_metadata
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.query_service import TaskQueryService
@@ -302,6 +302,7 @@ class MainRuntimeService:
                 payload.get('memory_scope'),
                 fallback_session_key=raw_session_id,
             )
+        payload['final_acceptance'] = normalize_final_acceptance_metadata(payload.get('final_acceptance')).model_dump(mode='json')
         return payload
 
     def _task_memory_scope(self, task: TaskRecord | None) -> dict[str, str]:
@@ -1146,7 +1147,7 @@ def _tool_runtime_payload(runtime: dict[str, Any] | None, kwargs: dict[str, Any]
     return fallback if isinstance(fallback, dict) else {}
 
 
-class CreateAsyncTaskTool(Tool):
+class _LegacyCreateAsyncTaskTool(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service
 
@@ -1247,3 +1248,64 @@ class ViewTaskProgressTool(Tool):
         await self._service.startup()
         task_id = str(kwargs.get('任务id') or '').strip()
         return self._service.view_progress(task_id, mark_read=True)
+class CreateAsyncTaskTool(Tool):
+    def __init__(self, service: MainRuntimeService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return 'create_async_task'
+
+    @property
+    def description(self) -> str:
+        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。必要时可同时声明最终结果是否需要验收。'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'task': {'type': 'string', 'description': '用户的原始需求。'},
+                'requires_final_acceptance': {
+                    'type': 'boolean',
+                    'description': '是否需要在 root execution 完成后再做最终验收。',
+                },
+                'final_acceptance_prompt': {
+                    'type': 'string',
+                    'description': '最终验收提示词。仅当 requires_final_acceptance=true 时必填。',
+                },
+            },
+            'required': ['task'],
+        }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        requires_final_acceptance = (params or {}).get('requires_final_acceptance')
+        final_acceptance_prompt = str((params or {}).get('final_acceptance_prompt') or '').strip()
+        if requires_final_acceptance is True and not final_acceptance_prompt:
+            errors.append('final_acceptance_prompt is required when requires_final_acceptance=true')
+        return errors
+
+    async def execute(self, task: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
+        session_id = str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared'
+        explicit_max_depth = kwargs.get('max_depth', kwargs.get('maxDepth'))
+        if explicit_max_depth in (None, ''):
+            explicit_max_depth = _runtime_task_default_max_depth(runtime)
+        final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
+        raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
+        requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))
+        record = await self._service.create_task(
+            str(task or ''),
+            session_id=session_id,
+            max_depth=explicit_max_depth,
+            metadata={
+                'final_acceptance': {
+                    'required': requires_final_acceptance,
+                    'prompt': final_acceptance_prompt,
+                    'node_id': '',
+                    'status': 'pending',
+                }
+            },
+        )
+        return f'创建任务成功{record.task_id}'

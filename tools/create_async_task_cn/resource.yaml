@@ -1,8 +1,8 @@
 schema_version: 1
 kind: tool
-display_name: "\u521b\u5efa\u5f02\u6b65\u4efb\u52a1"
+display_name: "创建异步任务"
 name: create_async_task
-description: 把用户需求转交为后台异步任务。
+description: 把用户需求转交为后台异步任务，并可按需声明最终结果是否需要验收。
 source:
   type: ''
   url: ''
@@ -24,6 +24,12 @@ parameters:
     task:
       type: string
       description: 用户的原始需求。
+    requires_final_acceptance:
+      type: boolean
+      description: 是否需要在 root execution 完成后再做最终验收。
+    final_acceptance_prompt:
+      type: string
+      description: 最终验收提示词。仅当 requires_final_acceptance=true 时必填。
   required: [task]
 exposure:
   agent: true

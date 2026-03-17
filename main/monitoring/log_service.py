@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from g3ku.content import ContentNavigationService
-from main.models import NodeOutputEntry, NodeRecord, TaskRecord
+from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
+from main.models import NodeOutputEntry, NodeRecord, TaskRecord, normalize_final_acceptance_metadata
 from main.monitoring.file_store import TaskFileStore
 from main.protocol import build_envelope, now_iso
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
@@ -217,6 +218,18 @@ class TaskLogService:
         )
         return self.refresh_task_view(task_id, mark_unread=False) or updated
 
+    def update_task_metadata(self, task_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]], *, mark_unread: bool = True) -> TaskRecord | None:
+        def _mutate(task: TaskRecord) -> TaskRecord:
+            metadata = metadata_mutator(dict(task.metadata or {}))
+            if not isinstance(metadata, dict):
+                raise TypeError('task metadata mutator must return a dict')
+            return task.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
+
+        updated = self._store.update_task(task_id, _mutate)
+        if updated is None:
+            return None
+        return self.refresh_task_view(task_id, mark_unread=mark_unread) or updated
+
     def _summarize_content(
         self,
         value: Any,
@@ -225,6 +238,7 @@ class TaskLogService:
         node_id: str | None,
         display_name: str,
         source_kind: str,
+        force: bool = False,
     ) -> tuple[str, str]:
         store = self._content_store
         if store is None:
@@ -234,6 +248,7 @@ class TaskLogService:
             runtime={'task_id': task_id, 'node_id': node_id},
             display_name=display_name,
             source_kind=source_kind,
+            force=force,
         )
 
     def _summarize_node_input(self, *, task_id: str, node_id: str, content: str) -> tuple[str, str]:
@@ -269,6 +284,39 @@ class TaskLogService:
             return record.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
 
         return self._store.update_node(node_id, _mutate)
+
+    def ensure_node_output_externalized(self, task_id: str, node_id: str) -> NodeRecord | None:
+        record = self._store.get_node(node_id)
+        if record is None:
+            return None
+        final_output = str(record.final_output or '')
+        if not final_output or str(record.final_output_ref or '').strip():
+            return record
+        if len(final_output) <= INLINE_CHAR_LIMIT and len(final_output.splitlines()) <= INLINE_LINE_LIMIT:
+            return record
+        text, ref = self._summarize_content(
+            final_output,
+            task_id=task_id,
+            node_id=node_id,
+            display_name=f'final-output:{node_id}',
+            source_kind='node_final_output',
+            force=True,
+        )
+        if not ref:
+            return record
+        updated = self._store.update_node(
+            node_id,
+            lambda current: current.model_copy(
+                update={
+                    'final_output': text or current.final_output,
+                    'final_output_ref': ref or current.final_output_ref,
+                    'updated_at': now_iso(),
+                }
+            ),
+        )
+        if updated is not None:
+            self.refresh_task_view(task_id, mark_unread=True)
+        return updated or record
 
     def mark_task_failed(self, task_id: str, *, reason: str) -> TaskRecord | None:
         task = self._store.get_task(task_id)
@@ -358,18 +406,26 @@ class TaskLogService:
         root = self._tree_builder.build_tree(task, nodes)
         tree_text = self._tree_builder.render_tree_text(root)
         root_node = self._store.get_node(task.root_node_id)
-        next_status = root_node.status if root_node is not None else task.status
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+        next_status = self._derive_task_status(root_node=root_node, task_status=task.status, final_acceptance=final_acceptance)
         brief_text = self._brief_text(task=task, root_node=root_node)
         task_token_usage, _task_token_usage_by_model = aggregate_node_token_usage(nodes, tracked=bool(getattr(task.token_usage, 'tracked', False)))
+        root_succeeded = bool(root_node is not None and root_node.status == 'success')
+        failure_reason = task.failure_reason
+        if next_status == 'failed':
+            if root_node is not None and root_node.status == 'failed':
+                failure_reason = root_node.failure_reason
+            elif root_node is not None and str(root_node.check_result or '').strip():
+                failure_reason = root_node.check_result
         updated = task.model_copy(
             update={
                 'status': next_status,
                 'brief_text': brief_text,
                 'is_unread': True if mark_unread else task.is_unread,
                 'updated_at': now_iso(),
-                'final_output': (root_node.final_output if root_node and next_status == 'success' else task.final_output),
-                'final_output_ref': (root_node.final_output_ref if root_node and next_status == 'success' else task.final_output_ref),
-                'failure_reason': (root_node.failure_reason if root_node and next_status == 'failed' else task.failure_reason),
+                'final_output': (root_node.final_output if root_succeeded else task.final_output),
+                'final_output_ref': (root_node.final_output_ref if root_succeeded else task.final_output_ref),
+                'failure_reason': failure_reason,
                 'finished_at': now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at,
                 'token_usage': task_token_usage,
             }
@@ -454,6 +510,22 @@ class TaskLogService:
         if str(task.failure_reason or '').strip():
             return _single_line_text(task.failure_reason)
         return _single_line_text(task.user_request)
+
+    @staticmethod
+    def _derive_task_status(*, root_node: NodeRecord | None, task_status: str, final_acceptance) -> str:
+        if root_node is None:
+            return task_status
+        root_status = str(root_node.status or task_status)
+        if root_status != 'success':
+            return root_status
+        if not bool(getattr(final_acceptance, 'required', False)):
+            return root_status
+        acceptance_status = str(getattr(final_acceptance, 'status', 'pending') or 'pending').strip().lower()
+        if acceptance_status == 'passed':
+            return 'success'
+        if acceptance_status == 'failed':
+            return 'failed'
+        return 'in_progress'
 
     def _require_task(self, task_id: str) -> TaskRecord:
         task = self._store.get_task(task_id)
