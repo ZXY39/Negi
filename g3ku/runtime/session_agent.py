@@ -17,10 +17,21 @@ from g3ku.core.state import AgentState, StructuredError
 class RuntimeAgentSession:
     """Primary AgentSession implementation backed by the runtime engine."""
 
-    def __init__(self, loop, *, session_key: str, channel: str, chat_id: str):
+    def __init__(
+        self,
+        loop,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        memory_channel: str | None = None,
+        memory_chat_id: str | None = None,
+    ):
         self._loop = loop
         self._channel = channel
         self._chat_id = chat_id
+        self._memory_channel = str(memory_channel or channel or "unknown")
+        self._memory_chat_id = str(memory_chat_id or chat_id or "unknown")
         self._multi_agent_runner = getattr(loop, "multi_agent_runner", None)
         self._state = AgentState(
             session_key=session_key,
@@ -76,6 +87,93 @@ class RuntimeAgentSession:
                     parts.append(text.strip())
             return "\n".join(parts).strip()
         return str(content or "")
+
+    @staticmethod
+    def _normalize_web_uploads(uploads: Any) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for raw in list(uploads or []):
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("path") or "").strip()
+            if not path:
+                continue
+            item = {
+                "path": path,
+                "name": str(raw.get("name") or "").strip() or path,
+                "mime_type": str(raw.get("mime_type") or raw.get("mimeType") or "").strip(),
+                "kind": str(raw.get("kind") or "").strip(),
+            }
+            size = raw.get("size")
+            if isinstance(size, (int, float)):
+                item["size"] = int(size)
+            items.append(item)
+        return items
+
+    def _pending_user_message_snapshot(self) -> dict[str, Any] | None:
+        prompt = self._last_prompt
+        attachments: list[dict[str, Any]] = []
+        timestamp: str | None = None
+        if isinstance(prompt, UserInputMessage):
+            metadata = dict(prompt.metadata or {})
+            raw_text = metadata.get("web_ceo_raw_text")
+            text = str(raw_text) if isinstance(raw_text, str) else self._history_text(prompt.content)
+            attachments = self._normalize_web_uploads(metadata.get("web_ceo_uploads"))
+            timestamp = prompt.timestamp
+        else:
+            text = self._history_text(prompt)
+        if not text.strip() and not attachments:
+            return None
+        payload: dict[str, Any] = {"role": "user", "content": text}
+        if attachments:
+            payload["attachments"] = attachments
+        if isinstance(timestamp, str) and timestamp.strip():
+            payload["timestamp"] = timestamp.strip()
+        return payload
+
+    def _interaction_flow_snapshot(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for raw in self._event_log:
+            if not isinstance(raw, dict):
+                continue
+            event_type = str(raw.get("type") or "").strip()
+            payload = raw.get("payload")
+            event_payload = payload if isinstance(payload, dict) else {}
+            if event_type == "tool_execution_start":
+                status = "running"
+            elif event_type == "tool_execution_end":
+                status = "error" if bool(event_payload.get("is_error")) else "success"
+            else:
+                continue
+            items.append(
+                {
+                    "status": status,
+                    "tool_name": str(event_payload.get("tool_name") or "tool").strip() or "tool",
+                    "text": str(event_payload.get("text") or "").strip(),
+                    "timestamp": str(raw.get("timestamp") or "").strip(),
+                    "tool_call_id": str(event_payload.get("tool_call_id") or "").strip(),
+                    "is_error": bool(event_payload.get("is_error")),
+                }
+            )
+        return items
+
+    def inflight_turn_snapshot(self) -> dict[str, Any] | None:
+        status = str(self._state.status or "").strip().lower()
+        if not (self._state.is_running or status in {"paused", "error"}):
+            return None
+        snapshot: dict[str, Any] = {
+            "status": status or ("running" if self._state.is_running else "idle"),
+            "tool_events": self._interaction_flow_snapshot(),
+        }
+        user_message = self._pending_user_message_snapshot()
+        if user_message is not None:
+            snapshot["user_message"] = user_message
+        if self._state.latest_message:
+            snapshot["assistant_text"] = str(self._state.latest_message)
+        if self._state.last_error is not None:
+            snapshot["last_error"] = asdict(self._state.last_error)
+        if not snapshot["tool_events"] and "user_message" not in snapshot and "assistant_text" not in snapshot and "last_error" not in snapshot:
+            return None
+        return snapshot
 
     def _allocate_tool_call_id(self, tool_name: str) -> str:
         normalized = str(tool_name or "tool").strip() or "tool"
@@ -266,6 +364,14 @@ class RuntimeAgentSession:
                 metadata=dict(user_input.metadata or {}),
             )
             persisted_session.add_message("assistant", output)
+            if self._state.session_key.startswith("web:"):
+                from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
+
+                update_ceo_session_after_turn(
+                    persisted_session,
+                    user_text=user_text,
+                    assistant_text=output,
+                )
             self._loop.sessions.save(persisted_session)
         except Exception:
             await self._emit(
@@ -278,8 +384,8 @@ class RuntimeAgentSession:
             try:
                 await self._loop.memory_manager.ingest_turn(
                     session_key=self._state.session_key,
-                    channel=self._channel,
-                    chat_id=self._chat_id,
+                    channel=self._memory_channel,
+                    chat_id=self._memory_chat_id,
                     messages=[
                         {"role": "user", "content": user_text},
                         {"role": "assistant", "content": output},
@@ -296,8 +402,8 @@ class RuntimeAgentSession:
             try:
                 artifact = await self._loop.commit_service.maybe_commit(
                     session=persisted_session,
-                    channel=self._channel,
-                    chat_id=self._chat_id,
+                    channel=self._memory_channel,
+                    chat_id=self._memory_chat_id,
                 )
                 if artifact is not None:
                     self._loop.sessions.save(persisted_session)

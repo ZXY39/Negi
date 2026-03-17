@@ -1,0 +1,1 @@
+{"exists": true, "is_dir": true, "items": [".changeset", ".claude-plugin", ".git", ".github", ".gitignore", ".husky", ".prettierrc", "AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "benchmarks", "bin", "cli", "docker", "docs", "examples", "package.json", "pnpm-lock.yaml", "scripts"]}

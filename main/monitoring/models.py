@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import Field
 
-from main.models import Model
+from main.models import Model, ModelTokenUsageRecord, TokenUsageSummary
 from main.types import NodeStatus, TaskStatus
 
 
@@ -21,6 +21,8 @@ class TaskTreeNode(Model):
     check_result: str = ''
     check_result_ref: str = ''
     updated_at: str = ''
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
+    token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
     children: list['TaskTreeNode'] = Field(default_factory=list)
 
 
@@ -53,6 +55,7 @@ class TaskListItem(Model):
     created_at: str = ''
     updated_at: str = ''
     max_depth: int = 0
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
 
 
 class TaskProgressResult(Model):
@@ -62,5 +65,7 @@ class TaskProgressResult(Model):
     root: TaskTreeNode | None = None
     latest_node: LatestTaskNodeOutput | None = None
     nodes: list[dict[str, Any]] = Field(default_factory=list)
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
+    token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
     text: str = ''
 

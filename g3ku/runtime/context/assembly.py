@@ -82,8 +82,8 @@ class ContextAssemblyService:
                 retrieved_memory = await memory_manager.retrieve_block(
                     query=query_text,
                     session_key=session.state.session_key,
-                    channel=getattr(session, '_channel', 'cli'),
-                    chat_id=getattr(session, '_chat_id', session.state.session_key),
+                    channel=getattr(session, '_memory_channel', getattr(session, '_channel', 'cli')),
+                    chat_id=getattr(session, '_memory_chat_id', getattr(session, '_chat_id', session.state.session_key)),
                 )
             except Exception:
                 retrieved_memory = ''
@@ -126,8 +126,8 @@ class ContextAssemblyService:
             try:
                 await memory_manager.write_context_assembly_trace(
                     session_key=session.state.session_key,
-                    channel=getattr(session, '_channel', 'cli'),
-                    chat_id=getattr(session, '_chat_id', session.state.session_key),
+                    channel=getattr(session, '_memory_channel', getattr(session, '_channel', 'cli')),
+                    chat_id=getattr(session, '_memory_chat_id', getattr(session, '_chat_id', session.state.session_key)),
                     payload=trace,
                 )
             except Exception:

@@ -1,16 +1,13 @@
 {
-  "generation": 4,
+  "generation": 7,
   "tools": [
     {
-      "name": "agent_browser",
-      "available": false,
+      "name": "content",
+      "available": true,
       "busy": false,
       "pendingDelete": false,
       "warnings": [],
-      "errors": [
-        "manifest kind must be 'skill' or 'tool': tools\\agent_browser\\resource.yaml",
-        "missing main/tool.py: tools\\agent_browser"
-      ]
+      "errors": []
     },
     {
       "name": "create_async_task",
@@ -143,6 +140,14 @@
       "errors": []
     },
     {
+      "name": "ddg-web-search",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
       "name": "github",
       "available": false,
       "busy": false,
@@ -162,6 +167,14 @@
     },
     {
       "name": "skill-creator",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "task-retrospective",
       "available": true,
       "busy": false,
       "pendingDelete": false,

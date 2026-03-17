@@ -158,6 +158,69 @@ class ResourceManager:
     def busy_state(self, kind: ResourceKind, name: str):
         return self._locks.busy_state(kind, name)
 
+    def capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
+        with self._lock:
+            return {
+                "skills": self._resource_dir_state(self._registry.skills_dir),
+                "tools": self._resource_dir_state(self._registry.tools_dir),
+            }
+
+    def refresh_paths(self, paths: list[str | Path], *, trigger: str = "path-change") -> ResourceSnapshot:
+        skill_roots: set[Path] = set()
+        tool_roots: set[Path] = set()
+        for raw_path in paths:
+            if raw_path in (None, ""):
+                continue
+            skill_root = self._registry.skill_root_for_path(Path(raw_path))
+            if skill_root is not None:
+                skill_roots.add(skill_root.resolve(strict=False))
+            tool_root = self._registry.tool_root_for_path(Path(raw_path))
+            if tool_root is not None:
+                tool_roots.add(tool_root.resolve(strict=False))
+        if not skill_roots and not tool_roots:
+            with self._lock:
+                return self._snapshot
+        return self.refresh_roots(skill_roots=skill_roots, tool_roots=tool_roots, trigger=trigger)
+
+    def refresh_changed_tree_state(
+        self,
+        before_state: dict[str, dict[str, str]] | None,
+        *,
+        trigger: str = "path-change",
+    ) -> ResourceSnapshot:
+        previous = before_state if isinstance(before_state, dict) else {}
+        after_state = self.capture_resource_tree_state()
+        skill_roots = self._changed_roots(previous.get("skills"), after_state.get("skills"), self._registry.skills_dir)
+        tool_roots = self._changed_roots(previous.get("tools"), after_state.get("tools"), self._registry.tools_dir)
+        if not skill_roots and not tool_roots:
+            with self._lock:
+                return self._snapshot
+        return self.refresh_roots(skill_roots=skill_roots, tool_roots=tool_roots, trigger=trigger)
+
+    def refresh_roots(
+        self,
+        *,
+        skill_roots: set[Path] | None = None,
+        tool_roots: set[Path] | None = None,
+        trigger: str = "targeted",
+    ) -> ResourceSnapshot:
+        normalized_skill_roots = {Path(root).resolve(strict=False) for root in (skill_roots or set())}
+        normalized_tool_roots = {Path(root).resolve(strict=False) for root in (tool_roots or set())}
+        if not normalized_skill_roots and not normalized_tool_roots:
+            with self._lock:
+                return self._snapshot
+
+        with self._lock:
+            old_snapshot = self._snapshot
+            snapshot = self._refresh_selected_locked(
+                skill_roots=normalized_skill_roots,
+                tool_roots=normalized_tool_roots,
+            )
+            self._snapshot = snapshot
+            self._persist_state(snapshot)
+        self._finish_reload(old_snapshot, snapshot, trigger=trigger)
+        return snapshot
+
     def ensure_fresh(self) -> None:
         if not self._started and bool(self._resources_cfg_value("reload.lazy_reload_on_access", True)):
             self.reload_now(trigger="lazy")
@@ -169,13 +232,7 @@ class ResourceManager:
             snapshot = self._merge_discovery(discovery)
             self._snapshot = snapshot
             self._persist_state(snapshot)
-        self._cleanup_stale_tool_instances(old_snapshot, snapshot)
-        for callback in list(self._callbacks):
-            try:
-                callback(snapshot)
-            except Exception as exc:
-                logger.debug("resource snapshot callback failed: {}", exc)
-        logger.debug("resources reloaded via {}: {} tools, {} skills", trigger, len(snapshot.tools), len(snapshot.skills))
+        self._finish_reload(old_snapshot, snapshot, trigger=trigger)
         return snapshot
 
     def _merge_discovery(self, discovery: DiscoveryResult) -> ResourceSnapshot:
@@ -270,6 +327,212 @@ class ResourceManager:
             loop.create_task(result)
         except Exception as exc:
             logger.debug("tool instance close skipped: {}", exc)
+
+    def _finish_reload(self, old_snapshot: ResourceSnapshot, snapshot: ResourceSnapshot, *, trigger: str) -> None:
+        self._cleanup_stale_tool_instances(old_snapshot, snapshot)
+        for callback in list(self._callbacks):
+            try:
+                callback(snapshot)
+            except Exception as exc:
+                logger.debug("resource snapshot callback failed: {}", exc)
+        logger.debug("resources reloaded via {}: {} tools, {} skills", trigger, len(snapshot.tools), len(snapshot.skills))
+
+    def _refresh_selected_locked(
+        self,
+        *,
+        skill_roots: set[Path],
+        tool_roots: set[Path],
+    ) -> ResourceSnapshot:
+        old = self._snapshot
+        generation = old.generation + 1
+        new_tools = dict(old.tools)
+        new_tool_instances = dict(old.tool_instances)
+        new_skills = dict(old.skills)
+
+        old_skill_names_by_root = self._resource_names_by_root(old.skills)
+        old_tool_names_by_root = self._resource_names_by_root(old.tools)
+
+        discovered_tools_by_root: dict[Path, ToolResourceDescriptor | None] = {}
+        changed_tool_names: set[str] = set()
+        for root in sorted(tool_roots):
+            descriptor = self._registry.build_tool_descriptor(root)
+            discovered_tools_by_root[root] = descriptor
+            changed_tool_names.update(old_tool_names_by_root.get(root, []))
+            if descriptor is not None:
+                changed_tool_names.add(descriptor.name)
+
+        final_tool_names = set(old.tools.keys())
+        final_tool_names.difference_update(changed_tool_names)
+        final_tool_names.update(
+            descriptor.name
+            for descriptor in discovered_tools_by_root.values()
+            if descriptor is not None
+        )
+
+        if changed_tool_names:
+            for descriptor in old.skills.values():
+                if set(descriptor.requires_tools) & changed_tool_names:
+                    skill_roots.add(descriptor.root.resolve(strict=False))
+
+        discovered_skills_by_root: dict[Path, SkillResourceDescriptor | None] = {}
+        for root in sorted(skill_roots):
+            descriptor = self._registry.build_skill_descriptor(root, tool_names=final_tool_names)
+            discovered_skills_by_root[root] = descriptor
+
+        services = self._services_getter() if self._services_getter is not None else {}
+        services.setdefault("app_config", self.app_config)
+
+        occupied_tool_names = set(new_tools.keys())
+        for root in tool_roots:
+            occupied_tool_names.difference_update(old_tool_names_by_root.get(root, []))
+        for root in sorted(tool_roots):
+            for name in old_tool_names_by_root.get(root, []):
+                self._remove_tool_name(name, new_tools=new_tools, new_tool_instances=new_tool_instances, old_snapshot=old)
+            descriptor = discovered_tools_by_root.get(root)
+            if descriptor is None:
+                continue
+            if descriptor.name in occupied_tool_names:
+                logger.debug("skip duplicate tool name during targeted refresh: {}", descriptor.name)
+                continue
+            self._apply_tool_descriptor(
+                descriptor,
+                generation=generation,
+                new_tools=new_tools,
+                new_tool_instances=new_tool_instances,
+                old_snapshot=old,
+                services=services,
+            )
+            occupied_tool_names.add(descriptor.name)
+
+        occupied_skill_names = set(new_skills.keys())
+        for root in skill_roots:
+            occupied_skill_names.difference_update(old_skill_names_by_root.get(root, []))
+        for root in sorted(skill_roots):
+            for name in old_skill_names_by_root.get(root, []):
+                self._remove_skill_name(name, new_skills=new_skills, old_snapshot=old)
+            descriptor = discovered_skills_by_root.get(root)
+            if descriptor is None:
+                continue
+            if descriptor.name in occupied_skill_names:
+                logger.debug("skip duplicate skill name during targeted refresh: {}", descriptor.name)
+                continue
+            descriptor.generation = generation
+            new_skills[descriptor.name] = descriptor
+            self._locks.register_path(ResourceKind.SKILL, descriptor.name, descriptor.main_path or descriptor.manifest_path)
+            self._locks.clear_pending_delete(ResourceKind.SKILL, descriptor.name)
+            occupied_skill_names.add(descriptor.name)
+
+        return ResourceSnapshot(generation=generation, tools=new_tools, skills=new_skills, tool_instances=new_tool_instances)
+
+    @staticmethod
+    def _resource_names_by_root(descriptors: dict[str, SkillResourceDescriptor] | dict[str, ToolResourceDescriptor]) -> dict[Path, list[str]]:
+        mapping: dict[Path, list[str]] = {}
+        for name, descriptor in descriptors.items():
+            root = descriptor.root.resolve(strict=False)
+            mapping.setdefault(root, []).append(name)
+        return mapping
+
+    def _remove_skill_name(
+        self,
+        name: str,
+        *,
+        new_skills: dict[str, SkillResourceDescriptor],
+        old_snapshot: ResourceSnapshot,
+    ) -> None:
+        old_descriptor = old_snapshot.skills.get(name)
+        if old_descriptor is None:
+            return
+        if self._locks.is_busy(ResourceKind.SKILL, name):
+            self._locks.mark_pending_delete(ResourceKind.SKILL, name)
+            new_skills[name] = old_descriptor
+            return
+        new_skills.pop(name, None)
+        self._locks.unregister_path(ResourceKind.SKILL, name)
+
+    def _remove_tool_name(
+        self,
+        name: str,
+        *,
+        new_tools: dict[str, ToolResourceDescriptor],
+        new_tool_instances: dict[str, Any],
+        old_snapshot: ResourceSnapshot,
+    ) -> None:
+        old_descriptor = old_snapshot.tools.get(name)
+        old_instance = old_snapshot.tool_instances.get(name)
+        if old_descriptor is None:
+            return
+        if self._locks.is_busy(ResourceKind.TOOL, name) and old_instance is not None:
+            self._locks.mark_pending_delete(ResourceKind.TOOL, name)
+            new_tools[name] = old_descriptor
+            new_tool_instances[name] = old_instance
+            return
+        new_tools.pop(name, None)
+        new_tool_instances.pop(name, None)
+        self._locks.unregister_path(ResourceKind.TOOL, name)
+
+    def _apply_tool_descriptor(
+        self,
+        descriptor: ToolResourceDescriptor,
+        *,
+        generation: int,
+        new_tools: dict[str, ToolResourceDescriptor],
+        new_tool_instances: dict[str, Any],
+        old_snapshot: ResourceSnapshot,
+        services: dict[str, Any],
+    ) -> None:
+        old_descriptor = old_snapshot.tools.get(descriptor.name)
+        old_instance = old_snapshot.tool_instances.get(descriptor.name)
+        if old_descriptor and old_descriptor.fingerprint == descriptor.fingerprint and old_instance is not None:
+            descriptor = old_descriptor
+            new_tools[descriptor.name] = descriptor
+            new_tool_instances[descriptor.name] = old_instance
+        elif self._locks.is_busy(ResourceKind.TOOL, descriptor.name) and old_descriptor is not None and old_descriptor.fingerprint != descriptor.fingerprint and old_instance is not None:
+            self._locks.mark_pending_delete(ResourceKind.TOOL, descriptor.name)
+            new_tools[descriptor.name] = old_descriptor
+            new_tool_instances[descriptor.name] = old_instance
+        else:
+            descriptor.generation = generation
+            try:
+                instance = self._loader.load_tool(descriptor, services=services)
+            except Exception as exc:
+                descriptor.available = False
+                descriptor.errors.append(str(exc))
+                instance = None
+            new_tools[descriptor.name] = descriptor
+            if descriptor.available and instance is not None:
+                new_tool_instances[descriptor.name] = instance
+                self._locks.clear_pending_delete(ResourceKind.TOOL, descriptor.name)
+            else:
+                new_tool_instances.pop(descriptor.name, None)
+        self._locks.register_path(ResourceKind.TOOL, descriptor.name, descriptor.manifest_path)
+
+    @staticmethod
+    def _resource_dir_state(base_dir: Path) -> dict[str, str]:
+        state: dict[str, str] = {}
+        root = Path(base_dir).resolve(strict=False)
+        if not root.exists():
+            return state
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir():
+                continue
+            state[entry.name] = ResourceRegistry._tree_fingerprint(entry)
+        return state
+
+    @staticmethod
+    def _changed_roots(
+        before: dict[str, str] | None,
+        after: dict[str, str] | None,
+        base_dir: Path,
+    ) -> set[Path]:
+        previous = dict(before or {})
+        current = dict(after or {})
+        changed = {
+            name
+            for name in set(previous) | set(current)
+            if previous.get(name) != current.get(name)
+        }
+        base = Path(base_dir).resolve(strict=False)
+        return {base / name for name in changed}
 
     def _persist_state(self, snapshot: ResourceSnapshot) -> None:
         try:

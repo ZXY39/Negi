@@ -9,6 +9,7 @@ from g3ku.content import ContentNavigationService
 from main.models import NodeOutputEntry, NodeRecord, TaskRecord
 from main.monitoring.file_store import TaskFileStore
 from main.protocol import build_envelope, now_iso
+from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 from main.monitoring.tree_builder import TaskTreeBuilder
 
 
@@ -26,6 +27,10 @@ class TaskLogService:
         self._tree_builder = tree_builder
         self._registry = registry
         self._content_store = content_store
+        self._snapshot_payload_builder = None
+
+    def set_snapshot_payload_builder(self, builder) -> None:
+        self._snapshot_payload_builder = builder
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
         paths = self._file_store.paths_for_task(task.task_id)
@@ -85,6 +90,7 @@ class TaskLogService:
         *,
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
+        usage_attempts: list[Any] | None = None,
     ) -> NodeRecord | None:
         text, ref = self._summarize_content(
             content,
@@ -105,7 +111,15 @@ class TaskLogService:
                     created_at=now_iso(),
                 )
             )
-            return record.model_copy(update={'output': output, 'updated_at': now_iso()})
+            update: dict[str, Any] = {'output': output, 'updated_at': now_iso()}
+            if usage_attempts and bool(getattr(record.token_usage, 'tracked', False)):
+                delta_usage, delta_usage_by_model = build_token_usage_from_attempts(usage_attempts, tracked=True)
+                update['token_usage'] = merge_token_usage_records([record.token_usage, delta_usage], tracked=True)
+                update['token_usage_by_model'] = merge_token_usage_by_model(
+                    [*list(record.token_usage_by_model or []), *delta_usage_by_model],
+                    tracked=True,
+                )
+            return record.model_copy(update=update)
 
         updated = self._store.update_node(node_id, _mutate)
         self.refresh_task_view(task_id, mark_unread=True)
@@ -346,6 +360,7 @@ class TaskLogService:
         root_node = self._store.get_node(task.root_node_id)
         next_status = root_node.status if root_node is not None else task.status
         brief_text = self._brief_text(task=task, root_node=root_node)
+        task_token_usage, _task_token_usage_by_model = aggregate_node_token_usage(nodes, tracked=bool(getattr(task.token_usage, 'tracked', False)))
         updated = task.model_copy(
             update={
                 'status': next_status,
@@ -356,6 +371,7 @@ class TaskLogService:
                 'final_output_ref': (root_node.final_output_ref if root_node and next_status == 'success' else task.final_output_ref),
                 'failure_reason': (root_node.failure_reason if root_node and next_status == 'failed' else task.failure_reason),
                 'finished_at': now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at,
+                'token_usage': task_token_usage,
             }
         )
         self._store.upsert_task(updated)
@@ -369,33 +385,49 @@ class TaskLogService:
             runtime_state['cancel_requested'] = bool(updated.cancel_requested)
             self._file_store.write_json(updated.runtime_state_path, runtime_state)
         if self._registry is not None:
-            payload = {
-                'task': updated.model_dump(mode='json'),
-                'root': root.model_dump(mode='json') if root is not None else None,
-                'tree_text': tree_text,
-                'nodes': [item.model_dump(mode='json') for item in nodes],
-            }
-            self._registry.publish_task(
-                updated.session_id,
+            payload = None
+            if callable(self._snapshot_payload_builder):
+                payload = self._snapshot_payload_builder(updated.task_id)
+            if payload is None:
+                payload = {
+                    'task': updated.model_dump(mode='json'),
+                    'progress': {
+                        'task_id': updated.task_id,
+                        'task_status': updated.status,
+                        'tree_text': tree_text,
+                        'root': root.model_dump(mode='json') if root is not None else None,
+                        'latest_node': None,
+                        'nodes': [item.model_dump(mode='json') for item in nodes],
+                        'token_usage': updated.token_usage.model_dump(mode='json'),
+                        'token_usage_by_model': [],
+                        'text': f'Task status: {updated.status}',
+                    },
+                }
+            self._registry.publish_global_task(
                 updated.task_id,
                 build_envelope(
                     channel='task',
                     session_id=updated.session_id,
                     task_id=updated.task_id,
-                    seq=self._registry.next_task_seq(updated.session_id, updated.task_id),
+                    seq=self._registry.next_global_task_seq(updated.task_id),
                     type='snapshot.task',
                     data=payload,
                 ),
             )
-            self._registry.publish_ceo(
-                updated.session_id,
+            self._registry.publish_global_ceo(
                 build_envelope(
                     channel='ceo',
                     session_id=updated.session_id,
                     task_id=updated.task_id,
                     seq=self._registry.next_ceo_seq(updated.session_id),
                     type='task.summary.changed',
-                    data={'task_id': updated.task_id, 'status': updated.status, 'brief': updated.brief_text, 'is_unread': bool(updated.is_unread)},
+                    data={
+                        'task_id': updated.task_id,
+                        'status': updated.status,
+                        'brief': updated.brief_text,
+                        'is_unread': bool(updated.is_unread),
+                        'token_usage': updated.token_usage.model_dump(mode='json'),
+                    },
                 ),
             )
         return updated

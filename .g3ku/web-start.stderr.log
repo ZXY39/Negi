@@ -1,0 +1,30 @@
+[92m14:26:27 - LiteLLM:WARNING[0m: get_model_cost_map.py:213 - LiteLLM: Failed to fetch remote model cost map from https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010). Falling back to local backup.
+INFO:     Started server process [8476]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18790 (Press CTRL+C to quit)
+INFO:     127.0.0.1:60982 - "WebSocket /api/ws/ceo?session_id=web%3Aceo-ee37b7f8adac" [accepted]
+2026-03-17 14:26:36.434 | DEBUG    | g3ku.resources.manager:reload_now:178 - resources reloaded via init: 14 tools, 9 skills
+2026-03-17 14:26:42.698 | INFO     | g3ku.runtime.bootstrap_bridge:init_memory_runtime:259 - RAG memory store enabled (G3kuHybridStore)
+2026-03-17 14:26:42.722 | INFO     | g3ku.runtime.bootstrap_bridge:_sync_memory_runtime:191 - memory runtime synced from resource settings (reason=resource_snapshot)
+2026-03-17 14:26:43.075 | DEBUG    | g3ku.resources.manager:reload_now:178 - resources reloaded via internal-runtime-sync: 14 tools, 9 skills
+2026-03-17 14:26:43.076 | DEBUG    | g3ku.resources.manager:reload_now:178 - resources reloaded via bootstrap: 14 tools, 9 skills
+2026-03-17 14:26:43.422 | DEBUG    | g3ku.resources.manager:reload_now:178 - resources reloaded via main_runtime: 14 tools, 9 skills
+2026-03-17 14:26:43.441 | INFO     | g3ku.runtime.bootstrap_bridge:init_resource_runtime:65 - Resource runtime initialized (skills_dir=skills, tools_dir=tools)
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:61122 - "WebSocket /api/ws/ceo?session_id=web%3Aceo-ee37b7f8adac" [accepted]
+INFO:     connection open
+2026-03-17 14:29:35.750 | DEBUG    | g3ku.resources.manager:reload_now:178 - resources reloaded via admin_china_bridge_channel_update: 14 tools, 9 skills
+2026-03-17 14:29:38.051 | INFO     | g3ku.runtime.bootstrap_bridge:init_memory_runtime:259 - RAG memory store enabled (G3kuHybridStore)
+2026-03-17 14:29:38.054 | INFO     | g3ku.runtime.bootstrap_bridge:_sync_memory_runtime:191 - memory runtime synced from resource settings (reason=admin_china_bridge_channel_update)
+2026-03-17 14:29:38.072 | INFO     | g3ku.runtime.config_refresh:refresh_loop_runtime_config:47 - Loop runtime config refreshed revision=2 reason=admin_china_bridge_channel_update
+2026-03-17 14:29:49.187 | DEBUG    | g3ku.resources.manager:reload_now:178 - resources reloaded via admin_china_bridge_channel_update: 14 tools, 9 skills
+2026-03-17 14:29:51.536 | INFO     | g3ku.runtime.bootstrap_bridge:init_memory_runtime:259 - RAG memory store enabled (G3kuHybridStore)
+2026-03-17 14:29:51.540 | INFO     | g3ku.runtime.bootstrap_bridge:_sync_memory_runtime:191 - memory runtime synced from resource settings (reason=admin_china_bridge_channel_update)
+2026-03-17 14:29:51.557 | INFO     | g3ku.runtime.config_refresh:refresh_loop_runtime_config:47 - Loop runtime config refreshed revision=3 reason=admin_china_bridge_channel_update
+INFO:     Shutting down
+INFO:     connection closed
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [8476]

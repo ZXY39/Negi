@@ -10,9 +10,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from g3ku.resources import ResourceManager
+from g3ku.session.manager import Session
 from main.api import admin_rest
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
-from main.service.runtime_service import MainRuntimeService
+from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -340,6 +341,82 @@ def test_main_runtime_service_normalizes_short_task_id_for_lookup_and_progress()
     assert progress == 'progress:task:demo:False'
 
 
+@pytest.mark.asyncio
+async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
+    captured: dict[str, object] = {}
+
+    class _StubService:
+        async def create_task(self, task: str, *, session_id: str = 'web:shared', max_depth: int | None = None, **kwargs):
+            captured['task'] = task
+            captured['session_id'] = session_id
+            captured['max_depth'] = max_depth
+            captured['kwargs'] = kwargs
+            return SimpleNamespace(task_id='task:demo')
+
+    tool = CreateAsyncTaskTool(_StubService())
+    result = await tool.execute(
+        '整理需求',
+        __g3ku_runtime={'session_key': 'web:ceo-demo', 'task_defaults': {'max_depth': 3}},
+    )
+
+    assert result.endswith('task:demo')
+    assert captured['task'] == '整理需求'
+    assert captured['session_id'] == 'web:ceo-demo'
+    assert captured['max_depth'] == 3
+
+
+def test_ceo_session_task_defaults_endpoint_reads_and_updates_depth(tmp_path: Path):
+    class _SessionManager:
+        def __init__(self, session, path: Path):
+            self._session = session
+            self._path = path
+            self.saved = 0
+
+        def get_path(self, key: str) -> Path:
+            assert key == self._session.key
+            return self._path
+
+        def get_or_create(self, key: str):
+            assert key == self._session.key
+            return self._session
+
+        def save(self, session) -> None:
+            self._session = session
+            self.saved += 1
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': self._session.key}]
+
+    session_path = tmp_path / 'sessions' / 'web_ceo_demo.jsonl'
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    session = Session(key='web:ceo-demo', metadata={})
+    manager = _SessionManager(session, session_path)
+
+    from g3ku.runtime.api import ceo_sessions
+    from g3ku.runtime import web_ceo_sessions
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    ceo_sessions.get_agent = lambda: SimpleNamespace(sessions=manager)
+    ceo_sessions.get_runtime_manager = lambda _agent: SimpleNamespace(get=lambda _session_id: None)
+    ceo_sessions.workspace_path = lambda: tmp_path
+    ceo_sessions.main_runtime_depth_limits = lambda: {'default_max_depth': 2, 'hard_max_depth': 4}
+    web_ceo_sessions.main_runtime_depth_limits = lambda: {'default_max_depth': 2, 'hard_max_depth': 4}
+
+    client = TestClient(app)
+
+    initial = client.get('/api/ceo/sessions/web:ceo-demo/task-defaults')
+    assert initial.status_code == 200
+    assert initial.json()['task_defaults']['max_depth'] == 2
+
+    updated = client.patch('/api/ceo/sessions/web:ceo-demo/task-defaults', json={'max_depth': 9})
+    assert updated.status_code == 200
+    assert updated.json()['task_defaults']['max_depth'] == 4
+    assert manager.saved >= 1
+    assert manager.get_or_create('web:ceo-demo').metadata['task_defaults']['max_depth'] == 4
+
+
 def test_task_rest_endpoint_normalizes_short_task_id():
     captured: dict[str, str] = {}
 
@@ -367,6 +444,62 @@ def test_task_rest_endpoint_normalizes_short_task_id():
     assert response.status_code == 200
     assert captured == {'normalized_from': 'demo', 'detail_task_id': 'task:demo'}
     assert response.json()['task']['task_id'] == 'task:demo'
+
+
+def test_task_retry_rest_endpoint_normalizes_short_task_id_and_returns_new_task():
+    captured: dict[str, str] = {}
+
+    class _Record:
+        def __init__(self, task_id: str):
+            self.task_id = task_id
+
+        def model_dump(self, mode: str = 'json'):
+            _ = mode
+            return {'task_id': self.task_id, 'status': 'in_progress'}
+
+    class _StubService:
+        def normalize_task_id(self, task_id: str) -> str:
+            captured['normalized_from'] = task_id
+            return f'task:{task_id}'
+
+        async def retry_task(self, task_id: str):
+            captured['retry_task_id'] = task_id
+            return _Record('task:retry-1')
+
+    from main.api import rest as task_rest
+
+    app = FastAPI()
+    app.include_router(task_rest.router, prefix='/api')
+    task_rest.get_agent = lambda: SimpleNamespace(main_task_service=_StubService())
+
+    client = TestClient(app)
+    response = client.post('/api/tasks/demo/retry')
+
+    assert response.status_code == 200
+    assert captured == {'normalized_from': 'demo', 'retry_task_id': 'task:demo'}
+    assert response.json()['task']['task_id'] == 'task:retry-1'
+
+
+def test_task_retry_rest_endpoint_returns_conflict_for_non_failed_task():
+    class _StubService:
+        def normalize_task_id(self, task_id: str) -> str:
+            return f'task:{task_id}'
+
+        async def retry_task(self, task_id: str):
+            _ = task_id
+            raise ValueError('task_not_failed')
+
+    from main.api import rest as task_rest
+
+    app = FastAPI()
+    app.include_router(task_rest.router, prefix='/api')
+    task_rest.get_agent = lambda: SimpleNamespace(main_task_service=_StubService())
+
+    client = TestClient(app)
+    response = client.post('/api/tasks/demo/retry')
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'task_not_failed'
 
 
 def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):

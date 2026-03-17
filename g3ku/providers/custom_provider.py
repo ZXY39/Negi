@@ -7,7 +7,7 @@ from typing import Any
 import json_repair
 from openai import AsyncOpenAI
 
-from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 
 
 class CustomProvider(LLMProvider):
@@ -53,10 +53,9 @@ class CustomProvider(LLMProvider):
                             arguments=json_repair.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments)
             for tc in (msg.tool_calls or [])
         ]
-        u = response.usage
         return LLMResponse(
             content=msg.content, tool_calls=tool_calls, finish_reason=choice.finish_reason or "stop",
-            usage={"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens, "total_tokens": u.total_tokens} if u else {},
+            usage=normalize_usage_payload(getattr(response, "usage", None)),
             reasoning_content=getattr(msg, "reasoning_content", None) or None,
         )
 

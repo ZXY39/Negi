@@ -1,7 +1,0 @@
-{"_type": "metadata", "key": "web:regression-20260312-105835", "created_at": "2026-03-12T10:58:40.100529", "updated_at": "2026-03-12T11:00:41.412459", "metadata": {}, "last_consolidated": 0, "archive_segments": [], "last_user_turn_at": "2026-03-12T11:00:41.412459", "commit_turn_counter": 3}
-{"role": "user", "content": "For memory test, remember this token exactly: BLUE-42. Reply exactly: STORED", "timestamp": "2026-03-12T10:58:40.100529"}
-{"role": "assistant", "content": "STORED", "timestamp": "2026-03-12T10:58:40.100529"}
-{"role": "user", "content": "What token did I ask you to remember? Reply with the token only.", "timestamp": "2026-03-12T10:58:52.962761"}
-{"role": "assistant", "content": "BLUE-42", "timestamp": "2026-03-12T10:58:52.962761"}
-{"role": "user", "content": "After the restart, what token did I ask you to remember? Reply with the token only.", "timestamp": "2026-03-12T11:00:41.412459"}
-{"role": "assistant", "content": "BLUE-42", "timestamp": "2026-03-12T11:00:41.412459"}

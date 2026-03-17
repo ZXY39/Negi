@@ -4,7 +4,7 @@ from typing import Protocol
 
 from g3ku.config.schema import Config
 from g3ku.providers.provider_factory import build_provider_from_model_key
-from g3ku.providers.base import LLMResponse
+from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import is_retryable_model_error, response_requires_retry
 
 
@@ -40,6 +40,7 @@ class ConfigChatBackend:
             raise ValueError('model_refs must not be empty')
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
+        attempts: list[LLMModelAttempt] = []
         for index, ref in enumerate(refs):
             target = build_provider_from_model_key(self._config, ref)
             try:
@@ -58,6 +59,20 @@ class ConfigChatBackend:
                 if index < len(refs) - 1 and is_retryable_model_error(exc, retry_on=target.retry_on):
                     continue
                 raise
+            response.usage = normalize_usage_payload(response.usage)
+            response_attempts = list(response.attempts or [])
+            if not response_attempts:
+                response_attempts = [
+                    LLMModelAttempt(
+                        model_key=target.provider_ref,
+                        provider_id=target.provider_id,
+                        provider_model=target.model_id,
+                        usage=dict(response.usage or {}),
+                        finish_reason=str(response.finish_reason or 'stop'),
+                    )
+                ]
+            attempts.extend(response_attempts)
+            response.attempts = list(attempts)
             last_response = response
             if index < len(refs) - 1 and response_requires_retry(response, retry_on=target.retry_on):
                 continue
@@ -66,4 +81,5 @@ class ConfigChatBackend:
             raise last_error
         if last_response is None:
             raise RuntimeError('chat backend returned no response')
+        last_response.attempts = list(attempts)
         return last_response

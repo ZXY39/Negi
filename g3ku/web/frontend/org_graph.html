@@ -1,15 +1,19 @@
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="dark">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>G3ku Main Runtime</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
     <link rel="stylesheet" href="org_graph.css">
     <script src="https://unpkg.com/lucide@latest"></script>
 </head>
+
 <body>
     <div class="app-layout">
         <nav class="sidebar">
@@ -60,62 +64,98 @@
                     <p class="subtitle">通过 CEO 前门与 main 运行时交互，查看工具执行流与最终回复。</p>
                 </header>
 
-                <div class="chat-wrapper">
-                    <div class="chat-feed" id="ceo-chat-feed">
-                        <div class="message system">
-                            <div class="avatar"><i data-lucide="cpu"></i></div>
-                            <div class="msg-content">欢迎使用 G3ku Main Runtime。这里会展示 CEO 回合中的工具调用过程与最终回复。</div>
+                <div class="ceo-shell">
+                    <aside class="ceo-session-panel" aria-label="CEO session list">
+                        <div class="ceo-session-panel-header">
+                            <div>
+                                <h2>会话</h2>
+                                <p class="subtitle">聊天记录彼此隔离，仅共享长期记忆。</p>
+                            </div>
+                            <button id="ceo-new-session-btn" class="toolbar-btn" type="button">New Session</button>
                         </div>
-                    </div>
+                        <div id="ceo-session-current" class="ceo-session-current" aria-live="polite"></div>
+                        <div id="ceo-session-list" class="ceo-session-list" role="list"></div>
+                    </aside>
 
-                    <div class="chat-input-area">
-                        <div class="ceo-composer">
-                            <div id="ceo-upload-list" class="ceo-upload-list" hidden aria-live="polite"></div>
-                            <div class="ceo-input-row">
-                                <input id="ceo-file-input" type="file" multiple hidden>
-                                <button id="ceo-attach-btn" class="ceo-attach-btn" type="button" aria-label="上传附件">
-                                    <i data-lucide="paperclip"></i>
-                                </button>
-                                <textarea id="ceo-input" rows="1" placeholder="输入你的任务，可保留换行；也可以上传图片或文件作为补充"></textarea>
+                    <div class="chat-wrapper">
+                        <div class="chat-feed" id="ceo-chat-feed">
+                            <div class="message system">
+                                <div class="avatar"><i data-lucide="cpu"></i></div>
+                                <div class="msg-content">欢迎使用 G3ku Main Runtime。这里会展示 CEO 回合中的工具调用过程与最终回复。</div>
                             </div>
                         </div>
-                        <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
-                            <i data-lucide="send"></i> 发送
-                        </button>
+
+                        <div class="chat-input-area">
+                            <div class="ceo-composer">
+                                <div id="ceo-upload-list" class="ceo-upload-list" hidden aria-live="polite"></div>
+                                <div class="ceo-input-row">
+                                    <input id="ceo-file-input" type="file" multiple hidden>
+                                    <button id="ceo-attach-btn" class="ceo-attach-btn" type="button" aria-label="上传附件">
+                                        <i data-lucide="paperclip"></i>
+                                    </button>
+                                    <textarea id="ceo-input" rows="1"
+                                        placeholder="输入你的任务，可保留换行；也可以上传图片或文件作为补充"></textarea>
+                                </div>
+                            </div>
+                            <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
+                                <i data-lucide="send"></i> 发送
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>
 
-            <section id="view-tasks-list" class="view-section" style="display: none;">
-                <header class="content-header">
-                    <h1>任务大厅</h1>
-                    <p class="subtitle">查看当前会话中的任务摘要、批量操作与运行状态。</p>
+<section id="view-tasks-list" class="view-section" style="display: none;">
+                <header class="content-header task-list-header">
+                    <div class="task-header-main">
+                        <h1>任务大厅</h1>
+                        <p class="subtitle">查看当前会话中的任务摘要、批量操作与运行状态。</p>
+                    </div>
+                    <div class="task-header-actions">
+                        <button id="task-multi-toggle" class="toolbar-btn" type="button"
+                            aria-pressed="false">多选</button>
+                        <div class="task-toolbar-preferences">
+                            <label class="task-depth-setting" for="task-depth-select">
+                                <span class="task-depth-label">任务树深度</span>
+                                <select id="task-depth-select" class="task-depth-select resource-select"
+                                    aria-label="任务树深度"></select>
+                            </label>
+                            <span id="task-depth-hint" class="task-depth-hint">后续新任务会自动使用该深度，当前范围 0-4。</span>
+                        </div>
+                    </div>
                 </header>
 
                 <div class="project-list-container">
-                    <div class="project-toolbar">
+                    <div id="task-toolbar" class="project-toolbar" hidden>
                         <div class="project-toolbar-group">
-                            <button id="task-multi-toggle" class="toolbar-btn" type="button" aria-pressed="false">多选</button>
                             <div id="task-filter-wrap" class="toolbar-dropdown" hidden>
-                                <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button" aria-haspopup="menu" aria-expanded="false">选择</button>
+                                <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button"
+                                    aria-haspopup="menu" aria-expanded="false">选择</button>
                                 <div id="task-filter-menu" class="toolbar-menu" role="menu" hidden>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="paused">已暂停</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="unread">未读</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="failed">失败</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem" data-select-bucket="running">进行中</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="paused">已暂停</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="unread">未读</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="failed">失败</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="running">进行中</button>
                                 </div>
                             </div>
                             <div id="task-batch-wrap" class="toolbar-dropdown" hidden>
-                                <button id="task-batch-menu-trigger" class="toolbar-btn ghost" type="button" aria-haspopup="menu" aria-expanded="false">批量操作</button>
+                                <button id="task-batch-menu-trigger" class="toolbar-btn ghost" type="button"
+                                    aria-haspopup="menu" aria-expanded="false">批量操作</button>
                                 <div id="task-batch-menu" class="toolbar-menu" role="menu" hidden>
-                                    <button class="toolbar-menu-item warn" type="button" role="menuitem" data-batch-action="pause">暂停</button>
-                                    <button class="toolbar-menu-item success" type="button" role="menuitem" data-batch-action="resume">开始</button>
-                                    <button class="toolbar-menu-item danger" type="button" role="menuitem" data-batch-action="delete">删除</button>
+                                    <button class="toolbar-menu-item warn" type="button" role="menuitem"
+                                        data-batch-action="pause">暂停</button>
+                                    <button class="toolbar-menu-item success" type="button" role="menuitem"
+                                        data-batch-action="resume">开始</button>
+                                    <button class="toolbar-menu-item success" type="button" role="menuitem"
+                                        data-batch-action="retry">重试</button>
+                                    <button class="toolbar-menu-item danger" type="button" role="menuitem"
+                                        data-batch-action="delete">删除</button>
                                 </div>
                             </div>
-                        </div>
-                        <div class="project-toolbar-group project-toolbar-actions">
-                            <span id="task-selection-summary" class="project-selection-summary">已选 0 项</span>
                         </div>
                     </div>
                     <div id="task-card-grid" class="project-card-grid">
@@ -139,7 +179,8 @@
                 <div class="resource-layout full-list-layout">
                     <aside class="resource-list-panel skill-list-panel full-width-panel">
                         <div class="resource-controls">
-                            <input id="skill-search-input" class="resource-search" type="search" placeholder="搜索 Skill 名称、ID 或路径">
+                            <input id="skill-search-input" class="resource-search" type="search"
+                                placeholder="搜索 Skill 名称、ID 或路径">
                             <div class="resource-filter-row">
                                 <select id="skill-risk-filter" class="resource-select">
                                     <option value="all">全部风险</option>
@@ -160,7 +201,8 @@
                     </aside>
 
                     <div id="skill-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
-                    <section class="resource-detail-panel skill-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="skill-detail-title" tabindex="-1">
+                    <section class="resource-detail-panel skill-detail-panel detail-drawer" role="dialog"
+                        aria-modal="true" aria-hidden="true" aria-labelledby="skill-detail-title" tabindex="-1">
                         <div id="skill-detail-empty" class="empty-state resource-empty">请选择一个 Skill 查看或编辑详情。</div>
                         <div id="skill-detail-content" class="resource-detail-shell"></div>
                     </section>
@@ -182,7 +224,8 @@
                 <div class="resource-layout full-list-layout">
                     <aside class="resource-list-panel tool-list-panel full-width-panel">
                         <div class="resource-controls">
-                            <input id="tool-search-input" class="resource-search" type="search" placeholder="搜索 Tool 名称、ID 或路径">
+                            <input id="tool-search-input" class="resource-search" type="search"
+                                placeholder="搜索 Tool 名称、ID 或路径">
                             <div class="resource-filter-row">
                                 <select id="tool-status-filter" class="resource-select">
                                     <option value="all">全部状态</option>
@@ -203,7 +246,8 @@
                     </aside>
 
                     <div id="tool-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
-                    <section class="resource-detail-panel tool-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="tool-detail-title" tabindex="-1">
+                    <section class="resource-detail-panel tool-detail-panel detail-drawer" role="dialog"
+                        aria-modal="true" aria-hidden="true" aria-labelledby="tool-detail-title" tabindex="-1">
                         <div id="tool-detail-empty" class="empty-state resource-empty">请选择一个 Tool 查看或编辑权限配置。</div>
                         <div id="tool-detail-content" class="resource-detail-shell"></div>
                     </section>
@@ -215,7 +259,8 @@
                     <div>
                         <h1>LLM 配置中心</h1>
                         <p class="subtitle">选择供应商并维护模型 JSON 配置，再将模型编排到 Role Routes。</p>
-                        <p id="sidebar-model-hint" class="ceo-model-panel-hint" style="margin-top: 8px; color: var(--brand-primary);">正在加载模型配置...</p>
+                        <p id="sidebar-model-hint" class="ceo-model-panel-hint"
+                            style="margin-top: 8px; color: var(--brand-primary);">正在加载模型配置...</p>
                     </div>
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
@@ -233,10 +278,12 @@
                                 <p class="subtitle">点击模型查看对应 JSON 配置，或新建一个模型。</p>
                             </div>
                             <div class="model-shared-actions">
-                                <input id="model-search-input" class="resource-search" type="search" placeholder="搜索模型 Key / Provider / 模型">
+                                <input id="model-search-input" class="resource-search" type="search"
+                                    placeholder="搜索模型 Key / Provider / 模型">
                             </div>
                         </div>
-                        <div id="llm-bindings-list" class="model-shared-list" data-model-available-list="bindings"></div>
+                        <div id="llm-bindings-list" class="model-shared-list" data-model-available-list="bindings">
+                        </div>
                     </section>
 
                     <aside class="resource-detail-panel llm-routes-panel">
@@ -253,7 +300,8 @@
                 </div>
 
                 <div id="llm-editor-backdrop" class="detail-backdrop" aria-hidden="true"></div>
-                <section class="resource-detail-panel llm-editor-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-label="模型配置编辑器" tabindex="-1">
+                <section class="resource-detail-panel llm-editor-panel detail-drawer" role="dialog" aria-modal="true"
+                    aria-hidden="true" aria-label="模型配置编辑器" tabindex="-1">
                     <div id="llm-editor-shell" class="resource-detail-shell"></div>
                 </section>
             </section>
@@ -277,7 +325,8 @@
                     </aside>
 
                     <div id="communication-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
-                    <section class="resource-detail-panel communication-detail-panel detail-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="communication-detail-title" tabindex="-1">
+                    <section class="resource-detail-panel communication-detail-panel detail-drawer" role="dialog"
+                        aria-modal="true" aria-hidden="true" aria-labelledby="communication-detail-title" tabindex="-1">
                         <div id="communication-detail-empty" class="empty-state resource-empty">请选择一个通信方式查看或编辑配置。</div>
                         <div id="communication-detail-content" class="resource-detail-shell"></div>
                     </section>
@@ -298,7 +347,8 @@
                         </div>
                     </div>
                     <div class="header-actions">
-                        <div class="stat-pill"><i data-lucide="play-circle"></i> <span id="td-active-count">0</span> 活跃节点</div>
+                        <div class="stat-pill"><i data-lucide="play-circle"></i> <span id="td-active-count">0</span>
+                            活跃节点</div>
                     </div>
                 </header>
 
@@ -311,11 +361,13 @@
                         <div class="tree-container" id="org-tree-container">
                             <div class="empty-state">正在加载任务树...</div>
                         </div>
-                        <div id="task-selection-empty-inline" class="empty-state" style="margin-top: 12px;" hidden>Select a task node to view details.</div>
+                        <div id="task-selection-empty-inline" class="empty-state" style="margin-top: 12px;" hidden>
+                            Select a task node to view details.</div>
                     </div>
 
                     <div id="task-detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
-                    <div id="task-detail-drawer" class="feed-panel panel detail-drawer task-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="feed-target-name" tabindex="-1">
+                    <div id="task-detail-drawer" class="feed-panel panel detail-drawer task-detail-drawer" role="dialog"
+                        aria-modal="true" aria-labelledby="feed-target-name" tabindex="-1">
                         <div class="panel-header">
                             <h2 id="feed-target-name">当前节点</h2>
                         </div>
@@ -324,7 +376,8 @@
                             <div class="agent-detail-header">
                                 <h3 id="ad-role">节点</h3>
                                 <span class="status-badge" id="ad-status">STATUS</span>
-                                <button class="btn-secondary" id="close-agent-btn" type="button" data-modal-close style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--bg-panel); color: var(--text-primary);">关闭</button>
+                                <button class="btn-secondary" id="close-agent-btn" type="button" data-modal-close
+                                    style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--bg-panel); color: var(--text-primary);">关闭</button>
                             </div>
 
                             <div class="agent-detail-section">
@@ -344,7 +397,8 @@
 
                             <div class="agent-detail-section">
                                 <h4><i data-lucide="activity"></i> 日志</h4>
-                                <div id="ad-logs" style="max-height: 250px; overflow-y: auto; background: var(--bg-app); border-radius: var(--radius-md); padding: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2);">
+                                <div id="ad-logs"
+                                    style="max-height: 250px; overflow-y: auto; background: var(--bg-app); border-radius: var(--radius-md); padding: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2);">
                                     <div class="empty-state" style="padding: 10px;">暂无日志。</div>
                                 </div>
                             </div>
@@ -352,7 +406,8 @@
                             <div class="agent-detail-section">
                                 <div class="agent-detail-section-header">
                                     <h4><i data-lucide="package"></i> 工件</h4>
-                                    <button id="artifact-apply-btn" class="toolbar-btn success" type="button" hidden>应用补丁</button>
+                                    <button id="artifact-apply-btn" class="toolbar-btn success" type="button"
+                                        hidden>应用补丁</button>
                                 </div>
                                 <div id="artifact-list" class="artifact-list">
                                     <div class="empty-state" style="padding: 10px;">暂无工件。</div>
@@ -361,7 +416,8 @@
                             </div>
                         </div>
 
-                        <div id="task-node-empty" class="empty-state" style="padding: 16px;">选择任务树中的节点后，这里会显示详情、日志和工件。</div>
+                        <div id="task-node-empty" class="empty-state" style="padding: 16px;">选择任务树中的节点后，这里会显示详情、日志和工件。
+                        </div>
                     </div>
                 </div>
             </section>
@@ -383,10 +439,26 @@
                 </div>
             </div>
 
-            <div id="confirm-backdrop" class="confirm-backdrop" hidden>
-                <div id="confirm-dialog" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+            <div id="rename-session-backdrop" class="confirm-backdrop" hidden>
+                <div class="confirm-dialog">
                     <div class="confirm-header">
-                        <h2 id="confirm-title">请确认</h2>
+                        <h2>重命名会话</h2>
+                    </div>
+                    <div style="padding: 16px;">
+                        <input type="text" id="rename-session-input" class="resource-search" style="width: 100%; box-sizing: border-box;" placeholder="输入新的会话名称">
+                    </div>
+                    <div class="confirm-actions">
+                        <button id="rename-session-cancel" class="toolbar-btn ghost" type="button">取消</button>
+                        <button id="rename-session-accept" class="toolbar-btn success" type="button">确定</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="confirm-backdrop" class="confirm-backdrop" hidden>
+                <div id="confirm-dialog" class="confirm-dialog" role="dialog" aria-modal="true"
+                    aria-labelledby="confirm-title" aria-describedby="confirm-text">
+                    <div class="confirm-header">
+                        <h2>请确认</h2>
                     </div>
                     <p id="confirm-text" class="confirm-text">确认后继续执行当前操作。</p>
                     <div class="confirm-actions">
@@ -405,4 +477,5 @@
         lucide.createIcons();
     </script>
 </body>
+
 </html>

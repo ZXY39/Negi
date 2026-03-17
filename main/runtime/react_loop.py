@@ -75,7 +75,13 @@ class ReActToolLoop:
                 {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
                 for call in list(response.tool_calls or [])
             ]
-            self._log_service.append_node_output(task.task_id, node.node_id, content=str(response.content or ''), tool_calls=tool_calls)
+            self._log_service.append_node_output(
+                task.task_id,
+                node.node_id,
+                content=str(response.content or ''),
+                tool_calls=tool_calls,
+                usage_attempts=list(response.attempts or []),
+            )
             if response.tool_calls:
                 assistant_tool_calls = []
                 tool_messages = []

@@ -23,6 +23,17 @@ class ToolCallRequest:
 
 
 @dataclass
+class LLMModelAttempt:
+    """One concrete model call attempt, including normalized token usage."""
+
+    model_key: str
+    provider_id: str
+    provider_model: str
+    usage: dict[str, int] = field(default_factory=dict)
+    finish_reason: str = "stop"
+
+
+@dataclass
 class LLMResponse:
     """Response from an LLM provider."""
 
@@ -30,6 +41,7 @@ class LLMResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
+    attempts: list[LLMModelAttempt] = field(default_factory=list)
     reasoning_content: str | None = None
     thinking_blocks: list[dict] | None = None
 
@@ -117,6 +129,62 @@ class LLMProvider(ABC):
 
             result.append(msg)
         return result
+
+
+def _usage_lookup(value: Any, *path: str) -> tuple[bool, Any]:
+    current = value
+    for key in path:
+        if isinstance(current, dict):
+            if key not in current:
+                return False, None
+            current = current.get(key)
+            continue
+        if not hasattr(current, key):
+            return False, None
+        current = getattr(current, key)
+    return True, current
+
+
+def _coerce_usage_int(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        return max(0, int(float(text)))
+    except Exception:
+        return 0
+
+
+def normalize_usage_payload(raw_usage: Any) -> dict[str, int]:
+    """Normalize provider-specific usage payloads into a stable token shape."""
+
+    payload: dict[str, int] = {}
+    fields = (
+        ("input_tokens", ("input_tokens",), ("prompt_tokens",)),
+        ("output_tokens", ("output_tokens",), ("completion_tokens",)),
+        (
+            "cache_hit_tokens",
+            ("cache_hit_tokens",),
+            ("cache_read_tokens",),
+            ("cached_tokens",),
+            ("prompt_tokens_details", "cached_tokens"),
+            ("input_tokens_details", "cached_tokens"),
+        ),
+    )
+    for target, *candidates in fields:
+        for path in candidates:
+            found, value = _usage_lookup(raw_usage, *path)
+            if not found:
+                continue
+            payload[target] = _coerce_usage_int(value)
+            break
+    return payload
 
     @abstractmethod
     async def chat(

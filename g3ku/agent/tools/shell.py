@@ -22,6 +22,7 @@ class ExecTool(Tool):
         restrict_to_workspace: bool = False,
         path_append: str = "",
         content_store: Any = None,
+        main_task_service: Any = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -40,6 +41,7 @@ class ExecTool(Tool):
         self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
         self.content_store = content_store
+        self.main_task_service = main_task_service
 
     @property
     def name(self) -> str:
@@ -80,7 +82,8 @@ class ExecTool(Tool):
                 runtime=runtime,
                 error=guard_error,
             )
-        
+
+        resource_state = self._capture_resource_tree_state()
         env = os.environ.copy()
         temp_dir = str(runtime.get("temp_dir") or env.get("G3KU_TMP_DIR") or "").strip()
         if temp_dir:
@@ -152,6 +155,8 @@ class ExecTool(Tool):
                 runtime=runtime,
                 error=f"Error executing command: {str(e)}",
             )
+        finally:
+            self._notify_resource_change(resource_state, runtime=runtime, trigger="tool:exec")
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""
@@ -235,6 +240,31 @@ class ExecTool(Tool):
             force=True,
         )
         return str(envelope.ref or "") if envelope is not None else ""
+
+    def _capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
+        service = self.main_task_service
+        if service is None or not hasattr(service, "capture_resource_tree_state"):
+            return {}
+        try:
+            return service.capture_resource_tree_state()
+        except Exception:
+            return {}
+
+    def _notify_resource_change(
+        self,
+        before_state: dict[str, dict[str, str]] | None,
+        *,
+        runtime: dict[str, Any],
+        trigger: str,
+    ) -> None:
+        service = self.main_task_service
+        if service is None or not hasattr(service, "refresh_changed_resources"):
+            return
+        session_id = str(runtime.get("session_key") or "web:shared").strip() or "web:shared"
+        try:
+            service.refresh_changed_resources(before_state, trigger=trigger, session_id=session_id)
+        except Exception:
+            return
 
     @staticmethod
     def _preview(text: str, *, from_tail: bool) -> str:

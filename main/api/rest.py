@@ -27,7 +27,8 @@ def _ensure_task_route_id(task_id: str) -> str:
 async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1)):
     service = _service()
     await service.startup()
-    items = service.query_service.get_tasks(session_id, int(scope))
+    _ = session_id
+    items = service.query_service.get_tasks(None, int(scope))
     return {
         'ok': True,
         'scope': int(scope),
@@ -64,6 +65,23 @@ async def resume_task(task_id: str):
     service = _service()
     task_id = service.normalize_task_id(task_id)
     record = await service.resume_task(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return {'ok': True, 'task': record.model_dump(mode='json')}
+
+
+@router.post('/tasks/{task_id}/retry')
+async def retry_task(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    task_id = service.normalize_task_id(task_id)
+    try:
+        record = await service.retry_task(task_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == 'task_not_failed':
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}

@@ -29,7 +29,7 @@ async def task_websocket(websocket: WebSocket, task_id: str):
         await websocket.close(code=4404)
         return
     session_id = requested_session_id or str(payload.get('task', {}).get('session_id') or 'web:shared')
-    queue = await service.registry.subscribe_task(session_id, task_id)
+    queue = await service.registry.subscribe_global_task(task_id)
 
     async def sender() -> None:
         while True:
@@ -47,4 +47,4 @@ async def task_websocket(websocket: WebSocket, task_id: str):
     finally:
         sender_task.cancel()
         await asyncio.gather(sender_task, return_exceptions=True)
-        await service.registry.unsubscribe_task(session_id, task_id, queue)
+        await service.registry.unsubscribe_global_task(task_id, queue)

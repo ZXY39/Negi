@@ -60,6 +60,9 @@ except Exception:  # pragma: no cover - optional runtime dependency fallback
 _NS_SEP = "\x1f"
 CONTEXT_TYPE_ALL: tuple[str, ...] = ("memory", "resource", "skill")
 CONTEXT_LAYER_ALL: tuple[str, ...] = ("l0", "l1", "l2")
+_SENTENCE_SPLIT_RE = re.compile(
+    r"[.!?\u3002\uFF01\uFF1F]+(?=\s|$|[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF])"
+)
 
 ContextType = Literal["memory", "resource", "skill"]
 ContextLayer = Literal["l0", "l1", "l2"]
@@ -1685,7 +1688,7 @@ class MemoryManager:
         if window <= 0 or not text:
             return text
         normalized = " ".join(text.split())
-        sentences = [s.strip() for s in re.split(r"[.!?]+(?:\s+|$)", normalized) if s.strip()]
+        sentences = [s.strip() for s in re.split(_SENTENCE_SPLIT_RE, normalized) if s.strip()]
         if len(sentences) <= 1:
             return text
         q = query.lower()

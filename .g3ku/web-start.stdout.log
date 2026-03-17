@@ -1,0 +1,56 @@
+[g3ku] project root: D:\zxy\project\G3ku
+[g3ku] frontend mode: static
+[g3ku] backend url: http://127.0.0.1:18790
+[g3ku] main-agent prompt logging: enabled
+INFO:     127.0.0.1:61012 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61013 - "GET /api/tasks?scope=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61014 - "GET /org_graph.html HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61015 - "GET /org_graph_app.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61080 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61080 - "GET /org_graph.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61079 - "GET /api_client.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61090 - "GET /org_graph_app.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61091 - "GET /org_graph_llm.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61090 - "GET /api/llm/templates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61091 - "GET /api/llm/bindings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61079 - "GET /api/tasks?session_id=web%3Ashared&scope=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61080 - "GET /api/ceo/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61080 - "GET /favicon.ico HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61080 - "GET /api/tasks?session_id=web%3Aceo-ee37b7f8adac&scope=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61130 - "DELETE /api/tasks/task%3Aca21253b3e3b HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61130 - "GET /api/tasks?session_id=web%3Aceo-ee37b7f8adac&scope=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61130 - "GET /api/resources/skills?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61130 - "GET /api/tasks?session_id=web%3Aceo-ee37b7f8adac&scope=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61130 - "GET /api/resources/tools?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61130 - "GET /api/llm/templates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61135 - "GET /api/llm/bindings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61135 - "GET /api/china-bridge/channels HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61163 - "GET /api/llm/templates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/llm/bindings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels/qqbot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "PUT /api/china-bridge/channels/qqbot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "POST /api/china-bridge/channels/qqbot/test HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels/qqbot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels/qqbot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels/qqbot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "PUT /api/china-bridge/channels/qqbot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "POST /api/china-bridge/channels/qqbot/test HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels/qqbot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61162 - "GET /api/china-bridge/channels/qqbot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61260 - "GET /api/resources/tools?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61260 - "GET /api/resources/skills?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61260 - "GET /api/tasks?session_id=web%3Aceo-ee37b7f8adac&scope=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61305 - "GET /api/resources/skills?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61306 - "GET /api/tasks?session_id=web%3Aceo-ee37b7f8adac&scope=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61306 - "GET /api/resources/skills?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61306 - "GET /api/resources/tools?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61306 - "GET /api/resources/skills?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61306 - "GET /api/resources/tools?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61306 - "GET /api/llm/templates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61307 - "GET /api/llm/bindings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61307 - "GET /api/resources/tools?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61307 - "GET /api/resources/skills?offset=0&limit=300 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61307 - "GET /api/tasks?session_id=web%3Aceo-ee37b7f8adac&scope=1 HTTP/1.1" 200 OK

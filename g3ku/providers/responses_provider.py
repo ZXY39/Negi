@@ -101,11 +101,12 @@ class ResponsesProvider(LLMProvider):
                                 if response.status_code in self.RETRYABLE_STATUS_CODES:
                                     raise _RetryableResponsesError(detail)
                                 raise RuntimeError(detail)
-                            content, tool_calls, finish_reason = await _consume_sse(response)
+                            content, tool_calls, finish_reason, usage = await _consume_sse(response)
                             return LLMResponse(
                                 content=content,
                                 tool_calls=tool_calls,
                                 finish_reason=finish_reason,
+                                usage=usage,
                             )
                 except Exception as exc:
                     if not self._is_retryable_network_error(exc):

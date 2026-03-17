@@ -23,6 +23,8 @@ class TaskTreeBuilder:
                 check_result=node.check_result,
                 check_result_ref=str(node.check_result_ref or ''),
                 updated_at=node.updated_at,
+                token_usage=node.token_usage,
+                token_usage_by_model=list(node.token_usage_by_model or []),
                 children=[],
             )
             for node in ordered

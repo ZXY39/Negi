@@ -178,6 +178,7 @@ class FilesystemTool:
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding='utf-8')
+        self._notify_resource_change(file_path, trigger='tool:filesystem.write')
         return f'Successfully wrote {len(content)} bytes to {file_path}'
 
     def _edit(self, path: str, old_text: str | None, new_text: str | None) -> str:
@@ -198,6 +199,7 @@ class FilesystemTool:
             return f'Warning: old_text appears {count} times. Please provide more context to make it unique.'
         updated = content.replace(old_text, new_text, 1)
         file_path.write_text(updated, encoding='utf-8')
+        self._notify_resource_change(file_path, trigger='tool:filesystem.edit')
         return f'Successfully edited {file_path}'
 
     def _delete(self, path: str) -> str:
@@ -207,6 +209,7 @@ class FilesystemTool:
         if not file_path.is_file():
             return f'Error: Not a file: {path}'
         file_path.unlink()
+        self._notify_resource_change(file_path, trigger='tool:filesystem.delete')
         return f'Successfully deleted {file_path}'
 
     def _propose_patch(
@@ -306,6 +309,16 @@ class FilesystemTool:
             artifact_store=artifact_store,
             artifact_lookup=self._main_task_service or artifact_store,
         )
+
+    def _notify_resource_change(self, path: Path, *, trigger: str) -> None:
+        service = self._main_task_service
+        if service is None or not hasattr(service, 'refresh_resource_paths'):
+            return
+        session_id = 'web:shared'
+        try:
+            service.refresh_resource_paths([path], trigger=trigger, session_id=session_id)
+        except Exception:
+            return
 
 
 def build(runtime):

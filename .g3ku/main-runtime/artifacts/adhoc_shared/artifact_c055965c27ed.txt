@@ -1,0 +1,9 @@
+add-tool
+batch-web-planning
+github
+memory
+skill-creator
+task-retrospective
+tmux
+update-tool
+weather

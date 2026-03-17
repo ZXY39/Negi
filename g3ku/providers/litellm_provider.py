@@ -9,7 +9,7 @@ import json_repair
 import litellm
 from litellm import acompletion
 
-from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 from g3ku.providers.registry import find_by_model, find_gateway
 
 # Standard chat-completion message keys.
@@ -287,13 +287,7 @@ class LiteLLMProvider(LLMProvider):
                     arguments=args,
                 ))
 
-        usage = {}
-        if hasattr(response, "usage") and response.usage:
-            usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
+        usage = normalize_usage_payload(getattr(response, "usage", None))
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
         thinking_blocks = getattr(message, "thinking_blocks", None) or None

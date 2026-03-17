@@ -1,0 +1,33 @@
+schema_version: 1
+kind: skill
+name: task-retrospective
+description: 对后台任务做结构化复盘。仅在用户明确要求复盘任务、分析失败原因、总结任务过程、回顾任务结果时使用；优先结合 task_summary、task_list、task_progress 基于事实输出结论。
+trigger:
+  keywords:
+    - 任务复盘
+    - 复盘任务
+    - 复盘这个任务
+    - 分析失败原因
+    - 总结任务过程
+    - 回顾任务执行
+  always: false
+requires:
+  tools:
+    - task_summary
+    - task_list
+    - task_progress
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+  references: references
+governance:
+  allowed_roles:
+    - ceo
+  risk_level: low
+  editable_files:
+    - SKILL.md
+    - references/output-template.md
+exposure:
+  agent: true
+  main_runtime: true

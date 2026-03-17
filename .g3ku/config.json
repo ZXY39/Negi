@@ -10,9 +10,9 @@
       "reasoningEffort": "high"
     },
     "roleIterations": {
-      "ceo": 40,
-      "execution": 16,
-      "inspection": 16
+      "ceo": 999,
+      "execution": 999,
+      "inspection": 999
     },
     "multiAgent": {
       "orchestratorModelKey": null

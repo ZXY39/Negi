@@ -42,6 +42,44 @@ class ResourceRegistry:
         skills = self._discover_skills(tool_names=set(tools.keys()))
         return DiscoveryResult(tools=tools, skills=skills)
 
+    def skill_root_for_path(self, path: Path | str) -> Path | None:
+        return self._resource_root_for_path(path, self.skills_dir)
+
+    def tool_root_for_path(self, path: Path | str) -> Path | None:
+        return self._resource_root_for_path(path, self.tools_dir)
+
+    def build_skill_descriptor(self, root: Path | str, *, tool_names: set[str]) -> SkillResourceDescriptor | None:
+        skill_root = Path(root)
+        manifest_path = skill_root / self.manifest_name
+        if not skill_root.is_dir() or not manifest_path.exists():
+            return None
+        descriptor = self._build_skill(skill_root, manifest_path)
+        missing_tools = [name for name in descriptor.requires_tools if name not in tool_names]
+        if missing_tools:
+            descriptor.available = False
+            descriptor.warnings.append("missing required tools: " + ", ".join(missing_tools))
+        if any(shutil.which(name) is None for name in descriptor.requires_bins):
+            descriptor.available = False
+            descriptor.warnings.append("missing required bins")
+        if any(not os.environ.get(name) for name in descriptor.requires_env):
+            descriptor.available = False
+            descriptor.warnings.append("missing required env")
+        return descriptor
+
+    def build_tool_descriptor(self, root: Path | str) -> ToolResourceDescriptor | None:
+        tool_root = Path(root)
+        manifest_path = tool_root / self.manifest_name
+        if not tool_root.is_dir() or not manifest_path.exists():
+            return None
+        descriptor = self._build_tool(tool_root, manifest_path)
+        if any(shutil.which(name) is None for name in descriptor.requires_bins):
+            descriptor.available = False
+            descriptor.warnings.append("missing required bins")
+        if any(not os.environ.get(name) for name in descriptor.requires_env):
+            descriptor.available = False
+            descriptor.warnings.append("missing required env")
+        return descriptor
+
     def _discover_skills(self, *, tool_names: set[str]) -> dict[str, SkillResourceDescriptor]:
         items: dict[str, SkillResourceDescriptor] = {}
         if not self.skills_dir.exists():
@@ -284,3 +322,15 @@ class ResourceRegistry:
             return True
         except ValueError:
             return False
+
+    @staticmethod
+    def _resource_root_for_path(path: Path | str, base_dir: Path) -> Path | None:
+        candidate = Path(path).expanduser().resolve(strict=False)
+        base = Path(base_dir).resolve(strict=False)
+        try:
+            rel = candidate.relative_to(base)
+        except ValueError:
+            return None
+        if not rel.parts:
+            return None
+        return base / rel.parts[0]

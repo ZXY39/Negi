@@ -1,0 +1,4 @@
+version = '0.20.14'
+repository.url = 'git+https://github.com/vercel-labs/agent-browser.git'
+description = 'Headless browser automation CLI for AI agents'
+dist-tags.latest = '0.20.14'

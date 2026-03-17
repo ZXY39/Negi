@@ -1,0 +1,4 @@
+Cloning into 'external\openclaw-skills-nocheckout'...
+error: invalid path 'skills/fei-moss/moss-trade-bot-factory/data_cache/binanceusdm_BTC_USDT:USDT_15m_2025-10-06_148d.csv'
+error: invalid path 'skills/vajrabodhi/tmap-jsapi-gl-skill/references/jsapigl/demos/多边形&3D棱柱_多边形拔起:3D棱柱.html'
+error: invalid path 'skills/vajrabodhi/tmap-jsapi-gl-skill/references/jsapigl/demos/折线_折线应用:路线规划.html'

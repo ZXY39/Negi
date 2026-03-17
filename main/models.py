@@ -38,6 +38,23 @@ class SpawnChildResult(Model):
     node_output_ref: str = ''
 
 
+class TokenUsageSummary(Model):
+    tracked: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_hit_tokens: int = 0
+    call_count: int = 0
+    calls_with_usage: int = 0
+    calls_without_usage: int = 0
+    is_partial: bool = False
+
+
+class ModelTokenUsageRecord(TokenUsageSummary):
+    model_key: str = ''
+    provider_id: str = ''
+    provider_model: str = ''
+
+
 class TaskArtifactRecord(Model):
     artifact_id: str
     task_id: str
@@ -72,6 +89,7 @@ class TaskRecord(Model):
     runtime_state_path: str = ''
     tree_snapshot_path: str = ''
     tree_text_path: str = ''
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -97,6 +115,8 @@ class NodeRecord(Model):
     updated_at: str
     finished_at: str | None = None
     failure_reason: str = ''
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
+    token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property

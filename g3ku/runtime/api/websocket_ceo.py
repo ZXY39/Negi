@@ -10,28 +10,26 @@ from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 
-from g3ku.config.loader import load_config
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.legacy_metadata import is_legacy_runtime_metadata_message
+from g3ku.runtime.web_ceo_sessions import (
+    WebCeoStateStore,
+    create_web_ceo_session,
+    ensure_active_web_ceo_session,
+    ensure_ceo_session_metadata,
+    upload_dir_for_session,
+    workspace_path,
+)
 from g3ku.shells.web import get_agent, get_runtime_manager
-from g3ku.utils.helpers import ensure_dir, safe_filename
+from g3ku.utils.helpers import safe_filename
 from main.protocol import build_envelope
 
 router = APIRouter()
-UPLOAD_ROOT = Path('.g3ku') / 'web-ceo-uploads'
-
-
-def _workspace_path() -> Path:
-    try:
-        return Path(load_config().workspace_path).resolve()
-    except Exception:
-        return Path.cwd().resolve()
 
 
 def _session_upload_dir(session_id: str) -> Path:
-    safe_session = safe_filename(str(session_id or 'web_shared').replace(':', '_')) or 'web_shared'
-    return ensure_dir(_workspace_path() / UPLOAD_ROOT / safe_session)
+    return upload_dir_for_session(session_id)
 
 
 def _guess_upload_mime_type(name: str, content_type: str | None = None) -> str:
@@ -56,7 +54,7 @@ def _serialize_upload_descriptor(path: Path, *, name: str, mime_type: str) -> di
     return {
         'name': name,
         'path': str(resolved),
-        'relative_path': resolved.relative_to(_workspace_path()).as_posix(),
+        'relative_path': resolved.relative_to(workspace_path()).as_posix(),
         'mime_type': resolved_mime,
         'size': resolved.stat().st_size,
         'kind': _upload_kind(mime_type=resolved_mime, name=name),
@@ -81,7 +79,7 @@ def _resolve_uploaded_file(session_id: str, raw_path: str) -> Path:
         raise HTTPException(status_code=400, detail='invalid_upload_path')
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
-        candidate = (_workspace_path() / candidate).resolve()
+        candidate = (workspace_path() / candidate).resolve()
     else:
         candidate = candidate.resolve()
     upload_dir = _session_upload_dir(session_id).resolve()
@@ -155,8 +153,16 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
     return UserInputMessage(
         content=content or [{'type': 'text', 'text': note or text_value}],
         attachments=[str(item['path']) for item in uploads],
-        metadata={'web_ceo_uploads': uploads},
+        metadata={'web_ceo_uploads': uploads, 'web_ceo_raw_text': text_value},
     )
+
+
+def _build_inflight_turn_snapshot(session: Any) -> dict[str, Any] | None:
+    getter = getattr(session, 'inflight_turn_snapshot', None)
+    if not callable(getter):
+        return None
+    snapshot = getter()
+    return snapshot if isinstance(snapshot, dict) else None
 
 
 @router.post('/ceo/uploads')
@@ -256,9 +262,26 @@ def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
 @router.websocket('/ws/ceo')
 async def ceo_websocket(websocket: WebSocket):
     await websocket.accept()
-    session_id = str(websocket.query_params.get('session_id') or 'web:shared')
     agent = get_agent()
     runtime_manager = get_runtime_manager(agent)
+    transcript_store = getattr(agent, 'sessions', None)
+    if transcript_store is None:
+        await websocket.send_json(build_envelope(channel='ceo', session_id='web:shared', type='error', data={'code': 'session_manager_unavailable'}))
+        await websocket.close(code=4503)
+        return
+    state_store = WebCeoStateStore(workspace_path())
+    requested_session_id = str(websocket.query_params.get('session_id') or '').strip()
+    session_id = requested_session_id or ensure_active_web_ceo_session(transcript_store, state_store)
+    session_path = transcript_store.get_path(session_id)
+    persisted_session = (
+        create_web_ceo_session(transcript_store, session_id=session_id)
+        if not session_path.exists()
+        else transcript_store.get_or_create(session_id)
+    )
+    if ensure_ceo_session_metadata(persisted_session):
+        transcript_store.save(persisted_session)
+    state_store.set_active_session_id(session_id)
+    memory_scope = dict((persisted_session.metadata or {}).get('memory_scope') or {})
     service = getattr(agent, 'main_task_service', None)
     if service is None:
         await websocket.send_json(build_envelope(channel='ceo', session_id=session_id, type='error', data={'code': 'task_service_unavailable'}))
@@ -266,19 +289,21 @@ async def ceo_websocket(websocket: WebSocket):
         return
     await service.startup()
     queue = await service.registry.subscribe_ceo(session_id)
+    global_queue = await service.registry.subscribe_global_ceo()
     stream_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     if ':' in session_id:
         default_channel, default_chat_id = session_id.split(':', 1)
     else:
         default_channel, default_chat_id = 'web', session_id
-    session = runtime_manager.get_or_create(session_key=session_id, channel=default_channel or 'web', chat_id=default_chat_id or 'shared')
-    persisted_messages: list[dict[str, Any]] = []
-    transcript_store = getattr(agent, 'sessions', None)
-    load_session = getattr(transcript_store, 'get_or_create', None)
-    if load_session is not None:
-        persisted_session = load_session(session_id)
-        persisted_messages = _build_ceo_snapshot(getattr(persisted_session, 'messages', []))
+    session = runtime_manager.get_or_create(
+        session_key=session_id,
+        channel=default_channel or 'web',
+        chat_id=default_chat_id or 'shared',
+        memory_channel=str(memory_scope.get('channel') or 'web'),
+        memory_chat_id=str(memory_scope.get('chat_id') or 'shared'),
+    )
+    persisted_messages = _build_ceo_snapshot(getattr(persisted_session, 'messages', []))
     current_turn_task: asyncio.Task[Any] | None = None
 
     async def _safe_send(payload: dict[str, Any]) -> None:
@@ -343,10 +368,19 @@ async def ceo_websocket(websocket: WebSocket):
 
     unsubscribe = session.subscribe(relay_session_event)
     sender_task = asyncio.create_task(sender(queue))
+    global_sender_task = asyncio.create_task(sender(global_queue))
     stream_task = asyncio.create_task(sender(stream_queue))
     try:
+        inflight_turn = _build_inflight_turn_snapshot(session)
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
-        await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='snapshot.ceo', data={'messages': persisted_messages}))
+        await _safe_send(
+            build_envelope(
+                channel='ceo',
+                session_id=session_id,
+                type='snapshot.ceo',
+                data={'messages': persisted_messages, 'inflight_turn': inflight_turn},
+            )
+        )
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='ceo.state', data={'state': session.state_dict()}))
         while True:
             data = await websocket.receive_json()
@@ -393,6 +427,8 @@ async def ceo_websocket(websocket: WebSocket):
     finally:
         unsubscribe()
         sender_task.cancel()
+        global_sender_task.cancel()
         stream_task.cancel()
-        await asyncio.gather(sender_task, stream_task, return_exceptions=True)
+        await asyncio.gather(sender_task, global_sender_task, stream_task, return_exceptions=True)
         await service.registry.unsubscribe_ceo(session_id, queue)
+        await service.registry.unsubscribe_global_ceo(global_queue)

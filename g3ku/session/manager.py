@@ -101,6 +101,10 @@ class SessionManager:
         safe_key = safe_filename(key.replace(":", "_"))
         return self.sessions_dir / f"{safe_key}.jsonl"
 
+    def get_path(self, key: str) -> Path:
+        """Get the persistent path for a session."""
+        return self._get_session_path(key)
+
     def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.
@@ -197,6 +201,15 @@ class SessionManager:
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
+
+    def delete(self, key: str) -> bool:
+        """Delete a session from disk and cache."""
+        path = self._get_session_path(key)
+        self.invalidate(key)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """

@@ -32,16 +32,30 @@ const cloneRoleIterations = (iterations = DEFAULT_ROLE_ITERATIONS()) => {
 const S = {
     view: "ceo",
     ceoWs: null,
+    ceoWsToken: 0,
     ceoPendingTurns: [],
     ceoTurnActive: false,
     ceoPauseBusy: false,
     ceoUploads: [],
     ceoUploadBusy: false,
+    ceoSessions: [],
+    activeSessionId: "",
+    ceoSessionBusy: false,
+    taskDefaults: {
+        sessionId: "",
+        maxDepth: 1,
+        defaultMaxDepth: 1,
+        hardMaxDepth: 4,
+        loading: false,
+        saving: false,
+        requestToken: 0,
+    },
     taskWs: null,
     currentTaskId: null,
     tasks: [],
     currentTask: null,
     currentTaskProgress: null,
+    taskTokenStatsOpen: false,
     taskArtifacts: [],
     selectedArtifactId: "",
     artifactContent: "",
@@ -113,6 +127,13 @@ const S = {
 const U = {
     nav: [...document.querySelectorAll(".nav-item")],
     theme: document.getElementById("theme-toggle"),
+    ceoSessionList: document.getElementById("ceo-session-list"),
+    ceoSessionCurrent: document.getElementById("ceo-session-current"),
+    ceoNewSession: document.getElementById("ceo-new-session-btn"),
+    renameSessionBackdrop: document.getElementById("rename-session-backdrop"),
+    renameSessionInput: document.getElementById("rename-session-input"),
+    renameSessionCancel: document.getElementById("rename-session-cancel"),
+    renameSessionAccept: document.getElementById("rename-session-accept"),
     ceoFeed: document.getElementById("ceo-chat-feed"),
     ceoInput: document.getElementById("ceo-input"),
     ceoAttach: document.getElementById("ceo-attach-btn"),
@@ -139,7 +160,9 @@ const U = {
     modelBackdrop: document.getElementById("model-detail-backdrop"),
     modelDrawer: document.querySelector(".model-detail-dialog"),
     taskGrid: document.getElementById("task-card-grid"),
-    taskSelectionSummary: document.getElementById("task-selection-summary"),
+    taskToolbar: document.getElementById("task-toolbar"),
+    taskDepthSelect: document.getElementById("task-depth-select"),
+    taskDepthHint: document.getElementById("task-depth-hint"),
     taskMultiToggle: document.getElementById("task-multi-toggle"),
     taskFilterWrap: document.getElementById("task-filter-wrap"),
     taskFilterTrigger: document.getElementById("task-filter-menu-trigger"),
@@ -156,6 +179,12 @@ const U = {
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
     taskDetailDrawer: document.getElementById("task-detail-drawer"),
+    taskTokenButton: null,
+    taskTokenBackdrop: null,
+    taskTokenDrawer: null,
+    taskTokenSummaryText: null,
+    taskTokenContent: null,
+    taskTokenClose: null,
     artifactList: document.getElementById("artifact-list"),
     artifactContent: document.getElementById("artifact-content"),
     artifactApply: document.getElementById("artifact-apply-btn"),
@@ -218,6 +247,167 @@ const roleLabel = (v) => ({ ceo: "主Agent", execution: "执行", inspection: "�
 const pStatus = (v) => String(v || "").trim().toLowerCase();
 const MD_TOKEN_MARKER = "\uE000";
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const activeSessionId = () => String(S.activeSessionId || ApiClient.getActiveSessionId()).trim() || ApiClient.getActiveSessionId();
+
+function formatSessionTime(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "No activity yet";
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return parsed.toLocaleString();
+}
+
+function normalizeInt(value, fallback = 0) {
+    const next = Number(value);
+    return Number.isFinite(next) ? Math.trunc(next) : Math.trunc(fallback);
+}
+
+function applyTaskDefaultsPayload(payload = {}) {
+    const runtime = payload?.main_runtime && typeof payload.main_runtime === "object"
+        ? payload.main_runtime
+        : payload?.mainRuntime && typeof payload.mainRuntime === "object"
+            ? payload.mainRuntime
+            : {};
+    const taskDefaults = payload?.task_defaults && typeof payload.task_defaults === "object"
+        ? payload.task_defaults
+        : payload?.taskDefaults && typeof payload.taskDefaults === "object"
+            ? payload.taskDefaults
+            : {};
+    const defaultMaxDepth = Math.max(0, normalizeInt(runtime.default_max_depth ?? runtime.defaultMaxDepth, S.taskDefaults.defaultMaxDepth));
+    const hardMaxDepth = Math.max(defaultMaxDepth, normalizeInt(runtime.hard_max_depth ?? runtime.hardMaxDepth, S.taskDefaults.hardMaxDepth));
+    const maxDepth = clamp(
+        normalizeInt(taskDefaults.max_depth ?? taskDefaults.maxDepth, defaultMaxDepth),
+        0,
+        hardMaxDepth,
+    );
+    S.taskDefaults.sessionId = String(payload?.session_id || payload?.sessionId || S.taskDefaults.sessionId || activeSessionId()).trim();
+    S.taskDefaults.defaultMaxDepth = defaultMaxDepth;
+    S.taskDefaults.hardMaxDepth = hardMaxDepth;
+    S.taskDefaults.maxDepth = maxDepth;
+    S.taskDefaults.loading = false;
+    S.taskDefaults.saving = false;
+    renderTaskDepthControl();
+    return S.taskDefaults;
+}
+
+function renderTaskDepthControl() {
+    if (!U.taskDepthSelect || !U.taskDepthHint) return;
+    const sessionId = String(S.taskDefaults.sessionId || activeSessionId()).trim();
+    const defaultMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.defaultMaxDepth, 1));
+    const hardMaxDepth = Math.max(defaultMaxDepth, normalizeInt(S.taskDefaults.hardMaxDepth, 4));
+    const currentMaxDepth = clamp(normalizeInt(S.taskDefaults.maxDepth, defaultMaxDepth), 0, hardMaxDepth);
+    const disabled = !sessionId || S.taskDefaults.loading || S.taskDefaults.saving;
+    const select = U.taskDepthSelect;
+
+    select.innerHTML = "";
+    for (let depth = 0; depth <= hardMaxDepth; depth += 1) {
+        const option = document.createElement("option");
+        option.value = String(depth);
+        option.textContent = `${depth} 层`;
+        if (depth === currentMaxDepth) option.selected = true;
+        select.appendChild(option);
+    }
+    select.disabled = disabled;
+    select.value = String(currentMaxDepth);
+    select.dataset.sessionId = sessionId;
+    buildResourceSelect(select);
+    syncResourceSelectUI(select);
+
+    if (!sessionId) {
+        U.taskDepthHint.textContent = "请先选择一个 CEO 会话。";
+        return;
+    }
+    if (S.taskDefaults.loading) {
+        U.taskDepthHint.textContent = "正在加载当前会话的新任务深度设置...";
+        return;
+    }
+    if (S.taskDefaults.saving) {
+        U.taskDepthHint.textContent = `正在保存，后续新任务将使用 ${currentMaxDepth} 层深度。`;
+        return;
+    }
+    U.taskDepthHint.textContent = `后续新任务会自动使用该深度，当前范围 0-${hardMaxDepth}。`;
+}
+
+async function loadTaskDefaults(sessionId = activeSessionId()) {
+    const targetSessionId = String(sessionId || "").trim();
+    S.taskDefaults.requestToken += 1;
+    const token = S.taskDefaults.requestToken;
+    if (!targetSessionId) {
+        S.taskDefaults.sessionId = "";
+        S.taskDefaults.loading = false;
+        S.taskDefaults.saving = false;
+        renderTaskDepthControl();
+        return null;
+    }
+    S.taskDefaults.sessionId = targetSessionId;
+    S.taskDefaults.loading = true;
+    renderTaskDepthControl();
+    try {
+        const payload = await ApiClient.getCeoTaskDefaults(targetSessionId);
+        if (token !== S.taskDefaults.requestToken) return payload;
+        return applyTaskDefaultsPayload(payload);
+    } catch (e) {
+        if (token !== S.taskDefaults.requestToken) return null;
+        S.taskDefaults.loading = false;
+        S.taskDefaults.saving = false;
+        renderTaskDepthControl();
+        showToast({ title: "深度设置加载失败", text: e.message || "Unknown error", kind: "error" });
+        return null;
+    }
+}
+
+async function saveTaskDefaultMaxDepth(value) {
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId || !U.taskDepthSelect) return;
+    const nextDepth = clamp(normalizeInt(value, S.taskDefaults.defaultMaxDepth), 0, Math.max(S.taskDefaults.defaultMaxDepth, S.taskDefaults.hardMaxDepth));
+    if (!S.taskDefaults.loading && !S.taskDefaults.saving && nextDepth === normalizeInt(S.taskDefaults.maxDepth, nextDepth)) {
+        renderTaskDepthControl();
+        return;
+    }
+    const previousDepth = S.taskDefaults.maxDepth;
+    S.taskDefaults.sessionId = sessionId;
+    S.taskDefaults.maxDepth = nextDepth;
+    S.taskDefaults.saving = true;
+    renderTaskDepthControl();
+    try {
+        const payload = await ApiClient.updateCeoTaskDefaults(sessionId, { max_depth: nextDepth });
+        applyTaskDefaultsPayload(payload);
+        showToast({ title: "深度已更新", text: `后续新任务将使用 ${S.taskDefaults.maxDepth} 层深度。`, kind: "success" });
+    } catch (e) {
+        S.taskDefaults.maxDepth = previousDepth;
+        S.taskDefaults.saving = false;
+        renderTaskDepthControl();
+        showToast({ title: "深度更新失败", text: e.message || "Unknown error", kind: "error" });
+    }
+}
+
+function taskCreatedSortValue(task) {
+    const parsed = Date.parse(String(task?.created_at || ""));
+    return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
+function orderedTasks(tasks = S.tasks) {
+    return [...(Array.isArray(tasks) ? tasks : [])].sort((left, right) => {
+        const timeDiff = taskCreatedSortValue(right) - taskCreatedSortValue(left);
+        if (timeDiff !== 0) return timeDiff;
+        const rightCreatedAt = String(right?.created_at || "");
+        const leftCreatedAt = String(left?.created_at || "");
+        if (rightCreatedAt !== leftCreatedAt) return rightCreatedAt.localeCompare(leftCreatedAt);
+        return String(left?.task_id || "").localeCompare(String(right?.task_id || ""));
+    });
+}
+
+function canMutateCeoSessions() {
+    return !(S.ceoTurnActive || S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
+}
+
+function syncCeoSessionActions() {
+    const disabled = !canMutateCeoSessions();
+    if (U.ceoNewSession) U.ceoNewSession.disabled = disabled;
+    U.ceoSessionList?.querySelectorAll("[data-session-activate], [data-session-rename], [data-session-delete]")?.forEach((button) => {
+        button.disabled = disabled;
+    });
+}
 
 function safeHref(value) {
     const href = String(value || "").trim();
@@ -478,8 +668,9 @@ function renderPendingCeoUploads() {
             </div>
         `;
     }
-    if (U.ceoAttach) U.ceoAttach.disabled = !!S.ceoUploadBusy;
+    if (U.ceoAttach) U.ceoAttach.disabled = !!S.ceoUploadBusy || !!S.ceoSessionBusy || !activeSessionId();
     syncCeoPrimaryButton();
+    syncCeoSessionActions();
     icons();
 }
 
@@ -489,7 +680,7 @@ function syncCeoPrimaryButton() {
     const label = S.ceoPauseBusy ? "暂停中" : isPause ? "暂停" : "发送";
     const icon = isPause ? "pause" : "send";
     U.ceoSend.innerHTML = `<i data-lucide="${icon}"></i> ${label}`;
-    U.ceoSend.disabled = !!S.ceoUploadBusy || !!S.ceoPauseBusy;
+    U.ceoSend.disabled = !!S.ceoUploadBusy || !!S.ceoPauseBusy || !!S.ceoSessionBusy || !activeSessionId();
     U.ceoSend.setAttribute("aria-label", isPause ? "暂停当前 CEO 会话" : "发送消息");
     icons();
 }
@@ -518,6 +709,7 @@ function applyCeoState(state = {}) {
     if (!running) S.ceoPauseBusy = false;
     if (running) ensureActiveCeoTurn();
     if (paused) finalizePausedCeoTurn();
+    syncCeoSessionActions();
     syncCeoPrimaryButton();
 }
 
@@ -532,12 +724,14 @@ function handleCeoControlAck(payload = {}) {
     }
     S.ceoTurnActive = false;
     finalizePausedCeoTurn();
+    syncCeoSessionActions();
     syncCeoPrimaryButton();
 }
 
 function handleCeoError(payload = {}) {
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
+    syncCeoSessionActions();
     syncCeoPrimaryButton();
     finalizeCeoTurn(`运行出错：${String(payload?.message || "unknown error")}`);
 }
@@ -554,7 +748,7 @@ function requestCeoPause() {
         syncCeoPrimaryButton();
         S.ceoWs.send(JSON.stringify({
             type: "client.pause_turn",
-            session_id: "web:shared",
+            session_id: activeSessionId(),
         }));
     } catch (e) {
         S.ceoPauseBusy = false;
@@ -578,7 +772,7 @@ async function handleCeoFileSelection(event) {
     S.ceoUploadBusy = true;
     renderPendingCeoUploads();
     try {
-        const uploaded = await ApiClient.uploadCeoFiles(files);
+        const uploaded = await ApiClient.uploadCeoFiles(files, activeSessionId());
         S.ceoUploads = [...normalizeUploadList(S.ceoUploads), ...normalizeUploadList(uploaded)];
         renderPendingCeoUploads();
         showToast({ title: "上传完成", text: `已添加 ${uploaded.length} 个附件`, kind: "success" });
@@ -617,7 +811,26 @@ function resetCeoFeed() {
     S.ceoPendingTurns = [];
 }
 
-function renderCeoSnapshot(messages = []) {
+function restoreCeoInflightTurn(snapshot = null) {
+    if (!snapshot || typeof snapshot !== "object") return;
+    const userMessage = snapshot.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
+    if (userMessage) {
+        const attachments = normalizeUploadList(userMessage.attachments);
+        const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
+        addMsg(text, "user", { attachments });
+    }
+    const status = String(snapshot.status || "").trim().toLowerCase();
+    const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
+    const needsAssistantTurn = toolEvents.length > 0 || status === "running" || status === "paused" || status === "error";
+    if (needsAssistantTurn) ensureActiveCeoTurn();
+    toolEvents.forEach((event) => appendCeoToolEvent(event));
+    if (status === "error") {
+        const errorMessage = String(snapshot?.last_error?.message || "").trim() || "unknown error";
+        finalizeCeoTurn(`运行出错：${errorMessage}`);
+    }
+}
+
+function renderCeoSnapshot(messages = [], inflightTurn = null) {
     resetCeoFeed();
     messages.forEach((item) => {
         const role = String(item?.role || "").trim().toLowerCase();
@@ -631,6 +844,7 @@ function renderCeoSnapshot(messages = []) {
             addMsg(content, "system", { markdown: true });
         }
     });
+    restoreCeoInflightTurn(inflightTurn);
 }
 
 function scrollCeoFeedToBottom() {
@@ -863,8 +1077,76 @@ function resourceSelectLabel(select) {
         "skill-status-filter": "Skill status filter",
         "tool-status-filter": "Tool status filter",
         "tool-risk-filter": "Tool risk filter",
+        "task-depth-select": "Task tree depth",
     };
     return map[String(select?.id || "").trim()] || "Resource filter";
+}
+
+function buildResourceSelectOptionButton(select, shell, option) {
+    if (!(select instanceof HTMLSelectElement) || !(shell instanceof HTMLElement) || !(option instanceof HTMLOptionElement)) return null;
+    const optionButton = document.createElement("button");
+    optionButton.type = "button";
+    optionButton.className = "resource-select-option";
+    optionButton.dataset.value = option.value;
+    optionButton.setAttribute("role", "option");
+    optionButton.tabIndex = -1;
+
+    const label = document.createElement("span");
+    label.className = "resource-select-option-label";
+    label.textContent = String(option.textContent || "").trim();
+
+    const check = document.createElement("span");
+    check.className = "resource-select-option-check";
+    check.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="13 5 7 11 4 8"></polyline></svg>`;
+    check.setAttribute("aria-hidden", "true");
+
+    optionButton.append(label, check);
+    optionButton.addEventListener("click", () => setResourceSelectValue(select, option.value));
+    optionButton.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            focusResourceSelectOption(shell, "next");
+        }
+        if (e.key === "ArrowUp") {
+            e.preventDefault();
+            focusResourceSelectOption(shell, "prev");
+        }
+        if (e.key === "Home") {
+            e.preventDefault();
+            focusResourceSelectOption(shell, "first");
+        }
+        if (e.key === "End") {
+            e.preventDefault();
+            focusResourceSelectOption(shell, "last");
+        }
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setResourceSelectValue(select, option.value);
+        }
+        if (e.key === "Escape") {
+            e.preventDefault();
+            closeResourceSelects({ restoreFocus: true });
+        }
+        if (e.key === "Tab") closeResourceSelects();
+    });
+    return optionButton;
+}
+
+function rebuildResourceSelectOptions(select) {
+    if (!(select instanceof HTMLSelectElement)) return;
+    const shell = select.closest(".resource-select-shell");
+    const menu = shell?.querySelector(".resource-select-menu");
+    if (!(shell instanceof HTMLElement) || !(menu instanceof HTMLElement)) return;
+    const signature = [...select.options]
+        .map((option) => `${String(option.value)}\u0000${String(option.textContent || "").trim()}`)
+        .join("\u0001");
+    if (menu.dataset.optionsSignature === signature) return;
+    menu.innerHTML = "";
+    [...select.options].forEach((option) => {
+        const optionButton = buildResourceSelectOptionButton(select, shell, option);
+        if (optionButton) menu.appendChild(optionButton);
+    });
+    menu.dataset.optionsSignature = signature;
 }
 
 function closeResourceSelects({ exceptId = "", restoreFocus = false } = {}) {
@@ -889,6 +1171,7 @@ function syncResourceSelectUI(select) {
     if (!(select instanceof HTMLSelectElement)) return;
     const shell = select.closest(".resource-select-shell");
     if (!shell) return;
+    rebuildResourceSelectOptions(select);
     const trigger = shell.querySelector(".resource-select-trigger");
     const valueEl = shell.querySelector(".resource-select-value");
     const menu = shell.querySelector(".resource-select-menu");
@@ -1014,7 +1297,7 @@ function buildResourceSelect(select) {
 
         const check = document.createElement("span");
         check.className = "resource-select-option-check";
-        check.textContent = "✓";
+        check.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="13 5 7 11 4 8"></polyline></svg>`;
         check.setAttribute("aria-hidden", "true");
 
         optionButton.append(label, check);
@@ -1979,12 +2262,267 @@ async function deleteModelDetail(modelKey) {
     }
 }
 
+function resetCeoComposerState() {
+    S.ceoUploads = [];
+    S.ceoUploadBusy = false;
+    if (U.ceoInput) U.ceoInput.value = "";
+    if (U.ceoFileInput) U.ceoFileInput.value = "";
+    renderPendingCeoUploads();
+    syncCeoInputHeight();
+}
+
+function resetCeoSessionState() {
+    resetCeoFeed();
+    S.ceoPendingTurns = [];
+    S.ceoTurnActive = false;
+    S.ceoPauseBusy = false;
+    syncCeoPrimaryButton();
+}
+
+function closeCeoWs() {
+    S.ceoWsToken += 1;
+    const socket = S.ceoWs;
+    S.ceoWs = null;
+    if (!socket) return;
+    socket.onclose = null;
+    socket.close();
+}
+
+function renderCeoSessions() {
+    if (!U.ceoSessionList || !U.ceoSessionCurrent) return;
+    const sessions = Array.isArray(S.ceoSessions) ? S.ceoSessions : [];
+    const currentId = activeSessionId();
+    const current = sessions.find((item) => String(item?.session_id || "") === currentId) || null;
+    U.ceoSessionCurrent.innerHTML = current
+        ? `
+            <div class="ceo-session-current-title">${esc(String(current.title || current.session_id || "Session"))}</div>
+            <div class="ceo-session-current-meta">当前会话 · ${esc(formatSessionTime(current.updated_at))}</div>
+        `
+        : `
+            <div class="ceo-session-current-title">正在准备会话</div>
+            <div class="ceo-session-current-meta">会话加载后会自动连接。</div>
+        `;
+
+    if (!sessions.length) {
+        U.ceoSessionList.innerHTML = '<div class="empty-state ceo-session-empty">No sessions yet.</div>';
+        syncCeoSessionActions();
+        return;
+    }
+
+    const disabled = !canMutateCeoSessions();
+    U.ceoSessionList.innerHTML = sessions.map((item) => {
+        const sessionId = String(item?.session_id || "");
+        const isActive = sessionId === currentId;
+        const preview = String(item?.preview_text || "").trim() || "No messages yet.";
+        return `
+            <div class="ceo-session-card${isActive ? " is-active" : ""}" role="listitem">
+                <button
+                    type="button"
+                    class="ceo-session-main ceo-session-select"
+                    data-session-activate="${esc(sessionId)}"
+                    aria-pressed="${isActive ? "true" : "false"}"
+                >
+                    <div class="ceo-session-title">${esc(String(item.title || sessionId || "Session"))}</div>
+                    <div class="ceo-session-preview">${esc(preview)}</div>
+                    <div class="ceo-session-meta">${esc(formatSessionTime(item.updated_at))}</div>
+                </button>
+                <div class="ceo-session-actions" aria-label="Session actions">
+                    <button type="button" class="ceo-session-action" data-session-rename="${esc(sessionId)}" aria-label="Rename session" ${disabled ? "disabled" : ""}>
+                        <i data-lucide="pencil"></i>
+                    </button>
+                    <button type="button" class="ceo-session-action danger" data-session-delete="${esc(sessionId)}" aria-label="Delete session" ${disabled ? "disabled" : ""}>
+                        <i data-lucide="trash-2"></i>
+                    </button>
+                </div>
+            </div>
+        `;
+    }).join("");
+    syncCeoSessionActions();
+    icons();
+}
+
+function applyCeoSessionsPayload(payload = {}) {
+    const sessions = Array.isArray(payload?.items) ? payload.items : [];
+    const nextActiveId =
+        String(payload?.active_session_id || "").trim()
+        || String(sessions.find((item) => item?.is_active)?.session_id || "").trim()
+        || activeSessionId();
+    S.ceoSessions = sessions;
+    S.activeSessionId = nextActiveId;
+    if (nextActiveId) ApiClient.setActiveSessionId(nextActiveId);
+    renderCeoSessions();
+    void loadTaskDefaults(nextActiveId);
+    return nextActiveId;
+}
+
+async function refreshCeoSessions({ reconnect = false } = {}) {
+    S.ceoSessionBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    try {
+        const payload = await ApiClient.listCeoSessions();
+        const nextActiveId = applyCeoSessionsPayload(payload);
+        if (reconnect && nextActiveId) initCeoWs();
+        return payload;
+    } finally {
+        S.ceoSessionBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+    }
+}
+
+async function activateCeoSession(sessionId) {
+    const targetId = String(sessionId || "").trim();
+    if (!targetId || targetId === activeSessionId()) return;
+    if (!canMutateCeoSessions()) {
+        showToast({ title: "会话暂不可切换", text: "请先等待当前回合完成或暂停后再切换。", kind: "warn" });
+        return;
+    }
+    S.ceoSessionBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    try {
+        const payload = await ApiClient.activateCeoSession(targetId);
+        const nextActiveId = applyCeoSessionsPayload(payload);
+        closeCeoWs();
+        resetCeoComposerState();
+        resetCeoSessionState();
+        if (nextActiveId) initCeoWs();
+    } catch (e) {
+        showToast({ title: "切换失败", text: e.message || "Unknown error", kind: "error" });
+    } finally {
+        S.ceoSessionBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+    }
+}
+
+async function createNewCeoSession() {
+    if (!canMutateCeoSessions()) {
+        showToast({ title: "当前不可新建", text: "请先等待当前回合完成或暂停后再新建会话。", kind: "warn" });
+        return;
+    }
+    S.ceoSessionBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    try {
+        const payload = await ApiClient.createCeoSession({});
+        const nextActiveId = applyCeoSessionsPayload(payload);
+        closeCeoWs();
+        resetCeoComposerState();
+        resetCeoSessionState();
+        if (nextActiveId) initCeoWs();
+    } catch (e) {
+        showToast({ title: "新建失败", text: e.message || "Unknown error", kind: "error" });
+    } finally {
+        S.ceoSessionBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+    }
+}
+
+async function renameCeoSession(sessionId) {
+    const targetId = String(sessionId || "").trim();
+    const current = (S.ceoSessions || []).find((item) => String(item?.session_id || "") === targetId);
+    if (!targetId || !current || !U.renameSessionBackdrop || !U.renameSessionInput) return;
+    if (!canMutateCeoSessions()) {
+        showToast({ title: "当前不可重命名", text: "请先等待当前回合完成或暂停后再操作。", kind: "warn" });
+        return;
+    }
+    U.renameSessionInput.value = current.title || "";
+    U.renameSessionBackdrop.hidden = false;
+    U.renameSessionBackdrop.classList.add("is-open");
+    U.renameSessionInput.focus();
+    S.renameContext = { sessionId: targetId };
+}
+
+async function handleRenameAccept() {
+    const sessionId = S.renameContext?.sessionId;
+    const nextTitle = String(U.renameSessionInput?.value || "").trim();
+    if (!sessionId || !nextTitle) {
+        handleRenameCancel();
+        return;
+    }
+    handleRenameCancel();
+    S.ceoSessionBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    showToast({ title: "正在重命名", text: "请稍候...", kind: "info", persistent: true });
+    try {
+        const payload = await ApiClient.renameCeoSession(sessionId, { title: nextTitle });
+        applyCeoSessionsPayload(payload);
+        showToast({ title: "成功", text: "会话已重命名", kind: "success" });
+    } catch (e) {
+        showToast({ title: "重命名失败", text: e.message || "Unknown error", kind: "error" });
+    } finally {
+        S.ceoSessionBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+    }
+}
+
+function handleRenameCancel() {
+    if (U.renameSessionBackdrop) {
+        U.renameSessionBackdrop.hidden = true;
+        U.renameSessionBackdrop.classList.remove("is-open");
+    }
+    S.renameContext = null;
+}
+
+async function performDeleteCeoSession(sessionId) {
+    const targetId = String(sessionId || "").trim();
+    if (!targetId) return;
+    const wasActive = targetId === activeSessionId();
+    S.ceoSessionBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    try {
+        const payload = await ApiClient.deleteCeoSession(targetId);
+        const nextActiveId = applyCeoSessionsPayload(payload);
+        if (wasActive) {
+            closeCeoWs();
+            resetCeoComposerState();
+            resetCeoSessionState();
+            if (nextActiveId) initCeoWs();
+        }
+    } catch (e) {
+        showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
+    } finally {
+        S.ceoSessionBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+    }
+}
+
+function requestDeleteCeoSession(sessionId) {
+    const current = (S.ceoSessions || []).find((item) => String(item?.session_id || "") === String(sessionId || "").trim());
+    if (!current) return;
+    if (!canMutateCeoSessions()) {
+        showToast({ title: "当前不可删除", text: "请先等待当前回合完成或暂停后再操作。", kind: "warn" });
+        return;
+    }
+    openConfirm({
+        title: "删除会话",
+        text: `将删除会话“${current.title || current.session_id}”的聊天记录与附件。后台任务不会被删除。`,
+        confirmLabel: "删除",
+        confirmKind: "danger",
+        returnFocus: U.ceoNewSession,
+        onConfirm: () => performDeleteCeoSession(current.session_id),
+    });
+}
+
 function initCeoWs() {
-    if (S.ceoWs && S.ceoWs.readyState <= 1) return;
-    S.ceoWs = new WebSocket(ApiClient.getCeoWsUrl());
+    const sessionId = activeSessionId();
+    if (!sessionId) return;
+    if (S.ceoWs && S.ceoWs.readyState <= 1 && S.ceoWs.sessionId === sessionId) return;
+    closeCeoWs();
+    const token = ++S.ceoWsToken;
+    const socket = new WebSocket(ApiClient.getCeoWsUrl(sessionId));
+    socket.sessionId = sessionId;
+    S.ceoWs = socket;
     S.ceoWs.onmessage = (ev) => {
         const payload = JSON.parse(ev.data);
-        if (payload.type === "snapshot.ceo") renderCeoSnapshot(payload.data?.messages || []);
+        if (payload.type === "snapshot.ceo") renderCeoSnapshot(payload.data?.messages || [], payload.data?.inflight_turn || null);
         if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {});
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
         if (payload.type === "ceo.agent.tool") appendCeoToolEvent(payload.data || {});
@@ -1994,9 +2532,15 @@ function initCeoWs() {
         if (payload.type === "task.artifact.applied" && payload.data?.task_id === S.currentTaskId) void loadTaskArtifacts();
     };
     S.ceoWs.onclose = () => {
+        if (token !== S.ceoWsToken) return;
+        S.ceoWs = null;
         S.ceoPauseBusy = false;
         syncCeoPrimaryButton();
-        window.setTimeout(() => S.view === "ceo" && initCeoWs(), 1000);
+        window.setTimeout(() => {
+            if (token !== S.ceoWsToken) return;
+            if (activeSessionId() !== sessionId) return;
+            initCeoWs();
+        }, 1000);
     };
 }
 
@@ -2005,6 +2549,7 @@ function sendCeoMessage() {
         requestCeoPause();
         return;
     }
+    if (S.ceoSessionBusy || !activeSessionId()) return;
     const text = String(U.ceoInput.value || "");
     const uploads = normalizeUploadList(S.ceoUploads);
     if (!text.trim() && !uploads.length) return;
@@ -2020,7 +2565,7 @@ function sendCeoMessage() {
     try {
         S.ceoWs.send(JSON.stringify({
             type: "client.user_message",
-            session_id: "web:shared",
+            session_id: activeSessionId(),
             text,
             uploads: uploads.map((item) => ({
                 name: item.name,
@@ -2039,6 +2584,7 @@ function sendCeoMessage() {
         if (turn) S.ceoPendingTurns.push(turn);
         S.ceoTurnActive = true;
         S.ceoPauseBusy = false;
+        syncCeoSessionActions();
         syncCeoPrimaryButton();
     } catch (e) {
         addMsg(`Failed to send message: ${e.message || "unknown error"}`, "system");
@@ -2047,12 +2593,132 @@ function sendCeoMessage() {
 }
 const canPause = (task) => !!task && !task.is_paused && pStatus(task.status) === "in_progress";
 const canResume = (task) => !!task && !!task.is_paused;
-const canDelete = (task) => !!task && !!task.is_paused;
+const canRetry = (task) => !!task && pStatus(task.status) === "failed";
+const canDelete = (task) => !!task && (!!task.is_paused || ["success", "failed"].includes(pStatus(task.status)));
+const EMPTY_TOKEN_USAGE = () => ({
+    tracked: false,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_hit_tokens: 0,
+    call_count: 0,
+    calls_with_usage: 0,
+    calls_without_usage: 0,
+    is_partial: false,
+});
 
 function taskStatusKey(task) {
     if (!task) return "unknown";
     if (task.is_paused) return "blocked";
     return pStatus(task.status) || "unknown";
+}
+
+function normalizeTokenUsage(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const toInt = (value) => {
+        const num = Number(value);
+        return Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0;
+    };
+    return {
+        tracked: !!source.tracked,
+        input_tokens: toInt(source.input_tokens),
+        output_tokens: toInt(source.output_tokens),
+        cache_hit_tokens: toInt(source.cache_hit_tokens),
+        call_count: toInt(source.call_count),
+        calls_with_usage: toInt(source.calls_with_usage),
+        calls_without_usage: toInt(source.calls_without_usage),
+        is_partial: !!source.is_partial,
+    };
+}
+
+function normalizeModelTokenUsage(raw) {
+    const usage = normalizeTokenUsage(raw);
+    return {
+        ...usage,
+        model_key: String(raw?.model_key || "").trim(),
+        provider_id: String(raw?.provider_id || "").trim(),
+        provider_model: String(raw?.provider_model || "").trim(),
+    };
+}
+
+function formatTokenCount(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return "0";
+    return new Intl.NumberFormat("zh-CN").format(Math.max(0, Math.floor(num)));
+}
+
+function tokenKnownTotal(usage) {
+    const data = normalizeTokenUsage(usage);
+    return data.input_tokens + data.output_tokens;
+}
+
+function taskTokenUsage(task = null, progress = null) {
+    return normalizeTokenUsage(task?.token_usage || progress?.token_usage || EMPTY_TOKEN_USAGE());
+}
+
+function taskTokenSummaryLine(usage) {
+    const data = normalizeTokenUsage(usage);
+    if (!data.tracked) return "历史任务未统计";
+    if (!data.call_count) return "尚未发生模型调用";
+    const parts = [
+        `输入 ${formatTokenCount(data.input_tokens)}`,
+        `输出 ${formatTokenCount(data.output_tokens)}`,
+        `缓存命中 ${formatTokenCount(data.cache_hit_tokens)}`,
+    ];
+    if (data.is_partial) parts.push("部分缺失");
+    return parts.join(" · ");
+}
+
+function ensureTaskTokenUi() {
+    const view = U.viewTaskDetails;
+    if (!view) return;
+    if (!U.taskTokenButton) {
+        const headerActions = view.querySelector(".project-header .header-actions");
+        if (headerActions) {
+            const button = document.createElement("button");
+            button.id = "task-token-stats-btn";
+            button.className = "toolbar-btn ghost";
+            button.type = "button";
+            button.textContent = "Token统计";
+            button.disabled = true;
+            headerActions.appendChild(button);
+            U.taskTokenButton = button;
+        }
+    }
+    if (!U.taskTokenBackdrop || !U.taskTokenDrawer) {
+        const backdrop = document.createElement("div");
+        backdrop.id = "task-token-backdrop";
+        backdrop.className = "detail-backdrop";
+        backdrop.setAttribute("aria-hidden", "true");
+        const drawer = document.createElement("section");
+        drawer.id = "task-token-drawer";
+        drawer.className = "panel detail-drawer task-token-modal";
+        drawer.setAttribute("role", "dialog");
+        drawer.setAttribute("aria-modal", "true");
+        drawer.setAttribute("aria-hidden", "true");
+        drawer.setAttribute("aria-labelledby", "task-token-title");
+        drawer.tabIndex = -1;
+        drawer.innerHTML = `
+            <div class="detail-modal-header">
+                <div>
+                    <h2 id="task-token-title">Token统计</h2>
+                    <p id="task-token-summary-text" class="subtitle">任务级 token 消耗会在这里实时刷新。</p>
+                </div>
+                <button id="task-token-close-btn" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
+            </div>
+            <div class="detail-modal-body">
+                <div id="task-token-content" class="task-token-shell">
+                    <div class="empty-state">请选择一个任务后查看 token 统计。</div>
+                </div>
+            </div>
+        `;
+        view.querySelector(".project-dashboard")?.appendChild(backdrop);
+        view.querySelector(".project-dashboard")?.appendChild(drawer);
+        U.taskTokenBackdrop = backdrop;
+        U.taskTokenDrawer = drawer;
+        U.taskTokenSummaryText = drawer.querySelector("#task-token-summary-text");
+        U.taskTokenContent = drawer.querySelector("#task-token-content");
+        U.taskTokenClose = drawer.querySelector("#task-token-close-btn");
+    }
 }
 
 
@@ -2227,7 +2893,11 @@ function syncTaskSelection() {
 
 function updateTaskToolbar() {
     const selected = getSelectedTasks();
-    if (U.taskSelectionSummary) U.taskSelectionSummary.textContent = `Selected ${selected.length}`;
+    if (U.taskToolbar) U.taskToolbar.hidden = !S.multiSelectMode;
+    if (U.taskMultiToggle) {
+        U.taskMultiToggle.setAttribute("aria-pressed", S.multiSelectMode ? "true" : "false");
+        U.taskMultiToggle.classList.toggle("active", S.multiSelectMode);
+    }
     const filterButtons = [...(U.taskFilterMenu?.querySelectorAll("[data-select-bucket]") || [])];
     filterButtons.forEach((button) => {
         button.disabled = S.taskBusy || !S.tasks.some((task) => statusBucketMatches(task, button.dataset.selectBucket));
@@ -2239,7 +2909,9 @@ function updateTaskToolbar() {
             ? selected.some((task) => canPause(task))
             : action === "resume"
                 ? selected.some((task) => canResume(task))
-                : selected.some((task) => canDelete(task));
+                : action === "retry"
+                    ? selected.some((task) => canRetry(task))
+                    : selected.some((task) => canDelete(task));
         button.disabled = S.taskBusy || !enabled;
     });
     setTaskMenuVisibility();
@@ -2267,7 +2939,7 @@ function taskActionErrorText(action, error) {
     const message = String(error?.message || error || "").trim();
     if (action === "delete") {
         if (message.includes("task_still_stopping")) return "任务仍在停止中，请稍后再删";
-        if (message.includes("task_not_paused")) return "仅暂停中的任务可删除";
+        if (message.includes("task_not_deletable") || message.includes("task_not_paused")) return "仅已暂停或已完成的任务可删除";
         if (message.includes("task_not_found")) return "任务不存在或已被删除";
     }
     return message || "Unknown error";
@@ -2296,7 +2968,7 @@ async function requestTaskAction(taskId, action) {
 function taskMetaText(task) {
     const parts = [];
     if (task.is_unread) parts.push("Unread");
-    if (task.updated_at) parts.push(new Date(task.updated_at).toLocaleString());
+    if (task.created_at) parts.push(`Created ${formatSessionTime(task.created_at)}`);
     return parts.join(" · ") || "No timestamp";
 }
 function renderTasks() {
@@ -2305,7 +2977,7 @@ function renderTasks() {
         U.taskGrid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">No tasks yet.</div>';
         return updateTaskToolbar();
     }
-    S.tasks.forEach((task) => {
+    orderedTasks(S.tasks).forEach((task) => {
         const selected = S.selectedTaskIds.has(task.task_id);
         const primaryAction = primaryTaskAction(task);
         const statusKey = taskStatusKey(task);
@@ -2316,9 +2988,10 @@ function renderTasks() {
                 <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
                 <span class="status-badge" data-status="${esc(statusKey)}">${esc(taskStatusLabel(task))}</span>
             </div>
-            <div class="pc-header"><div><h3 class="pc-title">${esc(task.title || task.task_id)}</h3><span class="pc-id">${esc(task.task_id)}</span></div></div>
+            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title">${esc(task.title || task.task_id)}</h3><span class="pc-id">${esc(task.task_id)}</span></div></div>
             <div class="pc-summary">${esc(task.brief || "No summary")}</div>
             <div class="pc-stats">${esc(taskMetaText(task))}</div>
+            <div class="pc-token-stats">${esc(taskTokenSummaryLine(task.token_usage))}</div>
             <div class="pc-actions">
                 <div class="pc-actions-left">
                     ${primaryAction ? `<button class="project-action-btn ${primaryAction.tone}" type="button" data-action="${primaryAction.action}" ${S.taskBusy ? "disabled" : ""}>${primaryAction.label}</button>` : ""}
@@ -2476,6 +3149,191 @@ async function performTaskBatchAction(action, eligible) {
     }
 }
 
+function updateTaskToolbar() {
+    syncTaskSelection();
+    const selected = getSelectedTasks();
+    if (U.taskToolbar) U.taskToolbar.hidden = !S.multiSelectMode;
+    if (U.taskMultiToggle) {
+        U.taskMultiToggle.setAttribute("aria-pressed", S.multiSelectMode ? "true" : "false");
+        U.taskMultiToggle.classList.toggle("active", S.multiSelectMode);
+    }
+    const filterButtons = [...(U.taskFilterMenu?.querySelectorAll("[data-select-bucket]") || [])];
+    filterButtons.forEach((button) => {
+        button.disabled = S.taskBusy || !S.tasks.some((task) => statusBucketMatches(task, button.dataset.selectBucket));
+    });
+    const batchButtons = [...(U.taskBatchMenu?.querySelectorAll("[data-batch-action]") || [])];
+    batchButtons.forEach((button) => {
+        const action = button.dataset.batchAction;
+        const enabled = action === "pause"
+            ? selected.some((task) => canPause(task))
+            : action === "resume"
+                ? selected.some((task) => canResume(task))
+                : action === "retry"
+                    ? selected.some((task) => canRetry(task))
+                    : selected.some((task) => canDelete(task));
+        button.disabled = S.taskBusy || !enabled;
+    });
+    setTaskMenuVisibility();
+}
+
+function primaryTaskAction(task) {
+    if (canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
+    if (canResume(task)) return { action: "resume", label: "开始", tone: "success" };
+    if (canRetry(task)) return { action: "retry", label: "重试", tone: "success" };
+    return null;
+}
+
+function taskActionText(action) {
+    return ({ pause: "暂停", resume: "开始", retry: "重试", delete: "删除" }[action] || "操作");
+}
+
+function taskActionSuccessTitle(action) {
+    return action === "delete" ? "删除成功" : `${taskActionText(action)}成功`;
+}
+
+function taskActionFailureTitle(action) {
+    return action === "delete" ? "删除失败" : `${taskActionText(action)}失败`;
+}
+
+function taskActionErrorText(action, error) {
+    const message = String(error?.message || error || "").trim();
+    if (action === "retry") {
+        if (message.includes("task_not_failed")) return "仅失败任务可重试";
+        if (message.includes("task_not_found")) return "任务不存在或已被删除";
+    }
+    if (action === "delete") {
+        if (message.includes("task_still_stopping")) return "任务仍在停止中，请稍后再删";
+        if (message.includes("task_not_deletable") || message.includes("task_not_paused")) return "仅已暂停或已完成的任务可删除";
+        if (message.includes("task_not_found")) return "任务不存在或已被删除";
+    }
+    return message || "Unknown error";
+}
+
+async function requestTaskAction(taskId, action) {
+    if (action === "pause") return ApiClient.pauseTask(taskId);
+    if (action === "resume") return ApiClient.resumeTask(taskId);
+    if (action === "retry") return ApiClient.retryTask(taskId);
+    if (action === "delete") return ApiClient.deleteTask(taskId);
+    throw new Error(`Unsupported task action: ${action}`);
+}
+
+async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
+    if (!taskId || !action) return;
+    if (action === "delete") {
+        openConfirm({
+            title: "删除任务",
+            text: "删除后将移除任务记录、树快照和工件文件，且无法恢复。",
+            confirmLabel: "删除",
+            confirmKind: "danger",
+            returnFocus,
+            onConfirm: () => performTaskAction(taskId, action),
+        });
+        return;
+    }
+    await performTaskAction(taskId, action);
+}
+
+async function performTaskAction(taskId, action) {
+    if (!taskId || !action) return;
+    S.taskBusy = true;
+    renderTasks();
+    try {
+        const result = await requestTaskAction(taskId, action);
+        const successText = action === "retry" ? (result?.task_id || taskId) : taskId;
+        showToast({ title: taskActionSuccessTitle(action), text: successText, kind: "success" });
+        await loadTasks();
+        if (action === "delete") {
+            handleDeletedTasks([taskId]);
+        } else if (action !== "retry" && S.currentTaskId === taskId) {
+            await loadTaskDetail(taskId, { preserveView: true, reopenSocket: false });
+            await loadTaskArtifacts();
+        }
+    } catch (e) {
+        showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, e), kind: "error" });
+    } finally {
+        S.taskBusy = false;
+        renderTasks();
+    }
+}
+
+async function runTaskBatchAction(action, { returnFocus = null } = {}) {
+    closeTaskMenus();
+    const selected = getSelectedTasks();
+    const eligible = selected.filter((task) => {
+        if (action === "pause") return canPause(task);
+        if (action === "resume") return canResume(task);
+        if (action === "retry") return canRetry(task);
+        if (action === "delete") return canDelete(task);
+        return false;
+    });
+    if (!eligible.length) {
+        showToast({ title: "No eligible tasks", text: "Current selection cannot perform this action.", kind: "warn" });
+        return;
+    }
+    if (action === "delete") {
+        openConfirm({
+            title: "删除任务",
+            text: "删除后将移除任务记录、树快照和工件文件，且无法恢复。",
+            confirmLabel: "删除",
+            confirmKind: "danger",
+            returnFocus,
+            onConfirm: () => performTaskBatchAction(action, eligible),
+        });
+        return;
+    }
+    await performTaskBatchAction(action, eligible);
+}
+
+async function performTaskBatchAction(action, eligible) {
+    S.taskBusy = true;
+    renderTasks();
+    try {
+        const results = await Promise.allSettled(eligible.map((task) => requestTaskAction(task.task_id, action)));
+        const succeeded = results
+            .map((result, index) => (result.status === "fulfilled" ? eligible[index].task_id : ""))
+            .filter(Boolean);
+        const failed = results
+            .map((result, index) => (result.status === "rejected" ? { taskId: eligible[index].task_id, error: result.reason } : null))
+            .filter(Boolean);
+        await loadTasks();
+        if (action === "delete") {
+            handleDeletedTasks(succeeded);
+        } else if (action !== "retry" && S.currentTaskId && succeeded.includes(S.currentTaskId)) {
+            await loadTaskDetail(S.currentTaskId, { preserveView: true, reopenSocket: false });
+            await loadTaskArtifacts();
+        }
+        if (failed.length && !succeeded.length) {
+            showToast({
+                title: taskActionFailureTitle(action),
+                text: taskActionErrorText(action, failed[0].error),
+                kind: "error",
+            });
+            return;
+        }
+        if (failed.length) {
+            showToast({
+                title: action === "delete" ? "删除完成" : `${taskActionText(action)}完成`,
+                text: `${succeeded.length} 个任务成功，${failed.length} 个失败`,
+                kind: "warn",
+            });
+            return;
+        }
+        const successText = action === "delete"
+            ? `已删除 ${succeeded.length} 个任务`
+            : action === "retry"
+                ? `已创建 ${succeeded.length} 个重试任务`
+                : `${succeeded.length} 个任务已更新`;
+        showToast({
+            title: taskActionSuccessTitle(action),
+            text: successText,
+            kind: "success",
+        });
+    } finally {
+        S.taskBusy = false;
+        renderTasks();
+    }
+}
+
 function resetTaskView() {
     if (S.taskWs) {
         S.taskWs.close();
@@ -2507,12 +3365,90 @@ function resetTaskView() {
     if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
     if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
     if (U.artifactApply) U.artifactApply.hidden = true;
+    if (U.taskTokenButton) U.taskTokenButton.disabled = true;
+    if (U.taskTokenSummaryText) U.taskTokenSummaryText.textContent = "任务级 token 消耗会在这里实时刷新。";
+    if (U.taskTokenContent) U.taskTokenContent.innerHTML = '<div class="empty-state">请选择一个任务后查看 token 统计。</div>';
+    setTaskTokenStatsOpen(false);
     setTaskSelectionEmptyVisible(false);
     hideAgent();
 }
 
 function setTaskDetailOpen(open) {
     setDrawerOpen(U.taskDetailBackdrop, U.taskDetailDrawer, open);
+}
+
+function setTaskTokenStatsOpen(open) {
+    S.taskTokenStatsOpen = !!open;
+    setDrawerOpen(U.taskTokenBackdrop, U.taskTokenDrawer, !!open);
+    if (open) renderTaskTokenStats();
+}
+
+function renderTaskTokenStats() {
+    if (!U.taskTokenContent || !U.taskTokenSummaryText) return;
+    const summary = taskTokenUsage(S.currentTask, S.currentTaskProgress);
+    U.taskTokenSummaryText.textContent = taskTokenSummaryLine(summary);
+    if (!summary.tracked) {
+        U.taskTokenContent.innerHTML = `
+            <div class="task-token-topline">
+                <div class="task-token-stat"><strong>未统计</strong><span>该任务创建于统计上线前，暂无精确数据。</span></div>
+            </div>
+        `;
+        return;
+    }
+    const modelRows = Array.isArray(S.currentTaskProgress?.token_usage_by_model)
+        ? S.currentTaskProgress.token_usage_by_model.map(normalizeModelTokenUsage).sort((a, b) => {
+            const delta = tokenKnownTotal(b) - tokenKnownTotal(a);
+            if (delta !== 0) return delta;
+            return String(a.model_key || "").localeCompare(String(b.model_key || ""));
+        })
+        : [];
+    const partialNote = summary.is_partial
+        ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
+        : '<span class="task-token-badge success">统计完整</span>';
+    const topline = `
+        <div class="task-token-topline">
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>总输入</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>总输出</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缓存命中</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.call_count))}</strong><span>模型调用</span></div>
+        </div>
+        <div class="task-token-meta">
+            ${partialNote}
+            <span class="task-token-subtle">有 usage ${esc(formatTokenCount(summary.calls_with_usage))} · 缺失 ${esc(formatTokenCount(summary.calls_without_usage))}</span>
+        </div>
+    `;
+    if (!summary.call_count) {
+        U.taskTokenContent.innerHTML = `${topline}<div class="empty-state task-token-empty">尚未发生模型调用。</div>`;
+        return;
+    }
+    const rowsMarkup = modelRows.length
+        ? modelRows.map((item) => {
+            const subtitleParts = [item.provider_id, item.provider_model].filter(Boolean);
+            const badges = [];
+            if (item.is_partial) badges.push('<span class="task-token-badge warn">部分缺失</span>');
+            if (!item.calls_without_usage) badges.push('<span class="task-token-badge success">完整</span>');
+            return `
+                <div class="task-token-model-item">
+                    <div class="task-token-model-head">
+                        <div>
+                            <h3>${esc(item.model_key || "未命名模型")}</h3>
+                            <p>${esc(subtitleParts.join(" · ") || "模型标识未提供")}</p>
+                        </div>
+                        <div class="task-token-model-badges">${badges.join("")}</div>
+                    </div>
+                    <div class="task-token-model-stats">
+                        <span>输入 ${esc(formatTokenCount(item.input_tokens))}</span>
+                        <span>输出 ${esc(formatTokenCount(item.output_tokens))}</span>
+                        <span>缓存命中 ${esc(formatTokenCount(item.cache_hit_tokens))}</span>
+                    </div>
+                    <div class="task-token-model-meta">
+                        调用 ${esc(formatTokenCount(item.call_count))} · 有 usage ${esc(formatTokenCount(item.calls_with_usage))} · 缺失 ${esc(formatTokenCount(item.calls_without_usage))}
+                    </div>
+                </div>
+            `;
+        }).join("")
+        : '<div class="empty-state task-token-empty">当前只有任务级统计，尚无按模型明细。</div>';
+    U.taskTokenContent.innerHTML = `${topline}<div class="task-token-model-list">${rowsMarkup}</div>`;
 }
 
 function setTaskSelectionEmptyVisible(visible) {
@@ -2883,6 +3819,8 @@ function applyTaskPayload(payload) {
     U.tdStatus.dataset.status = taskStatusKey(payload.task);
     U.tdSummary.textContent = payload.task.user_request || payload.task.final_output || payload.progress.text || "No summary";
     U.tdActiveCount.textContent = String((payload.progress.nodes || []).filter((node) => String(node.status || "") === "in_progress").length);
+    if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
+    renderTaskTokenStats();
     if (S.tree) renderTree();
     else {
         U.tree.innerHTML = '<div class="empty-state">No task tree.</div>';
@@ -2968,7 +3906,13 @@ function renderSkills() {
         el.className = `resource-list-item${S.selectedSkill?.skill_id === skill.skill_id ? " selected" : ""}`;
         const desc = (skill.description || "").trim();
         const subtitle = desc ? (desc.length > 50 ? desc.slice(0, 47) + "..." : desc) : skill.skill_id;
-        el.innerHTML = `<div class="resource-list-title">${esc(skill.display_name)}</div><div class="resource-list-subtitle">${esc(subtitle)}</div><div class="resource-list-meta">${esc(displayRiskLabel(skill.risk_level))} · ${esc(displayEnabledLabel(skill.enabled, skill.available))}</div>`;
+        el.innerHTML = `
+            <div class="resource-list-title">${esc(skill.display_name)}</div>
+            <div class="resource-list-subtitle">${esc(subtitle)}</div>
+            <div class="resource-list-meta">
+                <span class="meta-tag risk-${String(skill.risk_level || 'low').toLowerCase()}">${esc(displayRiskLabel(skill.risk_level))}</span>
+                <span class="meta-tag status-${skill.enabled ? 'enabled' : 'disabled'}">${esc(displayEnabledLabel(skill.enabled, skill.available))}</span>
+            </div>`;
         el.addEventListener("click", () => openSkill(skill.skill_id));
         U.skillList.appendChild(el);
     });
@@ -2996,7 +3940,13 @@ function renderTools() {
         el.className = `resource-list-item${S.selectedTool?.tool_id === tool.tool_id ? " selected" : ""}`;
         const desc = (tool.description || "").trim();
         const subtitle = desc ? (desc.length > 50 ? desc.slice(0, 47) + "..." : desc) : tool.tool_id;
-        el.innerHTML = `<div class="resource-list-title">${esc(tool.display_name)}</div><div class="resource-list-subtitle">${esc(subtitle)}</div><div class="resource-list-meta">${esc(displayEnabledLabel(tool.enabled, tool.available))} · ${(tool.actions || []).length} 个 action</div>`;
+        el.innerHTML = `
+            <div class="resource-list-title">${esc(tool.display_name)}</div>
+            <div class="resource-list-subtitle">${esc(subtitle)}</div>
+            <div class="resource-list-meta">
+                <span class="meta-tag status-${tool.enabled ? 'enabled' : 'disabled'}">${esc(displayEnabledLabel(tool.enabled, tool.available))}</span>
+                <span class="meta-tag tool-actions">${(tool.actions || []).length} 个 action</span>
+            </div>`;
         el.addEventListener("click", () => openTool(tool.tool_id));
         U.toolList.appendChild(el);
     });
@@ -3140,19 +4090,18 @@ function renderCommunicationBridgeSummary() {
     const statusLabel = bridge.connected ? "已连接" : bridge.running ? "运行中" : bridge.enabled ? "待连接" : "未启用";
     const statusText = bridge.last_error ? `${statusLabel} · ${bridge.last_error}` : statusLabel;
     U.communicationBridgeSummary.innerHTML = `
-        <div class="communication-summary-card">
-            <div class="communication-summary-head">
+        <div class="resource-list-item communication-summary-card">
+            <div class="panel-header">
                 <div>
                     <div class="resource-list-title">中国通信子系统</div>
-                    <div class="resource-list-subtitle">统一负责渠道 webhook / ws / 回发通信</div>
+                    <div class="resource-list-subtitle">统一负责渠道 webhook / ws / 回调通信</div>
                 </div>
-                <span class="status-badge" data-status="${esc(statusKey)}">${esc(statusText)}</span>
+                <span class="meta-tag status-${esc(statusKey)}">${esc(statusText)}</span>
             </div>
-            <div class="communication-summary-meta">
-                <span>publicPort: ${esc(bridge.public_port)}</span>
-                <span>controlPort: ${esc(bridge.control_port)}</span>
-                <span>${bridge.dist_exists ? "Host 已构建" : "Host 未构建"}</span>
-                <span>${bridge.node_found ? "Node 已就绪" : "Node 未找到"}</span>
+            <div class="resource-list-meta">
+                <span class="meta-tag">Port: ${esc(bridge.public_port)} / ${esc(bridge.control_port)}</span>
+                <span class="meta-tag status-${bridge.dist_exists ? 'enabled' : 'disabled'}">${bridge.dist_exists ? "Host 已构建" : "Host 未构建"}</span>
+                <span class="meta-tag status-${bridge.node_found ? 'enabled' : 'disabled'}">${bridge.node_found ? "Node 已就绪" : "Node 未找到"}</span>
             </div>
         </div>
     `;
@@ -3172,12 +4121,16 @@ function renderCommunications() {
         el.type = "button";
         el.className = `resource-list-item communication-card${selected ? " selected" : ""}`;
         el.innerHTML = `
-            <div class="communication-card-head">
+            <div class="panel-header">
                 <div class="resource-list-title">${esc(item.label)}</div>
-                <span class="status-badge" data-status="${esc(communicationRuntimeStatusKey(item))}">${esc(communicationRuntimeLabel(item))}</span>
+                <span class="meta-tag status-${esc(communicationRuntimeStatusKey(item))}">${esc(communicationRuntimeLabel(item))}</span>
             </div>
             <div class="resource-list-subtitle">${esc(item.description || item.config_path || item.id)}</div>
-            <div class="resource-list-meta">${esc(displayEnabledLabel(item.enabled))} · ${esc(item.config_path || "")} · ${esc(item.account_count || 0)} 个账号</div>
+            <div class="resource-list-meta">
+                <span class="meta-tag status-${item.enabled ? 'enabled' : 'disabled'}">${esc(displayEnabledLabel(item.enabled))}</span>
+                <span class="meta-tag tool-actions">${esc(item.account_count || 0)} 个账号</span>
+                <span class="meta-tag tool-actions" style="border-style: solid; opacity: 0.6;">${esc(item.config_path || "")}</span>
+            </div>
         `;
         el.addEventListener("click", () => void openCommunication(item.id));
         U.communicationList.appendChild(el);
@@ -3844,6 +4797,7 @@ function switchView(view) {
         el.style.display = active ? "" : "none";
     });
     if (view !== "task-details") {
+        setTaskTokenStatsOpen(false);
         clearAgentSelection({ rerender: false });
         if (S.taskWs) {
             S.taskWs.close();
@@ -3861,7 +4815,35 @@ function bind() {
     U.theme?.addEventListener("click", toggleTheme);
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
+    U.taskTokenButton?.addEventListener("click", () => setTaskTokenStatsOpen(true));
+    U.taskTokenClose?.addEventListener("click", () => setTaskTokenStatsOpen(false));
+    U.taskTokenBackdrop?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.artifactApply?.addEventListener("click", () => void applySelectedArtifact());
+    U.ceoNewSession?.addEventListener("click", () => void createNewCeoSession());
+    U.renameSessionCancel?.addEventListener("click", handleRenameCancel);
+    U.renameSessionAccept?.addEventListener("click", handleRenameAccept);
+    U.renameSessionInput?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") handleRenameAccept();
+        if (e.key === "Escape") handleRenameCancel();
+    });
+    U.ceoSessionList?.addEventListener("click", (e) => {
+        const activate = e.target.closest("[data-session-activate]");
+        if (activate) {
+            void activateCeoSession(activate.dataset.sessionActivate);
+            return;
+        }
+        const rename = e.target.closest("[data-session-rename]");
+        if (rename) {
+            e.stopPropagation();
+            void renameCeoSession(rename.dataset.sessionRename);
+            return;
+        }
+        const remove = e.target.closest("[data-session-delete]");
+        if (remove) {
+            e.stopPropagation();
+            requestDeleteCeoSession(remove.dataset.sessionDelete);
+        }
+    });
     U.ceoSend?.addEventListener("click", handleCeoPrimaryAction);
     U.ceoAttach?.addEventListener("click", () => {
         if (S.ceoUploadBusy) return;
@@ -4074,6 +5056,9 @@ function bind() {
             toggle.classList.toggle("checked", e.target.checked);
         }
     });
+    U.taskDepthSelect?.addEventListener("change", (e) => {
+        void saveTaskDefaultMaxDepth(e.target.value);
+    });
     U.taskMultiToggle?.addEventListener("click", () => setMultiSelectMode(!S.multiSelectMode));
     U.taskFilterTrigger?.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -4083,6 +5068,17 @@ function bind() {
         e.stopPropagation();
         setTaskMenuOpen("batch", !S.taskBatchMenuOpen);
     });
+    if (U.taskBatchMenu && !U.taskBatchMenu.querySelector('[data-batch-action="retry"]')) {
+        const retryButton = document.createElement("button");
+        retryButton.className = "toolbar-menu-item success";
+        retryButton.type = "button";
+        retryButton.setAttribute("role", "menuitem");
+        retryButton.dataset.batchAction = "retry";
+        retryButton.textContent = "重试";
+        const deleteButton = U.taskBatchMenu.querySelector('[data-batch-action="delete"]');
+        if (deleteButton) U.taskBatchMenu.insertBefore(retryButton, deleteButton);
+        else U.taskBatchMenu.appendChild(retryButton);
+    }
     U.taskFilterMenu?.querySelectorAll("[data-select-bucket]")?.forEach((button) => button.addEventListener("click", () => {
         S.selectedTaskIds = new Set(S.tasks.filter((task) => statusBucketMatches(task, button.dataset.selectBucket)).map((task) => task.task_id));
         closeTaskMenus();
@@ -4126,6 +5122,10 @@ function bind() {
             closeTaskMenus();
             return;
         }
+        if (S.taskTokenStatsOpen) {
+            setTaskTokenStatsOpen(false);
+            return;
+        }
         if (U.taskDetailDrawer?.classList.contains("is-open")) {
             clearAgentSelection();
             return;
@@ -4140,21 +5140,26 @@ function bind() {
     });
     renderPendingCeoUploads();
     syncCeoInputHeight();
+    renderCeoSessions();
     syncCeoPrimaryButton();
 }
 
 function init() {
+    ensureTaskTokenUi();
     enhanceResourceSelects();
     configureTaskDetailSections();
     bind();
     bindTreePan();
     icons();
+    renderTaskDepthControl();
     renderSkillActions();
     renderToolActions();
     renderCommunicationActions();
     void loadModels();
     void loadTasks();
-    initCeoWs();
+    void refreshCeoSessions({ reconnect: true }).catch((error) => {
+        showToast({ title: "会话加载失败", text: error.message || "Unknown error", kind: "error" });
+    });
 }
 
 document.addEventListener("DOMContentLoaded", init);

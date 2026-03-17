@@ -12,4 +12,5 @@ def build(runtime):
         restrict_to_workspace=settings.restrict_to_workspace,
         path_append=settings.path_append,
         content_store=content_store,
+        main_task_service=service,
     )

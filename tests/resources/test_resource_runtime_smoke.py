@@ -19,6 +19,7 @@ from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
 from main.models import TaskArtifactRecord
+from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
 from main.storage.artifact_store import TaskArtifactStore
 
@@ -257,6 +258,27 @@ class _VisibleToolService:
         return {'ok': True, 'tool_id': tool_id, 'content': self.resource_manager.load_toolskill_body(tool_id)}
 
 
+class _ResourceSyncService(_VisibleToolService):
+    def capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
+        if self.resource_manager is None:
+            return {}
+        return self.resource_manager.capture_resource_tree_state()
+
+    def refresh_resource_paths(self, paths, *, trigger: str = 'path-change', session_id: str = 'web:shared'):
+        _ = session_id
+        if self.resource_manager is None:
+            return {'ok': False}
+        snapshot = self.resource_manager.refresh_paths(list(paths or []), trigger=trigger)
+        return {'ok': True, 'skills': len(snapshot.skills), 'tools': len(snapshot.tools)}
+
+    def refresh_changed_resources(self, before_state, *, trigger: str = 'path-change', session_id: str = 'web:shared'):
+        _ = session_id
+        if self.resource_manager is None:
+            return {'ok': False}
+        snapshot = self.resource_manager.refresh_changed_tree_state(before_state, trigger=trigger)
+        return {'ok': True, 'skills': len(snapshot.skills), 'tools': len(snapshot.tools)}
+
+
 class _ArtifactService:
     def __init__(self, artifact_store: TaskArtifactStore):
         self.artifact_store = artifact_store
@@ -282,6 +304,11 @@ class _MainTaskService:
 
     def view_progress(self, task_id: str, *, mark_read: bool = True) -> str:
         return f'progress:{task_id}:{mark_read}'
+
+
+class _DummyChatBackend:
+    async def chat(self, **kwargs):
+        raise AssertionError(f'chat backend should not be used in this test: {kwargs!r}')
 
 
 @pytest.mark.asyncio
@@ -519,6 +546,109 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_filesystem_tool_auto_refreshes_new_skill_without_full_reload(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    service = _ResourceSyncService()
+    service.bind_resource_manager(manager)
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    manager.start()
+
+    def _fail_reload(self, *, trigger: str = 'manual'):
+        raise AssertionError(f'full reload should not run during targeted refresh: {trigger}')
+
+    manager.reload_now = MethodType(_fail_reload, manager)
+
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+
+        skill_root = workspace / 'skills' / 'auto_skill'
+        manifest = textwrap.dedent(
+            """\
+            schema_version: 1
+            kind: skill
+            name: auto_skill
+            description: Auto refreshed skill.
+            trigger:
+              keywords: []
+            requires:
+              tools: []
+              bins: []
+              env: []
+            exposure:
+              agent: true
+              main_runtime: true
+            """
+        )
+        body = '# auto_skill\n\nAuto skill guide\n'
+
+        await tool.execute(action='write', path=str(skill_root / 'resource.yaml'), content=manifest)
+        await tool.execute(action='write', path=str(skill_root / 'SKILL.md'), content=body)
+
+        skill = manager.get_skill('auto_skill')
+        assert skill is not None
+        assert skill.available is True
+        assert 'Auto skill guide' in manager.load_skill_body('auto_skill')
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_auto_refreshes_new_skill_without_full_reload(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    service = _ResourceSyncService()
+    service.bind_resource_manager(manager)
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    manager.start()
+
+    def _fail_reload(self, *, trigger: str = 'manual'):
+        raise AssertionError(f'full reload should not run during targeted refresh: {trigger}')
+
+    manager.reload_now = MethodType(_fail_reload, manager)
+
+    try:
+        tool = manager.get_tool('exec')
+        assert tool is not None
+
+        skill_root = workspace / 'skills' / 'exec_skill'
+        script = (
+            "from pathlib import Path;"
+            f"root=Path(r'{skill_root}');"
+            "root.mkdir(parents=True, exist_ok=True);"
+            "(root/'resource.yaml').write_text("
+            "'schema_version: 1\\nkind: skill\\nname: exec_skill\\ndescription: Exec refreshed skill.\\ntrigger:\\n  keywords: []\\nrequires:\\n  tools: []\\n  bins: []\\n  env: []\\nexposure:\\n  agent: true\\n  main_runtime: true\\n',"
+            " encoding='utf-8');"
+            "(root/'SKILL.md').write_text('# exec_skill\\n\\nExec skill guide\\n', encoding='utf-8')"
+        )
+        payload = json.loads(
+            await tool.execute(
+                command=f'python -c "{script}"',
+                __g3ku_runtime={'session_key': 'web:shared'},
+            )
+        )
+
+        assert payload['status'] == 'success'
+        skill = manager.get_skill('exec_skill')
+        assert skill is not None
+        assert skill.available is True
+        assert 'Exec skill guide' in manager.load_skill_body('exec_skill')
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
@@ -679,6 +809,45 @@ def test_load_context_bodies_skip_release_reload(tmp_path: Path):
 
         assert triggers == ['release', 'release']
     finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_task_retrospective_skill_is_discovered_and_visible_only_to_ceo(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'skills' / 'task-retrospective', workspace / 'skills' / 'task-retrospective')
+    shutil.copytree(REPO_ROOT / 'tools' / 'task_summary_cn', workspace / 'tools' / 'task_summary_cn')
+    shutil.copytree(REPO_ROOT / 'tools' / 'task_fetch_cn', workspace / 'tools' / 'task_fetch_cn')
+    shutil.copytree(REPO_ROOT / 'tools' / 'task_progress_cn', workspace / 'tools' / 'task_progress_cn')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        descriptor = manager.get_skill('task-retrospective')
+        ceo_visible = [item.skill_id for item in service.list_visible_skill_resources(actor_role='ceo', session_id='web:shared')]
+        execution_visible = [item.skill_id for item in service.list_visible_skill_resources(actor_role='execution', session_id='web:shared')]
+        inspection_visible = [item.skill_id for item in service.list_visible_skill_resources(actor_role='inspection', session_id='web:shared')]
+
+        assert descriptor is not None
+        assert descriptor.available is True
+        assert 'task-retrospective' in ceo_visible
+        assert 'task-retrospective' not in execution_visible
+        assert 'task-retrospective' not in inspection_visible
+    finally:
+        await service.close()
         manager.close()
 
 

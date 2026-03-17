@@ -25,15 +25,35 @@ class SessionRuntimeManager:
             return self._session_cls
         return RuntimeAgentSession
 
-    def get_or_create(self, *, session_key: str, channel: str, chat_id: str) -> RuntimeAgentSession:
+    def get_or_create(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        memory_channel: str | None = None,
+        memory_chat_id: str | None = None,
+    ) -> RuntimeAgentSession:
         key = str(session_key or "").strip() or f"{channel}:{chat_id}"
         channel_value = str(channel or "cli")
         chat_value = str(chat_id or "direct")
         session = self._sessions.get(key)
         if session is None:
             session_cls = self._resolve_session_cls()
-            session = session_cls(self._loop, session_key=key, channel=channel_value, chat_id=chat_value)
+            session = session_cls(
+                self._loop,
+                session_key=key,
+                channel=channel_value,
+                chat_id=chat_value,
+                memory_channel=memory_channel,
+                memory_chat_id=memory_chat_id,
+            )
             self._sessions[key] = session
+        else:
+            if memory_channel:
+                setattr(session, "_memory_channel", str(memory_channel or "").strip() or channel_value)
+            if memory_chat_id:
+                setattr(session, "_memory_chat_id", str(memory_chat_id or "").strip() or chat_value)
         self._meta[key] = (channel_value, chat_value)
         return session
 
@@ -44,12 +64,34 @@ class SessionRuntimeManager:
         session_key: str,
         channel: str,
         chat_id: str,
+        memory_channel: str | None = None,
+        memory_chat_id: str | None = None,
     ) -> Any:
-        session = self.get_or_create(session_key=session_key, channel=channel, chat_id=chat_id)
+        session = self.get_or_create(
+            session_key=session_key,
+            channel=channel,
+            chat_id=chat_id,
+            memory_channel=memory_channel,
+            memory_chat_id=memory_chat_id,
+        )
         return await session.prompt(message)
 
-    async def continue_(self, *, session_key: str, channel: str, chat_id: str) -> Any:
-        session = self.get_or_create(session_key=session_key, channel=channel, chat_id=chat_id)
+    async def continue_(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        memory_channel: str | None = None,
+        memory_chat_id: str | None = None,
+    ) -> Any:
+        session = self.get_or_create(
+            session_key=session_key,
+            channel=channel,
+            chat_id=chat_id,
+            memory_channel=memory_channel,
+            memory_chat_id=memory_chat_id,
+        )
         return await session.continue_()
 
     async def cancel(self, session_key: str, *, reason: str = "user_cancelled") -> int:
@@ -61,6 +103,14 @@ class SessionRuntimeManager:
 
     def session_meta(self, session_key: str) -> tuple[str, str] | None:
         return self._meta.get(str(session_key or "").strip())
+
+    def get(self, session_key: str) -> RuntimeAgentSession | None:
+        return self._sessions.get(str(session_key or "").strip())
+
+    def remove(self, session_key: str) -> RuntimeAgentSession | None:
+        key = str(session_key or "").strip()
+        self._meta.pop(key, None)
+        return self._sessions.pop(key, None)
 
     def list_sessions(self) -> list[str]:
         return sorted(self._sessions.keys())

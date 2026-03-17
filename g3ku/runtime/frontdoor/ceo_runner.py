@@ -94,12 +94,15 @@ class CeoFrontDoorRunner:
         await self._loop._ensure_checkpointer_ready()
         query_text = self._content_text(getattr(user_input, 'content', ''))
         persisted_history: list[dict[str, Any]] = []
+        runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
         persisted_session = None
         if getattr(self._loop, '_checkpointer', None) is None:
-            persisted_session = self._loop.sessions.get_or_create(session.state.session_key)
+            persisted_session = runtime_session
         main_service = getattr(self._loop, 'main_task_service', None)
         if main_service is not None:
             await main_service.startup()
+        memory_channel = getattr(session, '_memory_channel', getattr(session, '_channel', 'cli'))
+        memory_chat_id = getattr(session, '_memory_chat_id', getattr(session, '_chat_id', session.state.session_key))
         for name in ('message', 'cron'):
             tool = self._loop.tools.get(name)
             if tool is not None and hasattr(tool, 'set_context'):
@@ -143,6 +146,9 @@ class CeoFrontDoorRunner:
                 'session_key': session.state.session_key,
                 'channel': getattr(session, '_channel', 'cli'),
                 'chat_id': getattr(session, '_chat_id', session.state.session_key),
+                'memory_channel': memory_channel,
+                'memory_chat_id': memory_chat_id,
+                'task_defaults': dict((getattr(runtime_session, 'metadata', None) or {}).get('task_defaults') or {}),
                 'temp_dir': str(getattr(self._loop, 'temp_dir', '') or ''),
                 'loop': self._loop,
             }

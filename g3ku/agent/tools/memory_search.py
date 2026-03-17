@@ -79,8 +79,8 @@ class MemorySearchTool(Tool):
         runtime_raw = kwargs.pop("__g3ku_runtime", None)
         runtime = runtime_raw if isinstance(runtime_raw, dict) else {}
         session_key = str(session or runtime.get("session_key") or "")
-        channel = runtime.get("channel")
-        chat_id = runtime.get("chat_id")
+        channel = runtime.get("memory_channel", runtime.get("channel"))
+        chat_id = runtime.get("memory_chat_id", runtime.get("chat_id"))
 
         if (not channel or not chat_id) and session_key and ":" in session_key:
             ch, cid = session_key.split(":", 1)

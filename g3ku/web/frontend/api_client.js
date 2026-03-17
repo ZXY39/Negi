@@ -1,7 +1,18 @@
 const API_BASE_URL = "";
-const DEFAULT_SESSION_ID = "web:shared";
+const FALLBACK_SESSION_ID = "web:shared";
 
 class ApiClient {
+    static _activeSessionId = "";
+
+    static getActiveSessionId() {
+        return String(this._activeSessionId || FALLBACK_SESSION_ID).trim() || FALLBACK_SESSION_ID;
+    }
+
+    static setActiveSessionId(sessionId) {
+        this._activeSessionId = String(sessionId || "").trim() || FALLBACK_SESSION_ID;
+        return this._activeSessionId;
+    }
+
     static _buildUrl(path, params = {}) {
         const base = API_BASE_URL || window.location.origin;
         const url = new URL(path, base);
@@ -48,30 +59,58 @@ class ApiClient {
         return this._request("DELETE", path, { params });
     }
 
-    static getCeoWsUrl() {
+    static getCeoWsUrl(sessionId = this.getActiveSessionId()) {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;
-        return `${protocol}//${host}/api/ws/ceo?session_id=${DEFAULT_SESSION_ID}`;
+        return `${protocol}//${host}/api/ws/ceo?session_id=${encodeURIComponent(sessionId)}`;
     }
 
-    static getTaskWsUrl(taskId) {
+    static getTaskWsUrl(taskId, sessionId = this.getActiveSessionId()) {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;
-        return `${protocol}//${host}/api/ws/tasks/${encodeURIComponent(taskId)}?session_id=${DEFAULT_SESSION_ID}`;
+        return `${protocol}//${host}/api/ws/tasks/${encodeURIComponent(taskId)}?session_id=${encodeURIComponent(sessionId)}`;
     }
 
-    static async uploadCeoFiles(files = []) {
+    static async listCeoSessions() {
+        return this.get("/api/ceo/sessions");
+    }
+
+    static async createCeoSession(payload = {}) {
+        return this.post("/api/ceo/sessions", payload || {});
+    }
+
+    static async renameCeoSession(sessionId, payload = {}) {
+        return this._request("PATCH", `/api/ceo/sessions/${encodeURIComponent(sessionId)}`, { body: payload || {} });
+    }
+
+    static async getCeoTaskDefaults(sessionId) {
+        return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/task-defaults`);
+    }
+
+    static async updateCeoTaskDefaults(sessionId, payload = {}) {
+        return this._request("PATCH", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/task-defaults`, { body: payload || {} });
+    }
+
+    static async activateCeoSession(sessionId) {
+        return this.post(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/activate`, {});
+    }
+
+    static async deleteCeoSession(sessionId) {
+        return this.delete(`/api/ceo/sessions/${encodeURIComponent(sessionId)}`);
+    }
+
+    static async uploadCeoFiles(files = [], sessionId = this.getActiveSessionId()) {
         const formData = new FormData();
         [...files].forEach((file) => formData.append("files", file));
         const data = await this._request("POST", "/api/ceo/uploads", {
-            params: { session_id: DEFAULT_SESSION_ID },
+            params: { session_id: sessionId },
             body: formData,
         });
         return data.items || [];
     }
 
-    static async getTasks(scope = 1) {
-        const data = await this.get("/api/tasks", { session_id: DEFAULT_SESSION_ID, scope });
+    static async getTasks(scope = 1, sessionId = this.getActiveSessionId()) {
+        const data = await this.get("/api/tasks", { session_id: sessionId, scope });
         return data.items || [];
     }
 
@@ -86,6 +125,11 @@ class ApiClient {
 
     static async resumeTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/resume`);
+        return data.task || null;
+    }
+
+    static async retryTask(taskId) {
+        const data = await this.post(`/api/tasks/${taskId}/retry`);
         return data.task || null;
     }
 
@@ -361,19 +405,19 @@ class ApiClient {
     }
 
     static async saveSkillFile(skillId, fileKey, content) {
-        return this.put(`/api/resources/skills/${skillId}/files/${fileKey}`, { content }, { session_id: DEFAULT_SESSION_ID });
+        return this.put(`/api/resources/skills/${skillId}/files/${fileKey}`, { content }, { session_id: this.getActiveSessionId() });
     }
 
     static async updateSkillPolicy(skillId, payload) {
-        return this.put(`/api/resources/skills/${skillId}/policy`, payload, { session_id: DEFAULT_SESSION_ID });
+        return this.put(`/api/resources/skills/${skillId}/policy`, payload, { session_id: this.getActiveSessionId() });
     }
 
     static async enableSkill(skillId) {
-        return this.post(`/api/resources/skills/${skillId}/enable`, {}, { session_id: DEFAULT_SESSION_ID });
+        return this.post(`/api/resources/skills/${skillId}/enable`, {}, { session_id: this.getActiveSessionId() });
     }
 
     static async disableSkill(skillId) {
-        return this.post(`/api/resources/skills/${skillId}/disable`, {}, { session_id: DEFAULT_SESSION_ID });
+        return this.post(`/api/resources/skills/${skillId}/disable`, {}, { session_id: this.getActiveSessionId() });
     }
 
     static async getTools(offset = 0, limit = 200) {
@@ -391,19 +435,19 @@ class ApiClient {
     }
 
     static async updateToolPolicy(toolId, payload) {
-        return this.put(`/api/resources/tools/${toolId}/policy`, payload, { session_id: DEFAULT_SESSION_ID });
+        return this.put(`/api/resources/tools/${toolId}/policy`, payload, { session_id: this.getActiveSessionId() });
     }
 
     static async enableTool(toolId) {
-        return this.post(`/api/resources/tools/${toolId}/enable`, {}, { session_id: DEFAULT_SESSION_ID });
+        return this.post(`/api/resources/tools/${toolId}/enable`, {}, { session_id: this.getActiveSessionId() });
     }
 
     static async disableTool(toolId) {
-        return this.post(`/api/resources/tools/${toolId}/disable`, {}, { session_id: DEFAULT_SESSION_ID });
+        return this.post(`/api/resources/tools/${toolId}/disable`, {}, { session_id: this.getActiveSessionId() });
     }
 
     static async reloadResources() {
-        return this.post("/api/resources/reload", {}, { session_id: DEFAULT_SESSION_ID });
+        return this.post("/api/resources/reload", {}, { session_id: this.getActiveSessionId() });
     }
 
     static async getChinaChannels() {

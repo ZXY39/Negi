@@ -5,6 +5,7 @@ import json
 from g3ku.content import content_summary_and_ref
 from main.models import NodeRecord
 from main.monitoring.models import LatestTaskNodeOutput, TaskListItem, TaskProgressResult, TaskSummaryResult
+from main.token_usage import aggregate_node_token_usage
 
 
 class TaskQueryService:
@@ -13,7 +14,7 @@ class TaskQueryService:
         self._file_store = file_store
         self._log_service = log_service
 
-    def summary(self, session_id: str) -> TaskSummaryResult:
+    def summary(self, session_id: str | None = None) -> TaskSummaryResult:
         tasks = self._store.list_tasks(session_id)
         total = len(tasks)
         in_progress = sum(1 for item in tasks if item.status == 'in_progress')
@@ -27,7 +28,7 @@ class TaskQueryService:
             text=f'Tasks: {total} total, {in_progress} in progress, {failed} failed, {unread} unread',
         )
 
-    def get_tasks(self, session_id: str, task_type: int) -> list[TaskListItem]:
+    def get_tasks(self, session_id: str | None, task_type: int) -> list[TaskListItem]:
         tasks = self._store.list_tasks(session_id)
         scope = int(task_type)
         if scope == 2:
@@ -47,6 +48,7 @@ class TaskQueryService:
                 created_at=item.created_at,
                 updated_at=item.updated_at,
                 max_depth=int(item.max_depth or 0),
+                token_usage=item.token_usage,
             )
             for item in tasks
         ]
@@ -66,6 +68,7 @@ class TaskQueryService:
             self._log_service.mark_task_read(task_id)
             task = self._store.get_task(task_id) or task
         nodes = self._store.list_nodes(task_id)
+        token_usage, token_usage_by_model = aggregate_node_token_usage(nodes, tracked=bool(getattr(task.token_usage, 'tracked', False)))
         latest_node = self._latest_node(nodes)
         text = f'Task status: {task.status}'
         if tree_text:
@@ -80,6 +83,8 @@ class TaskQueryService:
             root=snapshot.get('root') if isinstance(snapshot.get('root'), dict) else None,
             latest_node=latest_node,
             nodes=[self._serialize_node(item) for item in nodes],
+            token_usage=token_usage,
+            token_usage_by_model=token_usage_by_model,
             text=text,
         )
 

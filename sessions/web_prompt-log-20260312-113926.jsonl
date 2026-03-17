@@ -1,3 +1,0 @@
-{"_type": "metadata", "key": "web:prompt-log-20260312-113926", "created_at": "2026-03-12T11:40:04.326996", "updated_at": "2026-03-12T11:40:04.326996", "metadata": {}, "last_consolidated": 0, "archive_segments": [], "last_user_turn_at": "2026-03-12T11:40:04.326996", "commit_turn_counter": 1}
-{"role": "user", "content": "Reply with exactly OK.", "timestamp": "2026-03-12T11:40:04.326996"}
-{"role": "assistant", "content": "OK", "timestamp": "2026-03-12T11:40:04.326996"}

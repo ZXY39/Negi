@@ -8,6 +8,7 @@ from typing import Any, Callable
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.agent.tools.base import Tool
 from g3ku.content import ContentNavigationService
+from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.context.summarizer import layered_body_payload
 from main.governance import (
     GovernanceStore,
@@ -18,7 +19,7 @@ from main.governance import (
     list_effective_tool_names,
 )
 from main.ids import new_node_id, new_task_id
-from main.models import NodeRecord, TaskArtifactRecord, TaskRecord
+from main.models import NodeRecord, TaskArtifactRecord, TaskRecord, TokenUsageSummary
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.query_service import TaskQueryService
@@ -73,6 +74,7 @@ class MainRuntimeService:
             content_store=self.content_store,
         )
         self.query_service = TaskQueryService(store=self.store, file_store=self.file_store, log_service=self.log_service)
+        self.log_service.set_snapshot_payload_builder(lambda task_id: self.get_task_detail_payload(task_id, mark_read=False))
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
         self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
         self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
@@ -136,6 +138,7 @@ class MainRuntimeService:
         task_id = new_task_id()
         root_node_id = new_node_id()
         now = now_iso()
+        task_metadata = self._normalize_task_metadata(session_id=session_id, metadata=metadata)
         record = TaskRecord(
             task_id=task_id,
             session_id=str(session_id or 'web:shared').strip() or 'web:shared',
@@ -154,7 +157,8 @@ class MainRuntimeService:
             finished_at=None,
             final_output='',
             failure_reason='',
-            metadata=dict(metadata or {}),
+            token_usage=TokenUsageSummary(tracked=True),
+            metadata=task_metadata,
         )
         root = NodeRecord(
             node_id=root_node_id,
@@ -173,6 +177,8 @@ class MainRuntimeService:
             can_spawn_children=0 < effective_max_depth,
             created_at=now,
             updated_at=now,
+            token_usage=TokenUsageSummary(tracked=True),
+            token_usage_by_model=[],
             metadata={},
         )
         record, root = self.log_service.initialize_task(record, root)
@@ -194,12 +200,30 @@ class MainRuntimeService:
         await self.task_runner.resume(task_id)
         return self.get_task(task_id)
 
+    async def retry_task(self, task_id: str) -> TaskRecord | None:
+        await self.startup()
+        task_id = self.normalize_task_id(task_id)
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        if task.status != 'failed':
+            raise ValueError('task_not_failed')
+        metadata = dict(task.metadata or {})
+        metadata['retry_of_task_id'] = task.task_id
+        return await self.create_task(
+            task.user_request,
+            session_id=task.session_id,
+            max_depth=task.max_depth,
+            title=task.title,
+            metadata=metadata,
+        )
+
     async def delete_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         task = self.get_task(task_id)
         if task is None:
             return None
-        if not bool(task.is_paused):
+        if not (bool(task.is_paused) or task.status in {'success', 'failed'}):
             raise ValueError('task_not_paused')
         if self.task_runner.is_active(task_id):
             try:
@@ -213,6 +237,11 @@ class MainRuntimeService:
         self.file_store.delete_task_files(task_id)
         self.store.delete_task(task_id)
         return task
+
+    async def wait_for_task(self, task_id: str) -> TaskRecord | None:
+        task_id = self.normalize_task_id(task_id)
+        await self.task_runner.wait(task_id)
+        return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
@@ -254,6 +283,31 @@ class MainRuntimeService:
         self.policy_engine.sync_default_role_policies()
         self._runtime_model_revision = int(revision or 0)
         return True
+
+    def _normalize_task_metadata(self, *, session_id: str, metadata: dict[str, Any] | None) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        raw_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+        payload.setdefault('origin_session_id', raw_session_id)
+        if raw_session_id.startswith('web:'):
+            payload['memory_scope'] = normalize_memory_scope(
+                payload.get('memory_scope'),
+                fallback_channel=DEFAULT_WEB_MEMORY_SCOPE['channel'],
+                fallback_chat_id=DEFAULT_WEB_MEMORY_SCOPE['chat_id'],
+            )
+        else:
+            payload['memory_scope'] = normalize_memory_scope(
+                payload.get('memory_scope'),
+                fallback_session_key=raw_session_id,
+            )
+        return payload
+
+    def _task_memory_scope(self, task: TaskRecord | None) -> dict[str, str]:
+        if task is None:
+            return dict(DEFAULT_WEB_MEMORY_SCOPE)
+        return normalize_memory_scope(
+            (task.metadata or {}).get('memory_scope') if isinstance(task.metadata, dict) else None,
+            fallback_session_key=task.session_id,
+        )
 
     def _subject(self, *, actor_role: str, session_id: str, task_id: str | None = None, node_id: str | None = None) -> PermissionSubject:
         return PermissionSubject(user_key=session_id, session_id=session_id, task_id=task_id, node_id=node_id, actor_role=actor_role)
@@ -429,13 +483,63 @@ class MainRuntimeService:
             raise ValueError('editable_file_not_allowed')
         return path.read_text(encoding='utf-8')
 
+    def capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
+        manager = getattr(self, '_resource_manager', None)
+        if manager is None or not hasattr(manager, 'capture_resource_tree_state'):
+            return {}
+        return manager.capture_resource_tree_state()
+
+    def refresh_resource_paths(
+        self,
+        paths: list[str | Path],
+        *,
+        trigger: str = 'path-change',
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        manager = getattr(self, '_resource_manager', None)
+        registry = getattr(self, 'resource_registry', None)
+        policy_engine = getattr(self, 'policy_engine', None)
+        if manager is not None and hasattr(manager, 'refresh_paths'):
+            manager.refresh_paths(list(paths or []), trigger=trigger)
+            if registry is not None and hasattr(registry, 'refresh_from_current_resources'):
+                skills, tools = registry.refresh_from_current_resources()
+                if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
+                    policy_engine.sync_default_role_policies()
+                return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
+        fallback = getattr(self, 'reload_resources', None)
+        if callable(fallback):
+            return fallback(session_id=session_id)
+        return {'ok': True, 'session_id': session_id, 'skills': 0, 'tools': 0}
+
+    def refresh_changed_resources(
+        self,
+        before_state: dict[str, dict[str, str]] | None,
+        *,
+        trigger: str = 'path-change',
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        manager = getattr(self, '_resource_manager', None)
+        registry = getattr(self, 'resource_registry', None)
+        policy_engine = getattr(self, 'policy_engine', None)
+        if manager is not None and hasattr(manager, 'refresh_changed_tree_state'):
+            manager.refresh_changed_tree_state(before_state, trigger=trigger)
+            if registry is not None and hasattr(registry, 'refresh_from_current_resources'):
+                skills, tools = registry.refresh_from_current_resources()
+                if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
+                    policy_engine.sync_default_role_policies()
+                return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
+        fallback = getattr(self, 'reload_resources', None)
+        if callable(fallback):
+            return fallback(session_id=session_id)
+        return {'ok': True, 'session_id': session_id, 'skills': 0, 'tools': 0}
+
     def write_skill_file(self, skill_id: str, file_key: str, content: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
         path = self.resource_registry.skill_file_map(str(skill_id or '').strip()).get(str(file_key or '').strip())
         if path is None:
             raise ValueError('editable_file_not_allowed')
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(content or ''), encoding='utf-8')
-        self.reload_resources(session_id=session_id)
+        self.refresh_resource_paths([path], trigger='skill-file-write', session_id=session_id)
         return {'skill_id': str(skill_id or '').strip(), 'file_key': str(file_key or '').strip(), 'path': str(path)}
 
     async def write_skill_file_async(
@@ -692,11 +796,26 @@ class MainRuntimeService:
         updated = current.replace(old_text, new_text, 1)
         target_path.write_text(updated, encoding='utf-8')
         task = self.get_task(task_id)
+        self.refresh_resource_paths([target_path], trigger='artifact-apply', session_id=(task.session_id if task is not None else 'web:shared'))
         if task is not None:
-            payload = build_envelope(channel='task', session_id=task.session_id, task_id=task.task_id, seq=self.registry.next_task_seq(task.session_id, task.task_id), type='artifact.applied', data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True})
-            self.registry.publish_task(task.session_id, task.task_id, payload)
-            ceo_payload = build_envelope(channel='ceo', session_id=task.session_id, task_id=task.task_id, seq=self.registry.next_ceo_seq(task.session_id), type='task.artifact.applied', data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'task_id': task.task_id})
-            self.registry.publish_ceo(task.session_id, ceo_payload)
+            payload = build_envelope(
+                channel='task',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                seq=self.registry.next_global_task_seq(task.task_id),
+                type='artifact.applied',
+                data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True},
+            )
+            self.registry.publish_global_task(task.task_id, payload)
+            ceo_payload = build_envelope(
+                channel='ceo',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                seq=self.registry.next_ceo_seq(task.session_id),
+                type='task.artifact.applied',
+                data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'task_id': task.task_id},
+            )
+            self.registry.publish_global_ceo(ceo_payload)
         return {'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True}
 
     def _actor_role_for_node(self, node: NodeRecord) -> str:
@@ -722,10 +841,9 @@ class MainRuntimeService:
         if not query_text:
             return messages
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
-        if ':' in session_key:
-            channel, chat_id = session_key.split(':', 1)
-        else:
-            channel, chat_id = 'task', session_key
+        memory_scope = self._task_memory_scope(task)
+        channel = str(memory_scope.get('channel') or 'unknown')
+        chat_id = str(memory_scope.get('chat_id') or 'unknown')
         try:
             block = await manager.retrieve_block(
                 query=query_text,
@@ -746,10 +864,12 @@ class MainRuntimeService:
         return enriched
 
     def summary(self, session_id: str) -> str:
-        return self.query_service.summary(session_id).text
+        _ = session_id
+        return self.query_service.summary(None).text
 
     def get_tasks(self, session_id: str, task_type: int) -> str:
-        items = self.query_service.get_tasks(session_id, task_type)
+        _ = session_id
+        items = self.query_service.get_tasks(None, task_type)
         if not items:
             return '无匹配任务。'
         return '\n'.join(f'- {item.task_id}：{item.brief}' for item in items)
@@ -773,6 +893,27 @@ class MainRuntimeService:
         return max(0, min(int(requested), self._hard_max_depth))
 
 
+def _runtime_task_default_max_depth(runtime: dict[str, Any] | None) -> int | None:
+    payload = runtime if isinstance(runtime, dict) else {}
+    task_defaults = payload.get('task_defaults')
+    if not isinstance(task_defaults, dict):
+        return None
+    raw_depth = task_defaults.get('max_depth', task_defaults.get('maxDepth'))
+    if raw_depth in (None, ''):
+        return None
+    try:
+        return int(raw_depth)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tool_runtime_payload(runtime: dict[str, Any] | None, kwargs: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(runtime, dict):
+        return runtime
+    fallback = kwargs.get('__g3ku_runtime')
+    return fallback if isinstance(fallback, dict) else {}
+
+
 class CreateAsyncTaskTool(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service
@@ -790,9 +931,16 @@ class CreateAsyncTaskTool(Tool):
         return {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '用户的原始需求。'}}, 'required': ['task']}
 
     async def execute(self, task: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
-        runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
+        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
         session_id = str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared'
-        record = await self._service.create_task(str(task or ''), session_id=session_id)
+        explicit_max_depth = kwargs.get('max_depth', kwargs.get('maxDepth'))
+        if explicit_max_depth in (None, ''):
+            explicit_max_depth = _runtime_task_default_max_depth(runtime)
+        record = await self._service.create_task(
+            str(task or ''),
+            session_id=session_id,
+            max_depth=explicit_max_depth,
+        )
         return f'创建任务成功{record.task_id}'
 
 
@@ -813,7 +961,7 @@ class TaskSummaryTool(Tool):
         return {'type': 'object', 'properties': {}}
 
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
-        runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
+        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
         return self._service.summary(str(runtime.get('session_key') or 'web:shared'))
 
@@ -841,7 +989,7 @@ class GetTasksTool(Tool):
         }
 
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
-        runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
+        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
         task_type = int(kwargs.get('任务类型'))
         return self._service.get_tasks(str(runtime.get('session_key') or 'web:shared'), task_type)

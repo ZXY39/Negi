@@ -4,10 +4,11 @@ import asyncio
 import json
 from typing import Any
 
+from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.agent.tools.base import Tool
 from main.errors import TaskPausedError
 from main.ids import new_node_id
-from main.models import NodeFinalResult, NodeRecord, SpawnChildResult, SpawnChildSpec
+from main.models import NodeFinalResult, NodeRecord, SpawnChildResult, SpawnChildSpec, TokenUsageSummary
 from main.prompts import load_prompt
 from main.runtime.internal_tools import SpawnChildNodesTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -119,6 +120,10 @@ class NodeRunner:
         return int(self._acceptance_max_iterations if node.node_kind == KIND_ACCEPTANCE else self._execution_max_iterations)
 
     def _runtime_context(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        memory_scope = normalize_memory_scope(
+            (task.metadata or {}).get('memory_scope') if isinstance(task.metadata, dict) else None,
+            fallback_session_key=task.session_id,
+        )
         return {
             'session_key': task.session_id,
             'task_id': task.task_id,
@@ -126,6 +131,8 @@ class NodeRunner:
             'depth': node.depth,
             'node_kind': node.node_kind,
             'actor_role': self._actor_role_for_node(node),
+            'memory_channel': str(memory_scope.get('channel') or 'unknown'),
+            'memory_chat_id': str(memory_scope.get('chat_id') or 'unknown'),
         }
 
     @staticmethod
@@ -236,6 +243,8 @@ class NodeRunner:
             can_spawn_children=(parent.depth + 1) < int(task.max_depth),
             created_at=_now(),
             updated_at=_now(),
+            token_usage=TokenUsageSummary(tracked=bool(getattr(task.token_usage, 'tracked', False))),
+            token_usage_by_model=[],
             metadata={},
         )
         return self._log_service.create_node(task.task_id, child)
@@ -276,6 +285,8 @@ class NodeRunner:
             can_spawn_children=False,
             created_at=_now(),
             updated_at=_now(),
+            token_usage=TokenUsageSummary(tracked=bool(getattr(task.token_usage, 'tracked', False))),
+            token_usage_by_model=[],
             metadata={'accepted_node_id': child.node_id},
         )
         return self._log_service.create_node(task.task_id, acceptance)
