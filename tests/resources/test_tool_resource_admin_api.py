@@ -228,12 +228,12 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
     family = ToolFamilyRecord(
         tool_id='filesystem',
         display_name='Filesystem',
-        description='Read, list, write, edit, delete workspace files, and create reviewable patch artifacts.',
+        description='Describe, search, and open workspace files by local excerpt, plus write, edit, delete, and patch actions.',
         primary_executor_name='filesystem',
         enabled=True,
         available=True,
         source_path='tools/filesystem',
-        actions=[ToolActionRecord(action_id='read', label='Read File', allowed_roles=['ceo'])],
+        actions=[ToolActionRecord(action_id='describe', label='Describe File', allowed_roles=['ceo'])],
         metadata={},
     )
 
@@ -251,7 +251,7 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
                     'enabled': bool(enabled),
                     'actions': [
                         family.actions[0].model_copy(
-                            update={'allowed_roles': list((allowed_roles_by_action or {}).get('read') or [])}
+                            update={'allowed_roles': list((allowed_roles_by_action or {}).get('describe') or [])}
                         )
                     ],
                 }
@@ -261,7 +261,7 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
     response = client.put(
         '/api/resources/tools/filesystem/policy',
         params={'session_id': 'web:shared'},
-        json={'enabled': True, 'actions': {'read': ['ceo', 'inspection']}},
+        json={'enabled': True, 'actions': {'describe': ['ceo', 'inspection']}},
     )
 
     assert response.status_code == 200
@@ -269,7 +269,7 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
         'tool_id': 'filesystem',
         'session_id': 'web:shared',
         'enabled': True,
-        'allowed_roles_by_action': {'read': ['ceo', 'inspection']},
+        'allowed_roles_by_action': {'describe': ['ceo', 'inspection']},
     }
     assert response.json()['item']['actions'][0]['allowed_roles'] == ['ceo', 'inspection']
 
@@ -284,7 +284,7 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
         available=True,
         source_path='tools/filesystem',
         actions=[
-            ToolActionRecord(action_id='read', label='Read File', allowed_roles=['ceo', 'execution', 'inspection'], executor_names=['filesystem']),
+            ToolActionRecord(action_id='describe', label='Describe File', allowed_roles=['ceo', 'execution', 'inspection'], executor_names=['filesystem']),
             ToolActionRecord(action_id='write', label='Write File', allowed_roles=['ceo', 'execution'], executor_names=['filesystem']),
         ],
         metadata={},
@@ -297,7 +297,7 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
     class _PolicyEngine:
         def evaluate_tool_action(self, *, subject, tool_id: str, action_id: str):
             _ = subject, tool_id
-            return SimpleNamespace(allowed=action_id == 'read')
+            return SimpleNamespace(allowed=action_id == 'describe')
 
     service = object.__new__(MainRuntimeService)
     service.resource_registry = _Registry()
@@ -308,7 +308,7 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
     visible = service.list_visible_tool_families(actor_role='inspection', session_id='web:shared')
 
     assert len(visible) == 1
-    assert [action.action_id for action in visible[0].actions] == ['read']
+    assert [action.action_id for action in visible[0].actions] == ['describe']
 
 
 def test_main_runtime_service_normalizes_short_task_id_for_lookup_and_progress():

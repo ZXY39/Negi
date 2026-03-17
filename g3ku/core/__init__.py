@@ -10,7 +10,14 @@ from g3ku.core.messages import (
     ToolResultMessage,
     UserInputMessage,
 )
-from g3ku.core.results import ArtifactRef, ContentBlock, RunResult, ToolExecutionResult
+from g3ku.core.results import (
+    ArtifactRef,
+    ContentBlock,
+    ContentEnvelope,
+    ContentHandle,
+    RunResult,
+    ToolExecutionResult,
+)
 from g3ku.core.session import AgentSession
 from g3ku.core.state import AgentState, StructuredError, UsageTotals
 
@@ -23,6 +30,8 @@ __all__ = [
     "AssistantMessage",
     "AttachmentReferenceMessage",
     "ContentBlock",
+    "ContentEnvelope",
+    "ContentHandle",
     "ControlMessage",
     "RunResult",
     "StructuredError",

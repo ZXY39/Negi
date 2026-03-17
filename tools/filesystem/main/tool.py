@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from g3ku.content import ContentNavigationService
 from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
 
 _METADATA_START = '### G3KU_PATCH_METADATA ###'
@@ -61,6 +62,7 @@ class FilesystemTool:
         self._allowed_dir = allowed_dir
         self._artifact_store = artifact_store
         self._main_task_service = main_task_service
+        self._content_store = getattr(main_task_service, 'content_store', None) if main_task_service is not None else None
 
     async def execute(
         self,
@@ -81,8 +83,16 @@ class FilesystemTool:
         if denied is not None:
             return denied
         try:
-            if operation == 'read':
-                return self._read(path)
+            if operation == 'describe':
+                return self._describe(path)
+            if operation == 'search':
+                return self._search(path, kwargs.get('query'), kwargs.get('limit'), kwargs.get('before'), kwargs.get('after'))
+            if operation == 'open':
+                return self._open(path, kwargs.get('start_line'), kwargs.get('end_line'), kwargs.get('around_line'), kwargs.get('window'))
+            if operation == 'head':
+                return self._head(path, kwargs.get('lines'))
+            if operation == 'tail':
+                return self._tail(path, kwargs.get('lines'))
             if operation == 'list':
                 return self._list(path)
             if operation == 'write':
@@ -118,13 +128,38 @@ class FilesystemTool:
             return None
         return f'Error: Action not allowed for role {actor_role}: filesystem.{action_id}'
 
-    def _read(self, path: str) -> str:
-        file_path = _resolve_path(path, self._workspace, self._allowed_dir)
-        if not file_path.exists():
-            return f'Error: File not found: {path}'
-        if not file_path.is_file():
-            return f'Error: Not a file: {path}'
-        return file_path.read_text(encoding='utf-8')
+    def _describe(self, path: str) -> str:
+        return json.dumps(self._navigator().describe(path=path), ensure_ascii=False)
+
+    def _search(self, path: str, query: Any, limit: Any, before: Any, after: Any) -> str:
+        return json.dumps(
+            self._navigator().search(
+                path=path,
+                query=str(query or ''),
+                limit=int(limit or 10),
+                before=int(before or 2),
+                after=int(after or 2),
+            ),
+            ensure_ascii=False,
+        )
+
+    def _open(self, path: str, start_line: Any, end_line: Any, around_line: Any, window: Any) -> str:
+        return json.dumps(
+            self._navigator().open(
+                path=path,
+                start_line=int(start_line) if start_line is not None else None,
+                end_line=int(end_line) if end_line is not None else None,
+                around_line=int(around_line) if around_line is not None else None,
+                window=int(window) if window is not None else None,
+            ),
+            ensure_ascii=False,
+        )
+
+    def _head(self, path: str, lines: Any) -> str:
+        return json.dumps(self._navigator().head(path=path, lines=int(lines or 80)), ensure_ascii=False)
+
+    def _tail(self, path: str, lines: Any) -> str:
+        return json.dumps(self._navigator().tail(path=path, lines=int(lines or 80)), ensure_ascii=False)
 
     def _list(self, path: str) -> str:
         dir_path = _resolve_path(path, self._workspace, self._allowed_dir)
@@ -261,6 +296,16 @@ class FilesystemTool:
             )
             return f'Error: old_text not found in {path}.\nBest match ({best_ratio:.0%} similar) at line {best_start + 1}:\n{diff}'
         return f'Error: old_text not found in {path}. No similar text found. Verify the file content.'
+
+    def _navigator(self) -> ContentNavigationService:
+        artifact_store = self._artifact_store
+        if artifact_store is None and self._main_task_service is not None:
+            artifact_store = getattr(self._main_task_service, 'artifact_store', None)
+        return ContentNavigationService(
+            workspace=self._workspace or Path.cwd(),
+            artifact_store=artifact_store,
+            artifact_lookup=self._main_task_service or artifact_store,
+        )
 
 
 def build(runtime):

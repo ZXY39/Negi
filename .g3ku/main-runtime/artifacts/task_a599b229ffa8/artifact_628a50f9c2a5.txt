@@ -1,0 +1,30 @@
+[
+  {
+    "role": "system",
+    "content": "你是一个以 ReAct + 工具调用模式运行的执行节点 (execution node)。\n\n规则：\n- 用户消息包含 JSON 格式的节点上下文。\n- 当工具能帮助你完成节点目标时，请使用工具。\n- 只有当工具列表中确实存在 `spawn_child_nodes` 时，才允许调用它。\n- 如果已经达到节点深度限制，你必须在本地完成任务而不得委派。\n- 严禁泄露隐藏的思维链。\n- 你的最终回复必须是一个精确符合以下形状的单 JSON 对象：\n  {\"status\":\"success\"|\"failed\",\"output\":\"...\"}\n- 不要用 Markdown 代码块包裹最终的 JSON。\n\n"
+  },
+  {
+    "role": "user",
+    "content": "{\n  \"task_id\": \"task:a599b229ffa8\",\n  \"node_id\": \"node:944c0788c66e\",\n  \"node_kind\": \"execution\",\n  \"depth\": 0,\n  \"can_spawn_children\": true,\n  \"goal\": \"root-child-large\",\n  \"prompt\": \"root-child-large\"\n}"
+  },
+  {
+    "role": "assistant",
+    "content": "delegating",
+    "tool_calls": [
+      {
+        "id": "call-1",
+        "type": "function",
+        "function": {
+          "name": "spawn_child_nodes",
+          "arguments": "{\"children\": [{\"goal\": \"child-large\", \"prompt\": \"do-large\", \"acceptance_prompt\": \"check-large\"}]}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "tool_call_id": "call-1",
+    "name": "spawn_child_nodes",
+    "content": "{\"children\": [{\"goal\": \"child-large\", \"check_result\": \"accepted\", \"node_output\": \"Externalized final-output:node:a8c8b14b6b54 (140 lines, 2099 chars). Use content.search/open with ref=artifact:artifact:6f55a4e8817f.\\nHead preview:\\nchild-line-000\\nchild-line-001\\nchild-line-002\\nchild-line-003\\nchild-line-004\\nchild-line-005\", \"node_output_summary\": \"Externalized final-output:node:a8c8b14b6b54 (140 lines, 2099 chars). Use content.search/open with ref=artifact:artifact:6f55a4e8817f.\\nHead preview:\\nchild-line-000\\nchild-line-001\\nchild-line-002\\nchild-line-003\\nchild-line-004\\nchild-line-005\", \"node_output_ref\": \"artifact:artifact:6f55a4e8817f\"}]}"
+  }
+]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import textwrap
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 import yaml
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
+from g3ku.content import ContentNavigationService
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
@@ -258,6 +260,11 @@ class _VisibleToolService:
 class _ArtifactService:
     def __init__(self, artifact_store: TaskArtifactStore):
         self.artifact_store = artifact_store
+        self.content_store = ContentNavigationService(
+            workspace=artifact_store._artifact_dir.parent,
+            artifact_store=artifact_store,
+            artifact_lookup=artifact_store,
+        )
 
     async def startup(self) -> None:
         return None
@@ -358,16 +365,21 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
         tool = manager.get_tool('filesystem')
         assert tool is not None
         assert 'target.txt' in await tool.execute(action='list', path='.')
-        assert await tool.execute(action='read', path='target.txt') == 'before value'
+        described = json.loads(await tool.execute(action='describe', path='target.txt'))
+        assert described['handle']['line_count'] == 1
+        opened = json.loads(await tool.execute(action='open', path='target.txt', start_line=1, end_line=5))
+        assert opened['excerpt'] == 'before value'
         assert 'Successfully wrote' in await tool.execute(action='write', path='written.txt', content='hello\n')
-        assert await tool.execute(action='read', path='written.txt') == 'hello'
+        written = json.loads(await tool.execute(action='head', path='written.txt', lines=5))
+        assert written['excerpt'] == 'hello'
         assert 'Successfully edited' in await tool.execute(
             action='edit',
             path='target.txt',
             old_text='before value',
             new_text='after value',
         )
-        assert await tool.execute(action='read', path='target.txt') == 'after value'
+        searched = json.loads(await tool.execute(action='search', path='target.txt', query='after'))
+        assert searched['hits'][0]['line'] == 1
 
         result = json.loads(
             await tool.execute(
@@ -504,6 +516,84 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
         assert handler.restrict_to_workspace is True
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    service = _ArtifactService(artifact_store)
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    try:
+        exec_tool = manager.get_tool('exec')
+        content_tool = manager.get_tool('content')
+        assert exec_tool is not None
+        assert content_tool is not None
+        command = f'"{sys.executable}" -c "for i in range(90): print(\'line-%03d\' % i)"'
+        payload = json.loads(await exec_tool.execute(command=command, __g3ku_runtime={'session_key': 'cli:test'}))
+        assert payload['status'] == 'success'
+        assert payload['stdout_ref'].startswith('artifact:')
+        assert payload['line_count'] >= 90
+
+        hits = json.loads(await content_tool.execute(action='search', ref=payload['stdout_ref'], query='line-044', limit=1))
+        excerpt = json.loads(
+            await content_tool.execute(
+                action='open',
+                ref=payload['stdout_ref'],
+                around_line=hits['hits'][0]['line'],
+                window=5,
+            )
+        )
+        assert 'line-044' in excerpt['excerpt']
+    finally:
+        manager.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_content_tool_reads_externalized_artifact_refs(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    service = _ArtifactService(artifact_store)
+    artifact = artifact_store.create_text_artifact(
+        task_id='task:test',
+        node_id='node:test',
+        kind='tool_output',
+        title='Large stdout',
+        content='alpha\nbeta\nneedle\nomega\n',
+        extension='.log',
+        mime_type='text/plain',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+        described = json.loads(await tool.execute(action='describe', ref=f'artifact:{artifact.artifact_id}'))
+        assert described['handle']['artifact_id'] == artifact.artifact_id
+        searched = json.loads(await tool.execute(action='search', ref=f'artifact:{artifact.artifact_id}', query='needle'))
+        assert searched['hits'][0]['line'] == 3
+        opened = json.loads(await tool.execute(action='open', ref=f'artifact:{artifact.artifact_id}', around_line=3, window=3))
+        assert 'needle' in opened['excerpt']
+    finally:
+        manager.close()
+        store.close()
 
 
 @pytest.mark.asyncio

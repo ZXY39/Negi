@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.agent.tools.base import Tool
+from g3ku.content import ContentNavigationService
 from g3ku.runtime.context.summarizer import layered_body_payload
 from main.governance import (
     GovernanceStore,
@@ -57,9 +58,20 @@ class MainRuntimeService:
         self.store = SQLiteTaskStore(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
         self.file_store = TaskFileStore(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
         self.artifact_store = TaskArtifactStore(artifact_dir=artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'), store=self.store)
+        self.content_store = ContentNavigationService(
+            workspace=Path.cwd(),
+            artifact_store=self.artifact_store,
+            artifact_lookup=self.store,
+        )
         self.registry = TaskEventRegistry()
         self.tree_builder = TaskTreeBuilder()
-        self.log_service = TaskLogService(store=self.store, file_store=self.file_store, tree_builder=self.tree_builder, registry=self.registry)
+        self.log_service = TaskLogService(
+            store=self.store,
+            file_store=self.file_store,
+            tree_builder=self.tree_builder,
+            registry=self.registry,
+            content_store=self.content_store,
+        )
         self.query_service = TaskQueryService(store=self.store, file_store=self.file_store, log_service=self.log_service)
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
         self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
@@ -205,6 +217,13 @@ class MainRuntimeService:
     def get_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         return self.store.get_task(task_id)
+
+    def get_node(self, node_id: str) -> NodeRecord | None:
+        return self.store.get_node(node_id)
+
+    def list_nodes(self, task_id: str) -> list[NodeRecord]:
+        task_id = self.normalize_task_id(task_id)
+        return self.store.list_nodes(task_id)
 
     def normalize_task_id(self, task_id: str) -> str:
         raw = str(task_id or '').strip()
@@ -613,6 +632,40 @@ class MainRuntimeService:
 
     def get_artifact(self, artifact_id: str) -> TaskArtifactRecord | None:
         return self.store.get_artifact(artifact_id)
+
+    def describe_content(self, *, ref: str | None = None, path: str | None = None) -> dict[str, Any]:
+        return self.content_store.describe(ref=ref, path=path)
+
+    def search_content(
+        self,
+        *,
+        query: str,
+        ref: str | None = None,
+        path: str | None = None,
+        limit: int = 10,
+        before: int = 2,
+        after: int = 2,
+    ) -> dict[str, Any]:
+        return self.content_store.search(ref=ref, path=path, query=query, limit=limit, before=before, after=after)
+
+    def open_content(
+        self,
+        *,
+        ref: str | None = None,
+        path: str | None = None,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        around_line: int | None = None,
+        window: int | None = None,
+    ) -> dict[str, Any]:
+        return self.content_store.open(
+            ref=ref,
+            path=path,
+            start_line=start_line,
+            end_line=end_line,
+            around_line=around_line,
+            window=window,
+        )
 
     async def apply_patch_artifact(self, task_id: str, artifact_id: str) -> dict[str, Any] | None:
         task_id = self.normalize_task_id(task_id)

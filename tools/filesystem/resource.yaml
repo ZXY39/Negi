@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: filesystem
 display_name: Filesystem
-description: Read, list, write, edit, delete workspace files, and create reviewable patch artifacts.
+description: Describe, search, and open workspace files by local excerpt, plus write, edit, delete, and patch actions.
 source:
   type: ''
   url: ''
@@ -30,7 +30,11 @@ parameters:
     action:
       type: string
       enum:
-        - read
+        - describe
+        - search
+        - open
+        - head
+        - tail
         - list
         - write
         - edit
@@ -40,6 +44,33 @@ parameters:
     path:
       type: string
       description: Target file or directory path. Relative paths resolve from workspace.
+    query:
+      type: string
+      description: Required when action=search.
+    limit:
+      type: integer
+      description: Optional max hits when action=search.
+    before:
+      type: integer
+      description: Optional context lines before each hit when action=search.
+    after:
+      type: integer
+      description: Optional context lines after each hit when action=search.
+    start_line:
+      type: integer
+      description: Optional start line when action=open.
+    end_line:
+      type: integer
+      description: Optional end line when action=open.
+    around_line:
+      type: integer
+      description: Optional center line when action=open.
+    window:
+      type: integer
+      description: Optional window size when action=open with around_line.
+    lines:
+      type: integer
+      description: Optional line count when action=head or action=tail.
     content:
       type: string
       description: Required when action=write.
@@ -58,10 +89,42 @@ parameters:
 governance:
   family: filesystem
   display_name: Filesystem
-  description: Read, list, write, edit, delete workspace files, and create reviewable patch artifacts.
+  description: Describe, search, and open workspace files by local excerpt, plus write, edit, delete, and patch actions.
   actions:
-    - id: read
-      label: Read File
+    - id: describe
+      label: Describe File
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+    - id: search
+      label: Search File
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+    - id: open
+      label: Open File Excerpt
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+    - id: head
+      label: Open File Head
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+    - id: tail
+      label: Open File Tail
       risk_level: low
       destructive: false
       allowed_roles:

@@ -48,7 +48,8 @@ class ReActToolLoop:
         limit = max(2, int(max_iterations or self._max_iterations))
         for _ in range(limit):
             self._check_pause_or_cancel(task.task_id)
-            self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(messages, ensure_ascii=False, indent=2))
+            model_messages = self._prepare_messages(messages, runtime_context=runtime_context)
+            self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
             self._log_service.upsert_frame(
                 task.task_id,
                 {
@@ -56,7 +57,7 @@ class ReActToolLoop:
                     'depth': node.depth,
                     'node_kind': node.node_kind,
                     'phase': 'before_model',
-                    'messages': messages,
+                    'messages': model_messages,
                     'pending_tool_calls': [],
                     'pending_child_specs': [],
                     'partial_child_results': [],
@@ -64,7 +65,7 @@ class ReActToolLoop:
                 },
             )
             response = await self._chat_backend.chat(
-                messages=messages,
+                messages=model_messages,
                 tools=tool_schemas or None,
                 model_refs=model_refs,
                 max_tokens=1200,
@@ -85,7 +86,7 @@ class ReActToolLoop:
                         'depth': node.depth,
                         'node_kind': node.node_kind,
                         'phase': 'after_model',
-                        'messages': messages,
+                        'messages': model_messages,
                         'pending_tool_calls': tool_calls,
                         'pending_child_specs': [],
                         'partial_child_results': [],
@@ -110,8 +111,20 @@ class ReActToolLoop:
                         runtime_context={**runtime_context, 'current_tool_call_id': call.id},
                     )
                     tool_messages.append({'role': 'tool', 'tool_call_id': call.id, 'name': call.name, 'content': tool_content})
-                messages.append({'role': 'assistant', 'content': response.content, 'tool_calls': assistant_tool_calls})
+                messages.append(
+                    {
+                        'role': 'assistant',
+                        'content': self._externalize_message_content(
+                            response.content,
+                            runtime_context=runtime_context,
+                            display_name=f'assistant:{node.node_id}',
+                            source_kind='assistant_message',
+                        ),
+                        'tool_calls': assistant_tool_calls,
+                    }
+                )
                 messages.extend(tool_messages)
+                waiting_messages = self._prepare_messages(messages, runtime_context=runtime_context)
                 self._log_service.upsert_frame(
                     task.task_id,
                     {
@@ -119,7 +132,7 @@ class ReActToolLoop:
                         'depth': node.depth,
                         'node_kind': node.node_kind,
                         'phase': 'waiting_tool_results',
-                        'messages': messages,
+                        'messages': waiting_messages,
                         'pending_tool_calls': [],
                         'pending_child_specs': [],
                         'partial_child_results': [],
@@ -146,12 +159,13 @@ class ReActToolLoop:
         if self._accepts_runtime_context(tool):
             execute_kwargs['__g3ku_runtime'] = runtime_context
         result = await tool.execute(**execute_kwargs)
-        if isinstance(result, str):
-            return result
-        try:
-            return json.dumps(result, ensure_ascii=False)
-        except TypeError:
-            return str(result)
+        rendered = result if isinstance(result, str) else self._render_tool_result(result)
+        return self._externalize_message_content(
+            rendered,
+            runtime_context=runtime_context,
+            display_name=f'tool:{tool_name}',
+            source_kind=f'tool_result:{tool_name}',
+        )
 
     def _check_pause_or_cancel(self, task_id: str) -> None:
         task = self._log_service._store.get_task(task_id)
@@ -185,3 +199,38 @@ class ReActToolLoop:
         if '__g3ku_runtime' in sig.parameters:
             return True
         return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
+
+    @staticmethod
+    def _render_tool_result(result: Any) -> str:
+        try:
+            return json.dumps(result, ensure_ascii=False)
+        except TypeError:
+            return str(result)
+
+    def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
+        store = getattr(self._log_service, '_content_store', None)
+        if store is None:
+            return list(messages)
+        return store.prepare_messages_for_model(
+            list(messages),
+            runtime=runtime_context,
+            source_prefix='react',
+        )
+
+    def _externalize_message_content(
+        self,
+        value: Any,
+        *,
+        runtime_context: dict[str, Any],
+        display_name: str,
+        source_kind: str,
+    ) -> Any:
+        store = getattr(self._log_service, '_content_store', None)
+        if store is None:
+            return value
+        return store.externalize_for_message(
+            value,
+            runtime=runtime_context,
+            display_name=display_name,
+            source_kind=source_kind,
+        )

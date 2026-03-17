@@ -1,0 +1,10 @@
+[
+  {
+    "role": "system",
+    "content": "你是一个以 ReAct + 工具调用模式运行的验收节点 (acceptance node)。\n\n规则：\n- 用户消息包含 JSON 格式的验收上下文。\n- 你可以使用普通工具来验证子节点的输出。\n- 你不得尝试委派或创建子节点。\n- 严禁泄露隐藏的思维链。\n- 你的最终回复必须是一个精确符合以下形状的单 JSON 对象：\n  {\"status\":\"success\"|\"failed\",\"output\":\"...\"}\n- `output` 应该是简洁的验收结果，父节点可以直接使用。\n\n"
+  },
+  {
+    "role": "user",
+    "content": "{\"handle\": {\"artifact_id\": \"artifact:1f9dc531e6a7\", \"char_count\": 2558, \"display_name\": \"react-user-2\", \"head_preview\": \"{\\n  \\\"task_id\\\": \\\"task:dfbb02e69bea\\\",\\n  \\\"node_id\\\": \\\"node:e9bb3fa1544d\\\",\\n  \\\"node_kind\\\": \\\"acceptance\\\",\\n  \\\"depth\\\": 2,\\n  \\\"can_spawn_children\\\": false,\", \"line_count\": 9, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:1f9dc531e6a7\", \"size_bytes\": 2658, \"source_kind\": \"react_user\", \"tail_preview\": \"\\\"node_kind\\\": \\\"acceptance\\\",\\n  \\\"depth\\\": 2,\\n  \\\"can_spawn_children\\\": false,\\n  \\\"goal\\\": \\\"验收:child-large\\\",\\n  \\\"prompt\\\": \\\"check-large\\\\n\\\\n子节点输出摘要：\\\\nchild-line-000\\\\nchild-line-001\\\\nchild-line-002\\\\nchild-line-003\\\\nchild-line-004\\\\nch...\", \"uri\": \"D:\\\\zxy\\\\project\\\\G3ku\\\\.g3ku\\\\main-runtime\\\\artifacts\\\\task_dfbb02e69bea\\\\artifact_1f9dc531e6a7.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:1f9dc531e6a7\", \"summary\": \"Externalized react-user-2 (9 lines, 2558 chars). Use content.search/open with ref=artifact:artifact:1f9dc531e6a7.\\nHead preview:\\n{\\n  \\\"task_id\\\": \\\"task:dfbb02e69bea\\\",\\n  \\\"node_id\\\": \\\"node:e9bb3fa1544d\\\",\\n  \\\"node_kind\\\": \\\"acceptance\\\",\\n  \\\"depth\\\": 2,\\n  \\\"can_spawn_children\\\": false,\", \"type\": \"content_ref\"}"
+  }
+]

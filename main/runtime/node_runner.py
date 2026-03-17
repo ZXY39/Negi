@@ -158,20 +158,41 @@ class NodeRunner:
                 child = self._create_execution_child(task=task, parent=parent, spec=spec)
                 cached_entry['child_node_id'] = child.node_id
             child_result = await self.run_node(task.task_id, child.node_id)
+            child = self._store.get_node(child.node_id) or child
+            child_summary = str(getattr(child, 'final_output', '') or child_result.output or '').strip()
+            child_ref = str(getattr(child, 'final_output_ref', '') or '').strip()
             if child_result.status != STATUS_SUCCESS:
-                result = SpawnChildResult(goal=spec.goal, check_result='无', node_output=child_result.output)
+                result = SpawnChildResult(
+                    goal=spec.goal,
+                    check_result='无',
+                    node_output=child_summary,
+                    node_output_summary=child_summary,
+                    node_output_ref=child_ref,
+                )
                 cached_entry['result'] = result.model_dump(mode='json')
                 self._save_spawn_cache(parent.node_id, cache_key, cached_payload)
                 return result
             acceptance_id = str(cached_entry.get('acceptance_node_id') or '').strip()
             acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
             if acceptance is None:
-                acceptance = self._create_acceptance_child(task=task, child=child, spec=spec, child_output=child_result.output)
+                acceptance = self._create_acceptance_child(
+                    task=task,
+                    child=child,
+                    spec=spec,
+                    child_output=child_summary,
+                    child_output_ref=child_ref,
+                )
                 cached_entry['acceptance_node_id'] = acceptance.node_id
             acceptance_result = await self.run_node(task.task_id, acceptance.node_id)
             check_result = acceptance_result.output if acceptance_result.status == STATUS_SUCCESS else '无'
             self._log_service.update_node_check_result(task.task_id, child.node_id, check_result)
-            result = SpawnChildResult(goal=spec.goal, check_result=check_result, node_output=child_result.output)
+            result = SpawnChildResult(
+                goal=spec.goal,
+                check_result=check_result,
+                node_output=child_summary,
+                node_output_summary=child_summary,
+                node_output_ref=child_ref,
+            )
             cached_entry['result'] = result.model_dump(mode='json')
             self._save_spawn_cache(parent.node_id, cache_key, cached_payload)
             return result
@@ -219,7 +240,25 @@ class NodeRunner:
         )
         return self._log_service.create_node(task.task_id, child)
 
-    def _create_acceptance_child(self, *, task, child: NodeRecord, spec: SpawnChildSpec, child_output: str) -> NodeRecord:
+    def _create_acceptance_child(
+        self,
+        *,
+        task,
+        child: NodeRecord,
+        spec: SpawnChildSpec,
+        child_output: str,
+        child_output_ref: str = '',
+    ) -> NodeRecord:
+        prompt = (
+            f'{spec.acceptance_prompt}\n\n'
+            f'子节点输出摘要：\n{child_output}\n'
+        )
+        if child_output_ref:
+            prompt = (
+                f'{prompt}\n'
+                f'子节点输出引用：{child_output_ref}\n'
+                '如需查看更多细节，只能先使用 content.search，再使用 content.open 读取局部片段，不要请求全文。\n'
+            )
         acceptance = NodeRecord(
             node_id=new_node_id(),
             task_id=task.task_id,
@@ -229,8 +268,8 @@ class NodeRunner:
             node_kind=KIND_ACCEPTANCE,
             status='in_progress',
             goal=f'验收:{spec.goal}',
-            prompt=f'{spec.acceptance_prompt}\n\n子节点输出：\n{child_output}',
-            input=f'{spec.acceptance_prompt}\n\n子节点输出：\n{child_output}',
+            prompt=prompt,
+            input=prompt,
             output=[],
             check_result='',
             final_output='',

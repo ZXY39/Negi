@@ -1,0 +1,89 @@
+schema_version: 1
+kind: tool
+name: content
+display_name: Content
+description: Describe, search, and open large content by ref or workspace path without loading the full body into model context.
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: 当前版本表示仓库内置实现；更新时需同步代码、参数契约和资源描述。
+  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文档不单独视为版本升级。
+  source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - describe
+        - search
+        - open
+        - head
+        - tail
+      description: Content navigation action.
+    ref:
+      type: string
+      description: Externalized content ref such as artifact:artifact_xxx.
+    path:
+      type: string
+      description: Workspace-relative file path when reading directly from a file.
+    query:
+      type: string
+      description: Search query used by action=search.
+    limit:
+      type: integer
+      description: Max hits for action=search.
+    before:
+      type: integer
+      description: Context lines before each hit when action=search.
+    after:
+      type: integer
+      description: Context lines after each hit when action=search.
+    start_line:
+      type: integer
+      description: Start line for action=open.
+    end_line:
+      type: integer
+      description: End line for action=open.
+    around_line:
+      type: integer
+      description: Center line for action=open.
+    window:
+      type: integer
+      description: Window size for action=open when around_line is provided.
+    lines:
+      type: integer
+      description: Number of lines for action=head or action=tail.
+  required:
+    - action
+governance:
+  family: content
+  display_name: Content
+  description: Navigate large content by summary, search, and local open operations.
+  actions:
+    - id: inspect
+      label: Inspect Content
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

@@ -15,8 +15,11 @@ class TaskTreeNode(Model):
     status: NodeStatus = 'in_progress'
     title: str = ''
     input: str = ''
+    input_ref: str = ''
     output: str = ''
+    output_ref: str = ''
     check_result: str = ''
+    check_result_ref: str = ''
     updated_at: str = ''
     children: list['TaskTreeNode'] = Field(default_factory=list)
 
@@ -29,6 +32,7 @@ class LatestTaskNodeOutput(Model):
     title: str = ''
     updated_at: str = ''
     output: str = ''
+    output_ref: str = ''
 
 
 class TaskSummaryResult(Model):

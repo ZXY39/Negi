@@ -109,7 +109,15 @@ async def list_artifacts(task_id: str):
 
 
 @router.get('/tasks/{task_id}/artifacts/{artifact_id}')
-async def get_artifact(task_id: str, artifact_id: str):
+async def get_artifact(
+    task_id: str,
+    artifact_id: str,
+    full: bool = Query(False),
+    start_line: int | None = Query(None),
+    end_line: int | None = Query(None),
+    around_line: int | None = Query(None),
+    window: int | None = Query(None),
+):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
@@ -117,8 +125,66 @@ async def get_artifact(task_id: str, artifact_id: str):
     artifact = service.get_artifact(artifact_id)
     if artifact is None or artifact.task_id != task_id:
         raise HTTPException(status_code=404, detail='artifact_not_found')
-    content = Path(artifact.path).read_text(encoding='utf-8') if artifact.path and Path(artifact.path).exists() else ''
-    return {'ok': True, 'artifact': artifact.model_dump(mode='json'), 'content': content}
+    ref = f'artifact:{artifact.artifact_id}'
+    content = ''
+    excerpt = None
+    if full:
+        content = Path(artifact.path).read_text(encoding='utf-8') if artifact.path and Path(artifact.path).exists() else ''
+    else:
+        excerpt = service.open_content(
+            ref=ref,
+            start_line=start_line,
+            end_line=end_line,
+            around_line=around_line,
+            window=window,
+        )
+        content = str(excerpt.get('excerpt') or '')
+    return {'ok': True, 'artifact': artifact.model_dump(mode='json'), 'content': content, 'excerpt': excerpt}
+
+
+@router.get('/content/describe')
+async def describe_content(ref: str | None = Query(None), path: str | None = Query(None)):
+    service = _service()
+    await service.startup()
+    return {'ok': True, **service.describe_content(ref=ref, path=path)}
+
+
+@router.get('/content/search')
+async def search_content(
+    query: str = Query(...),
+    ref: str | None = Query(None),
+    path: str | None = Query(None),
+    limit: int = Query(10),
+    before: int = Query(2),
+    after: int = Query(2),
+):
+    service = _service()
+    await service.startup()
+    return {'ok': True, **service.search_content(query=query, ref=ref, path=path, limit=limit, before=before, after=after)}
+
+
+@router.get('/content/open')
+async def open_content(
+    ref: str | None = Query(None),
+    path: str | None = Query(None),
+    start_line: int | None = Query(None),
+    end_line: int | None = Query(None),
+    around_line: int | None = Query(None),
+    window: int | None = Query(None),
+):
+    service = _service()
+    await service.startup()
+    return {
+        'ok': True,
+        **service.open_content(
+            ref=ref,
+            path=path,
+            start_line=start_line,
+            end_line=end_line,
+            around_line=around_line,
+            window=window,
+        ),
+    }
 
 
 @router.post('/tasks/{task_id}/artifacts/{artifact_id}/apply')

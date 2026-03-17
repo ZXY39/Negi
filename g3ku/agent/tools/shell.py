@@ -1,6 +1,7 @@
 ﻿"""Shell execution tool."""
 
 import asyncio
+import json
 import os
 import re
 from pathlib import Path
@@ -20,6 +21,7 @@ class ExecTool(Tool):
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
         path_append: str = "",
+        content_store: Any = None,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -37,6 +39,7 @@ class ExecTool(Tool):
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
+        self.content_store = content_store
 
     @property
     def name(self) -> str:
@@ -68,7 +71,15 @@ class ExecTool(Tool):
         cwd = working_dir or self.working_dir or os.getcwd()
         guard_error = self._guard_command(command, cwd)
         if guard_error:
-            return guard_error
+            return self._build_payload(
+                status="error",
+                exit_code=None,
+                command=command,
+                stdout_text="",
+                stderr_text=guard_error,
+                runtime=runtime,
+                error=guard_error,
+            )
         
         env = os.environ.copy()
         temp_dir = str(runtime.get("temp_dir") or env.get("G3KU_TMP_DIR") or "").strip()
@@ -109,32 +120,38 @@ class ExecTool(Tool):
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     pass
-                return f"Error: Command timed out after {self.timeout} seconds"
-            
-            output_parts = []
-            
-            if stdout:
-                output_parts.append(stdout.decode("utf-8", errors="replace"))
-            
-            if stderr:
-                stderr_text = stderr.decode("utf-8", errors="replace")
-                if stderr_text.strip():
-                    output_parts.append(f"STDERR:\n{stderr_text}")
-            
-            if process.returncode != 0:
-                output_parts.append(f"\nExit code: {process.returncode}")
-            
-            result = "\n".join(output_parts) if output_parts else "(no output)"
-            
-            # Truncate very long output
-            max_len = 10000
-            if len(result) > max_len:
-                result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
-            
-            return result
-            
+                return self._build_payload(
+                    status="error",
+                    exit_code=None,
+                    command=command,
+                    stdout_text="",
+                    stderr_text=f"Command timed out after {self.timeout} seconds",
+                    runtime=runtime,
+                    error=f"Command timed out after {self.timeout} seconds",
+                )
+
+            stdout_text = stdout.decode("utf-8", errors="replace") if stdout else ""
+            stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+            return self._build_payload(
+                status="success" if process.returncode == 0 else "error",
+                exit_code=process.returncode,
+                command=command,
+                stdout_text=stdout_text,
+                stderr_text=stderr_text,
+                runtime=runtime,
+                error="" if process.returncode == 0 else f"Exit code: {process.returncode}",
+            )
+
         except Exception as e:
-            return f"Error executing command: {str(e)}"
+            return self._build_payload(
+                status="error",
+                exit_code=None,
+                command=command,
+                stdout_text="",
+                stderr_text=str(e),
+                runtime=runtime,
+                error=f"Error executing command: {str(e)}",
+            )
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""
@@ -170,5 +187,64 @@ class ExecTool(Tool):
         win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)   # Windows: C:\...
         posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", command) # POSIX: /absolute only
         return win_paths + posix_paths
+
+    def _build_payload(
+        self,
+        *,
+        status: str,
+        exit_code: int | None,
+        command: str,
+        stdout_text: str,
+        stderr_text: str,
+        runtime: dict[str, Any],
+        error: str = "",
+    ) -> str:
+        combined = stdout_text.strip()
+        if stderr_text.strip():
+            combined = f"{combined}\nSTDERR:\n{stderr_text.strip()}".strip()
+        payload = {
+            "status": status,
+            "exit_code": exit_code,
+            "command": command,
+            "stdout_ref": self._persist_ref(stdout_text, runtime=runtime, display_name="exec stdout", source_kind="exec_stdout"),
+            "stderr_ref": self._persist_ref(stderr_text, runtime=runtime, display_name="exec stderr", source_kind="exec_stderr"),
+            "head_preview": self._preview(combined, from_tail=False),
+            "tail_preview": self._preview(combined, from_tail=True),
+            "line_count": len(combined.splitlines()) if combined else 0,
+            "next_actions": ["content.search", "content.open"],
+        }
+        if error:
+            payload["error"] = error
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _persist_ref(
+        self,
+        text: str,
+        *,
+        runtime: dict[str, Any],
+        display_name: str,
+        source_kind: str,
+    ) -> str:
+        if self.content_store is None or not str(text or "").strip():
+            return ""
+        envelope = self.content_store.maybe_externalize_text(
+            text,
+            runtime=runtime,
+            display_name=display_name,
+            source_kind=source_kind,
+            force=True,
+        )
+        return str(envelope.ref or "") if envelope is not None else ""
+
+    @staticmethod
+    def _preview(text: str, *, from_tail: bool) -> str:
+        if not text:
+            return ""
+        lines = text.splitlines()
+        selected = lines[-6:] if from_tail else lines[:6]
+        preview = "\n".join(selected).strip()
+        if len(preview) <= 240:
+            return preview
+        return preview[:240].rstrip() + "..."
 
 

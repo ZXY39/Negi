@@ -14,6 +14,7 @@ class Model(BaseModel):
 class NodeOutputEntry(Model):
     seq: int
     content: str = ''
+    content_ref: str = ''
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str
 
@@ -33,6 +34,8 @@ class SpawnChildResult(Model):
     goal: str
     check_result: str = ''
     node_output: str = ''
+    node_output_summary: str = ''
+    node_output_ref: str = ''
 
 
 class TaskArtifactRecord(Model):
@@ -64,6 +67,7 @@ class TaskRecord(Model):
     updated_at: str
     finished_at: str | None = None
     final_output: str = ''
+    final_output_ref: str = ''
     failure_reason: str = ''
     runtime_state_path: str = ''
     tree_snapshot_path: str = ''
@@ -82,9 +86,12 @@ class NodeRecord(Model):
     goal: str
     prompt: str
     input: str = ''
+    input_ref: str = ''
     output: list[NodeOutputEntry] = Field(default_factory=list)
     check_result: str = ''
+    check_result_ref: str = ''
     final_output: str = ''
+    final_output_ref: str = ''
     can_spawn_children: bool = False
     created_at: str
     updated_at: str

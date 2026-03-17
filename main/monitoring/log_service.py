@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any, Callable
 
+from g3ku.content import ContentNavigationService
 from main.models import NodeOutputEntry, NodeRecord, TaskRecord
 from main.monitoring.file_store import TaskFileStore
 from main.protocol import build_envelope, now_iso
@@ -18,11 +20,12 @@ def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
 
 
 class TaskLogService:
-    def __init__(self, *, store, file_store: TaskFileStore, tree_builder: TaskTreeBuilder, registry=None):
+    def __init__(self, *, store, file_store: TaskFileStore, tree_builder: TaskTreeBuilder, registry=None, content_store: ContentNavigationService | None = None):
         self._store = store
         self._file_store = file_store
         self._tree_builder = tree_builder
         self._registry = registry
+        self._content_store = content_store
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
         paths = self._file_store.paths_for_task(task.task_id)
@@ -67,9 +70,10 @@ class TaskLogService:
         return node
 
     def update_node_input(self, task_id: str, node_id: str, content: str) -> NodeRecord | None:
+        text, ref = self._summarize_node_input(task_id=task_id, node_id=node_id, content=content)
         updated = self._store.update_node(
             node_id,
-            lambda record: record.model_copy(update={'input': str(content or ''), 'updated_at': now_iso()}),
+            lambda record: record.model_copy(update={'input': text, 'input_ref': ref, 'updated_at': now_iso()}),
         )
         self.refresh_task_view(task_id, mark_unread=True)
         return updated
@@ -82,12 +86,21 @@ class TaskLogService:
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> NodeRecord | None:
+        text, ref = self._summarize_content(
+            content,
+            task_id=task_id,
+            node_id=node_id,
+            display_name=f'node-output:{node_id}:{self._next_output_seq(node_id)}',
+            source_kind='node_output',
+        )
+
         def _mutate(record: NodeRecord) -> NodeRecord:
             output = list(record.output)
             output.append(
                 NodeOutputEntry(
                     seq=len(output) + 1,
-                    content=str(content or ''),
+                    content=text,
+                    content_ref=ref,
                     tool_calls=list(tool_calls or []),
                     created_at=now_iso(),
                 )
@@ -99,9 +112,16 @@ class TaskLogService:
         return updated
 
     def update_node_check_result(self, task_id: str, node_id: str, check_result: str) -> NodeRecord | None:
+        text, ref = self._summarize_content(
+            check_result,
+            task_id=task_id,
+            node_id=node_id,
+            display_name=f'check-result:{node_id}',
+            source_kind='node_check_result',
+        )
         updated = self._store.update_node(
             node_id,
-            lambda record: record.model_copy(update={'check_result': str(check_result or ''), 'updated_at': now_iso()}),
+            lambda record: record.model_copy(update={'check_result': text, 'check_result_ref': ref, 'updated_at': now_iso()}),
         )
         self.refresh_task_view(task_id, mark_unread=True)
         return updated
@@ -115,13 +135,28 @@ class TaskLogService:
         final_output: str = '',
         failure_reason: str = '',
     ) -> NodeRecord | None:
+        final_text, final_ref = self._summarize_content(
+            final_output,
+            task_id=task_id,
+            node_id=node_id,
+            display_name=f'final-output:{node_id}',
+            source_kind='node_final_output',
+        )
+        failure_text, _failure_ref = self._summarize_content(
+            failure_reason,
+            task_id=task_id,
+            node_id=node_id,
+            display_name=f'failure-output:{node_id}',
+            source_kind='node_failure_output',
+        )
         updated = self._store.update_node(
             node_id,
             lambda record: record.model_copy(
                 update={
                     'status': str(status or record.status),
-                    'final_output': str(final_output or record.final_output),
-                    'failure_reason': str(failure_reason or record.failure_reason),
+                    'final_output': final_text or record.final_output,
+                    'final_output_ref': final_ref or record.final_output_ref,
+                    'failure_reason': failure_text or record.failure_reason,
                     'finished_at': now_iso() if status in {'success', 'failed'} else record.finished_at,
                     'updated_at': now_iso(),
                 }
@@ -167,6 +202,47 @@ class TaskLogService:
             cancel_requested=bool(updated.cancel_requested),
         )
         return self.refresh_task_view(task_id, mark_unread=False) or updated
+
+    def _summarize_content(
+        self,
+        value: Any,
+        *,
+        task_id: str,
+        node_id: str | None,
+        display_name: str,
+        source_kind: str,
+    ) -> tuple[str, str]:
+        store = self._content_store
+        if store is None:
+            return str(value or ''), ''
+        return store.summarize_for_storage(
+            value,
+            runtime={'task_id': task_id, 'node_id': node_id},
+            display_name=display_name,
+            source_kind=source_kind,
+        )
+
+    def _summarize_node_input(self, *, task_id: str, node_id: str, content: str) -> tuple[str, str]:
+        text = str(content or '')
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            return text, ''
+        return self._summarize_content(
+            text,
+            task_id=task_id,
+            node_id=node_id,
+            display_name=f'node-input:{node_id}',
+            source_kind='node_input',
+        )
+
+    def _next_output_seq(self, node_id: str) -> int:
+        record = self._store.get_node(node_id)
+        if record is None:
+            return 1
+        return len(list(record.output or [])) + 1
 
     def set_pause_state(self, task_id: str, *, pause_requested: bool | None = None, is_paused: bool | None = None) -> TaskRecord | None:
         return self.update_task_control(task_id, pause_requested=pause_requested, is_paused=is_paused)
@@ -277,6 +353,7 @@ class TaskLogService:
                 'is_unread': True if mark_unread else task.is_unread,
                 'updated_at': now_iso(),
                 'final_output': (root_node.final_output if root_node and next_status == 'success' else task.final_output),
+                'final_output_ref': (root_node.final_output_ref if root_node and next_status == 'success' else task.final_output_ref),
                 'failure_reason': (root_node.failure_reason if root_node and next_status == 'failed' else task.failure_reason),
                 'finished_at': now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at,
             }

@@ -17,8 +17,11 @@ class TaskTreeBuilder:
                 status=node.status,
                 title=node.goal or node.node_id,
                 input=node.input,
+                input_ref=str(node.input_ref or ''),
                 output='\n'.join(entry.content for entry in node.output if str(entry.content or '').strip()),
+                output_ref=next((str(entry.content_ref or '') for entry in reversed(list(node.output or [])) if str(entry.content_ref or '').strip()), str(node.final_output_ref or '')),
                 check_result=node.check_result,
+                check_result_ref=str(node.check_result_ref or ''),
                 updated_at=node.updated_at,
                 children=[],
             )
@@ -46,4 +49,3 @@ class TaskTreeBuilder:
 
         walk(root, is_root=True)
         return '\n'.join(lines)
-

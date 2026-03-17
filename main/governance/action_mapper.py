@@ -12,15 +12,25 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'filesystem': {
         'tool_id': 'filesystem',
         'display_name': 'Filesystem',
-        'description': 'Read, list, write, edit, delete workspace files, and create reviewable patch artifacts.',
+        'description': 'Describe, search, and open workspace files by local excerpt, plus write, edit, delete, and patch actions.',
         'actions': [
-            {'id': 'read', 'label': 'Read File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
+            {'id': 'describe', 'label': 'Describe File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
+            {'id': 'search', 'label': 'Search File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
+            {'id': 'open', 'label': 'Open File Excerpt', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
+            {'id': 'head', 'label': 'Open File Head', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
+            {'id': 'tail', 'label': 'Open File Tail', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
             {'id': 'list', 'label': 'List Directory', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
             {'id': 'write', 'label': 'Write File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
             {'id': 'edit', 'label': 'Edit File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
             {'id': 'delete', 'label': 'Delete File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo']},
             {'id': 'propose_patch', 'label': 'Propose Patch', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo', 'execution']},
         ],
+    },
+    'content': {
+        'tool_id': 'content_navigation',
+        'display_name': 'Content',
+        'description': 'Describe, search, and open large externalized content by reference.',
+        'actions': [{'id': 'inspect', 'label': 'Inspect Content', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES}],
     },
     'message': {
         'tool_id': 'messaging',
@@ -91,7 +101,7 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
 }
 
 
-DEFAULT_FAMILY_ORDER = ['filesystem', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'task_runtime', 'skill_access']
+DEFAULT_FAMILY_ORDER = ['filesystem', 'content_navigation', 'memory', 'messaging', 'automation', 'exec_runtime', 'model_admin', 'task_runtime', 'skill_access']
 
 
 def get_default_tool_governance(tool_name: str) -> dict[str, Any] | None:

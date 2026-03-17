@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: exec
-description: Execute shell commands inside the workspace runtime.
+description: Execute shell commands inside the workspace runtime and return structured summaries plus content refs.
 source:
   type: ''
   url: ''

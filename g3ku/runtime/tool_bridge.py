@@ -4,6 +4,7 @@ import json
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
+from g3ku.content import parse_content_envelope
 
 try:
     from langchain_core.messages import ToolMessage
@@ -90,6 +91,9 @@ class ToolExecutionBridge:
 
     @staticmethod
     def tool_result_hint(tool_name: str, content: Any) -> str:
+        envelope = parse_content_envelope(content)
+        if envelope is not None:
+            return f"{tool_name} finished | {envelope.summary}"
         if isinstance(content, list):
             counts = {"text": 0, "image": 0, "file": 0, "other": 0}
             text_bits: list[str] = []
@@ -309,7 +313,13 @@ class ToolExecutionBridge:
         )
         try:
             result = await handler(request)
-            result_content = getattr(result, "content", "")
+            result_content = self._externalize_tool_result(
+                getattr(result, "content", ""),
+                runtime_context=runtime_context,
+                tool_name=str(tool_name or "tool"),
+            )
+            if result_content != getattr(result, "content", ""):
+                result = self._replace_tool_message_content(result, result_content)
             if self._loop.debug_trace:
                 logger.info(
                     "[debug:tool:result] session={} channel={} chat={} tool={} content={}",
@@ -414,6 +424,11 @@ class ToolExecutionBridge:
         finally:
             self._loop.tools.pop_runtime_context(token)
 
+        result = self._externalize_tool_result(
+            result,
+            runtime_context=runtime_context,
+            tool_name=tool_name,
+        )
         rendered = self._stringify_tool_result(result)
         if on_progress and emit_progress:
             event_kind = "tool_error" if rendered.startswith("Error") else "tool_result"
@@ -440,5 +455,39 @@ class ToolExecutionBridge:
             return json.dumps(value, ensure_ascii=False)
         except Exception:
             return str(value)
+
+    def _externalize_tool_result(self, value: Any, *, runtime_context: Any, tool_name: str) -> Any:
+        service = getattr(self._loop, 'main_task_service', None)
+        store = getattr(service, 'content_store', None) if service is not None else None
+        if store is None:
+            return value
+        runtime_payload = {
+            'session_key': getattr(runtime_context, 'session_key', None) if runtime_context is not None else None,
+            'task_id': getattr(runtime_context, 'task_id', None) if runtime_context is not None else None,
+            'node_id': getattr(runtime_context, 'node_id', None) if runtime_context is not None else None,
+        }
+        result = store.externalize_for_message(
+            value,
+            runtime=runtime_payload,
+            display_name=f'tool:{tool_name}',
+            source_kind=f'tool_result:{tool_name}',
+        )
+        if isinstance(result, (dict, list)):
+            return json.dumps(result, ensure_ascii=False)
+        return result
+
+    @staticmethod
+    def _replace_tool_message_content(message: Any, content: Any) -> Any:
+        if hasattr(message, 'model_copy'):
+            return message.model_copy(update={'content': content})
+        try:
+            return ToolMessage(
+                content=content,
+                tool_call_id=getattr(message, 'tool_call_id', ''),
+                name=getattr(message, 'name', ''),
+                status=getattr(message, 'status', 'success'),
+            )
+        except Exception:
+            return message
 
 

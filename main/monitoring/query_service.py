@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from g3ku.content import content_summary_and_ref
 from main.models import NodeRecord
 from main.monitoring.models import LatestTaskNodeOutput, TaskListItem, TaskProgressResult, TaskSummaryResult
 
@@ -95,6 +96,7 @@ class TaskQueryService:
             title=target.goal or target.node_id,
             updated_at=str(target.updated_at or ''),
             output=self._node_output_text(target),
+            output_ref=self._node_output_ref(target),
         )
 
     @staticmethod
@@ -111,6 +113,17 @@ class TaskQueryService:
             return failure_reason
         return ''
 
+    @staticmethod
+    def _node_output_ref(node: NodeRecord) -> str:
+        final_ref = str(getattr(node, 'final_output_ref', '') or '').strip()
+        if final_ref:
+            return final_ref
+        for entry in reversed(list(node.output or [])):
+            content_ref = str(getattr(entry, 'content_ref', '') or '').strip()
+            if content_ref:
+                return content_ref
+        return ''
+
     def _serialize_node(self, node: NodeRecord) -> dict[str, object]:
         payload = node.model_dump(mode='json')
         payload['execution_trace'] = self._execution_trace(node)
@@ -118,6 +131,7 @@ class TaskQueryService:
 
     def _execution_trace(self, node: NodeRecord) -> dict[str, object]:
         tool_output_map = self._tool_output_map(node)
+        tool_ref_map = self._tool_output_ref_map(node)
         tool_steps: list[dict[str, str]] = []
         seen_ids: set[str] = set()
 
@@ -128,6 +142,7 @@ class TaskQueryService:
                     continue
                 seen_ids.add(tool_call_id)
                 output_text = str(tool_output_map.get(tool_call_id) or '')
+                output_ref = str(tool_ref_map.get(tool_call_id) or '')
                 arguments = call.get('arguments')
                 if isinstance(arguments, (dict, list)):
                     arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2)
@@ -139,6 +154,7 @@ class TaskQueryService:
                         'tool_name': str(call.get('name') or 'tool'),
                         'arguments_text': arguments_text,
                         'output_text': output_text,
+                        'output_ref': output_ref,
                         'status': self._tool_step_status(output_text, node.status),
                     }
                 )
@@ -147,7 +163,9 @@ class TaskQueryService:
             'initial_prompt': str(node.prompt or node.goal or ''),
             'tool_steps': tool_steps,
             'final_output': self._node_output_text(node),
+            'final_output_ref': self._node_output_ref(node),
             'acceptance_result': str(node.check_result or ''),
+            'acceptance_result_ref': str(getattr(node, 'check_result_ref', '') or ''),
         }
 
     def _tool_output_map(self, node: NodeRecord) -> dict[str, str]:
@@ -162,10 +180,23 @@ class TaskQueryService:
             if not tool_call_id:
                 continue
             content = item.get('content')
-            if isinstance(content, (dict, list)):
-                result[tool_call_id] = json.dumps(content, ensure_ascii=False, indent=2)
-            else:
-                result[tool_call_id] = str(content or '')
+            summary, _ref = content_summary_and_ref(content)
+            result[tool_call_id] = summary
+        return result
+
+    def _tool_output_ref_map(self, node: NodeRecord) -> dict[str, str]:
+        messages = self._parse_input_messages(node.input)
+        result: dict[str, str] = {}
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('role') or '').strip().lower() != 'tool':
+                continue
+            tool_call_id = str(item.get('tool_call_id') or '').strip()
+            if not tool_call_id:
+                continue
+            _summary, ref = content_summary_and_ref(item.get('content'))
+            result[tool_call_id] = ref
         return result
 
     @staticmethod
@@ -183,7 +214,10 @@ class TaskQueryService:
     def _tool_step_status(output_text: str, node_status: str) -> str:
         text = str(output_text or '').strip()
         if text:
-            return 'error' if text.startswith('Error:') else 'success'
+            lowered = text.lower()
+            if text.startswith('Error:') or '"status":"error"' in lowered or '"status": "error"' in lowered:
+                return 'error'
+            return 'success'
         if str(node_status or '').strip().lower() == 'in_progress':
             return 'running'
         return 'success'

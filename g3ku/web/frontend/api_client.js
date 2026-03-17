@@ -107,6 +107,25 @@ class ApiClient {
         return this.get(`/api/tasks/${taskId}/artifacts/${artifactId}`);
     }
 
+    static async describeContent({ ref = "", path = "" } = {}) {
+        return this.get("/api/content/describe", { ref, path });
+    }
+
+    static async searchContent({ query, ref = "", path = "", limit = 10, before = 2, after = 2 } = {}) {
+        return this.get("/api/content/search", { query, ref, path, limit, before, after });
+    }
+
+    static async openContent({ ref = "", path = "", startLine = null, endLine = null, aroundLine = null, window = null } = {}) {
+        return this.get("/api/content/open", {
+            ref,
+            path,
+            start_line: startLine,
+            end_line: endLine,
+            around_line: aroundLine,
+            window,
+        });
+    }
+
     static async applyTaskArtifact(taskId, artifactId) {
         return this.post(`/api/tasks/${taskId}/artifacts/${artifactId}/apply`);
     }
