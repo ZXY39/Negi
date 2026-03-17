@@ -148,7 +148,6 @@ class CeoFrontDoorRunner:
                 'chat_id': getattr(session, '_chat_id', session.state.session_key),
                 'memory_channel': memory_channel,
                 'memory_chat_id': memory_chat_id,
-                'task_defaults': dict((getattr(runtime_session, 'metadata', None) or {}).get('task_defaults') or {}),
                 'temp_dir': str(getattr(self._loop, 'temp_dir', '') or ''),
                 'loop': self._loop,
             }

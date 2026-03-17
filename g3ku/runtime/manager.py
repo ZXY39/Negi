@@ -66,6 +66,7 @@ class SessionRuntimeManager:
         chat_id: str,
         memory_channel: str | None = None,
         memory_chat_id: str | None = None,
+        persist_transcript: bool = True,
     ) -> Any:
         session = self.get_or_create(
             session_key=session_key,
@@ -74,7 +75,7 @@ class SessionRuntimeManager:
             memory_channel=memory_channel,
             memory_chat_id=memory_chat_id,
         )
-        return await session.prompt(message)
+        return await session.prompt(message, persist_transcript=persist_transcript)
 
     async def continue_(
         self,

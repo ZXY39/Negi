@@ -115,12 +115,16 @@
                         <button id="task-multi-toggle" class="toolbar-btn" type="button"
                             aria-pressed="false">多选</button>
                         <div class="task-toolbar-preferences">
+                            <div class="task-session-scope" role="group" aria-label="任务范围">
+                                <button id="task-session-current-btn" class="task-session-scope-btn" type="button" aria-pressed="false">当前会话</button>
+                                <button id="task-session-all-btn" class="task-session-scope-btn" type="button" aria-pressed="true">全部</button>
+                            </div>
                             <label class="task-depth-setting" for="task-depth-select">
-                                <span class="task-depth-label">任务树深度</span>
+                                <span class="task-depth-label">全局任务树深度</span>
                                 <select id="task-depth-select" class="task-depth-select resource-select"
-                                    aria-label="任务树深度"></select>
+                                    aria-label="全局任务树深度"></select>
                             </label>
-                            <span id="task-depth-hint" class="task-depth-hint">后续新任务会自动使用该深度，当前范围 0-4。</span>
+                            <span id="task-depth-hint" class="task-depth-hint">全局后续新任务会自动使用该深度，当前范围 0-4。</span>
                         </div>
                     </div>
                 </header>
@@ -490,9 +494,16 @@
                 <div id="confirm-dialog" class="confirm-dialog" role="dialog" aria-modal="true"
                     aria-labelledby="confirm-title" aria-describedby="confirm-text">
                     <div class="confirm-header">
-                        <h2>请确认</h2>
+                        <h2 id="confirm-title">请确认</h2>
                     </div>
                     <p id="confirm-text" class="confirm-text">确认后继续执行当前操作。</p>
+                    <div id="confirm-options" class="confirm-options" hidden>
+                        <label class="confirm-checkbox-row" for="confirm-checkbox">
+                            <input id="confirm-checkbox" type="checkbox">
+                            <span id="confirm-checkbox-label">同时删除此对话创建的所有任务记录</span>
+                        </label>
+                        <p id="confirm-checkbox-hint" class="confirm-checkbox-hint"></p>
+                    </div>
                     <div class="confirm-actions">
                         <button id="confirm-cancel" class="toolbar-btn ghost" type="button">取消</button>
                         <button id="confirm-accept" class="toolbar-btn danger" type="button">确认</button>

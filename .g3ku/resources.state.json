@@ -140,14 +140,6 @@
       "errors": []
     },
     {
-      "name": "ddg-web-search",
-      "available": true,
-      "busy": false,
-      "pendingDelete": false,
-      "warnings": [],
-      "errors": []
-    },
-    {
       "name": "github",
       "available": false,
       "busy": false,

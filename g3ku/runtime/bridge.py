@@ -51,10 +51,11 @@ class SessionRuntimeBridge:
         chat_id: str,
         listeners: Iterable[EventListener] | None = None,
         register_task: TaskRegistrar | None = None,
+        persist_transcript: bool = True,
     ) -> RunResult:
         session = self.get_session(session_key=session_key, channel=channel, chat_id=chat_id)
         unsubscribers = self._subscribe_many(session, listeners)
-        task = asyncio.create_task(session.prompt(message))
+        task = asyncio.create_task(session.prompt(message, persist_transcript=persist_transcript))
         if register_task is not None:
             active_session_key = getattr(getattr(session, "state", None), "session_key", None) or str(session_key or "").strip()
             register_task(active_session_key, task)

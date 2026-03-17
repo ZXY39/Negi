@@ -271,6 +271,36 @@ class MainRuntimeService:
         task_id = self.normalize_task_id(task_id)
         return self.store.get_task(task_id)
 
+    def list_tasks_for_session(self, session_id: str) -> list[TaskRecord]:
+        key = str(session_id or 'web:shared').strip() or 'web:shared'
+        return self.store.list_tasks(key)
+
+    def list_unfinished_tasks_for_session(self, session_id: str) -> list[TaskRecord]:
+        return [
+            task
+            for task in self.list_tasks_for_session(session_id)
+            if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
+        ]
+
+    def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+        tasks = self.list_tasks_for_session(session_id)
+        unfinished = sum(1 for task in tasks if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress')
+        return {
+            'total': len(tasks),
+            'unfinished': unfinished,
+            'terminal': max(0, len(tasks) - unfinished),
+        }
+
+    async def delete_task_records_for_session(self, session_id: str) -> int:
+        unfinished = self.list_unfinished_tasks_for_session(session_id)
+        if unfinished:
+            raise ValueError('session_has_unfinished_tasks')
+        deleted = 0
+        for task in list(self.list_tasks_for_session(session_id)):
+            await self.delete_task(task.task_id)
+            deleted += 1
+        return deleted
+
     def get_node(self, node_id: str) -> NodeRecord | None:
         return self.store.get_node(node_id)
 
@@ -1333,12 +1363,10 @@ class MainRuntimeService:
         return enriched
 
     def summary(self, session_id: str) -> str:
-        _ = session_id
-        return self.query_service.summary(None).text
+        return self.query_service.summary(str(session_id or 'web:shared').strip() or 'web:shared').text
 
     def get_tasks(self, session_id: str, task_type: int) -> str:
-        _ = session_id
-        items = self.query_service.get_tasks(None, task_type)
+        items = self.query_service.get_tasks(str(session_id or 'web:shared').strip() or 'web:shared', task_type)
         if not items:
             return '无匹配任务。'
         return '\n'.join(f'- {item.task_id}：{item.brief}' for item in items)

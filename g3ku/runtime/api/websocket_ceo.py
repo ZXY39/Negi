@@ -21,7 +21,7 @@ from g3ku.runtime.web_ceo_sessions import (
     upload_dir_for_session,
     workspace_path,
 )
-from g3ku.shells.web import get_agent, get_runtime_manager
+from g3ku.shells.web import ensure_web_runtime_services, get_agent, get_runtime_manager
 from g3ku.utils.helpers import safe_filename
 from main.protocol import build_envelope
 
@@ -287,6 +287,7 @@ async def ceo_websocket(websocket: WebSocket):
         await websocket.send_json(build_envelope(channel='ceo', session_id=session_id, type='error', data={'code': 'task_service_unavailable'}))
         await websocket.close(code=4503)
         return
+    await ensure_web_runtime_services(agent)
     await service.startup()
     queue = await service.registry.subscribe_ceo(session_id)
     global_queue = await service.registry.subscribe_global_ceo()

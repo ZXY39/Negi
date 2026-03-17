@@ -115,6 +115,8 @@ class RuntimeAgentSession:
         timestamp: str | None = None
         if isinstance(prompt, UserInputMessage):
             metadata = dict(prompt.metadata or {})
+            if bool(metadata.get('heartbeat_internal')):
+                return None
             raw_text = metadata.get("web_ceo_raw_text")
             text = str(raw_text) if isinstance(raw_text, str) else self._history_text(prompt.content)
             attachments = self._normalize_web_uploads(metadata.get("web_ceo_uploads"))
@@ -164,6 +166,11 @@ class RuntimeAgentSession:
             "status": status or ("running" if self._state.is_running else "idle"),
             "tool_events": self._interaction_flow_snapshot(),
         }
+        prompt = self._last_prompt
+        if isinstance(prompt, UserInputMessage):
+            metadata = dict(prompt.metadata or {})
+            if bool(metadata.get("heartbeat_internal")):
+                snapshot["source"] = "heartbeat"
         user_message = self._pending_user_message_snapshot()
         if user_message is not None:
             snapshot["user_message"] = user_message
@@ -301,7 +308,7 @@ class RuntimeAgentSession:
             on_progress=self._handle_progress,
         )
 
-    async def prompt(self, message: str | UserInputMessage) -> RunResult:
+    async def prompt(self, message: str | UserInputMessage, *, persist_transcript: bool = True) -> RunResult:
         from g3ku.shells.web import refresh_web_agent_runtime
 
         await refresh_web_agent_runtime(force=False, reason="prompt")
@@ -355,65 +362,66 @@ class RuntimeAgentSession:
         if getattr(self._loop, "prompt_trace", False):
             logger.info(render_output_trace(output))
         persisted_session = None
-        try:
-            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-            persisted_session.add_message(
-                "user",
-                user_text,
-                attachments=list(user_input.attachments or []),
-                metadata=dict(user_input.metadata or {}),
-            )
-            persisted_session.add_message("assistant", output)
-            if self._state.session_key.startswith("web:"):
-                from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
+        if persist_transcript:
+            try:
+                persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+                persisted_session.add_message(
+                    "user",
+                    user_text,
+                    attachments=list(user_input.attachments or []),
+                    metadata=dict(user_input.metadata or {}),
+                )
+                persisted_session.add_message("assistant", output)
+                if self._state.session_key.startswith("web:"):
+                    from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
 
-                update_ceo_session_after_turn(
-                    persisted_session,
-                    user_text=user_text,
-                    assistant_text=output,
-                )
-            self._loop.sessions.save(persisted_session)
-        except Exception:
-            await self._emit(
-                "message_delta",
-                channel="analysis",
-                kind="persistence_warning",
-                text="Session transcript persistence failed; response is still available in-memory.",
-            )
-        if getattr(self._loop, "memory_manager", None) is not None and self._loop._use_rag_memory():
-            try:
-                await self._loop.memory_manager.ingest_turn(
-                    session_key=self._state.session_key,
-                    channel=self._memory_channel,
-                    chat_id=self._memory_chat_id,
-                    messages=[
-                        {"role": "user", "content": user_text},
-                        {"role": "assistant", "content": output},
-                    ],
-                )
+                    update_ceo_session_after_turn(
+                        persisted_session,
+                        user_text=user_text,
+                        assistant_text=output,
+                    )
+                self._loop.sessions.save(persisted_session)
             except Exception:
                 await self._emit(
                     "message_delta",
                     channel="analysis",
                     kind="persistence_warning",
-                    text="RAG memory ingest failed; turn history is still available in session transcript.",
+                    text="Session transcript persistence failed; response is still available in-memory.",
                 )
-        if persisted_session is not None and getattr(self._loop, "commit_service", None) is not None:
-            try:
-                artifact = await self._loop.commit_service.maybe_commit(
-                    session=persisted_session,
-                    channel=self._memory_channel,
-                    chat_id=self._memory_chat_id,
-                )
-                if artifact is not None:
-                    self._loop.sessions.save(persisted_session)
-            except Exception:
-                await self._emit(
-                    "message_delta",
-                    channel="analysis",
-                    kind="persistence_warning",
-                    text="RAG memory commit pipeline failed; new turns remain available in session transcript.",
-                )
+            if getattr(self._loop, "memory_manager", None) is not None and self._loop._use_rag_memory():
+                try:
+                    await self._loop.memory_manager.ingest_turn(
+                        session_key=self._state.session_key,
+                        channel=self._memory_channel,
+                        chat_id=self._memory_chat_id,
+                        messages=[
+                            {"role": "user", "content": user_text},
+                            {"role": "assistant", "content": output},
+                        ],
+                    )
+                except Exception:
+                    await self._emit(
+                        "message_delta",
+                        channel="analysis",
+                        kind="persistence_warning",
+                        text="RAG memory ingest failed; turn history is still available in session transcript.",
+                    )
+            if persisted_session is not None and getattr(self._loop, "commit_service", None) is not None:
+                try:
+                    artifact = await self._loop.commit_service.maybe_commit(
+                        session=persisted_session,
+                        channel=self._memory_channel,
+                        chat_id=self._memory_chat_id,
+                    )
+                    if artifact is not None:
+                        self._loop.sessions.save(persisted_session)
+                except Exception:
+                    await self._emit(
+                        "message_delta",
+                        channel="analysis",
+                        kind="persistence_warning",
+                        text="RAG memory commit pipeline failed; new turns remain available in session transcript.",
+                    )
         await self._emit("message_end", role="assistant", text=output)
         await self._emit("turn_end", session_key=self._state.session_key, status="completed")
         await self._emit("agent_end", session_key=self._state.session_key, status="completed")

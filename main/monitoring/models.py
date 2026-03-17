@@ -47,6 +47,7 @@ class TaskSummaryResult(Model):
 
 class TaskListItem(Model):
     task_id: str
+    session_id: str = ''
     title: str = ''
     brief: str = ''
     status: TaskStatus = 'in_progress'

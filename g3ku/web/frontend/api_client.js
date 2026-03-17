@@ -65,8 +65,15 @@ class ApiClient {
         return this._request("PUT", path, { params, body });
     }
 
-    static delete(path, params = {}) {
-        return this._request("DELETE", path, { params });
+    static delete(path, options = {}) {
+        const normalized = options && typeof options === "object" && !Array.isArray(options)
+            ? (Object.prototype.hasOwnProperty.call(options, "params")
+                || Object.prototype.hasOwnProperty.call(options, "body")
+                || Object.prototype.hasOwnProperty.call(options, "headers"))
+                ? options
+                : { params: options }
+            : {};
+        return this._request("DELETE", path, normalized);
     }
 
     static getCeoWsUrl(sessionId = this.getActiveSessionId()) {
@@ -93,20 +100,34 @@ class ApiClient {
         return this._request("PATCH", `/api/ceo/sessions/${encodeURIComponent(sessionId)}`, { body: payload || {} });
     }
 
+    static async getMainRuntimeTaskDefaults() {
+        return this.get("/api/main-runtime/settings");
+    }
+
+    static async updateMainRuntimeTaskDefaults(payload = {}) {
+        return this.put("/api/main-runtime/settings", payload || {});
+    }
+
     static async getCeoTaskDefaults(sessionId) {
-        return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/task-defaults`);
+        void sessionId;
+        return this.getMainRuntimeTaskDefaults();
     }
 
     static async updateCeoTaskDefaults(sessionId, payload = {}) {
-        return this._request("PATCH", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/task-defaults`, { body: payload || {} });
+        void sessionId;
+        return this.updateMainRuntimeTaskDefaults(payload);
     }
 
     static async activateCeoSession(sessionId) {
         return this.post(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/activate`, {});
     }
 
-    static async deleteCeoSession(sessionId) {
-        return this.delete(`/api/ceo/sessions/${encodeURIComponent(sessionId)}`);
+    static async getCeoSessionDeleteCheck(sessionId) {
+        return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/delete-check`);
+    }
+
+    static async deleteCeoSession(sessionId, payload = {}) {
+        return this.delete(`/api/ceo/sessions/${encodeURIComponent(sessionId)}`, { body: payload || {} });
     }
 
     static async uploadCeoFiles(files = [], sessionId = this.getActiveSessionId()) {

@@ -1,0 +1,583 @@
+{
+  "task_id": "task:d22127eb62b8",
+  "root_node_id": "node:c130ad373fc6",
+  "updated_at": "2026-03-18T00:11:05+08:00",
+  "paused": false,
+  "pause_requested": false,
+  "cancel_requested": false,
+  "active_node_ids": [
+    "node:c130ad373fc6"
+  ],
+  "runnable_node_ids": [
+    "node:c130ad373fc6"
+  ],
+  "waiting_node_ids": [],
+  "frames": [
+    {
+      "node_id": "node:c130ad373fc6",
+      "depth": 0,
+      "node_kind": "execution",
+      "phase": "before_model",
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是一个以 ReAct + 工具调用模式运行的执行节点 (execution node)。\n\n规则：\n- 用户消息包含 JSON 格式的节点上下文。\n- 当工具能帮助你完成节点目标时，请使用工具。\n- 只有当工具列表中确实存在 `spawn_child_nodes` 时，才允许调用它。\n- 当待处理内容明显超出单节点的可靠处理范围时，应评估是否派生多个子节点，例如：要分析多篇论文、多组文件或目录、多模块项目，或搜索 / 工具返回结果过多且仅靠 grep、一次筛选或少量片段不足以完成判断。\n- 只有在任务可以拆成多个相对独立、边界清晰的子范围时，才调用 `spawn_child_nodes`；拆分时按论文、目录、模块、文件集合、结果批次等维度划分，避免职责重叠。\n- 调用 `spawn_child_nodes` 时，不要把待读取文件的正文、长摘录或整段工具输出直接塞进子节点提示词；只传文件路径、目录路径、artifact/content 引用、搜索关键词、已知行号范围、目标问题和交付要求，让子节点自行读取原始内容。\n- 对每个子节点，都要先判断是否真的需要验收节点，而不是默认必验。\n- 默认策略是“能直接可靠回传就直接回传”。\n- 范围窄、低复杂度、低风险、主要做机械抽取或格式整理的子任务，设置 `requires_acceptance=false`。\n- 范围广、跨多来源、需要一致性核对、复杂推理复核，或其结论会被父节点直接当最终依据继续使用的子任务，设置 `requires_acceptance=true`，并提供明确的 `acceptance_prompt`。\n- 如果已经达到节点深度限制，你必须在本地完成任务而不得委派。\n- 如果当前节点用本地工具和有限上下文即可可靠完成，就不要为了形式上的并发而派生子节点。\n- 严禁泄露隐藏的思维链。\n- 你的最终回复必须是一个精确符合以下形状的单个 JSON 对象：\n  {\"status\":\"success\"|\"failed\",\"output\":\"...\"}\n- 不要用 Markdown 代码块包裹最终的 JSON。\n\n\n# Retrieved Context (Layered)\n- [48cf8e605f0c4825] 安装项目为工具https://github.com/vercel-labs/agent-browser.git\n  L1: 安装项目为工具https://github.com/vercel-labs/agent-browser.git\n  L2: 安装项目为工具https://github.com/vercel-labs/agent-browser.git\n- [resource:tool:skill_access] Loads the full context/body for a currently visible skill by skill_id when direct skill details are needed.\n  L1: Purpose: fetch detailed content for a visible skill so it can be used. Input: `skill_id` of the visible skill. Use when: the task requires the full body/details of a specific visible skill and this is the most direct path. Scope: only loads currently visible skills; not for discovery/search or unrelated retrieval. Output: detailed skill context/body for the selected skill.\n  L2: # load_skill_context Load the detailed body of a currently visible skill so the CEO can use it. ## Parameters - `skill_id`: The skill id to load. ## Usage Use `load_skill_context` only when it is the most direct way to complete the task\n- [skill:skill:github] GitHub 技能：使用 gh CLI 与 GitHub 交互，重点覆盖 PR、Actions 运行检查、API 查询与 JSON/JQ 结构化输出。\n  L1: 用途：通过 gh CLI 访问 GitHub 数据与工作流状态。范围：PR 检查、Actions 运行查看、gh api 高级查询、--json/--jq 结构化输出。关键用法：不在 git 目录时始终显式传 --repo owner/repo 或直接用 URL；用 gh pr checks 查看 PR CI；gh run list/view/--log-failed 排查工作流失败；gh api 获取子命令未暴露字段；多数命令支持 --json 并可配合 --jq 过滤。\n- [resource:tool:memory] Search long-term memory for prior user/project facts, returning structured results by context type and a unified ranked view.\n  L1: Use when the answer depends on prior context not in the current turn: remembered preferences, earlier decisions, constraints, unresolved action items, or references like 'as discussed before'/'remember'. Avoid for single-turn transformations, general knowledge, greetings, or when all facts are already present. Inputs: query (concrete entities/intent), limit, optional context_type, include_l2, session. Scope: memory/resource/skill grouped results plus unified ranking. Usually call once per turn.\n- [skill:skill:skill-creator] skill-creator\n  L1: Title: skill-creator\nSummary: 面向 G3KU 创建、更新、迁移和校验 `skills/` 与 `tools/` 资源；提供两条明确工作流：一条用于创建 `skills/<skill_id>/`，一条用于接入 `tools/<tool_id>/`。也可把工作流描述、代码、文档、链接、PDF 或现有 skill/tool 转成适配 G3KU 的 skill 或 tool，并在需要时生成可导出的开放标准 SKILL.md 技能。适用于创建 skill、接入 tool、封装现有 CLI 或仓库、自动化重复流程、设计多 agent skill 套件、校验或导出 skill。\nKey Points: Skill Creator | 为 G3KU 创建、更新、迁移、校验与导出 skill / tool 资源。先判断任务属于“创建 skill”还是“接入 tool”，再按对应中文工作流执行。 | 使用原则 | - 先读完用户给出的流程、代码、文档、链接、PDF、示例输入输出和约束，再开始设计。 | - 默认优先产出 **G3KU 本地资源**；只有用户明确需要跨平台分发时，才追加开放标准 `SKILL.md` 技能。 | - 主 `SKILL.md` 只保留入口、分流规则和关键决策；细节步骤、模板和检查项放到 `references/`。 | - 能复用已有脚本、示例和上游资料就复用，不要重复造轮子。 | 先分流 | 路线 A：创建 ski...\n- [skill:skill:add-tool] add-tool\n  L1: Title: add-tool\nSummary: 新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时使用。适用于内置工具与外置工具双模式注册，重点覆盖 `tool_type`、`install_dir`、`resource.yaml`、`toolskills/SKILL.md`、安装/更新流程与删除安全原则。\nKey Points: 添加工具 | 当任务是新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时，使用本规范。 | 本仓库现在区分两类工具： | - `internal`：工具本体位于 `tools/<tool_id>/main/`，可直接进入函数工具列表。 | - `external`：第三方项目安装在 `tools/` 之外，`tools/<tool_id>/` 只负责注册，不包含 `main/`。 | 目标 | - 统一注册入口仍然是 `tools/<tool_id>/`。 | - `resource.yaml` 必须明确工具类型、来源、版本、参数、权限、治理和安装位置。 | - 第三方且需要接收上游更新的工具，默认走 `external`，不要把上游项目继续塞进 `tools/<tool_id>/main/`。 | - `toolskills/SKILL.md` 除了说明如何使用，还必须说明如何安装、如何更新。 | 标准目录 | 内置工具\n- [skill:skill:batch-web-planning] 将宽泛的网页调研需求拆分为 2–8 个可独立执行的具体网页调研工作项。\n  L1: 用途: 把大范围网页调研请求规划成可并行或顺序执行的子任务。输入: 宽泛的研究目标或网页调研需求。输出: 2–8 个独立工作项，每项含简短标签与清晰任务陈述。范围: 仅负责规划与拆分，不执行检索、浏览或结果汇总。约束: 每个工作项必须足够具体，并可在单个 worker 会话中完成。\n- [skill:skill:update-tool] update-tool\n  L1: Title: update-tool\nSummary: 更新、升级、追踪或审核 `tools/<tool_id>/` 下已有工具时使用。适用于按 `tool_type` 区分内置工具与外置工具，依据 `resource.yaml -> source/current_version/install_dir` 查询上游、执行升级，并同步更新 `toolskills/SKILL.md`、版本说明和治理信息。\nKey Points: 更新工具 | 当任务是升级、同步、追踪或审核 `tools/<tool_id>/` 下已有工具时，使用本规范。 | 更新前先看 `resource.yaml` 里的 `tool_type`，再决定走哪条分支。 | 目标 | - 升级判断来自 `source` 和 `current_version`，不是来自印象。 | - 更新后，代码/安装结果、`resource.yaml`、`toolskills/` 三者必须同步。 | - `external` 工具更新的是外部安装目录，不得偷偷改回 vendored 模式。 | 通用步骤 | 1. 读取： | - `tools/<tool_id>/resource.yaml` | - `tools/<tool_id>/toolskills/SKILL.md` | - `tools/<tool_id>/toolskills/references/`"
+        },
+        {
+          "role": "user",
+          "content": "{\n  \"task_id\": \"task:d22127eb62b8\",\n  \"node_id\": \"node:c130ad373fc6\",\n  \"node_kind\": \"execution\",\n  \"depth\": 0,\n  \"can_spawn_children\": true,\n  \"goal\": \"接入并安装 GitHub 仓库中的 skill：来源 URL 为 https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search 。请按 skill-creator / add-tool 相关规范先判断这是 skill 还是 tool 资源；读取上游仓库结构与目标 skill 内容，选择合适的本地落点与目录命名；将其安装/迁移到当前工作区可用的位置，并补齐或适配 G3KU 所需的元数据、文档与引用文件；若上游内容不完全兼容，则做最小必要适配并说明差异。完成后进行基本自检，确认目录存在、关键文件齐全、路径无明显问题，并输出安装位置、使用入口、任何前置依赖或限制。注意不要在任务说明里粘贴大段上游文件全文，自行从 URL 读取。\",\n  \"prompt\": \"接入并安装 GitHub 仓库中的 skill：来源 URL 为 https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search 。请按 skill-creator / add-tool 相关规范先判断这是 skill 还是 tool 资源；读取上游仓库结构与目标 skill 内容，选择合适的本地落点与目录命名；将其安装/迁移到当前工作区可用的位置，并补齐或适配 G3KU 所需的元数据、文档与引用文件；若上游内容不完全兼容，则做最小必要适配并说明差异。完成后进行基本自检，确认目录存在、关键文件齐全、路径无明显问题，并输出安装位置、使用入口、任何前置依赖或限制。注意不要在任务说明里粘贴大段上游文件全文，自行从 URL 读取。\"\n}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_bhSlSNMGw4i7kQXg17BHcbxq|fc_05ad193244f17b790169b97832e32481a191bc5600a1f2dee8",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"list\", \"path\": \".\", \"query\": \"\", \"limit\": 200, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 200, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_gEXpwziBq1o5G9Q39O7jcGo5|fc_05ad193244f17b790169b97832e33881a18fc8c69f9dd39c1c",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python - <<'PY'\\nimport urllib.request\\nurl='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md'\\nprint(urllib.request.urlopen(url, timeout=20).read().decode('utf-8'))\\nPY\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_Z8icDN8c8vhQJN1FIxrKWImU|fc_05ad193244f17b790169b97832e34481a188b631e47469d629",
+              "type": "function",
+              "function": {
+                "name": "load_skill_context",
+                "arguments": "{\"skill_id\": \"skill-creator\", \"level\": \"l1\", \"query\": \"创建或迁移上游 GitHub skill 到当前工作区时的目录落点、最小文件集、文档与引用文件要求\", \"max_tokens\": 2000}"
+              }
+            },
+            {
+              "id": "call_Fob0tKlX21TgTdoUIVWnlIqi|fc_05ad193244f17b790169b97832e34c81a18b1b0a0e681caf09",
+              "type": "function",
+              "function": {
+                "name": "load_skill_context",
+                "arguments": "{\"skill_id\": \"add-tool\", \"level\": \"l1\", \"query\": \"判断资源是 skill 还是 tool，以及 tool 接入目录要求，用于避免误分类\", \"max_tokens\": 1500}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_bhSlSNMGw4i7kQXg17BHcbxq|fc_05ad193244f17b790169b97832e32481a191bc5600a1f2dee8",
+          "name": "filesystem",
+          "content": "DIR  .agent\nDIR  .g3ku\nDIR  .git\nFILE .gitignore\nDIR  .pytest_cache\nDIR  .tmp\nDIR  .venv\nDIR  .vscode\nDIR  docs\nDIR  g3ku\nFILE g3ku.cmd\nFILE g3ku.ps1\nFILE g3ku.sh\nFILE g3ku_bootstrap.py\nFILE LICENSE\nDIR  main\nDIR  memory\nFILE pyproject.toml\nDIR  sessions\nDIR  skills\nDIR  subsystems\nFILE temp.JSON\nDIR  tests\nDIR  tmp_agent_browser_repo\nDIR  tools"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_gEXpwziBq1o5G9Q39O7jcGo5|fc_05ad193244f17b790169b97832e33881a18fc8c69f9dd39c1c",
+          "name": "exec",
+          "content": "{\"status\": \"error\", \"exit_code\": 1, \"command\": \"python - <<'PY'\\nimport urllib.request\\nurl='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md'\\nprint(urllib.request.urlopen(url, timeout=20).read().decode('utf-8'))\\nPY\", \"stdout_ref\": \"\", \"stderr_ref\": \"artifact:artifact:e916a6ae09c1\", \"head_preview\": \"STDERR:\\n��ʱ��Ӧ�� <<��\", \"tail_preview\": \"STDERR:\\n��ʱ��Ӧ�� <<��\", \"line_count\": 2, \"next_actions\": [\"content.search\", \"content.open\"], \"error\": \"Exit code: 1\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_Z8icDN8c8vhQJN1FIxrKWImU|fc_05ad193244f17b790169b97832e34481a188b631e47469d629",
+          "name": "load_skill_context",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:beedf329ed46\", \"char_count\": 1468, \"display_name\": \"tool:load_skill_context\", \"head_preview\": \"{\\\"ok\\\": true, \\\"skill_id\\\": \\\"skill-creator\\\", \\\"uri\\\": \\\"g3ku://skill/skill-creator\\\", \\\"level\\\": \\\"l1\\\", \\\"content\\\": \\\"Title: skill-creator\\\\nSummary: 面向 G3KU 创建、更新、迁移和校验 `skills/` 与 `tools/` 资源；提供两条明确工作流：一条用于创建 `skills/<skill_id>/`，一...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:beedf329ed46\", \"size_bytes\": 2728, \"source_kind\": \"tool_result:load_skill_context\", \"tail_preview\": \"{\\\"ok\\\": true, \\\"skill_id\\\": \\\"skill-creator\\\", \\\"uri\\\": \\\"g3ku://skill/skill-creator\\\", \\\"level\\\": \\\"l1\\\", \\\"content\\\": \\\"Title: skill-creator\\\\nSummary: 面向 G3KU 创建、更新、迁移和校验 `skills/` 与 `tools/` 资源；提供两条明确工作流：一条用于创建 `skills/<skill_id>/`，一...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_beedf329ed46.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:beedf329ed46\", \"summary\": \"Externalized tool:load_skill_context (1 lines, 1468 chars). Use content.search/open with ref=artifact:artifact:beedf329ed46.\\nHead preview:\\n{\\\"ok\\\": true, \\\"skill_id\\\": \\\"skill-creator\\\", \\\"uri\\\": \\\"g3ku://skill/skill-creator\\\", \\\"level\\\": \\\"l1\\\", \\\"content\\\": \\\"Title: skill-creator\\\\nSummary: 面向 G3KU 创建、更新、迁移和校验 `skills/` 与 `tools/` 资源；提供两条明确工作流：一条用于创建 `skills/<skill_id>/`，一...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_Fob0tKlX21TgTdoUIVWnlIqi|fc_05ad193244f17b790169b97832e34c81a18b1b0a0e681caf09",
+          "name": "load_skill_context",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:03c1dd78fba2\", \"char_count\": 1402, \"display_name\": \"tool:load_skill_context\", \"head_preview\": \"{\\\"ok\\\": true, \\\"skill_id\\\": \\\"add-tool\\\", \\\"uri\\\": \\\"g3ku://skill/add-tool\\\", \\\"level\\\": \\\"l1\\\", \\\"content\\\": \\\"Title: add-tool\\\\nSummary: 新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时使用。适用于内置工具与外置工具双模式注册，重点覆盖 `tool_type`、`install_dir`、`reso...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:03c1dd78fba2\", \"size_bytes\": 2438, \"source_kind\": \"tool_result:load_skill_context\", \"tail_preview\": \"{\\\"ok\\\": true, \\\"skill_id\\\": \\\"add-tool\\\", \\\"uri\\\": \\\"g3ku://skill/add-tool\\\", \\\"level\\\": \\\"l1\\\", \\\"content\\\": \\\"Title: add-tool\\\\nSummary: 新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时使用。适用于内置工具与外置工具双模式注册，重点覆盖 `tool_type`、`install_dir`、`reso...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_03c1dd78fba2.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:03c1dd78fba2\", \"summary\": \"Externalized tool:load_skill_context (1 lines, 1402 chars). Use content.search/open with ref=artifact:artifact:03c1dd78fba2.\\nHead preview:\\n{\\\"ok\\\": true, \\\"skill_id\\\": \\\"add-tool\\\", \\\"uri\\\": \\\"g3ku://skill/add-tool\\\", \\\"level\\\": \\\"l1\\\", \\\"content\\\": \\\"Title: add-tool\\\\nSummary: 新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时使用。适用于内置工具与外置工具双模式注册，重点覆盖 `tool_type`、`install_dir`、`reso...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_s6sKD36WcwXvoCEkzfv9fF4K|fc_05ad193244f17b790169b9783bf45c81a1aa3b00d027a1269e",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"git ls-remote https://github.com/openclaw/skills.git\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_IJv2rxFLH17R7hK50NVeidou|fc_05ad193244f17b790169b9783bf46c81a1ae449e4d012a98bb",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"git clone --depth 1 https://github.com/openclaw/skills.git .tmp/openclaw-skills\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_edOkU3x1KS2PWFnpHdz79rkB|fc_05ad193244f17b790169b9783bf47481a1b1abbfef94350c31",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"list\", \"path\": \"skills\", \"query\": \"\", \"limit\": 200, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 200, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_s6sKD36WcwXvoCEkzfv9fF4K|fc_05ad193244f17b790169b9783bf45c81a1aa3b00d027a1269e",
+          "name": "exec",
+          "content": "{\"status\": \"success\", \"exit_code\": 0, \"command\": \"git ls-remote https://github.com/openclaw/skills.git\", \"stdout_ref\": \"artifact:artifact:6263cb448470\", \"stderr_ref\": \"\", \"head_preview\": \"cad1e55d227450f34c58a871e7e44729a65c3073\\tHEAD\\ncad1e55d227450f34c58a871e7e44729a65c3073\\trefs/heads/main\\n77676d7bc4fb60e17dc58ccd0c1102268fd9c18a\\trefs/pull/1/head\\nfc7557f7a56cf9d5592d4c0cd113b045187cfe4d\\trefs/pull/10/head\\n5913d03d42fca494a6b7...\", \"tail_preview\": \"67ba6094893cffe30b54fce6bb9d67ad9b8554db\\trefs/pull/94/head\\nb61c3bb9884860ff6c33109556ec7ab76dce937b\\trefs/pull/95/head\\necdd3ff1dbaa4d038a4033986d0587561605bd26\\trefs/pull/96/head\\na5c0ae2b97aa6d0889870942c1d7f4aeb563f39d\\trefs/pull/97/head\\n28bf...\", \"line_count\": 218, \"next_actions\": [\"content.search\", \"content.open\"]}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_IJv2rxFLH17R7hK50NVeidou|fc_05ad193244f17b790169b9783bf46c81a1ae449e4d012a98bb",
+          "name": "exec",
+          "content": "{\"status\": \"error\", \"exit_code\": 128, \"command\": \"git clone --depth 1 https://github.com/openclaw/skills.git .tmp/openclaw-skills\", \"stdout_ref\": \"\", \"stderr_ref\": \"artifact:artifact:25b2c289ff6d\", \"head_preview\": \"STDERR:\\nCloning into '.tmp/openclaw-skills'...\\nfatal: unable to access 'https://github.com/openclaw/skills.git/': schannel: failed to receive handshake, SSL/TLS connection failed\", \"tail_preview\": \"STDERR:\\nCloning into '.tmp/openclaw-skills'...\\nfatal: unable to access 'https://github.com/openclaw/skills.git/': schannel: failed to receive handshake, SSL/TLS connection failed\", \"line_count\": 3, \"next_actions\": [\"content.search\", \"content.open\"], \"error\": \"Exit code: 128\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_edOkU3x1KS2PWFnpHdz79rkB|fc_05ad193244f17b790169b9783bf47481a1b1abbfef94350c31",
+          "name": "filesystem",
+          "content": "DIR  add-tool\nDIR  batch-web-planning\nDIR  github\nDIR  memory\nDIR  skill-creator\nDIR  task-retrospective\nDIR  tmux\nDIR  update-tool\nDIR  weather"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_WR8rZXu7K4avVslg6n4UFpYQ|fc_05ad193244f17b790169b978549d8481a1bb1f041b70fccf8d",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"curl -L https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_8aB33uiQq0Hyzu30YWgquS25|fc_05ad193244f17b790169b978549d9481a19876e4f11162dffd",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"curl -L https://api.github.com/repos/openclaw/skills/contents/skills/jakelin/ddg-web-search\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_nVpLRZ75YPijc3wCA6NcWVMK|fc_05ad193244f17b790169b978549d9881a1aaa12f181dfce2d6",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"list\", \"path\": \"skills/skill-creator\", \"query\": \"\", \"limit\": 200, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 200, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_WR8rZXu7K4avVslg6n4UFpYQ|fc_05ad193244f17b790169b978549d8481a1bb1f041b70fccf8d",
+          "name": "exec",
+          "content": "{\"status\": \"success\", \"exit_code\": 0, \"command\": \"curl -L https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md\", \"stdout_ref\": \"artifact:artifact:4270a0d29127\", \"stderr_ref\": \"artifact:artifact:0b42b1bcf48e\", \"head_preview\": \"---\\nname: ddg-search\\ndescription: Web search without an API key using DuckDuckGo Lite via web_fetch. Use as a fallback when web_search fails with missing_brave_api_key error, or whenever you need to search the web and no search API is confi...\", \"tail_preview\": \"0     0    0     0    0     0      0      0 --:--:--  0:00:03 --:--:--     0\\n  0     0    0     0    0     0      0      0 --:--:--  0:00:03 --:--:--     0\\n  0     0    0     0    0     0      0      0 --:--:--  0:00:06 --:--:--     0\\n  0...\", \"line_count\": 72, \"next_actions\": [\"content.search\", \"content.open\"]}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_8aB33uiQq0Hyzu30YWgquS25|fc_05ad193244f17b790169b978549d9481a19876e4f11162dffd",
+          "name": "exec",
+          "content": "{\"status\": \"success\", \"exit_code\": 0, \"command\": \"curl -L https://api.github.com/repos/openclaw/skills/contents/skills/jakelin/ddg-web-search\", \"stdout_ref\": \"artifact:artifact:2a5ee7f02b5f\", \"stderr_ref\": \"artifact:artifact:088361ba7a71\", \"head_preview\": \"{\\\"message\\\":\\\"API rate limit exceeded for 103.62.49.162. (But here's the good news: Authenticated requests get a higher rate limit. Check out the documentation for more details.)\\\",\\\"documentation_url\\\":\\\"https://docs.github.com/rest/overview/res...\", \"tail_preview\": \"Dload  Upload   Total   Spent    Left  Speed\\n\\n  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\\n  0     0    0     0    0     0      0      0 --:--:--  0:00:07 --:--:--     0\\n  0     0    0     0    0     0...\", \"line_count\": 9, \"next_actions\": [\"content.search\", \"content.open\"]}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_nVpLRZ75YPijc3wCA6NcWVMK|fc_05ad193244f17b790169b978549d9881a1aaa12f181dfce2d6",
+          "name": "filesystem",
+          "content": "DIR  references\nFILE resource.yaml\nDIR  scripts\nFILE SKILL.md"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_qtYUf5DT4D1P3NHBet2LXrmz|fc_05ad193244f17b790169b9786fe09c81a19cb928f992a06abc",
+              "type": "function",
+              "function": {
+                "name": "content",
+                "arguments": "{\"action\": \"head\", \"ref\": \"artifact:artifact:4270a0d29127\", \"path\": \"\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 120, \"around_line\": 1, \"window\": 120, \"lines\": 120}"
+              }
+            },
+            {
+              "id": "call_Vz0LrXWlCFvQBu2kimHfx53M|fc_05ad193244f17b790169b9786fe0a881a196e61c3401bbac04",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"open\", \"path\": \"skills/skill-creator/resource.yaml\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_GUJk7SA5sbMAB4Cg1wAcOjuQ|fc_05ad193244f17b790169b9786fe0b081a1afdd0cd52889a0fa",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"open\", \"path\": \"skills/skill-creator/SKILL.md\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 120, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_qtYUf5DT4D1P3NHBet2LXrmz|fc_05ad193244f17b790169b9786fe09c81a19cb928f992a06abc",
+          "name": "content",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:1d4e0290e9b1\", \"char_count\": 2955, \"display_name\": \"tool:content\", \"head_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"artifact_id\\\": \\\"artifact:4270a0d29127\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_4270a0d2912...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:1d4e0290e9b1\", \"size_bytes\": 2985, \"source_kind\": \"tool_result:content\", \"tail_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"artifact_id\\\": \\\"artifact:4270a0d29127\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_4270a0d2912...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_1d4e0290e9b1.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:1d4e0290e9b1\", \"summary\": \"Externalized tool:content (1 lines, 2955 chars). Use content.search/open with ref=artifact:artifact:1d4e0290e9b1.\\nHead preview:\\n{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"artifact_id\\\": \\\"artifact:4270a0d29127\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_4270a0d2912...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_Vz0LrXWlCFvQBu2kimHfx53M|fc_05ad193244f17b790169b9786fe0a881a196e61c3401bbac04",
+          "name": "filesystem",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:4e27ed03129f\", \"char_count\": 1232, \"display_name\": \"tool:filesystem\", \"head_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"path:skills/skill-creator/resource.yaml\\\", \\\"handle\\\": {\\\"ref\\\": \\\"path:skills/skill-creator/resource.yaml\\\", \\\"artifact_id\\\": \\\"\\\", \\\"uri\\\": \\\"D:\\\\\\\\projects\\\\\\\\G3KU\\\\\\\\skills\\\\\\\\skill-creator\\\\\\\\resource.yaml\\\", \\\"source_ki...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:4e27ed03129f\", \"size_bytes\": 1630, \"source_kind\": \"tool_result:filesystem\", \"tail_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"path:skills/skill-creator/resource.yaml\\\", \\\"handle\\\": {\\\"ref\\\": \\\"path:skills/skill-creator/resource.yaml\\\", \\\"artifact_id\\\": \\\"\\\", \\\"uri\\\": \\\"D:\\\\\\\\projects\\\\\\\\G3KU\\\\\\\\skills\\\\\\\\skill-creator\\\\\\\\resource.yaml\\\", \\\"source_ki...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_4e27ed03129f.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:4e27ed03129f\", \"summary\": \"Externalized tool:filesystem (1 lines, 1232 chars). Use content.search/open with ref=artifact:artifact:4e27ed03129f.\\nHead preview:\\n{\\\"ok\\\": true, \\\"ref\\\": \\\"path:skills/skill-creator/resource.yaml\\\", \\\"handle\\\": {\\\"ref\\\": \\\"path:skills/skill-creator/resource.yaml\\\", \\\"artifact_id\\\": \\\"\\\", \\\"uri\\\": \\\"D:\\\\\\\\projects\\\\\\\\G3KU\\\\\\\\skills\\\\\\\\skill-creator\\\\\\\\resource.yaml\\\", \\\"source_ki...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_GUJk7SA5sbMAB4Cg1wAcOjuQ|fc_05ad193244f17b790169b9786fe0b081a1afdd0cd52889a0fa",
+          "name": "filesystem",
+          "content": "{\"ok\": true, \"ref\": \"path:skills/skill-creator/SKILL.md\", \"handle\": {\"ref\": \"path:skills/skill-creator/SKILL.md\", \"artifact_id\": \"\", \"uri\": \"D:\\\\projects\\\\G3KU\\\\skills\\\\skill-creator\\\\SKILL.md\", \"source_kind\": \"workspace_path\", \"display_name\": \"SKILL.md\", \"mime_type\": \"text/plain\", \"size_bytes\": 4464, \"line_count\": 77, \"char_count\": 2848, \"head_preview\": \"# Skill Creator\\n\\n为 G3KU 创建、更新、迁移、校验与导出 skill / tool 资源。先判断任务属于“创建 skill”还是“接入 tool”，再按对应中文工作流执行。\\n\\n## 使用原则\", \"tail_preview\": \"- `python scripts/staleness_check.py <skill_dir>`：检查时间元数据、依赖健康与漂移。\\n- `python scripts/export_utils.py <skill_dir> [--variant desktop|api]`：导出跨平台包。\\n- `python scripts/skill_registry.py ...`：维护团队 skill 注册表。\\n- `bash scripts/i...\"}, \"start_line\": 1, \"end_line\": 11, \"excerpt\": \"# Skill Creator\\n\\n为 G3KU 创建、更新、迁移、校验与导出 skill / tool 资源。先判断任务属于“创建 skill”还是“接入 tool”，再按对应中文工作流执行。\\n\\n## 使用原则\\n\\n- 先读完用户给出的流程、代码、文档、链接、PDF、示例输入输出和约束，再开始设计。\\n- 默认优先产出 **G3KU 本地资源**；只有用户明确需要跨平台分发时，才追加开放标准 `SKILL.md` 技能。\\n- 主 `SKILL.md` 只保留入口、分流规则和关键决策；细节步骤、模板和检查项放到 `references/`。\\n- 能复用已有脚本、示例和上游资料就复用，不要重复造轮子。\"}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_7810eaJFKdA8dzrQgFjEyqcE|fc_05ad193244f17b790169b97879bc0481a1a5a40183f7c08bd0",
+              "type": "function",
+              "function": {
+                "name": "content",
+                "arguments": "{\"action\": \"open\", \"ref\": \"artifact:artifact:4270a0d29127\", \"path\": \"\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 120, \"around_line\": 1, \"window\": 120, \"lines\": 120}"
+              }
+            },
+            {
+              "id": "call_oi2B5gS0nx2m3BD0qxx9295C|fc_05ad193244f17b790169b97879bc1481a1ba727784c9cb79c8",
+              "type": "function",
+              "function": {
+                "name": "content",
+                "arguments": "{\"action\": \"open\", \"ref\": \"artifact:artifact:4e27ed03129f\", \"path\": \"\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 20}"
+              }
+            },
+            {
+              "id": "call_xmctjmTweDwPQBUv0vt6nxVw|fc_05ad193244f17b790169b97879bc2081a1b673876f1936f03d",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"list\", \"path\": \"skills/weather\", \"query\": \"\", \"limit\": 200, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 200, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_7810eaJFKdA8dzrQgFjEyqcE|fc_05ad193244f17b790169b97879bc0481a1a5a40183f7c08bd0",
+          "name": "content",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:70918695316e\", \"char_count\": 2955, \"display_name\": \"tool:content\", \"head_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"artifact_id\\\": \\\"artifact:4270a0d29127\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_4270a0d2912...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:70918695316e\", \"size_bytes\": 2985, \"source_kind\": \"tool_result:content\", \"tail_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"artifact_id\\\": \\\"artifact:4270a0d29127\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_4270a0d2912...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_70918695316e.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:70918695316e\", \"summary\": \"Externalized tool:content (1 lines, 2955 chars). Use content.search/open with ref=artifact:artifact:70918695316e.\\nHead preview:\\n{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4270a0d29127\\\", \\\"artifact_id\\\": \\\"artifact:4270a0d29127\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_4270a0d2912...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_oi2B5gS0nx2m3BD0qxx9295C|fc_05ad193244f17b790169b97879bc1481a1ba727784c9cb79c8",
+          "name": "content",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:8bb223d3a0e7\", \"char_count\": 2302, \"display_name\": \"tool:content\", \"head_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4e27ed03129f\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4e27ed03129f\\\", \\\"artifact_id\\\": \\\"artifact:4e27ed03129f\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\task_d22127eb62b8\\\\\\\\artifact_4e27ed...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:8bb223d3a0e7\", \"size_bytes\": 2700, \"source_kind\": \"tool_result:content\", \"tail_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4e27ed03129f\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4e27ed03129f\\\", \\\"artifact_id\\\": \\\"artifact:4e27ed03129f\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\task_d22127eb62b8\\\\\\\\artifact_4e27ed...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_8bb223d3a0e7.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:8bb223d3a0e7\", \"summary\": \"Externalized tool:content (1 lines, 2302 chars). Use content.search/open with ref=artifact:artifact:8bb223d3a0e7.\\nHead preview:\\n{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:4e27ed03129f\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:4e27ed03129f\\\", \\\"artifact_id\\\": \\\"artifact:4e27ed03129f\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\task_d22127eb62b8\\\\\\\\artifact_4e27ed...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_xmctjmTweDwPQBUv0vt6nxVw|fc_05ad193244f17b790169b97879bc2081a1b673876f1936f03d",
+          "name": "filesystem",
+          "content": "FILE resource.yaml\nFILE SKILL.md"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_hyvnzlxvATphx3khiB1m6PbM|fc_05ad193244f17b790169b97884213481a1b010d2acafd17995",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"powershell -NoProfile -Command \\\"(Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md').Content\\\"\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_2HFXSAYPN5xxQhpj8zTh73bL|fc_05ad193244f17b790169b97884214081a19b6b4209ffb06380",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"open\", \"path\": \"skills/weather/resource.yaml\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_hyvnzlxvATphx3khiB1m6PbM|fc_05ad193244f17b790169b97884213481a1b010d2acafd17995",
+          "name": "exec",
+          "content": "{\"status\": \"success\", \"exit_code\": 0, \"command\": \"powershell -NoProfile -Command \\\"(Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md').Content\\\"\", \"stdout_ref\": \"artifact:artifact:759c61d7937e\", \"stderr_ref\": \"\", \"head_preview\": \"---\\nname: ddg-search\\ndescription: Web search without an API key using DuckDuckGo Lite via web_fetch. Use as a fallback when web_search fails with missing_brave_api_key error, or whenever you need to search the web and no search API is confi...\", \"tail_preview\": \"## Limitations\\n\\n- No time/date filtering (DDG Lite doesn't support `&df=` reliably via fetch)\\n- Text results only �� no images or videos\\n- Results sourced from Bing (may differ from Google)\\n- Google search does NOT work via web_fetch (captc...\", \"line_count\": 59, \"next_actions\": [\"content.search\", \"content.open\"]}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_2HFXSAYPN5xxQhpj8zTh73bL|fc_05ad193244f17b790169b97884214081a19b6b4209ffb06380",
+          "name": "filesystem",
+          "content": "{\"ok\": true, \"ref\": \"path:skills/weather/resource.yaml\", \"handle\": {\"ref\": \"path:skills/weather/resource.yaml\", \"artifact_id\": \"\", \"uri\": \"D:\\\\projects\\\\G3KU\\\\skills\\\\weather\\\\resource.yaml\", \"source_kind\": \"workspace_path\", \"display_name\": \"resource.yaml\", \"mime_type\": \"text/plain\", \"size_bytes\": 292, \"line_count\": 20, \"char_count\": 274, \"head_preview\": \"schema_version: 1\\nkind: skill\\nname: weather\\ndescription: 获取当前天气与预报\\ntrigger:\\n  keywords: []\", \"tail_preview\": \"main: SKILL.md\\n  references: references\\n  scripts: scripts\\nexposure:\\n  agent: true\\n  org_graph: true\"}, \"start_line\": 1, \"end_line\": 11, \"excerpt\": \"schema_version: 1\\nkind: skill\\nname: weather\\ndescription: 获取当前天气与预报\\ntrigger:\\n  keywords: []\\n  always: false\\nrequires:\\n  tools:\\n  - exec\\n  bins:\"}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_4iY2HXse9ILJddcR0ZpHxWS5|fc_05ad193244f17b790169b978971f2481a19edc2442a26bb557",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"open\", \"path\": \"skills/weather/SKILL.md\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 120, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_bQZ8OgaJxm6GCxKEZHIaZqga|fc_05ad193244f17b790169b978971f3481a1a107c4e6c97ff96c",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"describe\", \"path\": \"skills/weather/references\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 20, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_4iY2HXse9ILJddcR0ZpHxWS5|fc_05ad193244f17b790169b978971f2481a19edc2442a26bb557",
+          "name": "filesystem",
+          "content": "{\"ok\": true, \"ref\": \"path:skills/weather/SKILL.md\", \"handle\": {\"ref\": \"path:skills/weather/SKILL.md\", \"artifact_id\": \"\", \"uri\": \"D:\\\\projects\\\\G3KU\\\\skills\\\\weather\\\\SKILL.md\", \"source_kind\": \"workspace_path\", \"display_name\": \"SKILL.md\", \"mime_type\": \"text/plain\", \"size_bytes\": 1044, \"line_count\": 42, \"char_count\": 730, \"head_preview\": \"# 天气查询\\n\\n两个免费服务，不需要 API 密钥。\\n\\n## wttr.in (首选)\", \"tail_preview\": \"curl -s \\\"https://api.open-meteo.com/v1/forecast?latitude=51.5&longitude=-0.12&current_weather=true\\\"\\n```\\n\\n先查找城市的坐标，然后进行查询。返回包含温度、风速、天气代码的 JSON。\\n\\n文档：https://open-meteo.com/en/docs\"}, \"start_line\": 1, \"end_line\": 11, \"excerpt\": \"# 天气查询\\n\\n两个免费服务，不需要 API 密钥。\\n\\n## wttr.in (首选)\\n\\n快速单行命令：\\n```bash\\ncurl -s \\\"wttr.in/London?format=3\\\"\\n# 输出: London: ⛅️ +8°C\\n```\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_bQZ8OgaJxm6GCxKEZHIaZqga|fc_05ad193244f17b790169b978971f3481a1a107c4e6c97ff96c",
+          "name": "filesystem",
+          "content": "Error executing filesystem action describe: path not found: skills/weather/references"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_gXvNhvKPwf86vu5yo0EW8Z97|fc_05ad193244f17b790169b9789ffa4481a18afaab0282b08254",
+              "type": "function",
+              "function": {
+                "name": "content",
+                "arguments": "{\"action\": \"open\", \"ref\": \"artifact:artifact:759c61d7937e\", \"path\": \"\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 120, \"around_line\": 1, \"window\": 120, \"lines\": 120}"
+              }
+            },
+            {
+              "id": "call_YLoDDoejrRnlQV8Rvae1DDCJ|fc_05ad193244f17b790169b9789ffa5881a1b363099994cec1cf",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"powershell -NoProfile -Command \\\"$html=(Invoke-WebRequest -UseBasicParsing 'https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search').Content; $html | Select-String -Pattern 'href=\\\\\\\"[^\\\\\\\"]+\\\\\\\"' -AllMatches | % { $_.Matches } | % { $_.Value } | Select-Object -First 50\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_gXvNhvKPwf86vu5yo0EW8Z97|fc_05ad193244f17b790169b9789ffa4481a18afaab0282b08254",
+          "name": "content",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:a79dbd13d567\", \"char_count\": 2967, \"display_name\": \"tool:content\", \"head_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:759c61d7937e\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:759c61d7937e\\\", \\\"artifact_id\\\": \\\"artifact:759c61d7937e\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_759c61d7937...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:a79dbd13d567\", \"size_bytes\": 3027, \"source_kind\": \"tool_result:content\", \"tail_preview\": \"{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:759c61d7937e\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:759c61d7937e\\\", \\\"artifact_id\\\": \\\"artifact:759c61d7937e\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_759c61d7937...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_a79dbd13d567.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:a79dbd13d567\", \"summary\": \"Externalized tool:content (1 lines, 2967 chars). Use content.search/open with ref=artifact:artifact:a79dbd13d567.\\nHead preview:\\n{\\\"ok\\\": true, \\\"ref\\\": \\\"artifact:artifact:759c61d7937e\\\", \\\"handle\\\": {\\\"ref\\\": \\\"artifact:artifact:759c61d7937e\\\", \\\"artifact_id\\\": \\\"artifact:759c61d7937e\\\", \\\"uri\\\": \\\".g3ku\\\\\\\\main-runtime\\\\\\\\artifacts\\\\\\\\adhoc_shared\\\\\\\\artifact_759c61d7937...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_YLoDDoejrRnlQV8Rvae1DDCJ|fc_05ad193244f17b790169b9789ffa5881a1b363099994cec1cf",
+          "name": "exec",
+          "content": "{\"status\": \"error\", \"exit_code\": 255, \"command\": \"powershell -NoProfile -Command \\\"$html=(Invoke-WebRequest -UseBasicParsing 'https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search').Content; $html | Select-String -Pattern 'href=\\\\\\\"[^\\\\\\\"]+\\\\\\\"' -AllMatches | % { $_.Matches } | % { $_.Value } | Select-Object -First 50\\\"\", \"stdout_ref\": \"\", \"stderr_ref\": \"artifact:artifact:e5efef688bb7\", \"head_preview\": \"STDERR:\\n'%' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���\\n���������ļ���\", \"tail_preview\": \"STDERR:\\n'%' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���\\n���������ļ���\", \"line_count\": 3, \"next_actions\": [\"content.search\", \"content.open\"], \"error\": \"Exit code: 255\"}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_WNrAnmcjJdkPrG8cf3Y9516Z|fc_05ad193244f17b790169b978a6f26881a181b86151cfd45a92",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import pathlib,urllib.request;u='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md';data=urllib.request.urlopen(u,timeout=30).read().decode('utf-8');print(data)\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_WNrAnmcjJdkPrG8cf3Y9516Z|fc_05ad193244f17b790169b978a6f26881a181b86151cfd45a92",
+          "name": "exec",
+          "content": "{\"status\": \"success\", \"exit_code\": 0, \"command\": \"python -c \\\"import pathlib,urllib.request;u='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md';data=urllib.request.urlopen(u,timeout=30).read().decode('utf-8');print(data)\\\"\", \"stdout_ref\": \"artifact:artifact:0cd91b6dad95\", \"stderr_ref\": \"\", \"head_preview\": \"---\\nname: ddg-search\\ndescription: Web search without an API key using DuckDuckGo Lite via web_fetch. Use as a fallback when web_search fails with missing_brave_api_key error, or whenever you need to search the web and no search API is confi...\", \"tail_preview\": \"## Limitations\\n\\n- No time/date filtering (DDG Lite doesn't support `&df=` reliably via fetch)\\n- Text results only �� no images or videos\\n- Results sourced from Bing (may differ from Google)\\n- Google search does NOT work via web_fetch (captc...\", \"line_count\": 59, \"next_actions\": [\"content.search\", \"content.open\"]}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_x9OFY14yqOMRr1n3t8xNomLa|fc_05ad193244f17b790169b978c92b8c81a1bbd9011267f3f246",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import urllib.request;print(urllib.request.urlopen('https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/README.md',timeout=20).status)\\\"\", \"working_dir\": \".\"}"
+              }
+            },
+            {
+              "id": "call_aAl62oeldd7zXsA5k0griobx|fc_05ad193244f17b790169b978c92b9c81a199da25b301c9bd18",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"search\", \"path\": \"skills\", \"query\": \"schema_version: 1\\nkind: skill\", \"limit\": 20, \"before\": 0, \"after\": 5, \"start_line\": 1, \"end_line\": 20, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_x9OFY14yqOMRr1n3t8xNomLa|fc_05ad193244f17b790169b978c92b8c81a1bbd9011267f3f246",
+          "name": "exec",
+          "content": "{\"status\": \"error\", \"exit_code\": 1, \"command\": \"python -c \\\"import urllib.request;print(urllib.request.urlopen('https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/README.md',timeout=20).status)\\\"\", \"stdout_ref\": \"\", \"stderr_ref\": \"artifact:artifact:333a3368829c\", \"head_preview\": \"STDERR:\\nTraceback (most recent call last):\\n  File \\\"C:\\\\Users\\\\LiuXi\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\Lib\\\\urllib\\\\request.py\\\", line 1321, in do_open\\n    h.request(req.get_method(), req.selector, req.data, headers,\\n    ~~~~~~~~~^^^^^^^^^^...\", \"tail_preview\": \"~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n                        context=self._context)\\n                        ^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"C:\\\\Users\\\\LiuXi\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\Lib\\\\urllib\\\\request.py\\\", line 1324, i...\", \"line_count\": 69, \"next_actions\": [\"content.search\", \"content.open\"], \"error\": \"Exit code: 1\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_aAl62oeldd7zXsA5k0griobx|fc_05ad193244f17b790169b978c92b9c81a199da25b301c9bd18",
+          "name": "filesystem",
+          "content": "Error executing filesystem action search: path is not a file: skills"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_6Zh8RYmHwpHgAIsocdODLqTG|fc_05ad193244f17b790169b978d8544881a185f017eec8ccd9f6",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python - <<'PY'\\nimport urllib.request, pathlib, yaml, re, os\\nfrom textwrap import dedent\\nu='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md'\\ntext=urllib.request.urlopen(u,timeout=30).read().decode('utf-8')\\noutdir=pathlib.Path('skills/ddg-web-search')\\noutdir.mkdir(parents=True, exist_ok=True)\\n(outdir/'references').mkdir(exist_ok=True)\\n(outdir/'scripts').mkdir(exist_ok=True)\\nresource=dedent('''\\nschema_version: 1\\nkind: skill\\nname: ddg-web-search\\ndescription: 使用 DuckDuckGo Lite 进行免 API Key 的网页搜索，适合作为无搜索 API 时的兜底方案。\\ntrigger:\\n  keywords:\\n    - duckduckgo\\n    - ddg\\n    - web search\\n    - search fallback\\n  always: false\\nrequires:\\n  tools: []\\n  bins: []\\nentry:\\n  main: SKILL.md\\n  references: references\\n  scripts: scripts\\nexposure:\\n  agent: true\\n  org_graph: true\\n''').lstrip()\\n(outdir/'resource.yaml').write_text(resource, encoding='utf-8')\\nbody=dedent('''\\n# DDG Web Search\\n\\n从上游 `openclaw/skills` 的 `skills/jakelin/ddg-web-search` 迁移而来。\\n\\n该 skill 提供一个**无需 API Key** 的网页搜索兜底方案：通过 DuckDuckGo Lite 的 HTML 结果页完成关键词检索。适用于默认搜索能力不可用、未配置搜索 API，或需要一个轻量级文本搜索备选路径的场景。\\n\\n## 何时使用\\n\\n- 常规网页搜索工具不可用\\n- 环境中没有可用的搜索 API Key\\n- 只需要文本网页结果，不需要图片/视频/时间过滤\\n- 需要一个可手动执行的搜索流程说明\\n\\n## 输入\\n\\n提供自然语言搜索词即可，例如：\\n\\n- `site:example.com release notes 2025`\\n- `best sqlite migration tools python`\\n- `OpenAI function calling json schema examples`\\n\\n## 使用方法\\n\\n### 1. 生成 DuckDuckGo Lite 搜索 URL\\n\\n将查询词进行 URL 编码后，拼接到：\\n\\n`https://lite.duckduckgo.com/lite/?q=<encoded query>`\\n\\n示例：\\n\\n```text\\nhttps://lite.duckduckgo.com/lite/?q=best%20sqlite%20migration%20tools%20python\\n```\\n\\n### 2. 抓取结果页\\n\\n使用当前环境可用的网页抓取/访问能力请求该 URL，并读取返回的 HTML 文本。\\n\\n### 3. 提取搜索结果\\n\\n优先提取：\\n\\n- 结果标题\\n- 目标链接\\n- 简短摘要\\n\\n如果需要进一步确认内容，再逐个打开候选结果页。\\n\\n### 4. 输出建议格式\\n\\n- 标题\\n- 链接\\n- 摘要\\n- 与当前任务的相关性说明\\n\\n## 推荐流程\\n\\n1. 先用精确关键词搜索\\n2. 若结果噪声较大，补充限定词：\\n   - `site:`\\n   - 具体产品名 / 版本号\\n   - `github`\\n   - `docs`\\n   - `official`\\n3. 对前 3–5 个结果做二次打开验证\\n4. 明确标注哪些信息来自搜索结果页、哪些来自落地页面\\n\\n## 限制\\n\\n- 不支持可靠的时间过滤\\n- 仅适合文本网页结果，不适合图片/视频搜索\\n- 结果来源和排序可能与其他搜索引擎不同\\n- 某些站点可能触发跳转、反爬或内容缺失\\n- 本仓库当前未内置专门的 `web_fetch` 工具；因此这里保留为**可迁移的流程型 skill**，使用时需结合环境中实际可用的网页访问工具或外部浏览能力\\n\\n## 与上游的最小适配差异\\n\\n- 上游 skill 面向带有 `web_fetch` 能力的代理环境，本文档直接提到该能力。\\n- 当前 G3KU 工作区中未发现同名内置工具，因此迁移时将其适配为**流程说明型 skill**，不强绑定具体工具实现。\\n- 保留了“DuckDuckGo Lite + 无 API Key + 兜底搜索”的核心用途，但把执行步骤改写为更通用的中文说明，便于在不同运行环境中复用。\\n\\n## 参考资料\\n\\n详见 `references/upstream.md`。\\n''').lstrip()\\n(outdir/'SKILL.md').write_text(body, encoding='utf-8')\\nup=dedent(f'''\\n# Upstream Reference\\n\\n- Source repository: https://github.com/openclaw/skills\\n- Source path: `skills/jakelin/ddg-web-search`\\n- Source raw file: {u}\\n\\n## Import notes\\n\\nThis local copy is based on the upstream `SKILL.md` available at migration time.\\nThe upstream resource appears to be a **skill**, not a tool: it is a directory under `skills/` and is represented as a single markdown skill document with frontmatter describing usage.\\n\\n## Compatibility adaptation\\n\\n- Kept the original purpose: DuckDuckGo Lite based web search without API keys.\\n- Adapted wording for G3KU and converted the document into the local skill layout:\\n  - `skills/ddg-web-search/resource.yaml`\\n  - `skills/ddg-web-search/SKILL.md`\\n  - `skills/ddg-web-search/references/upstream.md`\\n- Because the current workspace does not expose a dedicated `web_fetch` built-in tool in this task context, the migrated version documents a generic workflow instead of binding to a specific fetch tool.\\n\\n## Upstream excerpt summary\\n\\nThe upstream document states that the skill is used for web search without an API key via DuckDuckGo Lite, especially as a fallback when regular web search is unavailable or lacks configuration. It also notes limitations such as lack of reliable date filtering and text-only results.\\n''').lstrip()\\n(outdir/'references'/'upstream.md').write_text(up, encoding='utf-8')\\nprint('created', outdir)\\nPY\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_6Zh8RYmHwpHgAIsocdODLqTG|fc_05ad193244f17b790169b978d8544881a185f017eec8ccd9f6",
+          "name": "exec",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:c4fe48a3167f\", \"char_count\": 4214, \"display_name\": \"tool:exec\", \"head_preview\": \"{\\\"status\\\": \\\"error\\\", \\\"exit_code\\\": 1, \\\"command\\\": \\\"python - <<'PY'\\\\nimport urllib.request, pathlib, yaml, re, os\\\\nfrom textwrap import dedent\\\\nu='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:c4fe48a3167f\", \"size_bytes\": 5528, \"source_kind\": \"tool_result:exec\", \"tail_preview\": \"{\\\"status\\\": \\\"error\\\", \\\"exit_code\\\": 1, \\\"command\\\": \\\"python - <<'PY'\\\\nimport urllib.request, pathlib, yaml, re, os\\\\nfrom textwrap import dedent\\\\nu='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_c4fe48a3167f.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:c4fe48a3167f\", \"summary\": \"Externalized tool:exec (1 lines, 4214 chars). Use content.search/open with ref=artifact:artifact:c4fe48a3167f.\\nHead preview:\\n{\\\"status\\\": \\\"error\\\", \\\"exit_code\\\": 1, \\\"command\\\": \\\"python - <<'PY'\\\\nimport urllib.request, pathlib, yaml, re, os\\\\nfrom textwrap import dedent\\\\nu='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_jhKVX2Q9M2m7PvFp83S6nzrs|fc_05ad193244f17b790169b978fefff081a1b437ccf5e637cfea",
+              "type": "function",
+              "function": {
+                "name": "exec",
+                "arguments": "{\"command\": \"python -c \\\"import urllib.request, pathlib; from textwrap import dedent; u='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md'; text=urllib.request.urlopen(u,timeout=30).read().decode('utf-8'); outdir=pathlib.Path('skills/ddg-web-search'); (outdir/'references').mkdir(parents=True, exist_ok=True); (outdir/'scripts').mkdir(exist_ok=True); (outdir/'resource.yaml').write_text(dedent('''schema_version: 1\\nkind: skill\\nname: ddg-web-search\\ndescription: 使用 DuckDuckGo Lite 进行免 API Key 的网页搜索，适合作为无搜索 API 时的兜底方案。\\ntrigger:\\n  keywords:\\n    - duckduckgo\\n    - ddg\\n    - web search\\n    - search fallback\\n  always: false\\nrequires:\\n  tools: []\\n  bins: []\\nentry:\\n  main: SKILL.md\\n  references: references\\n  scripts: scripts\\nexposure:\\n  agent: true\\n  org_graph: true\\n'''), encoding='utf-8'); (outdir/'SKILL.md').write_text(dedent('''# DDG Web Search\\n\\n从上游 `openclaw/skills` 的 `skills/jakelin/ddg-web-search` 迁移而来。\\n\\n该 skill 提供一个**无需 API Key** 的网页搜索兜底方案：通过 DuckDuckGo Lite 的 HTML 结果页完成关键词检索。适用于默认搜索能力不可用、未配置搜索 API，或需要一个轻量级文本搜索备选路径的场景。\\n\\n## 何时使用\\n\\n- 常规网页搜索工具不可用\\n- 环境中没有可用的搜索 API Key\\n- 只需要文本网页结果，不需要图片/视频/时间过滤\\n- 需要一个可手动执行的搜索流程说明\\n\\n## 输入\\n\\n提供自然语言搜索词即可，例如：\\n\\n- `site:example.com release notes 2025`\\n- `best sqlite migration tools python`\\n- `OpenAI function calling json schema examples`\\n\\n## 使用方法\\n\\n### 1. 生成 DuckDuckGo Lite 搜索 URL\\n\\n将查询词进行 URL 编码后，拼接到：\\n\\n`https://lite.duckduckgo.com/lite/?q=<encoded query>`\\n\\n示例：\\n\\n`https://lite.duckduckgo.com/lite/?q=best%20sqlite%20migration%20tools%20python`\\n\\n### 2. 抓取结果页\\n\\n使用当前环境可用的网页抓取/访问能力请求该 URL，并读取返回的 HTML 文本。\\n\\n### 3. 提取搜索结果\\n\\n优先提取：\\n\\n- 结果标题\\n- 目标链接\\n- 简短摘要\\n\\n如果需要进一步确认内容，再逐个打开候选结果页。\\n\\n### 4. 输出建议格式\\n\\n- 标题\\n- 链接\\n- 摘要\\n- 与当前任务的相关性说明\\n\\n## 推荐流程\\n\\n1. 先用精确关键词搜索\\n2. 若结果噪声较大，补充限定词：\\n   - `site:`\\n   - 具体产品名 / 版本号\\n   - `github`\\n   - `docs`\\n   - `official`\\n3. 对前 3–5 个结果做二次打开验证\\n4. 明确标注哪些信息来自搜索结果页、哪些来自落地页面\\n\\n## 限制\\n\\n- 不支持可靠的时间过滤\\n- 仅适合文本网页结果，不适合图片/视频搜索\\n- 结果来源和排序可能与其他搜索引擎不同\\n- 某些站点可能触发跳转、反爬或内容缺失\\n- 本仓库当前未内置专门的 `web_fetch` 工具；因此这里保留为**可迁移的流程型 skill**，使用时需结合环境中实际可用的网页访问工具或外部浏览能力\\n\\n## 与上游的最小适配差异\\n\\n- 上游 skill 面向带有 `web_fetch` 能力的代理环境，本文档直接提到该能力。\\n- 当前 G3KU 工作区中未发现同名内置工具，因此迁移时将其适配为**流程说明型 skill**，不强绑定具体工具实现。\\n- 保留了“DuckDuckGo Lite + 无 API Key + 兜底搜索”的核心用途，但把执行步骤改写为更通用的中文说明，便于在不同运行环境中复用。\\n\\n## 参考资料\\n\\n详见 `references/upstream.md`。\\n'''), encoding='utf-8'); (outdir/'references'/'upstream.md').write_text(dedent('''# Upstream Reference\\n\\n- Source repository: https://github.com/openclaw/skills\\n- Source path: `skills/jakelin/ddg-web-search`\\n- Source raw file: https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md\\n\\n## Import notes\\n\\nThis local copy is based on the upstream `SKILL.md` available at migration time.\\nThe upstream resource appears to be a **skill**, not a tool: it is a directory under `skills/` and is represented as a single markdown skill document with frontmatter describing usage.\\n\\n## Compatibility adaptation\\n\\n- Kept the original purpose: DuckDuckGo Lite based web search without API keys.\\n- Adapted wording for G3KU and converted the document into the local skill layout:\\n  - `skills/ddg-web-search/resource.yaml`\\n  - `skills/ddg-web-search/SKILL.md`\\n  - `skills/ddg-web-search/references/upstream.md`\\n- Because the current workspace does not expose a dedicated `web_fetch` built-in tool in this task context, the migrated version documents a generic workflow instead of binding to a specific fetch tool.\\n\\n## Upstream excerpt summary\\n\\nThe upstream document states that the skill is used for web search without an API key via DuckDuckGo Lite, especially as a fallback when regular web search is unavailable or lacks configuration. It also notes limitations such as lack of reliable date filtering and text-only results.\\n'''), encoding='utf-8'); print('created', outdir)\\\"\", \"working_dir\": \".\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_jhKVX2Q9M2m7PvFp83S6nzrs|fc_05ad193244f17b790169b978fefff081a1b437ccf5e637cfea",
+          "name": "exec",
+          "content": "{\"handle\": {\"artifact_id\": \"artifact:b1f413d99487\", \"char_count\": 4621, \"display_name\": \"tool:exec\", \"head_preview\": \"{\\\"status\\\": \\\"error\\\", \\\"exit_code\\\": 1, \\\"command\\\": \\\"python -c \\\\\\\"import urllib.request, pathlib; from textwrap import dedent; u='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md';...\", \"line_count\": 1, \"mime_type\": \"text/plain\", \"ref\": \"artifact:artifact:b1f413d99487\", \"size_bytes\": 5899, \"source_kind\": \"tool_result:exec\", \"tail_preview\": \"{\\\"status\\\": \\\"error\\\", \\\"exit_code\\\": 1, \\\"command\\\": \\\"python -c \\\\\\\"import urllib.request, pathlib; from textwrap import dedent; u='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md';...\", \"uri\": \".g3ku\\\\main-runtime\\\\artifacts\\\\task_d22127eb62b8\\\\artifact_b1f413d99487.txt\"}, \"next_actions\": [\"content.search\", \"content.open\"], \"ref\": \"artifact:artifact:b1f413d99487\", \"summary\": \"Externalized tool:exec (1 lines, 4621 chars). Use content.search/open with ref=artifact:artifact:b1f413d99487.\\nHead preview:\\n{\\\"status\\\": \\\"error\\\", \\\"exit_code\\\": 1, \\\"command\\\": \\\"python -c \\\\\\\"import urllib.request, pathlib; from textwrap import dedent; u='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md';...\", \"type\": \"content_ref\"}"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_wFCfnipysTMamA5iwtV2HdmX|fc_05ad193244f17b790169b97937567c81a19961b64489faf884",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"write\", \"path\": \"skills/ddg-web-search/resource.yaml\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 20, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"schema_version: 1\\nkind: skill\\nname: ddg-web-search\\ndescription: 使用 DuckDuckGo Lite 进行免 API Key 的网页搜索，适合作为无搜索 API 时的兜底方案。\\ntrigger:\\n  keywords:\\n    - duckduckgo\\n    - ddg\\n    - web search\\n    - search fallback\\n  always: false\\nrequires:\\n  tools: []\\n  bins: []\\nentry:\\n  main: SKILL.md\\n  references: references\\n  scripts: scripts\\nexposure:\\n  agent: true\\n  org_graph: true\\n\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_crA41yHZVL7lvPlgFcmPqZ0T|fc_05ad193244f17b790169b97937569881a1819e690612bbf48a",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"write\", \"path\": \"skills/ddg-web-search/SKILL.md\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 20, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"# DDG Web Search\\n\\n从上游 `openclaw/skills` 的 `skills/jakelin/ddg-web-search` 迁移而来。\\n\\n该 skill 提供一个**无需 API Key** 的网页搜索兜底方案：通过 DuckDuckGo Lite 的 HTML 结果页完成关键词检索。适用于默认搜索能力不可用、未配置搜索 API，或需要一个轻量级文本搜索备选路径的场景。\\n\\n## 何时使用\\n\\n- 常规网页搜索工具不可用\\n- 环境中没有可用的搜索 API Key\\n- 只需要文本网页结果，不需要图片/视频/时间过滤\\n- 需要一个可手动执行的搜索流程说明\\n\\n## 输入\\n\\n提供自然语言搜索词即可，例如：\\n\\n- `site:example.com release notes 2025`\\n- `best sqlite migration tools python`\\n- `OpenAI function calling json schema examples`\\n\\n## 使用方法\\n\\n### 1. 生成 DuckDuckGo Lite 搜索 URL\\n\\n将查询词进行 URL 编码后，拼接到：\\n\\n`https://lite.duckduckgo.com/lite/?q=<encoded query>`\\n\\n示例：\\n\\n`https://lite.duckduckgo.com/lite/?q=best%20sqlite%20migration%20tools%20python`\\n\\n### 2. 抓取结果页\\n\\n使用当前环境可用的网页抓取/访问能力请求该 URL，并读取返回的 HTML 文本。\\n\\n### 3. 提取搜索结果\\n\\n优先提取：\\n\\n- 结果标题\\n- 目标链接\\n- 简短摘要\\n\\n如果需要进一步确认内容，再逐个打开候选结果页。\\n\\n### 4. 输出建议格式\\n\\n- 标题\\n- 链接\\n- 摘要\\n- 与当前任务的相关性说明\\n\\n## 推荐流程\\n\\n1. 先用精确关键词搜索\\n2. 若结果噪声较大，补充限定词：\\n   - `site:`\\n   - 具体产品名 / 版本号\\n   - `github`\\n   - `docs`\\n   - `official`\\n3. 对前 3–5 个结果做二次打开验证\\n4. 明确标注哪些信息来自搜索结果页、哪些来自落地页面\\n\\n## 限制\\n\\n- 不支持可靠的时间过滤\\n- 仅适合文本网页结果，不适合图片/视频搜索\\n- 结果来源和排序可能与其他搜索引擎不同\\n- 某些站点可能触发跳转、反爬或内容缺失\\n- 本仓库当前未内置专门的 `web_fetch` 工具；因此这里保留为**可迁移的流程型 skill**，使用时需结合环境中实际可用的网页访问工具或外部浏览能力\\n\\n## 与上游的最小适配差异\\n\\n- 上游 skill 面向带有 `web_fetch` 能力的代理环境，本文档直接提到该能力。\\n- 当前 G3KU 工作区中未发现同名内置工具，因此迁移时将其适配为**流程说明型 skill**，不强绑定具体工具实现。\\n- 保留了“DuckDuckGo Lite + 无 API Key + 兜底搜索”的核心用途，但把执行步骤改写为更通用的中文说明，便于在不同运行环境中复用。\\n\\n## 参考资料\\n\\n详见 `references/upstream.md`。\\n\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_Ois1gaVnn9JyICOLzoipHR9A|fc_05ad193244f17b790169b9793756a481a1bdc565732068f91b",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"write\", \"path\": \"skills/ddg-web-search/references/upstream.md\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 20, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"# Upstream Reference\\n\\n- Source repository: https://github.com/openclaw/skills\\n- Source path: `skills/jakelin/ddg-web-search`\\n- Source raw file: https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md\\n\\n## Import notes\\n\\nThis local copy is based on the upstream `SKILL.md` available at migration time.\\nThe upstream resource appears to be a **skill**, not a tool: it is a directory under `skills/` and is represented as a single markdown skill document with frontmatter describing usage.\\n\\n## Compatibility adaptation\\n\\n- Kept the original purpose: DuckDuckGo Lite based web search without API keys.\\n- Adapted wording for G3KU and converted the document into the local skill layout:\\n  - `skills/ddg-web-search/resource.yaml`\\n  - `skills/ddg-web-search/SKILL.md`\\n  - `skills/ddg-web-search/references/upstream.md`\\n- Because the current workspace does not expose a dedicated `web_fetch` built-in tool in this task context, the migrated version documents a generic workflow instead of binding to a specific fetch tool.\\n\\n## Upstream excerpt summary\\n\\nThe upstream document states that the skill is used for web search without an API key via DuckDuckGo Lite, especially as a fallback when regular web search is unavailable or lacks configuration. It also notes limitations such as lack of reliable date filtering and text-only results.\\n\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_wFCfnipysTMamA5iwtV2HdmX|fc_05ad193244f17b790169b97937567c81a19961b64489faf884",
+          "name": "filesystem",
+          "content": "Successfully wrote 367 bytes to D:\\projects\\G3KU\\skills\\ddg-web-search\\resource.yaml"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_crA41yHZVL7lvPlgFcmPqZ0T|fc_05ad193244f17b790169b97937569881a1819e690612bbf48a",
+          "name": "filesystem",
+          "content": "Successfully wrote 1393 bytes to D:\\projects\\G3KU\\skills\\ddg-web-search\\SKILL.md"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_Ois1gaVnn9JyICOLzoipHR9A|fc_05ad193244f17b790169b9793756a481a1bdc565732068f91b",
+          "name": "filesystem",
+          "content": "Successfully wrote 1362 bytes to D:\\projects\\G3KU\\skills\\ddg-web-search\\references\\upstream.md"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_ejdGu5bNuKi3pysiBvaF8ol1|fc_05ad193244f17b790169b979422b6881a19e0b12f3f8d28e1f",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"list\", \"path\": \"skills/ddg-web-search\", \"query\": \"\", \"limit\": 200, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 200, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_qL0lDAJow6aayHDMQEZKFWDA|fc_05ad193244f17b790169b979422b7c81a18eea8b251eb82841",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"open\", \"path\": \"skills/ddg-web-search/resource.yaml\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 200, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            },
+            {
+              "id": "call_gMeD7rhf6j2A9nNSiEkMIBuH|fc_05ad193244f17b790169b979422b8881a18fa238c6360ab50f",
+              "type": "function",
+              "function": {
+                "name": "filesystem",
+                "arguments": "{\"action\": \"open\", \"path\": \"skills/ddg-web-search/SKILL.md\", \"query\": \"\", \"limit\": 20, \"before\": 0, \"after\": 0, \"start_line\": 1, \"end_line\": 40, \"around_line\": 1, \"window\": 20, \"lines\": 20, \"content\": \"\", \"old_text\": \"\", \"new_text\": \"\", \"summary\": \"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_ejdGu5bNuKi3pysiBvaF8ol1|fc_05ad193244f17b790169b979422b6881a19e0b12f3f8d28e1f",
+          "name": "filesystem",
+          "content": "DIR  references\nFILE resource.yaml\nFILE SKILL.md"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_qL0lDAJow6aayHDMQEZKFWDA|fc_05ad193244f17b790169b979422b7c81a18eea8b251eb82841",
+          "name": "filesystem",
+          "content": "{\"ok\": true, \"ref\": \"path:skills/ddg-web-search/resource.yaml\", \"handle\": {\"ref\": \"path:skills/ddg-web-search/resource.yaml\", \"artifact_id\": \"\", \"uri\": \"D:\\\\projects\\\\G3KU\\\\skills\\\\ddg-web-search\\\\resource.yaml\", \"source_kind\": \"workspace_path\", \"display_name\": \"resource.yaml\", \"mime_type\": \"text/plain\", \"size_bytes\": 417, \"line_count\": 21, \"char_count\": 367, \"head_preview\": \"schema_version: 1\\nkind: skill\\nname: ddg-web-search\\ndescription: 使用 DuckDuckGo Lite 进行免 API Key 的网页搜索，适合作为无搜索 API 时的兜底方案。\\ntrigger:\\n  keywords:\", \"tail_preview\": \"main: SKILL.md\\n  references: references\\n  scripts: scripts\\nexposure:\\n  agent: true\\n  org_graph: true\"}, \"start_line\": 1, \"end_line\": 11, \"excerpt\": \"schema_version: 1\\nkind: skill\\nname: ddg-web-search\\ndescription: 使用 DuckDuckGo Lite 进行免 API Key 的网页搜索，适合作为无搜索 API 时的兜底方案。\\ntrigger:\\n  keywords:\\n    - duckduckgo\\n    - ddg\\n    - web search\\n    - search fallback\\n  always: false\"}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_gMeD7rhf6j2A9nNSiEkMIBuH|fc_05ad193244f17b790169b979422b8881a18fa238c6360ab50f",
+          "name": "filesystem",
+          "content": "{\"ok\": true, \"ref\": \"path:skills/ddg-web-search/SKILL.md\", \"handle\": {\"ref\": \"path:skills/ddg-web-search/SKILL.md\", \"artifact_id\": \"\", \"uri\": \"D:\\\\projects\\\\G3KU\\\\skills\\\\ddg-web-search\\\\SKILL.md\", \"source_kind\": \"workspace_path\", \"display_name\": \"SKILL.md\", \"mime_type\": \"text/plain\", \"size_bytes\": 2621, \"line_count\": 83, \"char_count\": 1393, \"head_preview\": \"# DDG Web Search\\n\\n从上游 `openclaw/skills` 的 `skills/jakelin/ddg-web-search` 迁移而来。\\n\\n该 skill 提供一个**无需 API Key** 的网页搜索兜底方案：通过 DuckDuckGo Lite 的 HTML 结果页完成关键词检索。适用于默认搜索能力不可用、未配置搜索 API，或需要一个轻量级文本搜索备选路径的场景。\", \"tail_preview\": \"- 当前 G3KU 工作区中未发现同名内置工具，因此迁移时将其适配为**流程说明型 skill**，不强绑定具体工具实现。\\n- 保留了“DuckDuckGo Lite + 无 API Key + 兜底搜索”的核心用途，但把执行步骤改写为更通用的中文说明，便于在不同运行环境中复用。\\n\\n## 参考资料\\n\\n详见 `references/upstream.md`。\"}, \"start_line\": 1, \"end_line\": 11, \"excerpt\": \"# DDG Web Search\\n\\n从上游 `openclaw/skills` 的 `skills/jakelin/ddg-web-search` 迁移而来。\\n\\n该 skill 提供一个**无需 API Key** 的网页搜索兜底方案：通过 DuckDuckGo Lite 的 HTML 结果页完成关键词检索。适用于默认搜索能力不可用、未配置搜索 API，或需要一个轻量级文本搜索备选路径的场景。\\n\\n## 何时使用\\n\\n- 常规网页搜索工具不可用\\n- 环境中没有可用的搜索 API Key\\n- 只需要文本网页结果，不需要图片/视频/时间过滤\"}"
+        }
+      ],
+      "pending_tool_calls": [],
+      "pending_child_specs": [],
+      "partial_child_results": [],
+      "last_error": ""
+    }
+  ]
+}

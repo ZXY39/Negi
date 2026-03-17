@@ -43,7 +43,7 @@ const S = {
     activeSessionId: "",
     ceoSessionBusy: false,
     taskDefaults: {
-        sessionId: "",
+        scope: "global",
         maxDepth: 1,
         defaultMaxDepth: 1,
         hardMaxDepth: 4,
@@ -249,6 +249,10 @@ const U = {
     confirmBackdrop: document.getElementById("confirm-backdrop"),
     confirmTitle: document.getElementById("confirm-title"),
     confirmText: document.getElementById("confirm-text"),
+    confirmOptions: document.getElementById("confirm-options"),
+    confirmCheckbox: document.getElementById("confirm-checkbox"),
+    confirmCheckboxLabel: document.getElementById("confirm-checkbox-label"),
+    confirmCheckboxHint: document.getElementById("confirm-checkbox-hint"),
     confirmCancel: document.getElementById("confirm-cancel"),
     confirmAccept: document.getElementById("confirm-accept"),
 };
@@ -395,7 +399,7 @@ function applyTaskDefaultsPayload(payload = {}) {
         0,
         hardMaxDepth,
     );
-    S.taskDefaults.sessionId = String(payload?.session_id || payload?.sessionId || S.taskDefaults.sessionId || activeSessionId()).trim();
+    S.taskDefaults.scope = String(payload?.scope || S.taskDefaults.scope || "global").trim() || "global";
     S.taskDefaults.defaultMaxDepth = defaultMaxDepth;
     S.taskDefaults.hardMaxDepth = hardMaxDepth;
     S.taskDefaults.maxDepth = maxDepth;
@@ -407,11 +411,10 @@ function applyTaskDefaultsPayload(payload = {}) {
 
 function renderTaskDepthControl() {
     if (!U.taskDepthSelect || !U.taskDepthHint) return;
-    const sessionId = String(S.taskDefaults.sessionId || activeSessionId()).trim();
     const defaultMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.defaultMaxDepth, 1));
     const hardMaxDepth = Math.max(defaultMaxDepth, normalizeInt(S.taskDefaults.hardMaxDepth, 4));
     const currentMaxDepth = clamp(normalizeInt(S.taskDefaults.maxDepth, defaultMaxDepth), 0, hardMaxDepth);
-    const disabled = !sessionId || S.taskDefaults.loading || S.taskDefaults.saving;
+    const disabled = S.taskDefaults.loading || S.taskDefaults.saving;
     const select = U.taskDepthSelect;
 
     select.innerHTML = "";
@@ -424,41 +427,28 @@ function renderTaskDepthControl() {
     }
     select.disabled = disabled;
     select.value = String(currentMaxDepth);
-    select.dataset.sessionId = sessionId;
+    select.dataset.scope = "global";
     buildResourceSelect(select);
     syncResourceSelectUI(select);
 
-    if (!sessionId) {
-        U.taskDepthHint.textContent = "请先选择一个 CEO 会话。";
-        return;
-    }
     if (S.taskDefaults.loading) {
-        U.taskDepthHint.textContent = "正在加载当前会话的新任务深度设置...";
+        U.taskDepthHint.textContent = "正在加载全局任务树深度设置...";
         return;
     }
     if (S.taskDefaults.saving) {
-        U.taskDepthHint.textContent = `正在保存，后续新任务将使用 ${currentMaxDepth} 层深度。`;
+        U.taskDepthHint.textContent = `正在保存，全局后续新任务将使用 ${currentMaxDepth} 层深度。`;
         return;
     }
-    U.taskDepthHint.textContent = `后续新任务会自动使用该深度，当前范围 0-${hardMaxDepth}。`;
+    U.taskDepthHint.textContent = `全局后续新任务会自动使用该深度，当前范围 0-${hardMaxDepth}。`;
 }
 
-async function loadTaskDefaults(sessionId = activeSessionId()) {
-    const targetSessionId = String(sessionId || "").trim();
+async function loadTaskDefaults() {
     S.taskDefaults.requestToken += 1;
     const token = S.taskDefaults.requestToken;
-    if (!targetSessionId) {
-        S.taskDefaults.sessionId = "";
-        S.taskDefaults.loading = false;
-        S.taskDefaults.saving = false;
-        renderTaskDepthControl();
-        return null;
-    }
-    S.taskDefaults.sessionId = targetSessionId;
     S.taskDefaults.loading = true;
     renderTaskDepthControl();
     try {
-        const payload = await ApiClient.getCeoTaskDefaults(targetSessionId);
+        const payload = await ApiClient.getMainRuntimeTaskDefaults();
         if (token !== S.taskDefaults.requestToken) return payload;
         return applyTaskDefaultsPayload(payload);
     } catch (e) {
@@ -472,22 +462,20 @@ async function loadTaskDefaults(sessionId = activeSessionId()) {
 }
 
 async function saveTaskDefaultMaxDepth(value) {
-    const sessionId = String(activeSessionId() || "").trim();
-    if (!sessionId || !U.taskDepthSelect) return;
+    if (!U.taskDepthSelect) return;
     const nextDepth = clamp(normalizeInt(value, S.taskDefaults.defaultMaxDepth), 0, Math.max(S.taskDefaults.defaultMaxDepth, S.taskDefaults.hardMaxDepth));
     if (!S.taskDefaults.loading && !S.taskDefaults.saving && nextDepth === normalizeInt(S.taskDefaults.maxDepth, nextDepth)) {
         renderTaskDepthControl();
         return;
     }
     const previousDepth = S.taskDefaults.maxDepth;
-    S.taskDefaults.sessionId = sessionId;
     S.taskDefaults.maxDepth = nextDepth;
     S.taskDefaults.saving = true;
     renderTaskDepthControl();
     try {
-        const payload = await ApiClient.updateCeoTaskDefaults(sessionId, { max_depth: nextDepth });
+        const payload = await ApiClient.updateMainRuntimeTaskDefaults({ max_depth: nextDepth });
         applyTaskDefaultsPayload(payload);
-        showToast({ title: "深度已更新", text: `后续新任务将使用 ${S.taskDefaults.maxDepth} 层深度。`, kind: "success" });
+        showToast({ title: "深度已更新", text: `全局后续新任务将使用 ${S.taskDefaults.maxDepth} 层深度。`, kind: "success" });
     } catch (e) {
         S.taskDefaults.maxDepth = previousDepth;
         S.taskDefaults.saving = false;
@@ -801,7 +789,7 @@ function syncCeoPrimaryButton() {
 }
 
 function finalizePausedCeoTurn(text = "已暂停") {
-    const turn = S.ceoPendingTurns.shift();
+    const turn = pullActiveCeoTurn();
     if (!turn?.textEl || !turn.flowEl) return;
     turn.finalized = true;
     turn.textEl.textContent = String(text || "已暂停");
@@ -816,13 +804,16 @@ function finalizePausedCeoTurn(text = "已暂停") {
     scrollCeoFeedToBottom();
 }
 
-function applyCeoState(state = {}) {
+function applyCeoState(state = {}, meta = {}) {
     const status = String(state?.status || "").trim().toLowerCase();
+    const source = String(meta?.source || state?.source || "").trim().toLowerCase();
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
     S.ceoTurnActive = running;
     if (!running) S.ceoPauseBusy = false;
-    if (running) ensureActiveCeoTurn();
+    if (running && !(source === "heartbeat" && !getActiveCeoTurn())) {
+        ensureActiveCeoTurn({ source });
+    }
     if (paused) finalizePausedCeoTurn();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
@@ -928,16 +919,18 @@ function resetCeoFeed() {
 
 function restoreCeoInflightTurn(snapshot = null) {
     if (!snapshot || typeof snapshot !== "object") return;
+    const source = String(snapshot.source || "").trim().toLowerCase();
+    const isHeartbeat = source === "heartbeat";
     const userMessage = snapshot.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
-    if (userMessage) {
+    if (userMessage && !isHeartbeat) {
         const attachments = normalizeUploadList(userMessage.attachments);
         const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
         addMsg(text, "user", { attachments });
     }
     const status = String(snapshot.status || "").trim().toLowerCase();
     const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
-    const needsAssistantTurn = toolEvents.length > 0 || status === "running" || status === "paused" || status === "error";
-    if (needsAssistantTurn) ensureActiveCeoTurn();
+    const needsAssistantTurn = toolEvents.length > 0 || status === "paused" || status === "error" || (!isHeartbeat && status === "running");
+    if (needsAssistantTurn) ensureActiveCeoTurn({ source });
     toolEvents.forEach((event) => appendCeoToolEvent(event));
     if (status === "error") {
         const errorMessage = String(snapshot?.last_error?.message || "").trim() || "unknown error";
@@ -967,7 +960,7 @@ function scrollCeoFeedToBottom() {
     U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
 }
 
-function createPendingCeoTurn() {
+function createPendingCeoTurn(source = "user") {
     if (!U.ceoFeed) return null;
     const el = document.createElement("div");
     el.className = "message system ceo-turn-message";
@@ -994,6 +987,7 @@ function createPendingCeoTurn() {
         steps: 0,
         hasError: false,
         finalized: false,
+        source: String(source || "").trim().toLowerCase() || "user",
     };
     icons();
     scrollCeoFeedToBottom();
@@ -1004,10 +998,34 @@ function getActiveCeoTurn() {
     return S.ceoPendingTurns.find((turn) => !turn.finalized) || null;
 }
 
-function ensureActiveCeoTurn() {
+function pullActiveCeoTurn(source = "") {
+    const expected = String(source || "").trim().toLowerCase();
+    const index = S.ceoPendingTurns.findIndex((turn) => {
+        if (!turn || turn.finalized) return false;
+        if (!expected) return true;
+        return String(turn.source || "user").trim().toLowerCase() === expected;
+    });
+    if (index < 0) return null;
+    const [turn] = S.ceoPendingTurns.splice(index, 1);
+    return turn || null;
+}
+
+function discardActiveCeoTurn({ source = "" } = {}) {
+    const turn = pullActiveCeoTurn(source);
+    if (!turn) return false;
+    turn.finalized = true;
+    turn.el?.remove?.();
+    scrollCeoFeedToBottom();
+    return true;
+}
+
+function ensureActiveCeoTurn({ source = "" } = {}) {
     const existing = getActiveCeoTurn();
-    if (existing) return existing;
-    const created = createPendingCeoTurn();
+    if (existing) {
+        if (!existing.source) existing.source = String(source || "").trim().toLowerCase() || "user";
+        return existing;
+    }
+    const created = createPendingCeoTurn(String(source || "").trim().toLowerCase() || "user");
     if (created) S.ceoPendingTurns.push(created);
     return created;
 }
@@ -1019,7 +1037,8 @@ function updateCeoTurnMeta(turn, stateLabel) {
 }
 
 function appendCeoToolEvent(event = {}) {
-    const turn = ensureActiveCeoTurn();
+    const source = String(event?.source || "").trim().toLowerCase();
+    const turn = ensureActiveCeoTurn({ source });
     if (!turn?.listEl || !turn.flowEl) return;
     const status = String(event.status || "running").trim().toLowerCase();
     const toolName = String(event.tool_name || "tool").trim() || "tool";
@@ -1045,11 +1064,11 @@ function appendCeoToolEvent(event = {}) {
     scrollCeoFeedToBottom();
 }
 
-function finalizeCeoTurn(text) {
+function finalizeCeoTurn(text, meta = {}) {
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
     syncCeoPrimaryButton();
-    const turn = S.ceoPendingTurns.shift();
+    const turn = pullActiveCeoTurn(meta?.source || "");
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true });
         return;
@@ -1157,10 +1176,25 @@ function setCommunicationDirty(next = true) {
     renderCommunicationActions();
 }
 
-function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, returnFocus = null }) {
-    S.confirmState = { onConfirm, returnFocus };
+function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, returnFocus = null, checkbox = null }) {
+    S.confirmState = { onConfirm, returnFocus, checkbox: checkbox && typeof checkbox === "object" ? checkbox : null };
     U.confirmTitle.textContent = title;
     U.confirmText.textContent = text;
+    if (U.confirmOptions && U.confirmCheckbox && U.confirmCheckboxLabel && U.confirmCheckboxHint) {
+        const enabled = !!(checkbox && typeof checkbox === "object");
+        U.confirmOptions.hidden = !enabled;
+        if (enabled) {
+            U.confirmCheckbox.checked = !!checkbox.checked;
+            U.confirmCheckbox.disabled = false;
+            U.confirmCheckboxLabel.textContent = checkbox.label || "同时删除此对话创建的所有任务记录";
+            U.confirmCheckboxHint.textContent = checkbox.hint || "";
+        } else {
+            U.confirmCheckbox.checked = false;
+            U.confirmCheckbox.disabled = false;
+            U.confirmCheckboxLabel.textContent = "同时删除此对话创建的所有任务记录";
+            U.confirmCheckboxHint.textContent = "";
+        }
+    }
     U.confirmAccept.textContent = confirmLabel;
     U.confirmAccept.className = `toolbar-btn ${confirmKind}`;
     U.confirmBackdrop.hidden = false;
@@ -1502,6 +1536,12 @@ function enhanceResourceSelects() {
 function closeConfirm({ restoreFocus = true } = {}) {
     const returnFocus = S.confirmState?.returnFocus;
     S.confirmState = null;
+    if (U.confirmOptions) U.confirmOptions.hidden = true;
+    if (U.confirmCheckbox) {
+        U.confirmCheckbox.checked = false;
+        U.confirmCheckbox.disabled = false;
+    }
+    if (U.confirmCheckboxHint) U.confirmCheckboxHint.textContent = "";
     U.confirmBackdrop.hidden = true;
     U.confirmBackdrop.classList.remove("is-open");
     if (restoreFocus) returnFocus?.focus?.();
@@ -1511,12 +1551,14 @@ async function acceptConfirm() {
     if (!S.confirmState?.onConfirm) return;
     U.confirmAccept.disabled = true;
     U.confirmCancel.disabled = true;
+    if (U.confirmCheckbox) U.confirmCheckbox.disabled = true;
     try {
-        await S.confirmState.onConfirm();
+        await S.confirmState.onConfirm({ checked: !!U.confirmCheckbox?.checked });
         closeConfirm();
     } finally {
         U.confirmAccept.disabled = false;
         U.confirmCancel.disabled = false;
+        if (U.confirmCheckbox) U.confirmCheckbox.disabled = false;
     }
 }
 
@@ -2475,7 +2517,7 @@ function applyCeoSessionsPayload(payload = {}) {
     S.activeSessionId = nextActiveId;
     if (nextActiveId) ApiClient.setActiveSessionId(nextActiveId);
     renderCeoSessions();
-    void loadTaskDefaults(nextActiveId);
+    if (S.view === "tasks") renderTasks();
     return nextActiveId;
 }
 
@@ -2593,7 +2635,28 @@ function handleRenameCancel() {
     S.renameContext = null;
 }
 
-async function performDeleteCeoSession(sessionId) {
+function formatSessionDeleteHint(payload = {}) {
+    const related = payload?.related_tasks && typeof payload.related_tasks === "object" ? payload.related_tasks : {};
+    const total = normalizeInt(related.total, 0);
+    const terminal = normalizeInt(related.terminal, 0);
+    if (total <= 0) return "当前会话没有关联任务记录。";
+    return `共 ${total} 条任务记录，其中 ${terminal} 条已完成，可一并清理。`;
+}
+
+function formatSessionDeleteBlockedText(payload = {}) {
+    const message = String(payload?.message || "").trim();
+    const tasks = Array.isArray(payload?.usage?.tasks) ? payload.usage.tasks : [];
+    if (!tasks.length) return message || "会话仍有未完成任务，无法删除。";
+    const names = tasks
+        .slice(0, 3)
+        .map((item) => String(item?.title || item?.task_id || "").trim())
+        .filter(Boolean);
+    const suffix = tasks.length > 3 ? ` 等 ${tasks.length} 个任务` : "";
+    if (!names.length) return message || "会话仍有未完成任务，无法删除。";
+    return `${message || "会话仍有未完成任务，无法删除。"} ${names.join("、")}${suffix}`;
+}
+
+async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } = {}) {
     const targetId = String(sessionId || "").trim();
     if (!targetId) return;
     const wasActive = targetId === activeSessionId();
@@ -2601,7 +2664,7 @@ async function performDeleteCeoSession(sessionId) {
     renderCeoSessions();
     syncCeoPrimaryButton();
     try {
-        const payload = await ApiClient.deleteCeoSession(targetId);
+        const payload = await ApiClient.deleteCeoSession(targetId, { delete_task_records: !!deleteTaskRecords });
         const nextActiveId = applyCeoSessionsPayload(payload);
         if (wasActive) {
             closeCeoWs();
@@ -2609,7 +2672,17 @@ async function performDeleteCeoSession(sessionId) {
             resetCeoSessionState();
             if (nextActiveId) initCeoWs();
         }
+        if (S.view === "tasks") await loadTasks();
     } catch (e) {
+        const blockedDelete = e?.status === 409 && e?.data && typeof e.data === "object" && e.data.code === "session_has_unfinished_tasks";
+        if (blockedDelete) {
+            showToast({
+                title: "无法删除当前会话",
+                text: formatSessionDeleteBlockedText(e.data),
+                kind: "warn",
+            });
+            return;
+        }
         showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
     } finally {
         S.ceoSessionBusy = false;
@@ -2618,20 +2691,49 @@ async function performDeleteCeoSession(sessionId) {
     }
 }
 
-function requestDeleteCeoSession(sessionId) {
+async function requestDeleteCeoSession(sessionId) {
     const current = (S.ceoSessions || []).find((item) => String(item?.session_id || "") === String(sessionId || "").trim());
     if (!current) return;
     if (!canMutateCeoSessions()) {
         showToast({ title: "当前不可删除", text: "请先等待当前回合完成或暂停后再操作。", kind: "warn" });
         return;
     }
+    S.ceoSessionBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    let deleteCheck = null;
+    try {
+        deleteCheck = await ApiClient.getCeoSessionDeleteCheck(current.session_id);
+    } catch (e) {
+        S.ceoSessionBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+        showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
+        return;
+    }
+    S.ceoSessionBusy = false;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    if (deleteCheck?.can_delete === false) {
+        showToast({
+            title: "无法删除当前会话",
+            text: formatSessionDeleteBlockedText(deleteCheck),
+            kind: "warn",
+        });
+        return;
+    }
     openConfirm({
         title: "删除会话",
-        text: `将删除会话“${current.title || current.session_id}”的聊天记录与附件。后台任务不会被删除。`,
+        text: `将删除会话“${current.title || current.session_id}”的聊天记录与附件。${formatSessionDeleteHint(deleteCheck)}`,
         confirmLabel: "删除",
         confirmKind: "danger",
         returnFocus: U.ceoNewSession,
-        onConfirm: () => performDeleteCeoSession(current.session_id),
+        checkbox: {
+            label: "同时删除此对话创建的所有任务记录",
+            hint: formatSessionDeleteHint(deleteCheck),
+            checked: false,
+        },
+        onConfirm: ({ checked } = {}) => performDeleteCeoSession(current.session_id, { deleteTaskRecords: !!checked }),
     });
 }
 
@@ -2647,11 +2749,12 @@ function initCeoWs() {
     S.ceoWs.onmessage = (ev) => {
         const payload = JSON.parse(ev.data);
         if (payload.type === "snapshot.ceo") renderCeoSnapshot(payload.data?.messages || [], payload.data?.inflight_turn || null);
-        if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {});
+        if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {}, payload.data || {});
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
         if (payload.type === "ceo.agent.tool") appendCeoToolEvent(payload.data || {});
         if (payload.type === "ceo.error") handleCeoError(payload.data || {});
-        if (payload.type === "ceo.reply.final") finalizeCeoTurn(payload.data?.text || "");
+        if (payload.type === "ceo.reply.final") finalizeCeoTurn(payload.data?.text || "", payload.data || {});
+        if (payload.type === "ceo.turn.discard") discardActiveCeoTurn({ source: payload.data?.source || "" });
         if (payload.type === "task.summary.changed" && S.view === "tasks") void loadTasks();
         if (payload.type === "task.artifact.applied" && payload.data?.task_id === S.currentTaskId) void loadTaskArtifacts();
     };
@@ -3103,16 +3206,42 @@ async function requestTaskAction(taskId, action) {
     throw new Error(`Unsupported task action: ${action}`);
 }
 
+function taskSessionQueryValue() {
+    return "all";
+}
+
+function taskSessionEmptyText() {
+    return "No tasks yet.";
+}
+
+function renderTaskSessionScope() {
+    return;
+}
+
+async function setTaskSessionScope(scope) {
+    return;
+}
+
+function taskSessionMeta(task) {
+    const sessionId = String(task?.session_id || "").trim();
+    if (!sessionId) return "";
+    const session = (S.ceoSessions || []).find((item) => String(item?.session_id || "").trim() === sessionId);
+    const label = String(session?.title || sessionId).trim();
+    return `Session ${label}`;
+}
+
 function taskMetaText(task) {
     const parts = [];
     if (task.is_unread) parts.push("Unread");
+    const sessionMeta = taskSessionMeta(task);
+    if (sessionMeta) parts.push(sessionMeta);
     if (task.created_at) parts.push(`Created ${formatSessionTime(task.created_at)}`);
     return parts.join(" · ") || "No timestamp";
 }
 function renderTasks() {
     U.taskGrid.innerHTML = "";
     if (!S.tasks.length) {
-        U.taskGrid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">No tasks yet.</div>';
+        U.taskGrid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${esc(taskSessionEmptyText())}</div>`;
         return updateTaskToolbar();
     }
     orderedTasks(S.tasks).forEach((task) => {
@@ -3168,8 +3297,9 @@ function renderTasks() {
 async function loadTasks() {
     U.taskGrid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">Loading tasks...</div>';
     try {
-        S.tasks = await ApiClient.getTasks(1);
+        S.tasks = await ApiClient.getTasks(1, taskSessionQueryValue());
         syncTaskSelection();
+        renderTaskSessionScope();
         renderTasks();
     } catch (e) {
         U.taskGrid.innerHTML = `<div class="empty-state error" style="grid-column: 1/-1;">Failed to load tasks: ${esc(e.message)}</div>`;
@@ -4739,7 +4869,7 @@ async function saveSkill() {
     }
 }
 
-function requestDeleteSkill() {
+async function requestDeleteSkill() {
     const selectedId = String(S.selectedSkill?.skill_id || "").trim();
     const displayName = String(S.selectedSkill?.display_name || selectedId || "Skill").trim();
     if (!selectedId || S.skillBusy) return;
@@ -4771,7 +4901,6 @@ async function performDeleteSkill(skillId, displayName) {
         const message = resourceDeleteErrorText(e);
         addNotice({ kind: "resource_failed", title: "删除 Skill 失败", text: message });
         showToast({ title: "删除失败", text: message, kind: "error", durationMs: 3200 });
-        throw e;
     } finally {
         S.skillBusy = false;
         renderSkillActions();
@@ -5029,7 +5158,6 @@ async function performDeleteTool(toolId, displayName) {
         const message = resourceDeleteErrorText(e);
         addNotice({ kind: "resource_failed", title: "删除工具失败", text: message });
         showToast({ title: "删除失败", text: message, kind: "error", durationMs: 3200 });
-        throw e;
     } finally {
         S.toolBusy = false;
         renderToolActions();
@@ -5436,6 +5564,7 @@ function bind() {
     renderPendingCeoUploads();
     syncCeoInputHeight();
     renderCeoSessions();
+    renderTaskSessionScope();
     syncCeoPrimaryButton();
 }
 
@@ -5448,6 +5577,7 @@ function init() {
     bindTreePan();
     icons();
     renderTaskDepthControl();
+    void loadTaskDefaults();
     renderSkillActions();
     renderToolActions();
     renderCommunicationActions();

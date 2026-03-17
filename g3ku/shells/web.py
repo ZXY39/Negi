@@ -17,6 +17,7 @@ from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 _global_agent: Optional[AgentLoop] = None
 _global_bus: Optional[MessageBus] = None
 _global_runtime_manager: Optional[SessionRuntimeManager] = None
+_global_web_heartbeat = None
 
 
 def debug_trace_enabled() -> bool:
@@ -25,7 +26,7 @@ def debug_trace_enabled() -> bool:
 
 
 def get_agent() -> AgentLoop:
-    global _global_agent, _global_bus, _global_runtime_manager
+    global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
     if not _global_agent:
         config, revision, _changed = get_runtime_config(force=False)
         provider_name, model_name = config.get_role_model_target('ceo')
@@ -71,8 +72,12 @@ def get_agent() -> AgentLoop:
         _global_agent._runtime_model_revision = revision
         _global_agent._runtime_default_model_key = config.resolve_role_model_key('ceo')
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
+        _global_web_heartbeat = _build_web_heartbeat(_global_agent, _global_runtime_manager)
     elif _global_runtime_manager is None or _global_runtime_manager.loop is not _global_agent:
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
+        _global_web_heartbeat = _build_web_heartbeat(_global_agent, _global_runtime_manager)
+    elif _global_web_heartbeat is None:
+        _global_web_heartbeat = _build_web_heartbeat(_global_agent, _global_runtime_manager)
     return _global_agent
 
 
@@ -88,18 +93,62 @@ def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager
     return _global_runtime_manager
 
 
+def _build_web_heartbeat(agent: AgentLoop, runtime_manager: SessionRuntimeManager):
+    from g3ku.heartbeat import WebSessionHeartbeatService
+
+    main_task_service = getattr(agent, 'main_task_service', None)
+    session_manager = getattr(agent, 'sessions', None)
+    if main_task_service is None or session_manager is None:
+        return None
+    heartbeat = WebSessionHeartbeatService(
+        workspace=getattr(agent, 'workspace', '.'),
+        agent=agent,
+        runtime_manager=runtime_manager,
+        main_task_service=main_task_service,
+        session_manager=session_manager,
+    )
+    log_service = getattr(main_task_service, 'log_service', None)
+    if log_service is not None and not bool(getattr(log_service, '_web_session_heartbeat_bound', False)):
+        log_service.add_task_terminal_listener(heartbeat.enqueue_task_terminal)
+        setattr(log_service, '_web_session_heartbeat_bound', True)
+    return heartbeat
+
+
+def get_web_heartbeat_service(agent: AgentLoop | None = None):
+    runtime_agent = agent or get_agent()
+    runtime_manager = get_runtime_manager(runtime_agent)
+    global _global_web_heartbeat
+    if _global_web_heartbeat is None:
+        _global_web_heartbeat = _build_web_heartbeat(runtime_agent, runtime_manager)
+    return _global_web_heartbeat
+
+
+async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
+    heartbeat = get_web_heartbeat_service(agent)
+    if heartbeat is not None:
+        await heartbeat.start()
+
+
 async def shutdown_web_runtime() -> None:
-    global _global_agent, _global_bus, _global_runtime_manager
+    global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
 
     agent = _global_agent
     runtime_manager = _global_runtime_manager
+    heartbeat = _global_web_heartbeat
 
     _global_agent = None
     _global_bus = None
     _global_runtime_manager = None
+    _global_web_heartbeat = None
 
     if agent is None:
         return
+
+    if heartbeat is not None:
+        try:
+            await heartbeat.stop()
+        except Exception:
+            logger.debug('web heartbeat stop skipped during shutdown')
 
     session_keys: set[str] = set()
     if runtime_manager is not None:
@@ -153,4 +202,13 @@ def run_web_shell(*, host: str, port: int, reload: bool, debug: bool, set_debug_
     )
 
 
-__all__ = ['debug_trace_enabled', 'get_agent', 'get_runtime_manager', 'refresh_web_agent_runtime', 'run_web_shell', 'shutdown_web_runtime']
+__all__ = [
+    'debug_trace_enabled',
+    'ensure_web_runtime_services',
+    'get_agent',
+    'get_runtime_manager',
+    'get_web_heartbeat_service',
+    'refresh_web_agent_runtime',
+    'run_web_shell',
+    'shutdown_web_runtime',
+]

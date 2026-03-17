@@ -2832,14 +2832,14 @@ textarea {
 }
 
 .confirm-backdrop {
-    position: absolute;
+    position: fixed;
     inset: 0;
     display: grid;
     place-items: center;
     padding: 24px;
     background: rgba(2, 6, 23, 0.64);
     backdrop-filter: blur(4px);
-    z-index: 90;
+    z-index: 1000;
     opacity: 0;
     pointer-events: none;
     transition: opacity 180ms ease;
@@ -2870,6 +2870,36 @@ textarea {
 .confirm-text {
     color: var(--text-secondary);
     line-height: 1.6;
+}
+
+.confirm-options {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
+}
+
+.confirm-checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    color: var(--text-primary);
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+.confirm-checkbox-row input {
+    margin-top: 2px;
+}
+
+.confirm-checkbox-hint {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+    line-height: 1.5;
 }
 
 .confirm-actions {
@@ -3981,6 +4011,39 @@ textarea {
     width: fit-content;
 }
 
+.task-session-scope {
+    display: none;
+}
+
+.task-session-scope-btn {
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 9px 12px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+
+.task-session-scope-btn:hover {
+    background: color-mix(in srgb, var(--brand-primary) 8%, transparent);
+    color: var(--text-primary);
+}
+
+.task-session-scope-btn[aria-pressed="true"] {
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    box-shadow: 0 10px 24px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+}
+
+.task-session-scope-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 16%, transparent);
+}
+
 .task-depth-setting {
     display: flex;
     align-items: center;
@@ -4025,6 +4088,18 @@ textarea {
     left: auto;
     right: 0;
     min-width: 136px;
+}
+
+@media (max-width: 1100px) {
+    .task-header-actions {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+
+    .task-toolbar-preferences {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
 }
 
 .task-depth-select {

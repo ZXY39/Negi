@@ -29,9 +29,14 @@ class TaskLogService:
         self._registry = registry
         self._content_store = content_store
         self._snapshot_payload_builder = None
+        self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
 
     def set_snapshot_payload_builder(self, builder) -> None:
         self._snapshot_payload_builder = builder
+
+    def add_task_terminal_listener(self, listener: Callable[[TaskRecord], None]) -> None:
+        if callable(listener):
+            self._task_terminal_listeners.append(listener)
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
         paths = self._file_store.paths_for_task(task.task_id)
@@ -349,6 +354,7 @@ class TaskLogService:
             pause_requested=bool(updated.pause_requested),
             cancel_requested=bool(updated.cancel_requested),
         )
+        self._notify_task_terminal(updated, previous_status=str(task.status or ''))
         return updated
 
     def update_runtime_state(self, task_id: str, **payload: Any) -> dict[str, Any]:
@@ -402,6 +408,7 @@ class TaskLogService:
         task = self._store.get_task(task_id)
         if task is None:
             return None
+        previous_status = str(task.status or '').strip().lower()
         nodes = self._store.list_nodes(task_id)
         root = self._tree_builder.build_tree(task, nodes)
         tree_text = self._tree_builder.render_tree_text(root)
@@ -486,6 +493,7 @@ class TaskLogService:
                     },
                 ),
             )
+        self._notify_task_terminal(updated, previous_status=previous_status)
         return updated
 
     def bootstrap_missing_files(self, task_id: str) -> TaskRecord | None:
@@ -532,3 +540,14 @@ class TaskLogService:
         if task is None:
             raise ValueError(f'task not found: {task_id}')
         return task
+
+    def _notify_task_terminal(self, task: TaskRecord, *, previous_status: str) -> None:
+        next_status = str(getattr(task, 'status', '') or '').strip().lower()
+        prev_status = str(previous_status or '').strip().lower()
+        if next_status not in {'success', 'failed'} or prev_status in {'success', 'failed'}:
+            return
+        for listener in list(self._task_terminal_listeners):
+            try:
+                listener(task)
+            except Exception:
+                continue

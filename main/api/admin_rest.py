@@ -132,6 +132,29 @@ def _model_role_iterations(manager: ModelManager) -> dict[str, int]:
     return {scope: manager.config.get_role_max_iterations(scope) for scope in VALID_SCOPES}
 
 
+def _main_runtime_settings_payload(cfg: Config) -> dict[str, Any]:
+    default_max_depth = max(0, int(getattr(cfg.main_runtime, 'default_max_depth', 1) or 0))
+    hard_max_depth = max(default_max_depth, int(getattr(cfg.main_runtime, 'hard_max_depth', default_max_depth) or default_max_depth))
+    return {
+        'task_defaults': {'max_depth': default_max_depth},
+        'main_runtime': {
+            'default_max_depth': default_max_depth,
+            'hard_max_depth': hard_max_depth,
+        },
+    }
+
+
+def _normalized_main_runtime_default_depth(cfg: Config, payload: dict[str, Any] | None) -> int:
+    source = payload if isinstance(payload, dict) else {}
+    raw_depth = source.get('max_depth', source.get('maxDepth', getattr(cfg.main_runtime, 'default_max_depth', 1)))
+    try:
+        requested = int(raw_depth)
+    except (TypeError, ValueError):
+        requested = int(getattr(cfg.main_runtime, 'default_max_depth', 1) or 1)
+    hard_max_depth = max(0, int(getattr(cfg.main_runtime, 'hard_max_depth', requested) or requested))
+    return max(0, min(requested, hard_max_depth))
+
+
 def _normalize_china_channel_id(channel_id: str) -> str:
     raw = str(channel_id or '').strip()
     key = raw.replace('-', '_').lower()
@@ -291,6 +314,23 @@ def _update_china_channel_config(cfg: Config, channel_id: str, *, enabled: bool,
     next_cfg = Config.model_validate(full_payload)
     save_config(next_cfg)
     return next_cfg
+
+
+@router.get('/main-runtime/settings')
+async def get_main_runtime_settings():
+    cfg = load_config()
+    return {'ok': True, **_main_runtime_settings_payload(cfg)}
+
+
+@router.put('/main-runtime/settings')
+async def update_main_runtime_settings(payload: dict | None = Body(default=None)):
+    cfg = load_config()
+    next_depth = _normalized_main_runtime_default_depth(cfg, payload)
+    if int(getattr(cfg.main_runtime, 'default_max_depth', 1) or 0) != next_depth:
+        cfg.main_runtime.default_max_depth = next_depth
+        save_config(cfg)
+        await _refresh_runtime('admin_main_runtime_update')
+    return {'ok': True, **_main_runtime_settings_payload(cfg)}
 
 
 @router.get('/models')

@@ -1,0 +1,4 @@
+  File "<string>", line 1
+    import urllib.request, pathlib; from textwrap import dedent; u='https://raw.githubusercontent.com/openclaw/skills/main/skills/jakelin/ddg-web-search/SKILL.md'; text=urllib.request.urlopen(u,timeout=30).read().decode('utf-8'); outdir=pathlib.Path('skills/ddg-web-search'); (outdir/'references').mkdir(parents=True, exist_ok=True); (outdir/'scripts').mkdir(exist_ok=True); (outdir/'resource.yaml').write_text(dedent('''schema_version: 1
+                                                                                                                                                                                                                                                                                                                                                                                                                                  ^
+SyntaxError: unterminated triple-quoted string literal (detected at line 1)

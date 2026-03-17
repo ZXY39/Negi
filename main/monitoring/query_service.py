@@ -40,6 +40,7 @@ class TaskQueryService:
         return [
             TaskListItem(
                 task_id=item.task_id,
+                session_id=item.session_id,
                 title=item.title or item.task_id,
                 brief=item.brief_text or '',
                 status=item.status,

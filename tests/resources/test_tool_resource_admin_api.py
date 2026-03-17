@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import datetime
 from pathlib import Path
 import json
 from types import SimpleNamespace
@@ -446,7 +447,8 @@ def test_ceo_session_task_defaults_endpoint_reads_and_updates_depth(tmp_path: Pa
     session_path = tmp_path / 'sessions' / 'web_ceo_demo.jsonl'
     session_path.parent.mkdir(parents=True, exist_ok=True)
     session_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
-    session = Session(key='web:ceo-demo', metadata={})
+    original_updated_at = datetime(2026, 3, 18, 0, 0, 0)
+    session = Session(key='web:ceo-demo', metadata={}, updated_at=original_updated_at)
     manager = _SessionManager(session, session_path)
 
     from g3ku.runtime.api import ceo_sessions
@@ -471,6 +473,40 @@ def test_ceo_session_task_defaults_endpoint_reads_and_updates_depth(tmp_path: Pa
     assert updated.json()['task_defaults']['max_depth'] == 4
     assert manager.saved >= 1
     assert manager.get_or_create('web:ceo-demo').metadata['task_defaults']['max_depth'] == 4
+    assert manager.get_or_create('web:ceo-demo').updated_at > original_updated_at
+
+
+def test_main_runtime_settings_endpoint_reads_and_updates_global_depth(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    initial = client.get('/api/main-runtime/settings')
+    assert initial.status_code == 200
+    assert initial.json()['task_defaults']['max_depth'] == 1
+    assert initial.json()['main_runtime']['hard_max_depth'] == 4
+
+    updated = client.put('/api/main-runtime/settings', json={'max_depth': 9})
+    assert updated.status_code == 200
+    assert updated.json()['task_defaults']['max_depth'] == 4
+    assert captured == {'force': True, 'reason': 'admin_main_runtime_update'}
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['mainRuntime']['defaultMaxDepth'] == 4
 
 
 def test_task_rest_endpoint_normalizes_short_task_id():

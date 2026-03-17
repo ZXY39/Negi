@@ -15,7 +15,7 @@ from g3ku.runtime.web_ceo_sessions import (
     normalize_task_defaults,
     workspace_path,
 )
-from g3ku.shells.web import get_agent, get_runtime_manager
+from g3ku.shells.web import get_agent, get_runtime_manager, get_web_heartbeat_service
 
 router = APIRouter()
 
@@ -57,6 +57,52 @@ def _assert_known_session(session_manager, session_id: str):
 def _assert_no_running_turn(runtime_manager, session_id: str):
     if _session_is_running(runtime_manager, session_id):
         raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
+
+
+async def _task_service(agent):
+    service = getattr(agent, 'main_task_service', None)
+    if service is None:
+        raise HTTPException(status_code=503, detail='main_task_service_unavailable')
+    await service.startup()
+    return service
+
+
+def _session_task_delete_payload(service, session_id: str) -> dict:
+    tasks = service.list_tasks_for_session(session_id)
+    unfinished = [
+        {
+            'task_id': str(getattr(task, 'task_id', '') or '').strip(),
+            'title': str(getattr(task, 'title', '') or '').strip(),
+            'status': str(getattr(task, 'status', '') or '').strip(),
+            'is_paused': bool(getattr(task, 'is_paused', False)),
+        }
+        for task in tasks
+        if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
+    ]
+    counts = service.get_session_task_counts(session_id)
+    can_delete = not unfinished
+    message = '' if can_delete else '会话仍有未完成任务，无法删除。'
+    return {
+        'ok': True,
+        'session_id': session_id,
+        'can_delete': can_delete,
+        'related_tasks': counts,
+        'usage': {'tasks': unfinished},
+        'message': message,
+    }
+
+
+def _raise_session_delete_blocked(*, session_id: str, payload: dict) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            'code': 'session_has_unfinished_tasks',
+            'message': str(payload.get('message') or '会话仍有未完成任务，无法删除。'),
+            'session_id': session_id,
+            'usage': dict(payload.get('usage') or {'tasks': []}),
+            'related_tasks': dict(payload.get('related_tasks') or {}),
+        },
+    )
 
 
 def _task_defaults_response(session) -> dict:
@@ -139,6 +185,7 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
             hard_max_depth=depth_limits["hard_max_depth"],
         ),
     }
+    session.updated_at = datetime.now()
     session_manager.save(session)
     return {"ok": True, **_task_defaults_response(session)}
 
@@ -156,12 +203,39 @@ async def activate_ceo_session(session_id: str):
     return {"ok": True, "item": item, "items": items, "active_session_id": target.key}
 
 
+@router.get('/ceo/sessions/{session_id}/delete-check')
+async def get_ceo_session_delete_check(session_id: str):
+    agent, session_manager, _runtime_manager, _state_store = _sessions()
+    session = _assert_known_session(session_manager, session_id)
+    service = await _task_service(agent)
+    return _session_task_delete_payload(service, session.key)
+
+
 @router.delete("/ceo/sessions/{session_id}")
-async def delete_ceo_session(session_id: str):
+async def delete_ceo_session(session_id: str, payload: dict | None = Body(default=None)):
     agent, session_manager, runtime_manager, state_store = _sessions()
+    service = await _task_service(agent)
     current_active = ensure_active_web_ceo_session(session_manager, state_store)
     _assert_no_running_turn(runtime_manager, current_active)
     session = _assert_known_session(session_manager, session_id)
+    if current_active != session.key:
+        _assert_no_running_turn(runtime_manager, session.key)
+    delete_check = _session_task_delete_payload(service, session.key)
+    if not bool(delete_check.get('can_delete')):
+        _raise_session_delete_blocked(session_id=session.key, payload=delete_check)
+    heartbeat = get_web_heartbeat_service(agent)
+    if heartbeat is not None:
+        heartbeat.clear_session(session.key)
+    delete_task_records = bool((payload or {}).get('delete_task_records'))
+    deleted_task_count = 0
+    if delete_task_records:
+        try:
+            deleted_task_count = await service.delete_task_records_for_session(session.key)
+        except ValueError as exc:
+            if str(exc) == 'session_has_unfinished_tasks':
+                latest = _session_task_delete_payload(service, session.key)
+                _raise_session_delete_blocked(session_id=session.key, payload=latest)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     delete_web_ceo_session_artifacts(session_manager=session_manager, session_id=session.key)
     remover = getattr(runtime_manager, "remove", None)
     if callable(remover):
@@ -176,6 +250,7 @@ async def delete_ceo_session(session_id: str):
         "ok": True,
         "deleted": True,
         "session_id": session.key,
+        "deleted_task_count": deleted_task_count,
         "items": items,
         "active_session_id": active_session_id,
     }

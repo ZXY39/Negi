@@ -27,10 +27,12 @@ def _ensure_task_route_id(task_id: str) -> str:
 async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1)):
     service = _service()
     await service.startup()
-    _ = session_id
-    items = service.query_service.get_tasks(None, int(scope))
+    normalized_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+    effective_session_id = None if normalized_session_id.lower() == 'all' else normalized_session_id
+    items = service.query_service.get_tasks(effective_session_id, int(scope))
     return {
         'ok': True,
+        'session_id': 'all' if effective_session_id is None else effective_session_id,
         'scope': int(scope),
         'items': [item.model_dump(mode='json') for item in items],
     }
