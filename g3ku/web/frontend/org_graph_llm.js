@@ -799,6 +799,7 @@
           enabled: true,
           description: "",
           retry_on: [...DEFAULT_RETRY_ON],
+          retry_count: 0,
         },
         draft,
       });
@@ -976,9 +977,9 @@
       if (!S.modelCatalog.roleEditing) return;
       const dragState = S.modelCatalog.dragState;
       if (!dragState?.ref) return;
-      const zone = event.target.closest("[data-model-available-list]");
+      const zone = event.target instanceof Element ? event.target.closest("[data-model-available-list]") : null;
       if (!zone) return;
-      if (event.relatedTarget && zone.contains(event.relatedTarget)) return;
+      if (!didModelDragLeaveZone(zone, event)) return;
       clearModelDragDecorations();
       stopModelAutoScroll();
     });

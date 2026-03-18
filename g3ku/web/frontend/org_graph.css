@@ -3161,6 +3161,13 @@ textarea {
     scrollbar-gutter: stable;
 }
 
+.resource-status-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
 .resource-empty-copy {
     color: var(--text-muted);
     font-size: 0.82rem;
@@ -3199,6 +3206,34 @@ textarea {
 .resource-draft-hint.is-dirty::before {
     background: color-mix(in srgb, var(--brand-primary) 72%, #22c55e 28%);
     box-shadow: 0 0 0 5px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+}
+
+.resource-warning-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: 18px;
+    border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border-color));
+    background: color-mix(in srgb, var(--warning) 10%, var(--bg-app));
+    color: var(--warning);
+    line-height: 1.6;
+}
+
+.resource-warning-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--warning);
+}
+
+.resource-warning-list {
+    margin: 0;
+    padding-left: 1.2rem;
+    color: var(--warning);
+}
+
+.resource-warning-list li + li {
+    margin-top: 4px;
 }
 
 .resource-copy-block,
@@ -3559,6 +3594,13 @@ textarea {
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
     background-color: var(--bg-panel);
     box-shadow: var(--shadow-sm);
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+.model-chain-card.is-drop-zone {
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+    box-shadow: var(--shadow-sm), 0 0 0 3px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+    background-color: color-mix(in srgb, var(--bg-panel) 94%, var(--brand-primary) 6%);
 }
 
 .model-chain-card .panel-header {
@@ -3834,17 +3876,26 @@ textarea {
    Restored Resource & Project Views
    ----------------------------------*/
 .project-list-container {
-    padding: var(--space-6) var(--space-8);
-    height: calc(100vh - 80px);
-    overflow-y: auto;
-    scrollbar-gutter: stable;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    overflow: hidden;
 }
 
 .project-card-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: var(--space-6);
-    margin-top: var(--space-6);
+    margin-top: 0;
+    flex: 1;
+    min-height: 0;
+    align-content: start;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    padding-right: 4px;
 }
 
 .project-card {
@@ -3983,6 +4034,22 @@ textarea {
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-sm);
     overflow: visible;
+}
+
+.task-list-panel {
+    min-height: 0;
+}
+
+.task-list-panel .project-toolbar {
+    flex-shrink: 0;
+}
+
+.task-list-panel .project-card {
+    box-shadow: var(--shadow-sm);
+}
+
+.task-pagination {
+    flex-shrink: 0;
 }
 
 .project-toolbar-group {
@@ -4429,6 +4496,9 @@ textarea {
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: var(--space-4);
     padding: 0 var(--space-4) var(--space-4);
+    flex: 1 1 auto;
+    min-height: 0;
+    align-content: start;
     overflow-y: auto;
     scrollbar-gutter: stable;
 }
@@ -4458,6 +4528,10 @@ textarea {
     justify-content: space-between;
     flex-wrap: wrap;
     gap: var(--space-3);
+    margin-top: auto;
+    flex-shrink: 0;
+    position: relative;
+    overflow: visible;
     border-top: 1px solid var(--border-color);
 }
 
@@ -4470,11 +4544,21 @@ textarea {
 
 .resource-pagination-group {
     flex: 0 1 auto;
+    position: relative;
+    overflow: visible;
 }
 
 .resource-pagination-group .resource-select-shell,
 .resource-pagination-group .resource-select {
+    width: 132px;
     min-width: 132px;
+    max-width: 132px;
+    flex: 0 0 132px;
+}
+
+.resource-pagination .resource-select-menu {
+    top: auto;
+    bottom: calc(100% + 10px);
 }
 
 .resource-pagination-actions {
@@ -4869,6 +4953,12 @@ textarea {
     border-color: color-mix(in srgb, #ef4444 30%, transparent);
 }
 
+.meta-tag.status-unavailable {
+    background-color: color-mix(in srgb, #f59e0b 15%, var(--bg-surface-inner));
+    color: #fbbf24;
+    border-color: color-mix(in srgb, #f59e0b 30%, transparent);
+}
+
 .meta-tag.status-running,
 .meta-tag.status-success {
     background-color: color-mix(in srgb, #22c55e 15%, var(--bg-surface-inner));
@@ -4906,6 +4996,7 @@ textarea {
 }
 [data-theme="dark"] .meta-tag.status-enabled { color: #4ade80; }
 [data-theme="dark"] .meta-tag.status-disabled { color: #fca5a1; }
+[data-theme="dark"] .meta-tag.status-unavailable { color: #fbbf24; }
 
 .meta-tag.status-running,
 .meta-tag.status-success {

@@ -261,6 +261,7 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
             "llmConfigId": item.llm_config_id,
             "enabled": item.enabled,
             "retryOn": list(item.retry_on or []),
+            "retryCount": int(getattr(item, "retry_count", 0) or 0),
             "description": item.description,
         }
         for item in cfg.models.catalog

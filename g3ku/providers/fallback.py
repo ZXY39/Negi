@@ -94,6 +94,13 @@ def response_requires_retry(response: LLMResponse, retry_on: list[str] | None = 
     return is_retryable_model_error(str(response.content or ""), retry_on=retry_on)
 
 
+def normalized_retry_count(value: int | None) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 class FallbackProvider(LLMProvider):
     """LLMProvider wrapper that retries through an ordered model chain."""
 
@@ -140,30 +147,68 @@ class FallbackProvider(LLMProvider):
 
             effective_temperature = float(target.default_temperature if target.default_temperature is not None else temperature)
             effective_reasoning = str(target.default_reasoning_effort) if target.default_reasoning_effort is not None else reasoning_effort
+            retry_count = normalized_retry_count(getattr(target, "retry_count", 0))
+            move_to_next_model = False
 
-            try:
-                response = await target.provider.chat(
-                    messages=messages,
-                    tools=tools,
-                    model=target.model_id,
-                    max_tokens=effective_max_tokens,
-                    temperature=effective_temperature,
-                    reasoning_effort=effective_reasoning,
-                    tool_choice=tool_choice,
-                    parallel_tool_calls=parallel_tool_calls,
-                )
-            except Exception as exc:
-                last_error = exc
-                if not is_retryable_model_error(exc, retry_on=target.retry_on) or model_key == chain[-1]:
+            for retry_index in range(retry_count + 1):
+                try:
+                    response = await target.provider.chat(
+                        messages=messages,
+                        tools=tools,
+                        model=target.model_id,
+                        max_tokens=effective_max_tokens,
+                        temperature=effective_temperature,
+                        reasoning_effort=effective_reasoning,
+                        tool_choice=tool_choice,
+                        parallel_tool_calls=parallel_tool_calls,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    retryable = is_retryable_model_error(exc, retry_on=target.retry_on)
+                    if retryable and retry_index < retry_count:
+                        logger.warning(
+                            "Model retry triggered for {} ({}/{}): {}",
+                            model_key,
+                            retry_index + 1,
+                            retry_count,
+                            exc,
+                        )
+                        continue
+                    if retryable and model_key != chain[-1]:
+                        logger.warning(
+                            "Model fallback triggered for {} after {} retries: {}",
+                            model_key,
+                            retry_count,
+                            exc,
+                        )
+                        move_to_next_model = True
+                        break
                     raise
-                logger.warning("Model fallback triggered for {}: {}", model_key, exc)
-                continue
 
-            if response_requires_retry(response, retry_on=target.retry_on) and model_key != chain[-1]:
-                last_response = response
-                logger.warning("Model fallback triggered for {}: {}", model_key, response.content or response.finish_reason)
+                if response_requires_retry(response, retry_on=target.retry_on):
+                    last_response = response
+                    if retry_index < retry_count:
+                        logger.warning(
+                            "Model retry triggered for {} ({}/{}): {}",
+                            model_key,
+                            retry_index + 1,
+                            retry_count,
+                            response.content or response.finish_reason,
+                        )
+                        continue
+                    if model_key != chain[-1]:
+                        logger.warning(
+                            "Model fallback triggered for {} after {} retries: {}",
+                            model_key,
+                            retry_count,
+                            response.content or response.finish_reason,
+                        )
+                        move_to_next_model = True
+                        break
+                return response
+
+            if move_to_next_model:
                 continue
-            return response
 
         if last_response is not None:
             return last_response

@@ -108,6 +108,7 @@ class ModelManager:
         temperature: float | None = None,
         reasoning_effort: str | None = None,
         retry_on: list[str] | None = None,
+        retry_count: int | None = None,
         description: str = "",
     ) -> dict[str, Any]:
         clean_key = str(key or "").strip()
@@ -132,6 +133,7 @@ class ModelManager:
                 "enabled": bool(enabled),
                 "description": str(description or "").strip(),
                 "retry_on": list(retry_on or ["network", "429", "5xx"]),
+                "retry_count": 0 if retry_count is None else int(retry_count),
             },
         )
         for scope in scopes or []:
@@ -152,10 +154,10 @@ class ModelManager:
         temperature: float | None = None,
         reasoning_effort: str | None = None,
         retry_on: list[str] | None = None,
+        retry_count: int | None = None,
         description: str | None = None,
     ) -> dict[str, Any]:
         item = self._require_model(key)
-        current = self.facade.get_binding(self.config, key)
         patch: dict[str, Any] = {}
         if provider_model is not None:
             provider_id, model_id = self.config.parse_provider_model(str(provider_model).strip())
@@ -176,9 +178,12 @@ class ModelManager:
             patch["parameters"] = parameters
         if extra_headers is not None:
             patch["extra_headers"] = extra_headers
-        self.facade.update_binding(self.config, model_key=key, draft_payload=patch)
+        if patch:
+            self.facade.update_binding(self.config, model_key=key, draft_payload=patch)
         if retry_on is not None:
             item.retry_on = list(retry_on)
+        if retry_count is not None:
+            item.retry_count = int(retry_count)
         if description is not None:
             item.description = str(description).strip()
         self._revalidate()

@@ -699,6 +699,37 @@ def test_models_endpoint_returns_role_iterations(tmp_path: Path, monkeypatch):
     assert payload['role_iterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16}
 
 
+def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/models/m', json={'retryCount': 3})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['retry_count'] == 3
+    assert captured == {'force': True, 'reason': 'admin_model_update'}
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['catalog'][0]['retryCount'] == 3
+
+
 def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

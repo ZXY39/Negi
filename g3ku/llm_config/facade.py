@@ -134,6 +134,7 @@ class LLMConfigFacade:
                 enabled=binding.enabled,
                 description=binding.description,
                 retry_on=binding.retry_on,
+                retry_count=binding.retry_count,
             )
         )
         return self.get_binding(config, binding.key)
@@ -152,6 +153,8 @@ class LLMConfigFacade:
             binding.description = str(draft_payload.get("description") or "").strip()
         if "retry_on" in draft_payload and isinstance(draft_payload.get("retry_on"), list):
             binding.retry_on = [str(item).strip() for item in draft_payload.get("retry_on") if str(item).strip()]
+        if "retry_count" in draft_payload:
+            binding.retry_count = int(draft_payload.get("retry_count") or 0)
 
         if next_config_id and not any(
             key in draft_payload for key in ("provider_id", "default_model", "base_url", "api_key", "parameters", "extra_headers", "extra_options")
@@ -231,6 +234,7 @@ class LLMConfigFacade:
             model_key=config_id,
             record=record,
             retry_on=[],
+            retry_count=0,
         )
 
     def export_runtime_config(self, config_id: str) -> GenericRuntimeConfig:
@@ -245,6 +249,7 @@ class LLMConfigFacade:
             model_key=model_key,
             record=record,
             retry_on=list(getattr(binding, "retry_on", []) or []),
+            retry_count=int(getattr(binding, "retry_count", 0) or 0),
         )
 
     def _binding_payload(self, binding: Any, record: NormalizedProviderConfig) -> dict[str, Any]:
@@ -261,6 +266,7 @@ class LLMConfigFacade:
             "temperature": record.parameters.get("temperature"),
             "reasoning_effort": record.parameters.get("reasoning_effort"),
             "retry_on": list(binding.retry_on or []),
+            "retry_count": int(getattr(binding, "retry_count", 0) or 0),
             "description": binding.description,
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
@@ -287,6 +293,7 @@ class LLMConfigFacade:
         model_key: str,
         record: NormalizedProviderConfig,
         retry_on: list[str],
+        retry_count: int,
     ) -> RuntimeTarget:
         return RuntimeTarget(
             model_key=model_key,
@@ -307,6 +314,7 @@ class LLMConfigFacade:
                 else None
             ),
             retry_on=list(retry_on),
+            retry_count=max(0, int(retry_count or 0)),
             extra_options=dict(record.extra_options),
         )
 

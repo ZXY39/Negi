@@ -347,6 +347,9 @@ async def list_models():
 @router.post('/models')
 async def create_model(payload: dict = Body(...)):
     manager = ModelManager.load()
+    raw_retry_count = payload.get('retry_count')
+    if raw_retry_count is None and 'retryCount' in payload:
+        raw_retry_count = payload.get('retryCount')
     try:
         item = manager.add_model(
             key=str(payload.get('key') or '').strip(),
@@ -360,6 +363,7 @@ async def create_model(payload: dict = Body(...)):
             temperature=payload.get('temperature'),
             reasoning_effort=payload.get('reasoning_effort'),
             retry_on=[str(item) for item in (payload.get('retry_on') or [])] if payload.get('retry_on') is not None else None,
+            retry_count=raw_retry_count,
             description=str(payload.get('description') or ''),
         )
     except ValueError as exc:
@@ -371,6 +375,9 @@ async def create_model(payload: dict = Body(...)):
 @router.put('/models/{model_key}')
 async def update_model(model_key: str, payload: dict = Body(...)):
     manager = ModelManager.load()
+    raw_retry_count = payload.get('retry_count')
+    if raw_retry_count is None and 'retryCount' in payload:
+        raw_retry_count = payload.get('retryCount')
     try:
         item = manager.update_model(
             key=model_key,
@@ -382,6 +389,7 @@ async def update_model(model_key: str, payload: dict = Body(...)):
             temperature=payload.get('temperature'),
             reasoning_effort=payload.get('reasoning_effort'),
             retry_on=[str(item) for item in (payload.get('retry_on') or [])] if payload.get('retry_on') is not None else None,
+            retry_count=raw_retry_count,
             description=payload.get('description'),
         )
     except ValueError as exc:

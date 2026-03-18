@@ -165,6 +165,7 @@ class RoleIterationConfig(Base):
 class ModelFallbackTarget(Base):
     model_key: str
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+    retry_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="before")
     @classmethod
@@ -198,6 +199,15 @@ class ModelFallbackTarget(Base):
             clean.append(token)
         return clean or ["network", "429", "5xx"]
 
+    @field_validator("retry_count", mode="before")
+    @classmethod
+    def _normalize_retry_count(cls, value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, str) and not value.strip():
+            return 0
+        return int(value)
+
     @property
     def provider_model(self) -> str:
         return self.model_key
@@ -217,6 +227,7 @@ class ManagedModelConfig(Base):
     temperature: float = 0.1
     reasoning_effort: str | None = None
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+    retry_count: int = Field(default=0, ge=0)
     description: str = ""
 
     @field_validator("key")
@@ -259,6 +270,15 @@ class ManagedModelConfig(Base):
             seen.add(token)
             clean.append(token)
         return clean or ["network", "429", "5xx"]
+
+    @field_validator("retry_count", mode="before")
+    @classmethod
+    def _normalize_retry_count(cls, value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, str) and not value.strip():
+            return 0
+        return int(value)
 
     @model_validator(mode="after")
     def _validate_binding_or_legacy_payload(self) -> "ManagedModelConfig":
@@ -792,7 +812,13 @@ class Config(BaseSettings):
             if managed is not None:
                 if not managed.enabled:
                     continue
-                chain.append(ModelFallbackTarget(model_key=key, retry_on=list(managed.retry_on or [])))
+                chain.append(
+                    ModelFallbackTarget(
+                        model_key=key,
+                        retry_on=list(managed.retry_on or []),
+                        retry_count=int(getattr(managed, "retry_count", 0) or 0),
+                    )
+                )
                 continue
             chain.append(ModelFallbackTarget(model_key=key))
         return chain

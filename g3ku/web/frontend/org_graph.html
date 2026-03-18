@@ -129,42 +129,62 @@
                     </div>
                 </header>
 
-                <div class="project-list-container">
-                    <div id="task-toolbar" class="project-toolbar" hidden>
-                        <div class="project-toolbar-group">
-                            <div id="task-filter-wrap" class="toolbar-dropdown" hidden>
-                                <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button"
-                                    aria-haspopup="menu" aria-expanded="false">选择</button>
-                                <div id="task-filter-menu" class="toolbar-menu" role="menu" hidden>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem"
-                                        data-select-bucket="paused">已暂停</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem"
-                                        data-select-bucket="unread">未读</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem"
-                                        data-select-bucket="failed">失败</button>
-                                    <button class="toolbar-menu-item" type="button" role="menuitem"
-                                        data-select-bucket="running">进行中</button>
+                <div class="resource-layout full-list-layout task-list-layout">
+                    <section class="resource-list-panel task-list-panel full-width-panel">
+                        <div class="project-list-container">
+                            <div id="task-toolbar" class="project-toolbar" hidden>
+                                <div class="project-toolbar-group">
+                                    <div id="task-filter-wrap" class="toolbar-dropdown" hidden>
+                                        <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button"
+                                            aria-haspopup="menu" aria-expanded="false">选择</button>
+                                        <div id="task-filter-menu" class="toolbar-menu" role="menu" hidden>
+                                            <button class="toolbar-menu-item" type="button" role="menuitem"
+                                                data-select-bucket="paused">已暂停</button>
+                                            <button class="toolbar-menu-item" type="button" role="menuitem"
+                                                data-select-bucket="unread">未读</button>
+                                            <button class="toolbar-menu-item" type="button" role="menuitem"
+                                                data-select-bucket="failed">失败</button>
+                                            <button class="toolbar-menu-item" type="button" role="menuitem"
+                                                data-select-bucket="running">进行中</button>
+                                        </div>
+                                    </div>
+                                    <div id="task-batch-wrap" class="toolbar-dropdown" hidden>
+                                        <button id="task-batch-menu-trigger" class="toolbar-btn ghost" type="button"
+                                            aria-haspopup="menu" aria-expanded="false">批量操作</button>
+                                        <div id="task-batch-menu" class="toolbar-menu" role="menu" hidden>
+                                            <button class="toolbar-menu-item warn" type="button" role="menuitem"
+                                                data-batch-action="pause">暂停</button>
+                                            <button class="toolbar-menu-item success" type="button" role="menuitem"
+                                                data-batch-action="resume">开始</button>
+                                            <button class="toolbar-menu-item success" type="button" role="menuitem"
+                                                data-batch-action="retry">重试</button>
+                                            <button class="toolbar-menu-item danger" type="button" role="menuitem"
+                                                data-batch-action="delete">删除</button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
-                            <div id="task-batch-wrap" class="toolbar-dropdown" hidden>
-                                <button id="task-batch-menu-trigger" class="toolbar-btn ghost" type="button"
-                                    aria-haspopup="menu" aria-expanded="false">批量操作</button>
-                                <div id="task-batch-menu" class="toolbar-menu" role="menu" hidden>
-                                    <button class="toolbar-menu-item warn" type="button" role="menuitem"
-                                        data-batch-action="pause">暂停</button>
-                                    <button class="toolbar-menu-item success" type="button" role="menuitem"
-                                        data-batch-action="resume">开始</button>
-                                    <button class="toolbar-menu-item success" type="button" role="menuitem"
-                                        data-batch-action="retry">重试</button>
-                                    <button class="toolbar-menu-item danger" type="button" role="menuitem"
-                                        data-batch-action="delete">删除</button>
-                                </div>
+                            <div id="task-card-grid" class="project-card-grid">
+                                <div class="empty-state" style="grid-column: 1/-1;">暂无任务，先在 CEO 会话中创建一个异步任务。</div>
                             </div>
                         </div>
-                    </div>
-                    <div id="task-card-grid" class="project-card-grid">
-                        <div class="empty-state" style="grid-column: 1/-1;">暂无任务，先在 CEO 会话中创建一个异步任务。</div>
-                    </div>
+                        <div class="resource-pagination task-pagination" aria-label="Tasks pagination">
+                            <div class="resource-pagination-group">
+                                <span class="resource-pagination-label">每页</span>
+                                <select id="task-page-size" class="resource-select"
+                                    data-resource-select-label="Task 每页数量">
+                                    <option value="20">20 条</option>
+                                    <option value="50">50 条</option>
+                                    <option value="100">100 条</option>
+                                </select>
+                            </div>
+                            <div id="task-page-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                            <div class="resource-pagination-actions">
+                                <button id="task-page-prev" class="toolbar-btn ghost" type="button">上一页</button>
+                                <button id="task-page-next" class="toolbar-btn ghost" type="button">下一页</button>
+                            </div>
+                        </div>
+                    </section>
                 </div>
             </section>
 

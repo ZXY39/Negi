@@ -240,6 +240,7 @@ class ApiClient {
             ["temperature", null],
             ["reasoning_effort", "reasoningEffort"],
             ["retry_on", "retryOn"],
+            ["retry_count", "retryCount"],
         ];
         mappedFields.forEach(([snakeKey, camelKey]) => {
             const value = pick(snakeKey, camelKey);

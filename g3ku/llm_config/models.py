@@ -155,6 +155,7 @@ class RuntimeTarget(StrictModel):
     default_temperature: float | None = None
     default_reasoning_effort: str | None = None
     retry_on: list[str] = Field(default_factory=list)
+    retry_count: int = Field(default=0, ge=0)
     extra_options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -164,6 +165,7 @@ class ModelBindingDraft(StrictModel):
     enabled: bool = True
     description: str = ""
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+    retry_count: int = Field(default=0, ge=0)
 
 
 class MemoryModelBinding(StrictModel):

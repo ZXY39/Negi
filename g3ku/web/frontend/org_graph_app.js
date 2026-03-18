@@ -65,6 +65,8 @@ const S = {
     taskFilterMenuOpen: false,
     taskBatchMenuOpen: false,
     taskBusy: false,
+    taskPage: 1,
+    taskPageSize: RESOURCE_PAGE_SIZES[0],
     confirmState: null,
     toastState: { timeoutId: null, intervalId: null, remaining: 0 },
     openResourceSelectId: "",
@@ -168,6 +170,10 @@ const U = {
     taskToolbar: document.getElementById("task-toolbar"),
     taskDepthSelect: document.getElementById("task-depth-select"),
     taskDepthHint: document.getElementById("task-depth-hint"),
+    taskPageSize: document.getElementById("task-page-size"),
+    taskPageInfo: document.getElementById("task-page-info"),
+    taskPagePrev: document.getElementById("task-page-prev"),
+    taskPageNext: document.getElementById("task-page-next"),
     taskMultiToggle: document.getElementById("task-multi-toggle"),
     taskFilterWrap: document.getElementById("task-filter-wrap"),
     taskFilterTrigger: document.getElementById("task-filter-menu-trigger"),
@@ -333,6 +339,40 @@ function resetSkillPagination() {
 function resetToolPagination() {
     S.toolPage = 1;
     renderTools();
+}
+
+function syncTaskPagination(meta) {
+    if (U.taskPageInfo) {
+        U.taskPageInfo.textContent = meta.total
+            ? `第 ${meta.currentPage}/${meta.totalPages} 页 · 显示 ${meta.startIndex}-${meta.endIndex} / 共 ${meta.total} 项`
+            : "共 0 项";
+    }
+    if (U.taskPagePrev) U.taskPagePrev.disabled = meta.currentPage <= 1 || meta.total === 0;
+    if (U.taskPageNext) U.taskPageNext.disabled = meta.currentPage >= meta.totalPages || meta.total === 0;
+    if (U.taskPageSize instanceof HTMLSelectElement) {
+        const nextValue = String(S.taskPageSize);
+        if (U.taskPageSize.value !== nextValue) U.taskPageSize.value = nextValue;
+        syncResourceSelectUI(U.taskPageSize);
+    }
+}
+
+function scrollTaskListToTop() {
+    U.taskGrid?.scrollTo?.({ top: 0, behavior: "auto" });
+    U.taskGrid?.closest(".project-list-container")?.scrollTo?.({ top: 0, behavior: "auto" });
+}
+
+function setTaskPage(page) {
+    const meta = paginateResources(orderedTasks(S.tasks), page, S.taskPageSize);
+    S.taskPage = meta.currentPage;
+    renderTasks();
+    scrollTaskListToTop();
+}
+
+function setTaskPageSize(value) {
+    S.taskPageSize = normalizeResourcePageSize(value, S.taskPageSize);
+    S.taskPage = 1;
+    renderTasks();
+    scrollTaskListToTop();
 }
 
 function setSkillPage(page) {
@@ -1235,6 +1275,7 @@ function resourceSelectLabel(select) {
         "tool-status-filter": "Tool status filter",
         "tool-risk-filter": "Tool risk filter",
         "tool-page-size": "Tool 每页数量",
+        "task-page-size": "Task 每页数量",
         "task-depth-select": "Task tree depth",
     };
     return map[String(select?.id || "").trim()] || "Resource filter";
@@ -1966,6 +2007,10 @@ function renderModelDetail() {
                                 <span class="resource-field-label">Retry On</span>
                                 <input class="resource-search" name="retryOn" value="${esc((current?.retry_on || []).join(", "))}" placeholder="如 network, 429, 5xx">
                             </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">重试次数</span>
+                                <input class="resource-search" type="number" min="0" step="1" name="retryCount" value="${esc(String(current?.retry_count ?? 0))}" placeholder="0">
+                            </label>
                         </div>
                     </section>
                     <section class="resource-section">
@@ -2116,12 +2161,70 @@ function startModelAutoScroll(target, clientY) {
     dragState.scrollFrameId = window.requestAnimationFrame(tick);
 }
 
+function modelDragZoneContainsPoint(zone, clientX, clientY) {
+    if (!zone || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+    const rect = zone.getBoundingClientRect();
+    return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+}
+
+function didModelDragLeaveZone(zone, event) {
+    if (!zone) return true;
+    const related = event?.relatedTarget;
+    if (related instanceof Node && zone.contains(related)) return false;
+    return !modelDragZoneContainsPoint(zone, Number(event?.clientX), Number(event?.clientY));
+}
+
+function resolveModelChainDropList(target) {
+    if (!(target instanceof Element)) return null;
+    const directList = target.closest("[data-model-chain-list]");
+    if (directList) return directList;
+    const card = target.closest(".model-chain-card");
+    return card?.querySelector("[data-model-chain-list]") || null;
+}
+
+function resolveModelChainDropTarget(list, clientY, dragState = null) {
+    if (!list) return null;
+    const scope = String(list.dataset.modelChainList || "");
+    const items = [...list.children].filter((child) => {
+        if (!child.matches?.("[data-model-chain-ref]")) return false;
+        if (
+            dragState?.source === "chain"
+            && scope === String(dragState.scope || "")
+            && String(child.dataset.modelChainRef || "") === String(dragState.ref || "")
+        ) {
+            return false;
+        }
+        return true;
+    });
+    for (const item of items) {
+        const rect = item.getBoundingClientRect();
+        if (clientY < rect.top + (rect.height / 2)) return item;
+    }
+    return items[items.length - 1] || null;
+}
+
+function resolveModelChainDropIndex(list, dragState, clientY) {
+    if (!list) return 0;
+    const items = [...list.children].filter((child) => {
+        if (!child.matches?.("[data-model-chain-ref]")) return false;
+        return String(child.dataset.modelChainRef || "") !== String(dragState?.ref || "");
+    });
+    const targetItem = resolveModelChainDropTarget(list, clientY, dragState);
+    if (!targetItem) return items.length;
+    const targetIndex = items.indexOf(targetItem);
+    if (targetIndex < 0) return items.length;
+    const rect = targetItem.getBoundingClientRect();
+    const insertBefore = clientY < rect.top + (rect.height / 2);
+    return targetIndex + (insertBefore ? 0 : 1);
+}
+
 function ensureModelDropPlaceholder(list, targetItem, clientY) {
     if (!list) return null;
     const placeholder = document.createElement('div');
     placeholder.className = 'model-chain-drop-placeholder';
     placeholder.dataset.modelDropPlaceholder = '1';
     list.classList.add('is-drop-zone');
+    list.closest('.model-chain-card')?.classList.add('is-drop-zone');
     if (targetItem && targetItem.parentElement === list) {
         targetItem.classList.add('is-drop-target');
         const rect = targetItem.getBoundingClientRect();
@@ -2314,6 +2417,7 @@ function collectModelFormData(form, current) {
     const temperatureText = String(formData.get("temperature") || "").trim();
     const reasoningEffort = String(formData.get("reasoningEffort") || "").trim();
     const retryOnRaw = String(formData.get("retryOn") || "").trim();
+    const retryCountText = String(formData.get("retryCount") || "").trim();
     const description = String(formData.get("description") || "").trim();
     const enabled = formData.get("enabled") === "on";
     const selectedScopes = new Set(MODEL_SCOPES.filter((scope) => formData.get(`scope_${scope.key}`) === "on").map((scope) => scope.key));
@@ -2325,6 +2429,7 @@ function collectModelFormData(form, current) {
 
     const extraHeaders = parseModelHeaders(formData.get("extraHeaders"));
     const retryOn = retryOnRaw ? parseModelRetryOn(retryOnRaw) : null;
+    const retryCount = retryCountText ? Number.parseInt(retryCountText, 10) : 0;
     const maxTokens = maxTokensText ? Number(maxTokensText) : null;
     const temperature = temperatureText ? Number(temperatureText) : null;
 
@@ -2333,6 +2438,9 @@ function collectModelFormData(form, current) {
     }
     if (temperatureText && (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)) {
         throw new Error("Temperature 必须在 0 到 2 之间");
+    }
+    if (retryCountText && (!Number.isInteger(retryCount) || retryCount < 0)) {
+        throw new Error("重试次数必须是不小于 0 的整数");
     }
 
     if (isCreate) {
@@ -2349,6 +2457,7 @@ function collectModelFormData(form, current) {
         if (temperature !== null) payload.temperature = temperature;
         if (reasoningEffort) payload.reasoningEffort = reasoningEffort;
         if (retryOn !== null) payload.retryOn = retryOn;
+        payload.retryCount = retryCount;
         if (extraHeaders !== null) payload.extraHeaders = extraHeaders;
         return { isCreate, key, enabled, selectedScopes, payload };
     }
@@ -2361,6 +2470,7 @@ function collectModelFormData(form, current) {
     if (temperature !== null && temperature !== Number(current?.temperature ?? NaN)) patch.temperature = temperature;
     if (reasoningEffort !== String(current?.reasoning_effort || "")) patch.reasoningEffort = reasoningEffort;
     if (retryOn !== null && JSON.stringify(retryOn) !== JSON.stringify(current?.retry_on || [])) patch.retryOn = retryOn;
+    if (retryCount !== Number.parseInt(String(current?.retry_count ?? 0), 10)) patch.retryCount = retryCount;
     if (description !== String(current?.description || "")) patch.description = description;
     if (extraHeaders !== null && JSON.stringify(extraHeaders) !== JSON.stringify(current?.extra_headers || null)) patch.extraHeaders = extraHeaders;
     return { isCreate, key, enabled, selectedScopes, patch };
@@ -3240,11 +3350,14 @@ function taskMetaText(task) {
 }
 function renderTasks() {
     U.taskGrid.innerHTML = "";
-    if (!S.tasks.length) {
+    const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
+    S.taskPage = meta.currentPage;
+    syncTaskPagination(meta);
+    if (!meta.total) {
         U.taskGrid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${esc(taskSessionEmptyText())}</div>`;
         return updateTaskToolbar();
     }
-    orderedTasks(S.tasks).forEach((task) => {
+    meta.items.forEach((task) => {
         const selected = S.selectedTaskIds.has(task.task_id);
         const primaryAction = primaryTaskAction(task);
         const statusKey = taskStatusKey(task);
@@ -4208,6 +4321,47 @@ function displayRiskLabel(level) {
     return ({ low: "低风险", medium: "中风险", high: "高风险" }[String(level || "").trim().toLowerCase()] || String(level || "未知风险"));
 }
 
+function resourceAvailabilityStatus(item) {
+    if (item?.available === false) return "unavailable";
+    return item?.enabled ? "enabled" : "disabled";
+}
+
+function normalizeResourceAvailabilityReason(reason, item = null) {
+    const text = String(reason || "").trim();
+    const metadata = item && typeof item.metadata === "object" ? item.metadata : {};
+    const requiredBins = Array.isArray(metadata.requires_bins) ? metadata.requires_bins.filter(Boolean) : [];
+    const requiredEnv = Array.isArray(metadata.requires_env) ? metadata.requires_env.filter(Boolean) : [];
+    const requiredTools = Array.isArray(item?.requires_tools) ? item.requires_tools.filter(Boolean) : [];
+    if (!text) return "";
+    if (text === "missing required bins") return requiredBins.length ? `缺少必需命令：${requiredBins.join(", ")}` : "缺少必需命令";
+    if (text === "missing required env") return requiredEnv.length ? `缺少必需环境变量：${requiredEnv.join(", ")}` : "缺少必需环境变量";
+    if (text.startsWith("missing required tools:")) {
+        const toolNames = text.slice("missing required tools:".length).trim();
+        return `缺少依赖工具：${toolNames || requiredTools.join(", ") || "未知工具"}`;
+    }
+    return text;
+}
+
+function resourceAvailabilityReasons(item) {
+    if (!item || item.available !== false) return [];
+    const metadata = item && typeof item.metadata === "object" ? item.metadata : {};
+    const warnings = Array.isArray(metadata.warnings) ? metadata.warnings : [];
+    const errors = Array.isArray(metadata.errors) ? metadata.errors : [];
+    const requiredBins = Array.isArray(metadata.requires_bins) ? metadata.requires_bins.filter(Boolean) : [];
+    const requiredEnv = Array.isArray(metadata.requires_env) ? metadata.requires_env.filter(Boolean) : [];
+    const requiredTools = Array.isArray(item.requires_tools) ? item.requires_tools.filter(Boolean) : [];
+    const normalized = [...errors, ...warnings]
+        .map((entry) => normalizeResourceAvailabilityReason(entry, item))
+        .filter(Boolean);
+    if (!normalized.length) {
+        if (requiredBins.length) normalized.push(`缺少必需命令：${requiredBins.join(", ")}`);
+        if (requiredEnv.length) normalized.push(`缺少必需环境变量：${requiredEnv.join(", ")}`);
+        if (requiredTools.length) normalized.push(`缺少依赖工具：${requiredTools.join(", ")}`);
+    }
+    if (!normalized.length) normalized.push("当前资源依赖未满足，请检查运行环境。");
+    return [...new Set(normalized)];
+}
+
 function displayEnabledLabel(enabled, available = true) {
     if (!available) return "不可用";
     return enabled ? "已启用" : "已禁用";
@@ -4231,7 +4385,7 @@ function renderSkills() {
             <div class="resource-list-subtitle">${esc(subtitle)}</div>
             <div class="resource-list-meta">
                 <span class="meta-tag risk-${String(skill.risk_level || 'low').toLowerCase()}">${esc(displayRiskLabel(skill.risk_level))}</span>
-                <span class="meta-tag status-${skill.enabled ? 'enabled' : 'disabled'}">${esc(displayEnabledLabel(skill.enabled, skill.available))}</span>
+                <span class="meta-tag status-${resourceAvailabilityStatus(skill)}">${esc(displayEnabledLabel(skill.enabled, skill.available))}</span>
             </div>`;
         el.addEventListener("click", () => openSkill(skill.skill_id));
         U.skillList.appendChild(el);
@@ -4267,7 +4421,7 @@ function renderTools() {
             <div class="resource-list-title">${esc(tool.display_name)}</div>
             <div class="resource-list-subtitle">${esc(subtitle)}</div>
             <div class="resource-list-meta">
-                <span class="meta-tag status-${tool.enabled ? 'enabled' : 'disabled'}">${esc(displayEnabledLabel(tool.enabled, tool.available))}</span>
+                <span class="meta-tag status-${resourceAvailabilityStatus(tool)}">${esc(displayEnabledLabel(tool.enabled, tool.available))}</span>
                 <span class="meta-tag tool-actions">${(tool.actions || []).length} 个 action</span>
             </div>`;
         el.addEventListener("click", () => openTool(tool.tool_id));
@@ -4699,6 +4853,8 @@ function renderSkillDetail() {
     const roles = ["ceo", "execution", "inspection"];
     const allowedRoles = Array.isArray(S.selectedSkill.allowed_roles) ? S.selectedSkill.allowed_roles : [];
     const editorValue = esc(S.skillContents[S.selectedSkillFile] || "");
+    const availabilityState = resourceAvailabilityStatus(S.selectedSkill);
+    const unavailableReasons = resourceAvailabilityReasons(S.selectedSkill);
     const fileTabs = S.skillFiles.length
         ? S.skillFiles.map((file) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === file.file_key ? "active" : ""}" data-file="${esc(file.file_key)}">${esc(file.file_key)}</button>`).join("")
         : '<span class="resource-empty-copy">暂无可编辑文件</span>';
@@ -4716,11 +4872,20 @@ function renderSkillDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
+                    <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedSkill.enabled, S.selectedSkill.available))}</span>
                     ${S.selectedSkill.enabled
                         ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
                         : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`}
                     <button type="button" class="toolbar-btn danger" id="skill-delete-btn">删除</button>
                 </div>
+                ${S.selectedSkill.available === false ? `
+                    <div class="resource-warning-banner" role="status" aria-live="polite">
+                        <div class="resource-warning-title">当前 Skill 不可用</div>
+                        <ul class="resource-warning-list">
+                            ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
+                        </ul>
+                    </div>
+                ` : ""}
                 <div class="resource-draft-hint${S.skillDirty ? " is-dirty" : ""}" ${S.skillDirty ? "" : "hidden"}></div>
                 <div class="resource-section">
                     <h3>角色可见性</h3>
@@ -5349,7 +5514,7 @@ function bind() {
         if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
-        const chainList = e.target.closest("[data-model-chain-list]");
+        const chainList = resolveModelChainDropList(e.target);
         if (!chainList) return;
         const scope = String(chainList.dataset.modelChainList || "");
         const allowDrop = dragState.source === "available" || scope === dragState.scope;
@@ -5358,9 +5523,13 @@ function bind() {
         e.dataTransfer.dropEffect = dragState.source === "chain" ? "move" : "copy";
         clearModelDragDecorations();
         let targetItem = e.target.closest("[data-model-chain-ref]");
+        if (!(targetItem instanceof Element) || targetItem.parentElement !== chainList) {
+            targetItem = null;
+        }
         if (targetItem && dragState.source === "chain" && scope === dragState.scope && String(targetItem.dataset.modelChainRef || "") === dragState.ref) {
             targetItem = null;
         }
+        if (!targetItem) targetItem = resolveModelChainDropTarget(chainList, e.clientY, dragState);
         ensureModelDropPlaceholder(chainList, targetItem, e.clientY);
         startModelAutoScroll(chainList, e.clientY);
     });
@@ -5368,7 +5537,7 @@ function bind() {
         if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
-        const chainList = e.target.closest("[data-model-chain-list]");
+        const chainList = resolveModelChainDropList(e.target);
         if (!chainList) return;
         const scope = String(chainList.dataset.modelChainList || "");
         const allowDrop = dragState.source === "available" || scope === dragState.scope;
@@ -5378,7 +5547,7 @@ function bind() {
         const children = [...chainList.children];
         const placeholderIndex = children.indexOf(placeholder);
         const targetIndex = placeholderIndex < 0
-            ? children.filter((child) => child.matches?.('[data-model-chain-ref]') && String(child.dataset.modelChainRef || '') !== dragState.ref).length
+            ? resolveModelChainDropIndex(chainList, dragState, e.clientY)
             : children.slice(0, placeholderIndex).filter((child) => child.matches?.('[data-model-chain-ref]') && String(child.dataset.modelChainRef || '') !== dragState.ref).length;
         clearModelDragDecorations();
         stopModelAutoScroll();
@@ -5389,10 +5558,9 @@ function bind() {
         if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
-        const zone = e.target.closest("[data-model-chain-list]");
+        const zone = e.target instanceof Element ? (e.target.closest(".model-chain-card") || resolveModelChainDropList(e.target)) : null;
         if (!zone) return;
-        const related = e.relatedTarget;
-        if (related && zone.contains(related)) return;
+        if (!didModelDragLeaveZone(zone, e)) return;
         clearModelDragDecorations();
         stopModelAutoScroll();
     });
@@ -5434,10 +5602,9 @@ function bind() {
         if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
-        const zone = e.target.closest("[data-model-available-list]");
+        const zone = e.target instanceof Element ? e.target.closest("[data-model-available-list]") : null;
         if (!zone) return;
-        const related = e.relatedTarget;
-        if (related && zone.contains(related)) return;
+        if (!didModelDragLeaveZone(zone, e)) return;
         clearModelDragDecorations();
         stopModelAutoScroll();
     });
@@ -5476,6 +5643,9 @@ function bind() {
     U.taskDepthSelect?.addEventListener("change", (e) => {
         void saveTaskDefaultMaxDepth(e.target.value);
     });
+    U.taskPageSize?.addEventListener("change", (e) => setTaskPageSize(e.target.value));
+    U.taskPagePrev?.addEventListener("click", () => setTaskPage(S.taskPage - 1));
+    U.taskPageNext?.addEventListener("click", () => setTaskPage(S.taskPage + 1));
     U.taskMultiToggle?.addEventListener("click", () => setMultiSelectMode(!S.multiSelectMode));
     U.taskFilterTrigger?.addEventListener("click", (e) => {
         e.stopPropagation();

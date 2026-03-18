@@ -61,6 +61,10 @@ class ModelConfigTool(Tool):
                     "items": {"type": "string"},
                     "description": "Retry triggers such as network, 429, 5xx.",
                 },
+                "retry_count": {
+                    "type": "integer",
+                    "description": "Retryable failures to allow on the same model before fallback.",
+                },
                 "description": {"type": "string", "description": "Optional human-readable description."},
                 "scopes": {
                     "type": "array",
@@ -149,6 +153,7 @@ class ModelConfigTool(Tool):
                 temperature=kwargs.get("temperature"),
                 reasoning_effort=kwargs.get("reasoning_effort"),
                 retry_on=[str(item) for item in (kwargs.get("retry_on") or [])] if kwargs.get("retry_on") is not None else None,
+                retry_count=kwargs.get("retry_count"),
                 description=str(kwargs.get("description") or ""),
             )
             await self._refresh_runtime(kwargs)
@@ -165,6 +170,7 @@ class ModelConfigTool(Tool):
                 temperature=kwargs.get("temperature"),
                 reasoning_effort=kwargs.get("reasoning_effort"),
                 retry_on=[str(item) for item in (kwargs.get("retry_on") or [])] if kwargs.get("retry_on") is not None else None,
+                retry_count=kwargs.get("retry_count"),
                 description=kwargs.get("description"),
             )
             await self._refresh_runtime(kwargs)

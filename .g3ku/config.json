@@ -41,6 +41,17 @@
           "5xx"
         ],
         "description": ""
+      },
+      {
+        "key": "subagent gpt-5.4",
+        "llmConfigId": "62c2aabba6f6452cadb368752916f08f",
+        "enabled": true,
+        "retryOn": [
+          "network",
+          "429",
+          "5xx"
+        ],
+        "description": ""
       }
     ],
     "roles": {
@@ -49,11 +60,11 @@
         "gpt-5.2"
       ],
       "execution": [
-        "gpt-5.4",
+        "subagent gpt-5.4",
         "gpt-5.2"
       ],
       "inspection": [
-        "gpt-5.4",
+        "subagent gpt-5.4",
         "gpt-5.2"
       ]
     }
@@ -109,7 +120,7 @@
     "filesBaseDir": ".g3ku/main-runtime/tasks",
     "artifactDir": ".g3ku/main-runtime/artifacts",
     "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
-    "defaultMaxDepth": 1,
+    "defaultMaxDepth": 4,
     "hardMaxDepth": 4
   },
   "chinaBridge": {
