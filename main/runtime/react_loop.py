@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import re
@@ -36,10 +37,20 @@ class RepeatedActionCircuitBreaker:
 class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
 
-    def __init__(self, *, chat_backend, log_service, max_iterations: int = 16) -> None:
+    def __init__(
+        self,
+        *,
+        chat_backend,
+        log_service,
+        max_iterations: int = 16,
+        parallel_tool_calls_enabled: bool = True,
+        max_parallel_tool_calls: int = 10,
+    ) -> None:
         self._chat_backend = chat_backend
         self._log_service = log_service
         self._max_iterations = max(2, int(max_iterations or 16))
+        self._parallel_tool_calls_enabled = bool(parallel_tool_calls_enabled)
+        self._max_parallel_tool_calls = max(1, int(max_parallel_tool_calls or 1))
 
     async def run(
         self,
@@ -73,8 +84,11 @@ class ReActToolLoop:
                     'pending_tool_calls': [],
                     'pending_child_specs': [],
                     'partial_child_results': [],
+                    'tool_calls': [],
+                    'child_pipelines': [],
                     'last_error': '',
                 },
+                publish_snapshot=True,
             )
             response = await self._chat_backend.chat(
                 messages=model_messages,
@@ -82,6 +96,7 @@ class ReActToolLoop:
                 model_refs=model_refs,
                 max_tokens=1200,
                 temperature=0.2,
+                parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
             )
             tool_calls = [
                 {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
@@ -96,58 +111,43 @@ class ReActToolLoop:
             )
             if response.tool_calls:
                 control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response.tool_calls)
-                assistant_tool_calls = []
-                tool_messages = []
-                self._log_service.upsert_frame(
-                    task.task_id,
-                    {
-                        'node_id': node.node_id,
-                        'depth': node.depth,
-                        'node_kind': node.node_kind,
-                        'phase': 'after_model',
-                        'messages': model_messages,
-                        'pending_tool_calls': tool_calls,
-                        'pending_child_specs': [],
-                        'partial_child_results': [],
-                        'last_error': '',
-                    },
-                )
                 for call in response.tool_calls:
-                    self._check_pause_or_cancel(task.task_id)
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
                     if call.name not in self._CONTROL_TOOL_NAMES:
                         breaker.register(signature)
-                    assistant_tool_calls.append(
-                        {
-                            'id': call.id,
-                            'type': 'function',
-                            'function': {'name': call.name, 'arguments': json.dumps(call.arguments, ensure_ascii=False)},
-                        }
-                    )
-                    started_at = now_iso()
-                    started_monotonic = time.monotonic()
-                    tool_content = await self._execute_tool(
-                        tools=tools,
-                        tool_name=call.name,
-                        arguments=dict(call.arguments or {}),
-                        runtime_context={
-                            **runtime_context,
-                            'current_tool_call_id': call.id,
-                            'allowed_content_refs': allowed_content_refs,
-                            'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
-                        },
-                    )
-                    tool_messages.append(
-                        {
-                            'role': 'tool',
-                            'tool_call_id': call.id,
-                            'name': call.name,
-                            'content': tool_content,
-                            'started_at': started_at,
-                            'finished_at': now_iso(),
-                            'elapsed_seconds': round(max(0.0, time.monotonic() - started_monotonic), 1),
-                        }
-                    )
+                assistant_tool_calls = [
+                    {
+                        'id': call.id,
+                        'type': 'function',
+                        'function': {'name': call.name, 'arguments': json.dumps(call.arguments, ensure_ascii=False)},
+                    }
+                    for call in response.tool_calls
+                ]
+                live_tool_calls = [self._live_tool_entry(call) for call in response.tool_calls]
+                self._log_service.update_frame(
+                    task.task_id,
+                    node.node_id,
+                    lambda frame: {
+                        **frame,
+                        'depth': node.depth,
+                        'node_kind': node.node_kind,
+                        'phase': 'waiting_tool_results',
+                        'messages': model_messages,
+                        'pending_tool_calls': tool_calls,
+                        'tool_calls': live_tool_calls,
+                        'last_error': '',
+                    },
+                    publish_snapshot=True,
+                )
+                results = await self._execute_tool_calls(
+                    task=task,
+                    node=node,
+                    response_tool_calls=list(response.tool_calls or []),
+                    tools=tools,
+                    allowed_content_refs=allowed_content_refs,
+                    runtime_context=runtime_context,
+                )
+                tool_messages = [item['tool_message'] for item in results]
                 messages.append(
                     {
                         'role': 'assistant',
@@ -162,19 +162,20 @@ class ReActToolLoop:
                 )
                 messages.extend(tool_messages)
                 waiting_messages = self._prepare_messages(messages, runtime_context=runtime_context)
-                self._log_service.upsert_frame(
+                self._log_service.update_frame(
                     task.task_id,
-                    {
-                        'node_id': node.node_id,
+                    node.node_id,
+                    lambda frame: {
+                        **frame,
                         'depth': node.depth,
                         'node_kind': node.node_kind,
                         'phase': 'waiting_tool_results',
                         'messages': waiting_messages,
                         'pending_tool_calls': [],
-                        'pending_child_specs': [],
-                        'partial_child_results': [],
+                        'tool_calls': [item['live_state'] for item in results],
                         'last_error': '',
                     },
+                    publish_snapshot=True,
                 )
                 if control_only_turn:
                     attempts = max(0, attempts - 1)
@@ -182,10 +183,150 @@ class ReActToolLoop:
 
             parsed = self._parse_final_result(str(response.content or ''))
             if parsed is not None:
-                self._log_service.remove_frame(task.task_id, node.node_id)
+                self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
                 return parsed
-            messages.append({'role': 'user', 'content': '你的上一条回复不是合法的最终 JSON。请只返回 {"status":"success|failed","output":"..."}。'})
+            messages.append({'role': 'user', 'content': 'Your previous reply was not valid final JSON. Return only {"status":"success|failed","output":"..."}.'})
         raise RuntimeError('node exceeded maximum ReAct iterations')
+
+    async def _execute_tool_calls(
+        self,
+        *,
+        task,
+        node,
+        response_tool_calls: list[Any],
+        tools: dict[str, Tool],
+        allowed_content_refs: list[str],
+        runtime_context: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        semaphore = asyncio.Semaphore(self._max_parallel_tool_calls if self._parallel_tool_calls_enabled else 1)
+
+        async def _run_call(index: int, call: Any) -> dict[str, Any]:
+            async with semaphore:
+                self._check_pause_or_cancel(task.task_id)
+                started_at = now_iso()
+                started_monotonic = time.monotonic()
+                self._update_tool_live_state(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    tool_call_id=call.id,
+                    status='running',
+                    started_at=started_at,
+                    finished_at='',
+                    elapsed_seconds=None,
+                )
+                try:
+                    tool_content = await self._execute_tool(
+                        tools=tools,
+                        tool_name=call.name,
+                        arguments=dict(call.arguments or {}),
+                        runtime_context={
+                            **runtime_context,
+                            'current_tool_call_id': call.id,
+                            'allowed_content_refs': allowed_content_refs,
+                            'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
+                        },
+                    )
+                except TaskPausedError:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    tool_content = f'Error executing {call.name}: {exc}'
+                finished_at = now_iso()
+                elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
+                status = self._tool_message_status(tool_content)
+                self._update_tool_live_state(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    tool_call_id=call.id,
+                    status=status,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    elapsed_seconds=elapsed_seconds,
+                )
+                return {
+                    'index': index,
+                    'live_state': {
+                        'tool_call_id': str(call.id or ''),
+                        'tool_name': str(call.name or 'tool'),
+                        'status': status,
+                        'started_at': started_at,
+                        'finished_at': finished_at,
+                        'elapsed_seconds': elapsed_seconds,
+                    },
+                    'tool_message': {
+                        'role': 'tool',
+                        'tool_call_id': call.id,
+                        'name': call.name,
+                        'content': tool_content,
+                        'started_at': started_at,
+                        'finished_at': finished_at,
+                        'elapsed_seconds': elapsed_seconds,
+                    },
+                }
+
+        gathered = await asyncio.gather(*[_run_call(index, call) for index, call in enumerate(response_tool_calls)])
+        return [item for item in sorted(gathered, key=lambda value: int(value['index']))]
+
+    def _update_tool_live_state(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        tool_call_id: str,
+        status: str,
+        started_at: str,
+        finished_at: str,
+        elapsed_seconds: float | None,
+    ) -> None:
+        def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
+            next_calls: list[dict[str, Any]] = []
+            matched = False
+            for item in list(frame.get('tool_calls') or []):
+                payload = dict(item or {})
+                if str(payload.get('tool_call_id') or '') == str(tool_call_id or ''):
+                    matched = True
+                    payload.update(
+                        {
+                            'status': status,
+                            'started_at': started_at or str(payload.get('started_at') or ''),
+                            'finished_at': finished_at,
+                            'elapsed_seconds': elapsed_seconds,
+                        }
+                    )
+                next_calls.append(payload)
+            if not matched:
+                next_calls.append(
+                    {
+                        'tool_call_id': str(tool_call_id or ''),
+                        'tool_name': 'tool',
+                        'status': status,
+                        'started_at': started_at,
+                        'finished_at': finished_at,
+                        'elapsed_seconds': elapsed_seconds,
+                    }
+                )
+            frame['tool_calls'] = next_calls
+            frame['phase'] = 'waiting_tool_results'
+            return frame
+
+        self._log_service.update_frame(task_id, node_id, _mutate, publish_snapshot=True)
+
+    @staticmethod
+    def _live_tool_entry(call: Any) -> dict[str, Any]:
+        return {
+            'tool_call_id': str(call.id or ''),
+            'tool_name': str(call.name or 'tool'),
+            'status': 'queued',
+            'started_at': '',
+            'finished_at': '',
+            'elapsed_seconds': None,
+        }
+
+    @staticmethod
+    def _tool_message_status(tool_content: str) -> str:
+        text = str(tool_content or '').strip()
+        return 'error' if text.startswith('Error') else 'success'
 
     async def _execute_tool(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> str:
         tool = tools.get(tool_name)

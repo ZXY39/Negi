@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: exec
-description: Execute shell commands within the workspace only and return structured summaries plus content refs.
+description: Execute shell commands with workspace-relative defaults and return structured summaries plus content refs.
 source:
   type: ''
   url: ''
@@ -24,7 +24,7 @@ permissions:
 settings:
   timeout: 60
   path_append: ''
-  restrict_to_workspace: true
+  restrict_to_workspace: false
 parameters:
   type: object
   properties:
@@ -33,7 +33,7 @@ parameters:
       description: Shell command to execute.
     working_dir:
       type: string
-      description: Optional working directory override.
+      description: Optional working directory override. Relative paths resolve from workspace. Absolute paths are allowed unless restrict_to_workspace is enabled.
   required:
     - command
 exposure:

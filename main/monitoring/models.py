@@ -16,6 +16,10 @@ class TaskSpawnRound(Model):
     created_at: str = ''
     child_node_ids: list[str] = Field(default_factory=list)
     source: str = 'explicit'
+    total_children: int = 0
+    completed_children: int = 0
+    running_children: int = 0
+    failed_children: int = 0
     children: list['TaskTreeNode'] = Field(default_factory=list)
 
 
@@ -51,6 +55,42 @@ class LatestTaskNodeOutput(Model):
     output_ref: str = ''
 
 
+class TaskLiveToolCall(Model):
+    tool_call_id: str = ''
+    tool_name: str = ''
+    status: str = 'queued'
+    started_at: str = ''
+    finished_at: str = ''
+    elapsed_seconds: float | None = None
+
+
+class TaskLiveChildPipeline(Model):
+    index: int = 0
+    goal: str = ''
+    status: str = 'queued'
+    child_node_id: str = ''
+    acceptance_node_id: str = ''
+    check_status: str = ''
+    started_at: str = ''
+    finished_at: str = ''
+
+
+class TaskLiveFrame(Model):
+    node_id: str = ''
+    depth: int = 0
+    node_kind: str = 'execution'
+    phase: str = ''
+    tool_calls: list[TaskLiveToolCall] = Field(default_factory=list)
+    child_pipelines: list[TaskLiveChildPipeline] = Field(default_factory=list)
+
+
+class TaskLiveState(Model):
+    active_node_ids: list[str] = Field(default_factory=list)
+    runnable_node_ids: list[str] = Field(default_factory=list)
+    waiting_node_ids: list[str] = Field(default_factory=list)
+    frames: list[TaskLiveFrame] = Field(default_factory=list)
+
+
 class TaskSummaryResult(Model):
     total_tasks: int = 0
     in_progress_tasks: int = 0
@@ -79,6 +119,7 @@ class TaskProgressResult(Model):
     tree_text: str = ''
     root: TaskTreeNode | None = None
     latest_node: LatestTaskNodeOutput | None = None
+    live_state: TaskLiveState | None = None
     nodes: list[dict[str, Any]] = Field(default_factory=list)
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)

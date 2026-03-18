@@ -22,6 +22,10 @@ class FilesystemToolSettings(Base):
     restrict_to_workspace: bool = False
 
 
+class ContentToolSettings(Base):
+    restrict_to_workspace: bool = False
+
+
 class MemorySearchToolSettings(Base):
     default_limit: int = 8
 

@@ -188,10 +188,12 @@ class ContentNavigationService:
         self,
         *,
         workspace: Path,
+        allowed_dir: Path | None = None,
         artifact_store: Any = None,
         artifact_lookup: Any = None,
     ) -> None:
         self._workspace = Path(workspace).resolve()
+        self._allowed_dir = Path(allowed_dir).resolve() if allowed_dir is not None else None
         self._artifact_store = artifact_store
         self._artifact_lookup = artifact_lookup
 
@@ -404,12 +406,15 @@ class ContentNavigationService:
             if not file_path.is_file():
                 raise ValueError(f"path is not a file: {path}")
             text = file_path.read_text(encoding="utf-8")
-            relative = str(file_path.relative_to(self._workspace)).replace("\\", "/")
+            try:
+                ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
+            except ValueError:
+                ref_path = str(file_path)
             return text, self._build_handle(
-                ref=f"path:{relative}",
+                ref=f"path:{ref_path}",
                 artifact_id="",
                 uri=str(file_path),
-                source_kind="workspace_path",
+                source_kind="file_path",
                 display_name=file_path.name,
                 mime_type="text/plain",
                 origin_ref="",
@@ -496,10 +501,13 @@ class ContentNavigationService:
         if not candidate.is_absolute():
             candidate = self._workspace / candidate
         resolved = candidate.resolve()
-        try:
-            resolved.relative_to(self._workspace)
-        except ValueError as exc:
-            raise PermissionError(f"path outside workspace: {path}") from exc
+        if self._allowed_dir is not None:
+            try:
+                resolved.relative_to(self._allowed_dir)
+            except ValueError as exc:
+                if self._allowed_dir == self._workspace:
+                    raise PermissionError(f"path outside workspace: {path}") from exc
+                raise PermissionError(f"path outside allowed directory: {path}") from exc
         return resolved
 
     @staticmethod

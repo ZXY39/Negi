@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: filesystem
 display_name: Filesystem
-description: Describe, search, and open workspace files by local excerpt, plus write, edit, delete, and patch actions.
+description: Describe, search, and open files by local excerpt, plus write, edit, delete, and patch actions.
 source:
   type: ''
   url: ''
@@ -23,7 +23,7 @@ permissions:
   filesystem:
     - workspace
 settings:
-  restrict_to_workspace: true
+  restrict_to_workspace: false
 parameters:
   type: object
   properties:
@@ -43,7 +43,7 @@ parameters:
       description: Filesystem action to execute.
     path:
       type: string
-      description: Target file or directory path. Relative paths resolve from workspace.
+      description: Target file or directory path. Relative paths resolve from workspace. Absolute paths are allowed unless restrict_to_workspace is enabled.
     query:
       type: string
       description: Required when action=search.
@@ -89,7 +89,7 @@ parameters:
 governance:
   family: filesystem
   display_name: Filesystem
-  description: Describe, search, and open workspace files by local excerpt, plus write, edit, delete, and patch actions.
+  description: Describe, search, and open files by local excerpt, plus write, edit, delete, and patch actions.
   actions:
     - id: describe
       label: Describe File

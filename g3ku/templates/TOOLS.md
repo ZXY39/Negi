@@ -17,14 +17,19 @@
 ## exec
 
 - 运行 shell 命令
-- 超时、`PATH` 补充和 `restrict_to_workspace` 都来自 `tools/exec/resource.yaml -> settings`
+- 相对路径和默认 `working_dir` 基于 workspace；超时、`PATH` 补充和 `restrict_to_workspace` 都来自 `tools/exec/resource.yaml -> settings`
 - 仍然带有危险命令拦截
 
 ## filesystem
 
 - 统一文件工具，支持 `read`、`list`、`write`、`edit`、`delete`、`propose_patch`
-- `restrict_to_workspace` 来自 `tools/filesystem/resource.yaml -> settings`
+- 相对路径基于 workspace；`restrict_to_workspace` 来自 `tools/filesystem/resource.yaml -> settings`
 - `propose_patch` 生成补丁工件，不直接修改文件
+
+## content
+
+- 统一的大内容导航工具，支持 `describe`、`search`、`open`、`head`、`tail`
+- 相对路径基于 workspace；`restrict_to_workspace` 来自 `tools/content/resource.yaml -> settings`
 
 ## memory_search
 

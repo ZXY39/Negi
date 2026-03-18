@@ -355,12 +355,26 @@ class MultiAgentConfig(Base):
         return self.orchestrator_model_key
 
 
+class NodeParallelismConfig(Base):
+    """Per-node parallel tool and child pipeline execution controls."""
+
+    enabled: bool = True
+    max_parallel_tool_calls_per_node: int = 10
+    max_parallel_child_pipelines_per_node: int = 10
+
+    @field_validator("max_parallel_tool_calls_per_node", "max_parallel_child_pipelines_per_node")
+    @classmethod
+    def _clamp_parallel_limit(cls, value: int) -> int:
+        return max(1, int(value or 1))
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
     role_iterations: RoleIterationConfig = Field(default_factory=RoleIterationConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
+    node_parallelism: NodeParallelismConfig = Field(default_factory=NodeParallelismConfig)
 
 
 class ProviderConfig(Base):

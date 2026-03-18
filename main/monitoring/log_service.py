@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +31,8 @@ class TaskLogService:
         self._content_store = content_store
         self._snapshot_payload_builder = None
         self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
+        self._task_locks: dict[str, threading.RLock] = {}
+        self._task_locks_guard = threading.Lock()
 
     def set_snapshot_payload_builder(self, builder) -> None:
         self._snapshot_payload_builder = builder
@@ -38,56 +41,115 @@ class TaskLogService:
         if callable(listener):
             self._task_terminal_listeners.append(listener)
 
-    def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
-        paths = self._file_store.paths_for_task(task.task_id)
-        task = task.model_copy(
-            update={
-                **paths,
-                'is_unread': True,
-                'brief_text': _single_line_text(task.user_request),
-                'updated_at': now_iso(),
+    def _task_lock(self, task_id: str) -> threading.RLock:
+        key = str(task_id or '').strip()
+        with self._task_locks_guard:
+            lock = self._task_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._task_locks[key] = lock
+            return lock
+
+    @staticmethod
+    def _default_frame(*, node_id: str = '', depth: int = 0, node_kind: str = 'execution', phase: str = '') -> dict[str, Any]:
+        return {
+            'node_id': str(node_id or '').strip(),
+            'depth': int(depth or 0),
+            'node_kind': str(node_kind or 'execution').strip() or 'execution',
+            'phase': str(phase or '').strip(),
+            'messages': [],
+            'pending_tool_calls': [],
+            'pending_child_specs': [],
+            'partial_child_results': [],
+            'tool_calls': [],
+            'child_pipelines': [],
+            'last_error': '',
+        }
+
+    @classmethod
+    def _frame_has_active_children(cls, frame: dict[str, Any]) -> bool:
+        for item in list(frame.get('child_pipelines') or []):
+            status = str((item or {}).get('status') or '').strip().lower()
+            if status in {'queued', 'running'}:
+                return True
+        return False
+
+    @classmethod
+    def _frame_has_active_tools(cls, frame: dict[str, Any]) -> bool:
+        for item in list(frame.get('tool_calls') or []):
+            status = str((item or {}).get('status') or '').strip().lower()
+            if status in {'queued', 'running'}:
+                return True
+        return False
+
+    @classmethod
+    def _frame_index_payload(cls, frames: list[dict[str, Any]]) -> tuple[list[str], list[str], list[str]]:
+        active_ids = sorted({str(item.get('node_id') or '') for item in frames if str(item.get('node_id') or '').strip()})
+        runnable_ids = sorted(
+            {
+                str(item.get('node_id') or '')
+                for item in frames
+                if (
+                    str(item.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model'}
+                    or cls._frame_has_active_tools(item)
+                )
+                and str(item.get('node_id') or '').strip()
             }
         )
-        root = root.model_copy(update={'updated_at': now_iso()})
-        self._store.upsert_task(task)
-        self._store.upsert_node(root)
-        self.update_runtime_state(
-            task.task_id,
-            root_node_id=task.root_node_id,
-            paused=False,
-            active_node_ids=[root.node_id],
-            runnable_node_ids=[root.node_id],
-            waiting_node_ids=[],
-            frames=[
-                {
-                    'node_id': root.node_id,
-                    'depth': root.depth,
-                    'node_kind': root.node_kind,
-                    'phase': 'before_model',
-                    'messages': [],
-                    'pending_tool_calls': [],
-                    'pending_child_specs': [],
-                    'partial_child_results': [],
-                    'last_error': '',
-                }
-            ],
+        waiting_ids = sorted(
+            {
+                str(item.get('node_id') or '')
+                for item in frames
+                if (
+                    str(item.get('phase') or '') in {'waiting_children', 'waiting_acceptance'}
+                    or cls._frame_has_active_children(item)
+                )
+                and str(item.get('node_id') or '').strip()
+            }
         )
-        self.refresh_task_view(task.task_id, mark_unread=True)
-        return task, root
+        return active_ids, runnable_ids, waiting_ids
+
+    def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
+        with self._task_lock(task.task_id):
+            paths = self._file_store.paths_for_task(task.task_id)
+            task = task.model_copy(
+                update={
+                    **paths,
+                    'is_unread': True,
+                    'brief_text': _single_line_text(task.user_request),
+                    'updated_at': now_iso(),
+                }
+            )
+            root = root.model_copy(update={'updated_at': now_iso()})
+            self._store.upsert_task(task)
+            self._store.upsert_node(root)
+            self.update_runtime_state(
+                task.task_id,
+                root_node_id=task.root_node_id,
+                paused=False,
+                active_node_ids=[root.node_id],
+                runnable_node_ids=[root.node_id],
+                waiting_node_ids=[],
+                frames=[self._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')],
+            )
+            self.refresh_task_view(task.task_id, mark_unread=True)
+            return task, root
 
     def create_node(self, task_id: str, node: NodeRecord) -> NodeRecord:
-        self._store.upsert_node(node)
-        self.refresh_task_view(task_id, mark_unread=True)
-        return node
+        with self._task_lock(task_id):
+            self._store.upsert_node(node)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return node
 
     def update_node_input(self, task_id: str, node_id: str, content: str) -> NodeRecord | None:
-        text, ref = self._summarize_node_input(task_id=task_id, node_id=node_id, content=content)
-        updated = self._store.update_node(
-            node_id,
-            lambda record: record.model_copy(update={'input': text, 'input_ref': ref, 'updated_at': now_iso()}),
-        )
-        self.refresh_task_view(task_id, mark_unread=True)
-        return updated
+        with self._task_lock(task_id):
+            text, ref = self._summarize_node_input(task_id=task_id, node_id=node_id, content=content)
+            updated = self._store.update_node(
+                node_id,
+                lambda record: record.model_copy(update={'input': text, 'input_ref': ref, 'updated_at': now_iso()}),
+            )
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated
 
     def append_node_output(
         self,
@@ -98,53 +160,55 @@ class TaskLogService:
         tool_calls: list[dict[str, Any]] | None = None,
         usage_attempts: list[Any] | None = None,
     ) -> NodeRecord | None:
-        text, ref = self._summarize_content(
-            content,
-            task_id=task_id,
-            node_id=node_id,
-            display_name=f'node-output:{node_id}:{self._next_output_seq(node_id)}',
-            source_kind='node_output',
-        )
-
-        def _mutate(record: NodeRecord) -> NodeRecord:
-            output = list(record.output)
-            output.append(
-                NodeOutputEntry(
-                    seq=len(output) + 1,
-                    content=text,
-                    content_ref=ref,
-                    tool_calls=list(tool_calls or []),
-                    created_at=now_iso(),
-                )
+        with self._task_lock(task_id):
+            text, ref = self._summarize_content(
+                content,
+                task_id=task_id,
+                node_id=node_id,
+                display_name=f'node-output:{node_id}:{self._next_output_seq(node_id)}',
+                source_kind='node_output',
             )
-            update: dict[str, Any] = {'output': output, 'updated_at': now_iso()}
-            if usage_attempts and bool(getattr(record.token_usage, 'tracked', False)):
-                delta_usage, delta_usage_by_model = build_token_usage_from_attempts(usage_attempts, tracked=True)
-                update['token_usage'] = merge_token_usage_records([record.token_usage, delta_usage], tracked=True)
-                update['token_usage_by_model'] = merge_token_usage_by_model(
-                    [*list(record.token_usage_by_model or []), *delta_usage_by_model],
-                    tracked=True,
-                )
-            return record.model_copy(update=update)
 
-        updated = self._store.update_node(node_id, _mutate)
-        self.refresh_task_view(task_id, mark_unread=True)
-        return updated
+            def _mutate(record: NodeRecord) -> NodeRecord:
+                output = list(record.output)
+                output.append(
+                    NodeOutputEntry(
+                        seq=len(output) + 1,
+                        content=text,
+                        content_ref=ref,
+                        tool_calls=list(tool_calls or []),
+                        created_at=now_iso(),
+                    )
+                )
+                update: dict[str, Any] = {'output': output, 'updated_at': now_iso()}
+                if usage_attempts and bool(getattr(record.token_usage, 'tracked', False)):
+                    delta_usage, delta_usage_by_model = build_token_usage_from_attempts(usage_attempts, tracked=True)
+                    update['token_usage'] = merge_token_usage_records([record.token_usage, delta_usage], tracked=True)
+                    update['token_usage_by_model'] = merge_token_usage_by_model(
+                        [*list(record.token_usage_by_model or []), *delta_usage_by_model],
+                        tracked=True,
+                    )
+                return record.model_copy(update=update)
+
+            updated = self._store.update_node(node_id, _mutate)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated
 
     def update_node_check_result(self, task_id: str, node_id: str, check_result: str) -> NodeRecord | None:
-        text, ref = self._summarize_content(
-            check_result,
-            task_id=task_id,
-            node_id=node_id,
-            display_name=f'check-result:{node_id}',
-            source_kind='node_check_result',
-        )
-        updated = self._store.update_node(
-            node_id,
-            lambda record: record.model_copy(update={'check_result': text, 'check_result_ref': ref, 'updated_at': now_iso()}),
-        )
-        self.refresh_task_view(task_id, mark_unread=True)
-        return updated
+        with self._task_lock(task_id):
+            text, ref = self._summarize_content(
+                check_result,
+                task_id=task_id,
+                node_id=node_id,
+                display_name=f'check-result:{node_id}',
+                source_kind='node_check_result',
+            )
+            updated = self._store.update_node(
+                node_id,
+                lambda record: record.model_copy(update={'check_result': text, 'check_result_ref': ref, 'updated_at': now_iso()}),
+            )
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated
 
     def update_node_status(
         self,
@@ -155,41 +219,43 @@ class TaskLogService:
         final_output: str = '',
         failure_reason: str = '',
     ) -> NodeRecord | None:
-        final_text, final_ref = self._summarize_content(
-            final_output,
-            task_id=task_id,
-            node_id=node_id,
-            display_name=f'final-output:{node_id}',
-            source_kind='node_final_output',
-        )
-        failure_text, _failure_ref = self._summarize_content(
-            failure_reason,
-            task_id=task_id,
-            node_id=node_id,
-            display_name=f'failure-output:{node_id}',
-            source_kind='node_failure_output',
-        )
-        updated = self._store.update_node(
-            node_id,
-            lambda record: record.model_copy(
-                update={
-                    'status': str(status or record.status),
-                    'final_output': final_text or record.final_output,
-                    'final_output_ref': final_ref or record.final_output_ref,
-                    'failure_reason': failure_text or record.failure_reason,
-                    'finished_at': now_iso() if status in {'success', 'failed'} else record.finished_at,
-                    'updated_at': now_iso(),
-                }
-            ),
-        )
-        self.refresh_task_view(task_id, mark_unread=True)
-        return updated
+        with self._task_lock(task_id):
+            final_text, final_ref = self._summarize_content(
+                final_output,
+                task_id=task_id,
+                node_id=node_id,
+                display_name=f'final-output:{node_id}',
+                source_kind='node_final_output',
+            )
+            failure_text, _failure_ref = self._summarize_content(
+                failure_reason,
+                task_id=task_id,
+                node_id=node_id,
+                display_name=f'failure-output:{node_id}',
+                source_kind='node_failure_output',
+            )
+            updated = self._store.update_node(
+                node_id,
+                lambda record: record.model_copy(
+                    update={
+                        'status': str(status or record.status),
+                        'final_output': final_text or record.final_output,
+                        'final_output_ref': final_ref or record.final_output_ref,
+                        'failure_reason': failure_text or record.failure_reason,
+                        'finished_at': now_iso() if status in {'success', 'failed'} else record.finished_at,
+                        'updated_at': now_iso(),
+                    }
+                ),
+            )
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated
 
     def mark_task_read(self, task_id: str) -> TaskRecord | None:
-        return self._store.update_task(
-            task_id,
-            lambda task: task.model_copy(update={'is_unread': False, 'updated_at': now_iso()}),
-        )
+        with self._task_lock(task_id):
+            return self._store.update_task(
+                task_id,
+                lambda task: task.model_copy(update={'is_unread': False, 'updated_at': now_iso()}),
+            )
 
     def request_cancel(self, task_id: str) -> TaskRecord | None:
         return self.update_task_control(task_id, cancel_requested=True)
@@ -202,38 +268,40 @@ class TaskLogService:
         pause_requested: bool | None = None,
         is_paused: bool | None = None,
     ) -> TaskRecord | None:
-        def _mutate(task: TaskRecord) -> TaskRecord:
-            update: dict[str, Any] = {'updated_at': now_iso()}
-            if cancel_requested is not None:
-                update['cancel_requested'] = bool(cancel_requested)
-            if pause_requested is not None:
-                update['pause_requested'] = bool(pause_requested)
-            if is_paused is not None:
-                update['is_paused'] = bool(is_paused)
-            return task.model_copy(update=update)
+        with self._task_lock(task_id):
+            def _mutate(task: TaskRecord) -> TaskRecord:
+                update: dict[str, Any] = {'updated_at': now_iso()}
+                if cancel_requested is not None:
+                    update['cancel_requested'] = bool(cancel_requested)
+                if pause_requested is not None:
+                    update['pause_requested'] = bool(pause_requested)
+                if is_paused is not None:
+                    update['is_paused'] = bool(is_paused)
+                return task.model_copy(update=update)
 
-        updated = self._store.update_task(task_id, _mutate)
-        if updated is None:
-            return None
-        self.update_runtime_state(
-            task_id,
-            paused=bool(updated.is_paused),
-            pause_requested=bool(updated.pause_requested),
-            cancel_requested=bool(updated.cancel_requested),
-        )
-        return self.refresh_task_view(task_id, mark_unread=False) or updated
+            updated = self._store.update_task(task_id, _mutate)
+            if updated is None:
+                return None
+            self.update_runtime_state(
+                task_id,
+                paused=bool(updated.is_paused),
+                pause_requested=bool(updated.pause_requested),
+                cancel_requested=bool(updated.cancel_requested),
+            )
+            return self.refresh_task_view(task_id, mark_unread=False) or updated
 
     def update_task_metadata(self, task_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]], *, mark_unread: bool = True) -> TaskRecord | None:
-        def _mutate(task: TaskRecord) -> TaskRecord:
-            metadata = metadata_mutator(dict(task.metadata or {}))
-            if not isinstance(metadata, dict):
-                raise TypeError('task metadata mutator must return a dict')
-            return task.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
+        with self._task_lock(task_id):
+            def _mutate(task: TaskRecord) -> TaskRecord:
+                metadata = metadata_mutator(dict(task.metadata or {}))
+                if not isinstance(metadata, dict):
+                    raise TypeError('task metadata mutator must return a dict')
+                return task.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
 
-        updated = self._store.update_task(task_id, _mutate)
-        if updated is None:
-            return None
-        return self.refresh_task_view(task_id, mark_unread=mark_unread) or updated
+            updated = self._store.update_task(task_id, _mutate)
+            if updated is None:
+                return None
+            return self.refresh_task_view(task_id, mark_unread=mark_unread) or updated
 
     def _summarize_content(
         self,
@@ -282,104 +350,113 @@ class TaskLogService:
         return self.update_task_control(task_id, pause_requested=pause_requested, is_paused=is_paused)
 
     def update_node_metadata(self, node_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]]) -> NodeRecord | None:
-        def _mutate(record: NodeRecord) -> NodeRecord:
-            metadata = metadata_mutator(dict(record.metadata or {}))
-            if not isinstance(metadata, dict):
-                raise TypeError('node metadata mutator must return a dict')
-            return record.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
-
-        return self._store.update_node(node_id, _mutate)
-
-    def ensure_node_output_externalized(self, task_id: str, node_id: str) -> NodeRecord | None:
         record = self._store.get_node(node_id)
         if record is None:
             return None
-        final_output = str(record.final_output or '')
-        if not final_output or str(record.final_output_ref or '').strip():
-            return record
-        if len(final_output) <= INLINE_CHAR_LIMIT and len(final_output.splitlines()) <= INLINE_LINE_LIMIT:
-            return record
-        text, ref = self._summarize_content(
-            final_output,
-            task_id=task_id,
-            node_id=node_id,
-            display_name=f'final-output:{node_id}',
-            source_kind='node_final_output',
-            force=True,
-        )
-        if not ref:
-            return record
-        updated = self._store.update_node(
-            node_id,
-            lambda current: current.model_copy(
-                update={
-                    'final_output': text or current.final_output,
-                    'final_output_ref': ref or current.final_output_ref,
-                    'updated_at': now_iso(),
-                }
-            ),
-        )
-        if updated is not None:
-            self.refresh_task_view(task_id, mark_unread=True)
-        return updated or record
+        with self._task_lock(record.task_id):
+            def _mutate(current: NodeRecord) -> NodeRecord:
+                metadata = metadata_mutator(dict(current.metadata or {}))
+                if not isinstance(metadata, dict):
+                    raise TypeError('node metadata mutator must return a dict')
+                return current.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
+
+            return self._store.update_node(node_id, _mutate)
+
+    def ensure_node_output_externalized(self, task_id: str, node_id: str) -> NodeRecord | None:
+        with self._task_lock(task_id):
+            record = self._store.get_node(node_id)
+            if record is None:
+                return None
+            final_output = str(record.final_output or '')
+            if not final_output or str(record.final_output_ref or '').strip():
+                return record
+            if len(final_output) <= INLINE_CHAR_LIMIT and len(final_output.splitlines()) <= INLINE_LINE_LIMIT:
+                return record
+            text, ref = self._summarize_content(
+                final_output,
+                task_id=task_id,
+                node_id=node_id,
+                display_name=f'final-output:{node_id}',
+                source_kind='node_final_output',
+                force=True,
+            )
+            if not ref:
+                return record
+            updated = self._store.update_node(
+                node_id,
+                lambda current: current.model_copy(
+                    update={
+                        'final_output': text or current.final_output,
+                        'final_output_ref': ref or current.final_output_ref,
+                        'updated_at': now_iso(),
+                    }
+                ),
+            )
+            if updated is not None:
+                self.refresh_task_view(task_id, mark_unread=True)
+            return updated or record
 
     def mark_task_failed(self, task_id: str, *, reason: str) -> TaskRecord | None:
-        task = self._store.get_task(task_id)
-        if task is None:
-            return None
-        root_node = self._store.get_node(task.root_node_id)
-        text = str(reason or 'task failed').strip() or 'task failed'
-        if root_node is not None:
-            self.update_node_status(task_id, root_node.node_id, status='failed', final_output=text, failure_reason=text)
-            return self._store.get_task(task_id)
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            if task is None:
+                return None
+            root_node = self._store.get_node(task.root_node_id)
+            text = str(reason or 'task failed').strip() or 'task failed'
+            if root_node is not None:
+                self.update_node_status(task_id, root_node.node_id, status='failed', final_output=text, failure_reason=text)
+                return self._store.get_task(task_id)
 
-        updated = self._store.update_task(
-            task_id,
-            lambda record: record.model_copy(
-                update={
-                    'status': 'failed',
-                    'is_unread': True,
-                    'final_output': text,
-                    'failure_reason': text,
-                    'updated_at': now_iso(),
-                    'finished_at': now_iso(),
-                }
-            ),
-        )
-        if updated is None:
-            return None
-        self.update_runtime_state(
-            task_id,
-            paused=bool(updated.is_paused),
-            pause_requested=bool(updated.pause_requested),
-            cancel_requested=bool(updated.cancel_requested),
-        )
-        self._notify_task_terminal(updated, previous_status=str(task.status or ''))
-        return updated
+            updated = self._store.update_task(
+                task_id,
+                lambda record: record.model_copy(
+                    update={
+                        'status': 'failed',
+                        'is_unread': True,
+                        'final_output': text,
+                        'failure_reason': text,
+                        'updated_at': now_iso(),
+                        'finished_at': now_iso(),
+                    }
+                ),
+            )
+            if updated is None:
+                return None
+            self.update_runtime_state(
+                task_id,
+                paused=bool(updated.is_paused),
+                pause_requested=bool(updated.pause_requested),
+                cancel_requested=bool(updated.cancel_requested),
+            )
+            self._notify_task_terminal(updated, previous_status=str(task.status or ''))
+            return updated
 
-    def update_runtime_state(self, task_id: str, **payload: Any) -> dict[str, Any]:
-        task = self._require_task(task_id)
-        current = self._file_store.read_json(task.runtime_state_path) or {
-            'task_id': task.task_id,
-            'root_node_id': task.root_node_id,
-            'updated_at': now_iso(),
-            'paused': bool(task.is_paused),
-            'pause_requested': bool(task.pause_requested),
-            'cancel_requested': bool(task.cancel_requested),
-            'active_node_ids': [],
-            'runnable_node_ids': [],
-            'waiting_node_ids': [],
-            'frames': [],
-        }
-        current.update({key: copy.deepcopy(value) for key, value in payload.items()})
-        current['task_id'] = task.task_id
-        current['root_node_id'] = task.root_node_id
-        current['updated_at'] = now_iso()
-        current['paused'] = bool(current.get('paused', task.is_paused))
-        current['pause_requested'] = bool(current.get('pause_requested', task.pause_requested))
-        current['cancel_requested'] = bool(current.get('cancel_requested', task.cancel_requested))
-        self._file_store.write_json(task.runtime_state_path, current)
-        return current
+    def update_runtime_state(self, task_id: str, *, publish_snapshot: bool = False, **payload: Any) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            current = self._file_store.read_json(task.runtime_state_path) or {
+                'task_id': task.task_id,
+                'root_node_id': task.root_node_id,
+                'updated_at': now_iso(),
+                'paused': bool(task.is_paused),
+                'pause_requested': bool(task.pause_requested),
+                'cancel_requested': bool(task.cancel_requested),
+                'active_node_ids': [],
+                'runnable_node_ids': [],
+                'waiting_node_ids': [],
+                'frames': [],
+            }
+            current.update({key: copy.deepcopy(value) for key, value in payload.items()})
+            current['task_id'] = task.task_id
+            current['root_node_id'] = task.root_node_id
+            current['updated_at'] = now_iso()
+            current['paused'] = bool(current.get('paused', task.is_paused))
+            current['pause_requested'] = bool(current.get('pause_requested', task.pause_requested))
+            current['cancel_requested'] = bool(current.get('cancel_requested', task.cancel_requested))
+            self._file_store.write_json(task.runtime_state_path, current)
+            if publish_snapshot:
+                self._publish_snapshot(task.task_id)
+            return current
 
     def read_runtime_state(self, task_id: str) -> dict[str, Any] | None:
         task = self._store.get_task(task_id)
@@ -387,123 +464,124 @@ class TaskLogService:
             return None
         return self._file_store.read_json(task.runtime_state_path)
 
-    def upsert_frame(self, task_id: str, frame: dict[str, Any]) -> dict[str, Any]:
-        state = self.read_runtime_state(task_id) or {}
-        frames = [item for item in list(state.get('frames') or []) if str(item.get('node_id') or '') != str(frame.get('node_id') or '')]
-        frames.append(copy.deepcopy(frame))
-        active_ids = sorted({str(item.get('node_id') or '') for item in frames if str(item.get('node_id') or '').strip()})
-        runnable_ids = sorted({str(item.get('node_id') or '') for item in frames if str(item.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model'}})
-        waiting_ids = sorted({str(item.get('node_id') or '') for item in frames if str(item.get('phase') or '') in {'waiting_children', 'waiting_acceptance'}})
-        return self.update_runtime_state(task_id, frames=frames, active_node_ids=active_ids, runnable_node_ids=runnable_ids, waiting_node_ids=waiting_ids)
+    def upsert_frame(self, task_id: str, frame: dict[str, Any], *, publish_snapshot: bool = False) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            state = self.read_runtime_state(task_id) or {}
+            frames = [item for item in list(state.get('frames') or []) if str(item.get('node_id') or '') != str(frame.get('node_id') or '')]
+            frames.append(copy.deepcopy(frame))
+            active_ids, runnable_ids, waiting_ids = self._frame_index_payload(frames)
+            return self.update_runtime_state(
+                task_id,
+                frames=frames,
+                active_node_ids=active_ids,
+                runnable_node_ids=runnable_ids,
+                waiting_node_ids=waiting_ids,
+                publish_snapshot=publish_snapshot,
+            )
 
-    def remove_frame(self, task_id: str, node_id: str) -> dict[str, Any]:
-        state = self.read_runtime_state(task_id) or {}
-        frames = [item for item in list(state.get('frames') or []) if str(item.get('node_id') or '') != str(node_id or '')]
-        active_ids = sorted({str(item.get('node_id') or '') for item in frames if str(item.get('node_id') or '').strip()})
-        runnable_ids = sorted({str(item.get('node_id') or '') for item in frames if str(item.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model'}})
-        waiting_ids = sorted({str(item.get('node_id') or '') for item in frames if str(item.get('phase') or '') in {'waiting_children', 'waiting_acceptance'}})
-        return self.update_runtime_state(task_id, frames=frames, active_node_ids=active_ids, runnable_node_ids=runnable_ids, waiting_node_ids=waiting_ids)
+    def update_frame(
+        self,
+        task_id: str,
+        node_id: str,
+        frame_mutator: Callable[[dict[str, Any]], dict[str, Any]],
+        *,
+        publish_snapshot: bool = False,
+    ) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            state = self.read_runtime_state(task_id) or {}
+            frames = list(state.get('frames') or [])
+            target = None
+            remaining: list[dict[str, Any]] = []
+            for item in frames:
+                if str(item.get('node_id') or '') == str(node_id or '') and target is None:
+                    target = copy.deepcopy(item)
+                    continue
+                remaining.append(copy.deepcopy(item))
+            mutated = frame_mutator(target or self._default_frame(node_id=node_id))
+            if not isinstance(mutated, dict):
+                raise TypeError('frame mutator must return a dict')
+            remaining.append(copy.deepcopy(mutated))
+            active_ids, runnable_ids, waiting_ids = self._frame_index_payload(remaining)
+            return self.update_runtime_state(
+                task_id,
+                frames=remaining,
+                active_node_ids=active_ids,
+                runnable_node_ids=runnable_ids,
+                waiting_node_ids=waiting_ids,
+                publish_snapshot=publish_snapshot,
+            )
+
+    def remove_frame(self, task_id: str, node_id: str, *, publish_snapshot: bool = False) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            state = self.read_runtime_state(task_id) or {}
+            frames = [item for item in list(state.get('frames') or []) if str(item.get('node_id') or '') != str(node_id or '')]
+            active_ids, runnable_ids, waiting_ids = self._frame_index_payload(frames)
+            return self.update_runtime_state(
+                task_id,
+                frames=frames,
+                active_node_ids=active_ids,
+                runnable_node_ids=runnable_ids,
+                waiting_node_ids=waiting_ids,
+                publish_snapshot=publish_snapshot,
+            )
 
     def refresh_task_view(self, task_id: str, *, mark_unread: bool) -> TaskRecord | None:
-        task = self._store.get_task(task_id)
-        if task is None:
-            return None
-        previous_status = str(task.status or '').strip().lower()
-        nodes = self._store.list_nodes(task_id)
-        root = self._tree_builder.build_tree(task, nodes)
-        tree_text = self._tree_builder.render_tree_text(root)
-        root_node = self._store.get_node(task.root_node_id)
-        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
-        next_status = self._derive_task_status(root_node=root_node, task_status=task.status, final_acceptance=final_acceptance)
-        brief_text = self._brief_text(task=task, root_node=root_node)
-        task_token_usage, _task_token_usage_by_model = aggregate_node_token_usage(nodes, tracked=bool(getattr(task.token_usage, 'tracked', False)))
-        root_succeeded = bool(root_node is not None and root_node.status == 'success')
-        failure_reason = task.failure_reason
-        if next_status == 'failed':
-            if root_node is not None and root_node.status == 'failed':
-                failure_reason = root_node.failure_reason
-            elif root_node is not None and str(root_node.check_result or '').strip():
-                failure_reason = root_node.check_result
-        updated = task.model_copy(
-            update={
-                'status': next_status,
-                'brief_text': brief_text,
-                'is_unread': True if mark_unread else task.is_unread,
-                'updated_at': now_iso(),
-                'final_output': (root_node.final_output if root_succeeded else task.final_output),
-                'final_output_ref': (root_node.final_output_ref if root_succeeded else task.final_output_ref),
-                'failure_reason': failure_reason,
-                'finished_at': now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at,
-                'token_usage': task_token_usage,
-            }
-        )
-        self._store.upsert_task(updated)
-        self._file_store.write_json(updated.tree_snapshot_path, {'task_id': updated.task_id, 'root': root.model_dump(mode='json') if root is not None else None})
-        self._file_store.write_text(updated.tree_text_path, tree_text)
-        runtime_state = self.read_runtime_state(task_id)
-        if runtime_state is not None:
-            runtime_state['updated_at'] = now_iso()
-            runtime_state['paused'] = bool(updated.is_paused)
-            runtime_state['pause_requested'] = bool(updated.pause_requested)
-            runtime_state['cancel_requested'] = bool(updated.cancel_requested)
-            self._file_store.write_json(updated.runtime_state_path, runtime_state)
-        if self._registry is not None:
-            payload = None
-            if callable(self._snapshot_payload_builder):
-                payload = self._snapshot_payload_builder(updated.task_id)
-            if payload is None:
-                payload = {
-                    'task': updated.model_dump(mode='json'),
-                    'progress': {
-                        'task_id': updated.task_id,
-                        'task_status': updated.status,
-                        'tree_text': tree_text,
-                        'root': root.model_dump(mode='json') if root is not None else None,
-                        'latest_node': None,
-                        'nodes': [item.model_dump(mode='json') for item in nodes],
-                        'token_usage': updated.token_usage.model_dump(mode='json'),
-                        'token_usage_by_model': [],
-                        'text': f'Task status: {updated.status}',
-                    },
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            if task is None:
+                return None
+            previous_status = str(task.status or '').strip().lower()
+            nodes = self._store.list_nodes(task_id)
+            root = self._tree_builder.build_tree(task, nodes)
+            tree_text = self._tree_builder.render_tree_text(root)
+            root_node = self._store.get_node(task.root_node_id)
+            final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+            next_status = self._derive_task_status(root_node=root_node, task_status=task.status, final_acceptance=final_acceptance)
+            brief_text = self._brief_text(task=task, root_node=root_node)
+            task_token_usage, _task_token_usage_by_model = aggregate_node_token_usage(nodes, tracked=bool(getattr(task.token_usage, 'tracked', False)))
+            root_succeeded = bool(root_node is not None and root_node.status == 'success')
+            failure_reason = task.failure_reason
+            if next_status == 'failed':
+                if root_node is not None and root_node.status == 'failed':
+                    failure_reason = root_node.failure_reason
+                elif root_node is not None and str(root_node.check_result or '').strip():
+                    failure_reason = root_node.check_result
+            updated = task.model_copy(
+                update={
+                    'status': next_status,
+                    'brief_text': brief_text,
+                    'is_unread': True if mark_unread else task.is_unread,
+                    'updated_at': now_iso(),
+                    'final_output': (root_node.final_output if root_succeeded else task.final_output),
+                    'final_output_ref': (root_node.final_output_ref if root_succeeded else task.final_output_ref),
+                    'failure_reason': failure_reason,
+                    'finished_at': now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at,
+                    'token_usage': task_token_usage,
                 }
-            self._registry.publish_global_task(
-                updated.task_id,
-                build_envelope(
-                    channel='task',
-                    session_id=updated.session_id,
-                    task_id=updated.task_id,
-                    seq=self._registry.next_global_task_seq(updated.task_id),
-                    type='snapshot.task',
-                    data=payload,
-                ),
             )
-            self._registry.publish_global_ceo(
-                build_envelope(
-                    channel='ceo',
-                    session_id=updated.session_id,
-                    task_id=updated.task_id,
-                    seq=self._registry.next_ceo_seq(updated.session_id),
-                    type='task.summary.changed',
-                    data={
-                        'task_id': updated.task_id,
-                        'status': updated.status,
-                        'brief': updated.brief_text,
-                        'is_unread': bool(updated.is_unread),
-                        'token_usage': updated.token_usage.model_dump(mode='json'),
-                    },
-                ),
-            )
-        self._notify_task_terminal(updated, previous_status=previous_status)
-        return updated
+            self._store.upsert_task(updated)
+            self._file_store.write_json(updated.tree_snapshot_path, {'task_id': updated.task_id, 'root': root.model_dump(mode='json') if root is not None else None})
+            self._file_store.write_text(updated.tree_text_path, tree_text)
+            runtime_state = self.read_runtime_state(task_id)
+            if runtime_state is not None:
+                runtime_state['updated_at'] = now_iso()
+                runtime_state['paused'] = bool(updated.is_paused)
+                runtime_state['pause_requested'] = bool(updated.pause_requested)
+                runtime_state['cancel_requested'] = bool(updated.cancel_requested)
+                self._file_store.write_json(updated.runtime_state_path, runtime_state)
+            self._publish_snapshot(updated.task_id, task=updated, nodes=nodes, root=root, tree_text=tree_text, publish_summary=True)
+            self._notify_task_terminal(updated, previous_status=previous_status)
+            return updated
 
     def bootstrap_missing_files(self, task_id: str) -> TaskRecord | None:
-        task = self._store.get_task(task_id)
-        if task is None:
-            return None
-        self.refresh_task_view(task_id, mark_unread=False)
-        if not Path(task.runtime_state_path).exists():
-            self.update_runtime_state(task.task_id, paused=bool(task.is_paused), active_node_ids=[], runnable_node_ids=[], waiting_node_ids=[], frames=[])
-        return self._store.get_task(task_id)
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            if task is None:
+                return None
+            self.refresh_task_view(task_id, mark_unread=False)
+            if not Path(task.runtime_state_path).exists():
+                self.update_runtime_state(task.task_id, paused=bool(task.is_paused), active_node_ids=[], runnable_node_ids=[], waiting_node_ids=[], frames=[])
+            return self._store.get_task(task_id)
 
     def _brief_text(self, *, task: TaskRecord, root_node: NodeRecord | None) -> str:
         if root_node is not None:
@@ -540,6 +618,70 @@ class TaskLogService:
         if task is None:
             raise ValueError(f'task not found: {task_id}')
         return task
+
+    def _publish_snapshot(
+        self,
+        task_id: str,
+        *,
+        task: TaskRecord | None = None,
+        nodes: list[NodeRecord] | None = None,
+        root=None,
+        tree_text: str | None = None,
+        publish_summary: bool = False,
+    ) -> None:
+        if self._registry is None:
+            return
+        current_task = task or self._store.get_task(task_id)
+        if current_task is None:
+            return
+        payload = self._snapshot_payload_builder(current_task.task_id) if callable(self._snapshot_payload_builder) else None
+        if payload is None:
+            current_nodes = list(nodes or self._store.list_nodes(task_id))
+            current_root = root if root is not None else self._tree_builder.build_tree(current_task, current_nodes)
+            current_tree_text = str(tree_text if tree_text is not None else self._tree_builder.render_tree_text(current_root))
+            payload = {
+                'task': current_task.model_dump(mode='json'),
+                'progress': {
+                    'task_id': current_task.task_id,
+                    'task_status': current_task.status,
+                    'tree_text': current_tree_text,
+                    'root': current_root.model_dump(mode='json') if current_root is not None else None,
+                    'latest_node': None,
+                    'live_state': None,
+                    'nodes': [item.model_dump(mode='json') for item in current_nodes],
+                    'token_usage': current_task.token_usage.model_dump(mode='json'),
+                    'token_usage_by_model': [],
+                    'text': f'Task status: {current_task.status}',
+                },
+            }
+        self._registry.publish_global_task(
+            current_task.task_id,
+            build_envelope(
+                channel='task',
+                session_id=current_task.session_id,
+                task_id=current_task.task_id,
+                seq=self._registry.next_global_task_seq(current_task.task_id),
+                type='snapshot.task',
+                data=payload,
+            ),
+        )
+        if publish_summary:
+            self._registry.publish_global_ceo(
+                build_envelope(
+                    channel='ceo',
+                    session_id=current_task.session_id,
+                    task_id=current_task.task_id,
+                    seq=self._registry.next_ceo_seq(current_task.session_id),
+                    type='task.summary.changed',
+                    data={
+                        'task_id': current_task.task_id,
+                        'status': current_task.status,
+                        'brief': current_task.brief_text,
+                        'is_unread': bool(current_task.is_unread),
+                        'token_usage': current_task.token_usage.model_dump(mode='json'),
+                    },
+                ),
+            )
 
     def _notify_task_terminal(self, task: TaskRecord, *, previous_status: str) -> None:
         next_status = str(getattr(task, 'status', '') or '').strip().lower()

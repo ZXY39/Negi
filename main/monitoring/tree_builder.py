@@ -26,7 +26,14 @@ class TaskTreeBuilder:
                 input=node.input,
                 input_ref=str(node.input_ref or ''),
                 output='\n'.join(entry.content for entry in node.output if str(entry.content or '').strip()),
-                output_ref=next((str(entry.content_ref or '') for entry in reversed(list(node.output or [])) if str(entry.content_ref or '').strip()), str(node.final_output_ref or '')),
+                output_ref=next(
+                    (
+                        str(entry.content_ref or '')
+                        for entry in reversed(list(node.output or []))
+                        if str(entry.content_ref or '').strip()
+                    ),
+                    str(node.final_output_ref or ''),
+                ),
                 check_result=node.check_result,
                 check_result_ref=str(node.check_result_ref or ''),
                 updated_at=node.updated_at,
@@ -56,15 +63,12 @@ class TaskTreeBuilder:
 
     def render_tree_text(self, root: TaskTreeNode | None) -> str:
         if root is None:
-            return '（空树）'
+            return '(empty tree)'
         lines: list[str] = []
 
         def walk(node: TaskTreeNode, prefix: str = '', *, is_root: bool = False) -> None:
-            label = f'（{node.node_id},{node.status}）'
-            if is_root:
-                lines.append(label)
-            else:
-                lines.append(f'{prefix}|-{label}')
+            label = f'({node.node_id},{node.status})'
+            lines.append(label if is_root else f'{prefix}|-{label}')
             child_prefix = '' if is_root else f'{prefix}  '
             for child in list(node.children or []):
                 walk(child, child_prefix, is_root=False)
@@ -118,6 +122,7 @@ class TaskTreeBuilder:
                         'position': position,
                         'created_at': self._round_created_at(parent=parent, child_ids=round_child_ids, node_records=node_records),
                         'child_ids': round_child_ids,
+                        'entries': entries,
                     }
                 )
 
@@ -130,6 +135,7 @@ class TaskTreeBuilder:
                     'position': len(round_specs),
                     'created_at': self._round_created_at(parent=parent, child_ids=implicit_child_ids, node_records=node_records),
                     'child_ids': implicit_child_ids,
+                    'entries': [],
                 }
             )
 
@@ -144,15 +150,24 @@ class TaskTreeBuilder:
         rounds: list[TaskSpawnRound] = []
         for index, spec in enumerate(ordered_round_specs, start=1):
             round_child_ids = [child_id for child_id in list(spec.get('child_ids') or []) if child_id in tree_nodes]
+            total_children, completed_children, running_children, failed_children = self._round_status_totals(
+                child_ids=round_child_ids,
+                entries=list(spec.get('entries') or []),
+                node_records=node_records,
+            )
             rounds.append(
                 TaskSpawnRound(
                     round_id=str(spec.get('round_id') or ''),
                     round_index=index,
-                    label=f'第 {index} 轮',
+                    label=f'Round {index}',
                     is_latest=False,
                     created_at=str(spec.get('created_at') or ''),
                     child_node_ids=round_child_ids,
                     source=str(spec.get('source') or 'explicit'),
+                    total_children=total_children,
+                    completed_children=completed_children,
+                    running_children=running_children,
+                    failed_children=failed_children,
                     children=[tree_nodes[child_id] for child_id in round_child_ids],
                 )
             )
@@ -172,3 +187,41 @@ class TaskTreeBuilder:
         if child_ids:
             return f'implicit:{parent.node_id}:{child_ids[0]}'
         return f'implicit:{parent.node_id}'
+
+    @staticmethod
+    def _round_status_totals(
+        *,
+        child_ids: list[str],
+        entries: list[object],
+        node_records: dict[str, NodeRecord],
+    ) -> tuple[int, int, int, int]:
+        total_children = max(len(child_ids), len([entry for entry in entries if isinstance(entry, dict)]))
+        completed_children = 0
+        running_children = 0
+        failed_children = 0
+
+        if entries:
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                status = str(entry.get('status') or '').strip().lower()
+                if status == 'success':
+                    completed_children += 1
+                elif status == 'error':
+                    failed_children += 1
+                elif status in {'queued', 'running'}:
+                    running_children += 1
+            return total_children, completed_children, running_children, failed_children
+
+        for child_id in child_ids:
+            record = node_records.get(child_id)
+            if record is None:
+                continue
+            status = str(record.status or '').strip().lower()
+            if status == 'success':
+                completed_children += 1
+            elif status == 'failed':
+                failed_children += 1
+            else:
+                running_children += 1
+        return total_children, completed_children, running_children, failed_children

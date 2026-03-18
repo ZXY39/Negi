@@ -306,6 +306,7 @@ class FilesystemTool:
             artifact_store = getattr(self._main_task_service, 'artifact_store', None)
         return ContentNavigationService(
             workspace=self._workspace or Path.cwd(),
+            allowed_dir=self._allowed_dir,
             artifact_store=artifact_store,
             artifact_lookup=self._main_task_service or artifact_store,
         )

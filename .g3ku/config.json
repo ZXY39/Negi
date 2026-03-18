@@ -71,17 +71,14 @@
     ],
     "roles": {
       "ceo": [
-        "loacal 5.2",
         "gpt-5.4",
         "gpt-5.2"
       ],
       "execution": [
-        "loacal 5.2",
         "subagent gpt-5.4",
         "gpt-5.2"
       ],
       "inspection": [
-        "loacal 5.2",
         "subagent gpt-5.4",
         "gpt-5.2"
       ]

@@ -533,7 +533,7 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
         manifest.read_text(encoding='utf-8')
         .replace('timeout: 60', 'timeout: 7')
         .replace("path_append: ''", "path_append: 'D:/bin'")
-        .replace('restrict_to_workspace: true', 'restrict_to_workspace: false'),
+        .replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
         encoding='utf-8',
     )
 
@@ -545,7 +545,7 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
         handler = tool._handler
         assert handler.timeout == 7
         assert handler.path_append == 'D:/bin'
-        assert handler.restrict_to_workspace is False
+        assert handler.restrict_to_workspace is True
     finally:
         manager.close()
 
@@ -711,13 +711,57 @@ async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_exec_tool_blocks_paths_outside_workspace(tmp_path: Path):
+async def test_exec_tool_allows_paths_outside_workspace_by_default(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     outside_dir = tmp_path / 'outside'
     outside_dir.mkdir(parents=True, exist_ok=True)
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('exec')
+        assert tool is not None
+
+        outside_cwd = json.loads(
+            await tool.execute(
+                command='echo allowed',
+                working_dir=str(outside_dir),
+                __g3ku_runtime={'session_key': 'web:shared'},
+            )
+        )
+        assert outside_cwd['status'] == 'success'
+
+        outside_path = outside_dir / 'sample.txt'
+        outside_path.write_text('allowed\n', encoding='utf-8')
+        outside_path_result = json.loads(
+            await tool.execute(
+                command=f'type "{outside_path}"' if os.name == 'nt' else f'cat "{outside_path}"',
+                __g3ku_runtime={'session_key': 'web:shared'},
+            )
+        )
+        assert outside_path_result['status'] == 'success'
+        assert 'allowed' in outside_path_result['head_preview']
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_blocks_paths_outside_workspace_when_restricted(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    outside_dir = tmp_path / 'outside'
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+
+    manifest = workspace / 'tools' / 'exec' / 'resource.yaml'
+    manifest.write_text(
+        manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+        encoding='utf-8',
+    )
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -784,6 +828,54 @@ async def test_content_tool_reads_externalized_artifact_refs(tmp_path: Path):
     finally:
         manager.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_content_tool_reads_absolute_paths_outside_workspace_by_default(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    outside_file = tmp_path / 'outside.log'
+    outside_file.write_text('alpha\nbeta\nneedle\nomega\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+        searched = json.loads(await tool.execute(action='search', path=str(outside_file), query='needle'))
+        assert searched['ok'] is True
+        assert searched['hits'][0]['line'] == 3
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_content_tool_blocks_absolute_paths_outside_workspace_when_restricted(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    outside_file = tmp_path / 'outside.log'
+    outside_file.write_text('alpha\nbeta\nneedle\nomega\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    manifest = workspace / 'tools' / 'content' / 'resource.yaml'
+    manifest.write_text(
+        manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+        encoding='utf-8',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+        blocked = json.loads(await tool.execute(action='search', path=str(outside_file), query='needle'))
+        assert blocked['ok'] is False
+        assert 'outside workspace' in blocked['error']
+    finally:
+        manager.close()
 
 
 @pytest.mark.asyncio
@@ -955,15 +1047,15 @@ def test_resource_loader_injects_tool_secrets(tmp_path: Path):
     loader = ResourceLoader(workspace, app_config=SimpleNamespace(tool_secrets={'filesystem': {'token': 'demo-secret'}}))
     runtime = loader.build_runtime_context(descriptor)
 
-    assert runtime.tool_settings == {'restrict_to_workspace': True}
+    assert runtime.tool_settings == {'restrict_to_workspace': False}
     assert runtime.tool_secrets == {'token': 'demo-secret'}
 
 
 @pytest.mark.asyncio
-async def test_filesystem_tool_blocks_paths_outside_workspace(tmp_path: Path):
+async def test_filesystem_tool_reads_absolute_paths_outside_workspace_by_default(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     outside_file = tmp_path / 'outside.txt'
-    outside_file.write_text('blocked\n', encoding='utf-8')
+    outside_file.write_text('allowed\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
@@ -973,8 +1065,35 @@ async def test_filesystem_tool_blocks_paths_outside_workspace(tmp_path: Path):
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
+        result = json.loads(await tool.execute(action='head', path=str(outside_file), lines=5))
+        assert result['ok'] is True
+        assert result['excerpt'] == 'allowed'
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_tool_blocks_paths_outside_workspace_when_restricted(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    outside_file = tmp_path / 'outside.txt'
+    outside_file.write_text('blocked\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manifest = workspace / 'tools' / 'filesystem' / 'resource.yaml'
+    manifest.write_text(
+        manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+        encoding='utf-8',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
         result = await tool.execute(action='head', path=str(outside_file), lines=5)
-        assert 'path outside workspace' in result
+        assert 'outside workspace' in result
     finally:
         manager.close()
 

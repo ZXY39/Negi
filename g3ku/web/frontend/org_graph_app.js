@@ -4738,7 +4738,62 @@ function resolveNodeTitle(node, detail) {
     };
 }
 
-function buildNodeExecutionTrace(node, detail) {
+function liveFramesByNodeId(progress) {
+    const frames = Array.isArray(progress?.live_state?.frames) ? progress.live_state.frames : [];
+    return new Map(
+        frames
+            .map((frame) => [String(frame?.node_id || "").trim(), frame])
+            .filter(([nodeId]) => !!nodeId),
+    );
+}
+
+function normalizeLiveToolCalls(frame) {
+    return (Array.isArray(frame?.tool_calls) ? frame.tool_calls : [])
+        .map((item) => ({
+            tool_call_id: String(item?.tool_call_id || ""),
+            tool_name: String(item?.tool_name || "tool"),
+            status: ["queued", "running", "success", "error"].includes(String(item?.status || ""))
+                ? String(item.status)
+                : "info",
+            started_at: String(item?.started_at || ""),
+            finished_at: String(item?.finished_at || ""),
+            elapsed_seconds: Number.isFinite(Number(item?.elapsed_seconds)) ? Number(item.elapsed_seconds) : null,
+        }))
+        .filter((item) => item.tool_call_id || item.tool_name);
+}
+
+function normalizeLiveChildPipelines(frame) {
+    return (Array.isArray(frame?.child_pipelines) ? frame.child_pipelines : [])
+        .map((item, index) => ({
+            index: normalizeInt(item?.index, index),
+            goal: String(item?.goal || ""),
+            status: ["queued", "running", "success", "error"].includes(String(item?.status || ""))
+                ? String(item.status)
+                : "info",
+            child_node_id: String(item?.child_node_id || ""),
+            acceptance_node_id: String(item?.acceptance_node_id || ""),
+            check_status: String(item?.check_status || ""),
+            started_at: String(item?.started_at || ""),
+            finished_at: String(item?.finished_at || ""),
+        }))
+        .filter((item) => item.goal || item.child_node_id || item.acceptance_node_id);
+}
+
+function buildLiveSectionStatus(items) {
+    if (!Array.isArray(items) || !items.length) return "info";
+    if (items.some((item) => String(item?.status || "") === "running" || String(item?.status || "") === "queued")) {
+        return "running";
+    }
+    if (items.some((item) => String(item?.status || "") === "error")) {
+        return "error";
+    }
+    if (items.some((item) => String(item?.status || "") === "success")) {
+        return "success";
+    }
+    return "info";
+}
+
+function buildNodeExecutionTrace(node, detail, liveFrame = null) {
     const source = detail?.execution_trace && typeof detail.execution_trace === "object" ? detail.execution_trace : {};
     const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps : [];
     return {
@@ -4755,6 +4810,8 @@ function buildNodeExecutionTrace(node, detail) {
                 ? String(step.status)
                 : "info",
         })),
+        live_tool_calls: normalizeLiveToolCalls(liveFrame),
+        live_child_pipelines: normalizeLiveChildPipelines(liveFrame),
         final_output: String(source.final_output ?? detail?.final_output ?? nodeOutputText(detail) ?? nodeOutputText(node) ?? ""),
         acceptance_result: String(source.acceptance_result ?? detail?.check_result ?? node?.check_result ?? ""),
     };
@@ -4941,6 +4998,184 @@ function buildExecutionTree(rawTree) {
             state: status,
             display_state: status.toUpperCase(),
             executionTrace: buildNodeExecutionTrace(node, detail),
+            roundOptions: roundState.options,
+            selectedRoundId: roundState.selectedRoundId,
+            defaultRoundId: roundState.defaultRoundId,
+            roundSummary: roundState.summary,
+            children: Array.isArray(node.children) ? node.children.map(walk) : [],
+        };
+    };
+    return walk(rawTree);
+}
+
+function traceStatusLabel(status) {
+    return ({
+        info: "Info",
+        running: "Running",
+        success: "Success",
+        error: "Error",
+    }[String(status || "")] || "Info");
+}
+
+function renderTraceField(label, value, emptyText = "No content") {
+    const text = String(value || "").trim() || emptyText;
+    return `
+        <div class="task-trace-field">
+            <div class="task-trace-label">${esc(label)}</div>
+            <div class="code-block task-trace-code">${esc(text)}</div>
+        </div>
+    `;
+}
+
+function renderLiveToolFields(toolCalls) {
+    return toolCalls.map((step, index) => [
+        renderTraceField(`Tool ${index + 1}`, `${step.tool_name || "tool"} [${step.status}]`, "No tool name"),
+        renderTraceField(
+            "Timing",
+            [step.started_at, step.finished_at, Number.isFinite(step.elapsed_seconds) ? `${step.elapsed_seconds}s` : ""].filter(Boolean).join(" | "),
+            "No timing",
+        ),
+    ].join("")).join("");
+}
+
+function renderLiveChildFields(childPipelines) {
+    return childPipelines.map((step, index) => [
+        renderTraceField(`Pipeline ${index + 1}`, `${step.goal || "(no goal)"} [${step.status}]`, "No child goal"),
+        renderTraceField(
+            "Nodes",
+            [step.child_node_id ? `child=${step.child_node_id}` : "", step.acceptance_node_id ? `accept=${step.acceptance_node_id}` : ""]
+                .filter(Boolean)
+                .join(" | "),
+            "No node ids yet",
+        ),
+        renderTraceField(
+            "Check",
+            `${step.check_status || "pending"}${step.started_at || step.finished_at ? ` | ${[step.started_at, step.finished_at].filter(Boolean).join(" -> ")}` : ""}`,
+            "No check state",
+        ),
+    ].join("")).join("");
+}
+
+function renderExecutionTrace(node) {
+    if (!U.adFlow) return;
+    const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
+    const fallbackLiveFrame = liveFrameMap.get(String(node?.node_id || "").trim()) || null;
+    const trace = node?.executionTrace || buildNodeExecutionTrace(node, node, fallbackLiveFrame);
+    const steps = [
+        renderTraceStep({
+            title: "Initial Prompt",
+            status: "info",
+            open: false,
+            bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
+        }),
+        ...trace.tool_steps.map((step) => renderTraceStep({
+            title: `Tool - ${step.tool_name || "tool"}`,
+            status: step.status || "info",
+            open: false,
+            bodyHtml: [
+                renderTraceField("Arguments", step.arguments_text, "No arguments"),
+                renderTraceField("Output", step.output_text, step.status === "running" ? "Waiting for tool output..." : "No tool output"),
+            ].join(""),
+        })),
+        ...(trace.live_tool_calls.length ? [renderTraceStep({
+            title: `Live Tools (${trace.live_tool_calls.length})`,
+            status: buildLiveSectionStatus(trace.live_tool_calls),
+            open: true,
+            bodyHtml: renderLiveToolFields(trace.live_tool_calls),
+        })] : []),
+        ...(trace.live_child_pipelines.length ? [renderTraceStep({
+            title: `Live Child Pipelines (${trace.live_child_pipelines.length})`,
+            status: buildLiveSectionStatus(trace.live_child_pipelines),
+            open: true,
+            bodyHtml: renderLiveChildFields(trace.live_child_pipelines),
+        })] : []),
+        renderTraceStep({
+            title: "Final Output",
+            status: nodeFinalTraceStatus(node),
+            open: true,
+            bodyHtml: renderTraceField("Content", trace.final_output, "No final output"),
+        }),
+    ];
+    U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
+    const traceItems = Array.from(U.adFlow.querySelectorAll(".task-trace-step"));
+    trace.tool_steps.forEach((step, index) => {
+        const item = traceItems[index + 1];
+        if (!(item instanceof HTMLElement)) return;
+        item.dataset.traceStatus = String(step.status || "info");
+        if (step.started_at) item.dataset.startedAt = step.started_at;
+        if (step.finished_at) item.dataset.finishedAt = step.finished_at;
+        if (Number.isFinite(step.elapsed_seconds)) item.dataset.elapsedSeconds = String(step.elapsed_seconds);
+        const runtimeEl = item.querySelector(".task-trace-runtime");
+        if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
+    });
+    refreshTaskDetailScrollRegions();
+    refreshLiveDurationBadges();
+}
+
+function renderAcceptanceResult(text) {
+    if (!U.adAcceptance) return;
+    U.adAcceptance.textContent = String(text || "").trim() || "No acceptance result";
+}
+
+function buildNodeRoundState(node) {
+    const rounds = rawNodeRounds(node).map((round) => ({
+        roundId: String(round.round_id || ""),
+        roundIndex: normalizeInt(round.round_index, 0),
+        label: String(round.label || "").trim() || `Round ${normalizeInt(round.round_index, 0)}`,
+        isLatest: !!round.is_latest,
+        childCount: Array.isArray(round.children) ? round.children.length : Math.max(0, normalizeInt(round.child_node_ids?.length, 0)),
+        createdAt: String(round.created_at || ""),
+        totalChildren: Math.max(0, normalizeInt(round.total_children, Array.isArray(round.children) ? round.children.length : 0)),
+        completedChildren: Math.max(0, normalizeInt(round.completed_children, 0)),
+        runningChildren: Math.max(0, normalizeInt(round.running_children, 0)),
+        failedChildren: Math.max(0, normalizeInt(round.failed_children, 0)),
+    }));
+    if (!rounds.length) {
+        return {
+            options: [],
+            selectedRoundId: "",
+            defaultRoundId: "",
+            summary: "No child rounds",
+        };
+    }
+    const defaultRoundId = resolveDefaultRoundId(node);
+    const selectedRoundId = String(node?.selected_round_id || defaultRoundId || "");
+    const selectedRound = rounds.find((round) => round.roundId === selectedRoundId) || rounds[rounds.length - 1];
+    const selectionMode = selectedRound.roundId && selectedRound.roundId !== defaultRoundId ? "manual" : "latest";
+    const totalChildren = selectedRound.totalChildren || selectedRound.childCount;
+    const counts = [
+        `${selectedRound.completedChildren}/${totalChildren || selectedRound.childCount} completed`,
+        selectedRound.runningChildren ? `${selectedRound.runningChildren} running` : "",
+        selectedRound.failedChildren ? `${selectedRound.failedChildren} failed` : "",
+    ].filter(Boolean).join(", ");
+    return {
+        options: rounds,
+        selectedRoundId,
+        defaultRoundId,
+        summary: `${selectedRound.label}${selectedRound.isLatest ? " (latest)" : ""} | ${selectionMode} | ${counts || `${selectedRound.childCount} children`} | ${rounds.length} rounds`,
+    };
+}
+
+function buildExecutionTree(rawTree) {
+    if (!rawTree) return null;
+    const nodeRecords = Array.isArray(S.currentTaskProgress?.nodes) ? S.currentTaskProgress.nodes : [];
+    const nodeMap = new Map(nodeRecords.map((item) => [String(item.node_id || ""), item]));
+    const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
+    const walk = (node) => {
+        const nodeId = String(node.node_id || "");
+        const detail = nodeMap.get(nodeId) || {};
+        const status = String(node.status || detail.status || "unknown").trim().toLowerCase() || "unknown";
+        const title = resolveNodeTitle(node, detail);
+        const roundState = buildNodeRoundState(node);
+        return {
+            node_id: node.node_id,
+            title: title.title,
+            fullTitle: title.fullTitle,
+            goal: title.goal,
+            kind: detail.node_kind || "execution",
+            state: status,
+            display_state: status.toUpperCase(),
+            executionTrace: buildNodeExecutionTrace(node, detail, liveFrameMap.get(nodeId) || null),
             roundOptions: roundState.options,
             selectedRoundId: roundState.selectedRoundId,
             defaultRoundId: roundState.defaultRoundId,

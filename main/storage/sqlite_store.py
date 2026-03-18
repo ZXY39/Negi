@@ -91,11 +91,19 @@ class SQLiteTaskStore:
         return [self._parse(row['payload_json'], TaskRecord) for row in rows]
 
     def update_task(self, task_id: str, mutator) -> TaskRecord | None:
-        record = self.get_task(task_id)
-        if record is None:
-            return None
-        updated = mutator(record)
-        return self.upsert_task(updated)
+        with self._lock, self._conn:
+            row = self._conn.execute('SELECT payload_json FROM tasks WHERE task_id = ?', (task_id,)).fetchone()
+            if row is None:
+                return None
+            record = self._parse(row['payload_json'], TaskRecord)
+            updated = mutator(record)
+            self._upsert_unlocked(
+                'tasks',
+                ['task_id', 'session_id', 'status', 'updated_at', 'payload_json'],
+                [updated.task_id, updated.session_id, updated.status, updated.updated_at, updated.model_dump_json()],
+                'task_id',
+            )
+            return updated
 
     def upsert_node(self, record: NodeRecord) -> NodeRecord:
         self._upsert(
@@ -129,11 +137,29 @@ class SQLiteTaskStore:
         return [self._parse(row['payload_json'], NodeRecord) for row in rows]
 
     def update_node(self, node_id: str, mutator) -> NodeRecord | None:
-        record = self.get_node(node_id)
-        if record is None:
-            return None
-        updated = mutator(record)
-        return self.upsert_node(updated)
+        with self._lock, self._conn:
+            row = self._conn.execute('SELECT payload_json FROM nodes WHERE node_id = ?', (node_id,)).fetchone()
+            if row is None:
+                return None
+            record = self._parse(row['payload_json'], NodeRecord)
+            updated = mutator(record)
+            self._upsert_unlocked(
+                'nodes',
+                ['node_id', 'task_id', 'parent_node_id', 'root_node_id', 'depth', 'status', 'created_at', 'updated_at', 'payload_json'],
+                [
+                    updated.node_id,
+                    updated.task_id,
+                    updated.parent_node_id,
+                    updated.root_node_id,
+                    updated.depth,
+                    updated.status,
+                    updated.created_at,
+                    updated.updated_at,
+                    updated.model_dump_json(),
+                ],
+                'node_id',
+            )
+            return updated
 
     def upsert_artifact(self, record: TaskArtifactRecord) -> TaskArtifactRecord:
         self._upsert(
@@ -159,11 +185,14 @@ class SQLiteTaskStore:
             self._conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
 
     def _upsert(self, table: str, columns: list[str], values: list[object], primary_key: str) -> None:
+        with self._lock, self._conn:
+            self._upsert_unlocked(table, columns, values, primary_key)
+
+    def _upsert_unlocked(self, table: str, columns: list[str], values: list[object], primary_key: str) -> None:
         placeholders = ', '.join('?' for _ in columns)
         updates = ', '.join(f"{column}=excluded.{column}" for column in columns if column != primary_key)
         sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) ON CONFLICT({primary_key}) DO UPDATE SET {updates}"
-        with self._lock, self._conn:
-            self._conn.execute(sql, values)
+        self._conn.execute(sql, values)
 
     def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
         with self._lock:

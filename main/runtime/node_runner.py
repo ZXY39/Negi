@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from typing import Any
 
@@ -14,17 +15,19 @@ from main.runtime.internal_tools import SpawnChildNodesTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
-ACCEPTANCE_REF_GUIDANCE = '如需查看更多细节，只能先使用 content.search，再使用 content.open 读取局部片段，不要请求全文。'
+ACCEPTANCE_REF_GUIDANCE = (
+    'If more detail is needed, use content.search first and then content.open for targeted reads. '
+    'Do not request the full document body.'
+)
 EXECUTION_SPAWN_GUIDANCE = """
+This execution node may spawn child nodes.
 
-当前节点仍可派生子节点，请额外遵守以下规则：
-- 在准备进行下一步前，立即评估是否通过派发子节点完成任务效率更高；如果更高，就优先调用 `spawn_child_nodes`，而不是继续由当前节点自行完成。
-- 特别是在以下情况优先考虑拆分：目标文件过多或过大、查询范围广、预计处理时间长、多目录/多模块/多结果集合并、搜索/工具返回结果过多且仅靠一次筛选不足以完成判断。
-- 只有当工具列表中确实存在 `spawn_child_nodes` 时，才允许调用它。
-- 只有在任务可以拆成多个相对独立、边界清晰的子范围时，才调用 `spawn_child_nodes`；拆分时按目录、模块、文件集合、结果批次等维度划分，避免职责重叠。
-- 调用 `spawn_child_nodes` 时，不要把待读取文件的正文、长摘录或整段工具输出直接塞进子节点提示词；只传文件路径、目录路径、artifact/content 引用、搜索关键词、已知行号范围、目标问题和交付要求，让子节点自行读取原始内容。
-- 对每个子节点，都要先判断是否真的需要验收节点，而不是默认必验。
-- 如果拆分后的并行或分段处理明显更高效，就不要继续由当前节点把所有工作都自己做完。
+Before doing the next step, check whether the work should be split into child pipelines first.
+- Prefer `spawn_child_nodes` when the workload is broad, slow, or naturally decomposes into independent scopes.
+- Only call `spawn_child_nodes` when the tool is present in the current tool list.
+- Split by directory, module, file group, result batch, or another clear ownership boundary.
+- Pass paths, refs, search clues, and acceptance requirements to children. Do not inline large source excerpts.
+- Decide per child whether acceptance is actually required instead of defaulting every child to acceptance.
 """.strip()
 
 
@@ -40,6 +43,7 @@ class NodeRunner:
         acceptance_model_refs: list[str],
         execution_max_iterations: int = 16,
         acceptance_max_iterations: int | None = None,
+        max_parallel_child_pipelines: int = 10,
         context_enricher=None,
     ) -> None:
         self._store = store
@@ -50,6 +54,7 @@ class NodeRunner:
         self._acceptance_model_refs = list(acceptance_model_refs or []) or list(execution_model_refs or [])
         self._execution_max_iterations = max(2, int(execution_max_iterations or 16))
         self._acceptance_max_iterations = max(2, int(acceptance_max_iterations or self._execution_max_iterations))
+        self._max_parallel_child_pipelines = max(1, int(max_parallel_child_pipelines or 1))
         self._context_enricher = context_enricher
 
     async def run_node(self, task_id: str, node_id: str) -> NodeFinalResult:
@@ -178,25 +183,91 @@ class NodeRunner:
         if task is None or parent is None:
             raise ValueError('parent task or node missing')
         if not parent.can_spawn_children:
-            raise ValueError('当前节点不允许继续派生子节点')
+            raise ValueError('spawn_child_nodes is not available for this node')
         cache_key = str(call_id or f'call:{len(specs)}')
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
             return [SpawnChildResult.model_validate(item) for item in list(cached.get('results') or [])]
 
-        async def _run_spec(index: int, spec: SpawnChildSpec, cached_entry: dict[str, Any]) -> SpawnChildResult:
-            requires_acceptance = (
-                bool(cached_entry.get('requires_acceptance'))
-                if 'requires_acceptance' in cached_entry
-                else self._requires_acceptance(spec)
-            )
-            cached_entry['requires_acceptance'] = requires_acceptance
+        cached_payload = copy.deepcopy(cached) if isinstance(cached, dict) else {
+            'specs': [item.model_dump(mode='json') for item in specs],
+            'entries': [],
+            'results': [],
+            'completed': False,
+        }
+        cached_payload['specs'] = [item.model_dump(mode='json') for item in specs]
+        entries = list(cached_payload.get('entries') or [])
+        while len(entries) < len(specs):
+            entries.append({})
+        cached_payload['entries'] = [
+            self._normalize_spawn_entry(index=index, spec=spec, entry=entries[index])
+            for index, spec in enumerate(specs)
+        ]
+        cached_payload['completed'] = False
+        self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
 
-            child_id = str(cached_entry.get('child_node_id') or '').strip()
+        semaphore = asyncio.Semaphore(self._max_parallel_child_pipelines)
+
+        async def _run_spec(index: int, spec: SpawnChildSpec) -> SpawnChildResult:
+            async with semaphore:
+                return await self._run_child_pipeline(
+                    task=task,
+                    parent=parent,
+                    spec=spec,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                )
+
+        results = await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
+        cached_payload['results'] = [item.model_dump(mode='json') for item in results]
+        cached_payload['completed'] = True
+        self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
+        return list(results)
+
+    async def _run_child_pipeline(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        spec: SpawnChildSpec,
+        cache_key: str,
+        cached_payload: dict[str, Any],
+        index: int,
+    ) -> SpawnChildResult:
+        entries = list(cached_payload.get('entries') or [])
+        entry = dict(entries[index] or {})
+        existing_result = entry.get('result')
+        if isinstance(existing_result, dict) and str(entry.get('status') or '').strip().lower() in {'success', 'error'}:
+            return SpawnChildResult.model_validate(existing_result)
+
+        requires_acceptance = bool(entry.get('requires_acceptance'))
+        started_at = str(entry.get('started_at') or _now())
+        self._update_spawn_entry(
+            task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            cache_key=cache_key,
+            cached_payload=cached_payload,
+            index=index,
+            status='running',
+            started_at=started_at,
+            finished_at='',
+            check_status='pending' if requires_acceptance else 'skipped',
+        )
+
+        try:
+            child_id = str(entry.get('child_node_id') or '').strip()
             child = self._store.get_node(child_id) if child_id else None
             if child is None:
                 child = self._create_execution_child(task=task, parent=parent, spec=spec)
-                cached_entry['child_node_id'] = child.node_id
+                self._update_spawn_entry(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                    child_node_id=child.node_id,
+                )
 
             child_result = await self.run_node(task.task_id, child.node_id)
             child = self._store.get_node(child.node_id) or child
@@ -215,8 +286,17 @@ class NodeRunner:
                     node_output_summary=child_summary,
                     node_output_ref=child_ref,
                 )
-                cached_entry['result'] = result.model_dump(mode='json')
-                self._save_spawn_cache(parent.node_id, cache_key, cached_payload)
+                self._update_spawn_entry(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                    status='error',
+                    finished_at=_now(),
+                    check_status='skipped',
+                    result=result.model_dump(mode='json'),
+                )
                 return result
 
             if not requires_acceptance:
@@ -228,21 +308,38 @@ class NodeRunner:
                     node_output_summary=child_summary,
                     node_output_ref=child_ref,
                 )
-                cached_entry['result'] = result.model_dump(mode='json')
-                self._save_spawn_cache(parent.node_id, cache_key, cached_payload)
+                self._update_spawn_entry(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                    status='success',
+                    finished_at=_now(),
+                    check_status='skipped',
+                    result=result.model_dump(mode='json'),
+                )
                 return result
 
-            acceptance_id = str(cached_entry.get('acceptance_node_id') or '').strip()
+            acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
             acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
             if acceptance is None:
                 acceptance = self.create_acceptance_node(
                     task=task,
                     accepted_node=child,
-                    goal=f'验收:{spec.goal}',
+                    goal=f'accept:{spec.goal}',
                     acceptance_prompt=str(spec.acceptance_prompt or ''),
                     parent_node_id=child.node_id,
                 )
-                cached_entry['acceptance_node_id'] = acceptance.node_id
+                self._update_spawn_entry(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                    acceptance_node_id=acceptance.node_id,
+                    check_status='running',
+                )
 
             acceptance_result = await self.run_node(task.task_id, acceptance.node_id)
             acceptance = self._store.get_node(acceptance.node_id) or acceptance
@@ -255,36 +352,182 @@ class NodeRunner:
                 node_output_summary=child_summary,
                 node_output_ref=child_ref,
             )
-            cached_entry['result'] = result.model_dump(mode='json')
-            self._save_spawn_cache(parent.node_id, cache_key, cached_payload)
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                status='success' if acceptance_result.status == STATUS_SUCCESS else 'error',
+                finished_at=_now(),
+                check_status='passed' if acceptance_result.status == STATUS_SUCCESS else 'failed',
+                result=result.model_dump(mode='json'),
+            )
+            return result
+        except TaskPausedError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            result = SpawnChildResult(
+                goal=spec.goal,
+                check_result=f'Error: {exc}',
+                node_output='',
+                node_output_summary='',
+                node_output_ref='',
+            )
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                status='error',
+                finished_at=_now(),
+                check_status='failed',
+                result=result.model_dump(mode='json'),
+            )
             return result
 
-        cached_payload = cached if isinstance(cached, dict) else {
-            'specs': [item.model_dump(mode='json') for item in specs],
-            'entries': [],
-            'results': [],
-            'completed': False,
+    def _normalize_spawn_entry(self, *, index: int, spec: SpawnChildSpec, entry: dict[str, Any] | None) -> dict[str, Any]:
+        payload = dict(entry or {})
+        status = str(payload.get('status') or '').strip().lower()
+        if status not in {'queued', 'running', 'success', 'error'}:
+            status = 'queued'
+        check_status = str(payload.get('check_status') or '').strip().lower()
+        if check_status not in {'', 'pending', 'running', 'skipped', 'passed', 'failed'}:
+            check_status = ''
+        result = payload.get('result')
+        return {
+            'index': index,
+            'goal': spec.goal,
+            'prompt': spec.prompt,
+            'requires_acceptance': bool(payload.get('requires_acceptance')) if 'requires_acceptance' in payload else self._requires_acceptance(spec),
+            'acceptance_prompt': str(spec.acceptance_prompt or ''),
+            'status': status,
+            'started_at': str(payload.get('started_at') or ''),
+            'finished_at': str(payload.get('finished_at') or ''),
+            'child_node_id': str(payload.get('child_node_id') or ''),
+            'acceptance_node_id': str(payload.get('acceptance_node_id') or ''),
+            'check_status': check_status,
+            'result': copy.deepcopy(result) if isinstance(result, dict) else {},
         }
-        cached_payload['specs'] = [item.model_dump(mode='json') for item in specs]
-        entries = list(cached_payload.get('entries') or [])
-        while len(entries) < len(specs):
-            entries.append({})
-        cached_payload['entries'] = entries
-        self._save_spawn_cache(parent.node_id, cache_key, cached_payload)
-        results = [await asyncio.create_task(_run_spec(index, spec, entries[index])) for index, spec in enumerate(specs)]
-        cached_payload['results'] = [item.model_dump(mode='json') for item in results]
-        cached_payload['completed'] = True
-        self._save_spawn_cache(parent.node_id, cache_key, cached_payload)
-        return results
 
-    def _save_spawn_cache(self, parent_node_id: str, cache_key: str, payload: dict[str, Any]) -> None:
+    def _update_spawn_entry(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        cached_payload: dict[str, Any],
+        index: int,
+        **changes: Any,
+    ) -> dict[str, Any]:
+        entries = list(cached_payload.get('entries') or [])
+        while len(entries) <= index:
+            entries.append({})
+        entry = dict(entries[index] or {})
+        for key, value in changes.items():
+            if value is None:
+                continue
+            entry[key] = copy.deepcopy(value)
+        entries[index] = entry
+        cached_payload['entries'] = entries
+        cached_payload['results'] = [
+            copy.deepcopy(item.get('result'))
+            for item in entries
+            if isinstance(item, dict) and isinstance(item.get('result'), dict) and item.get('result')
+        ]
+        self._save_spawn_cache(task_id, parent_node_id, cache_key, cached_payload)
+        return entry
+
+    def _save_spawn_cache(self, task_id: str, parent_node_id: str, cache_key: str, payload: dict[str, Any]) -> None:
+        payload_copy = copy.deepcopy(payload)
+
         def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
             operations = dict(metadata.get('spawn_operations') or {})
-            operations[cache_key] = payload
+            operations[cache_key] = payload_copy
             metadata['spawn_operations'] = operations
             return metadata
 
         self._log_service.update_node_metadata(parent_node_id, _mutate)
+        self._sync_parent_child_pipelines_frame(task_id, parent_node_id)
+        self._log_service.refresh_task_view(task_id, mark_unread=True)
+
+    def _sync_parent_child_pipelines_frame(self, task_id: str, parent_node_id: str) -> None:
+        parent = self._store.get_node(parent_node_id)
+        if parent is None:
+            return
+        child_pipelines, pending_specs, partial_results, has_active = self._parent_spawn_frame_state(parent)
+        state = self._log_service.read_runtime_state(task_id) or {}
+        frame_exists = any(str(item.get('node_id') or '') == parent_node_id for item in list(state.get('frames') or []))
+        if not frame_exists and not child_pipelines:
+            return
+
+        def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
+            next_frame = dict(frame or {})
+            next_frame['node_id'] = parent.node_id
+            next_frame['depth'] = int(parent.depth or 0)
+            next_frame['node_kind'] = parent.node_kind
+            next_frame['child_pipelines'] = child_pipelines
+            next_frame['pending_child_specs'] = pending_specs
+            next_frame['partial_child_results'] = partial_results
+            if has_active:
+                next_frame['phase'] = 'waiting_children'
+            elif str(next_frame.get('phase') or '').strip() == 'waiting_children':
+                next_frame['phase'] = 'waiting_tool_results' if list(next_frame.get('tool_calls') or []) else 'after_model'
+            return next_frame
+
+        self._log_service.update_frame(task_id, parent.node_id, _mutate, publish_snapshot=False)
+
+    @staticmethod
+    def _parent_spawn_frame_state(parent: NodeRecord) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
+        spawn_operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(spawn_operations, dict):
+            return [], [], [], False
+
+        child_pipelines: list[dict[str, Any]] = []
+        pending_specs: list[dict[str, Any]] = []
+        partial_results: list[dict[str, Any]] = []
+
+        for operation_index, (_operation_id, payload) in enumerate(spawn_operations.items()):
+            if not isinstance(payload, dict):
+                continue
+            specs = [copy.deepcopy(item) for item in list(payload.get('specs') or []) if isinstance(item, dict)]
+            if not bool(payload.get('completed')):
+                pending_specs.extend(specs)
+            for entry_index, entry in enumerate(list(payload.get('entries') or [])):
+                if not isinstance(entry, dict):
+                    continue
+                status = str(entry.get('status') or '').strip().lower()
+                if status not in {'queued', 'running', 'success', 'error'}:
+                    status = 'queued'
+                child_pipelines.append(
+                    {
+                        'index': int(entry.get('index') or entry_index),
+                        'goal': str(entry.get('goal') or ''),
+                        'status': status,
+                        'child_node_id': str(entry.get('child_node_id') or ''),
+                        'acceptance_node_id': str(entry.get('acceptance_node_id') or ''),
+                        'check_status': str(entry.get('check_status') or ''),
+                        'started_at': str(entry.get('started_at') or ''),
+                        'finished_at': str(entry.get('finished_at') or ''),
+                        '_sort_key': (
+                            str(entry.get('started_at') or ''),
+                            operation_index,
+                            int(entry.get('index') or entry_index),
+                        ),
+                    }
+                )
+                result = entry.get('result')
+                if isinstance(result, dict) and result:
+                    partial_results.append(copy.deepcopy(result))
+
+        child_pipelines.sort(key=lambda item: item.get('_sort_key') or ('', 0, 0))
+        for item in child_pipelines:
+            item.pop('_sort_key', None)
+        has_active = any(str(item.get('status') or '').strip().lower() in {'queued', 'running'} for item in child_pipelines)
+        return child_pipelines, pending_specs, partial_results, has_active
 
     def _requires_acceptance(self, spec: SpawnChildSpec) -> bool:
         if spec.requires_acceptance is True:
@@ -361,12 +604,9 @@ class NodeRunner:
         return self._log_service.create_node(task.task_id, acceptance)
 
     def _compose_acceptance_prompt(self, *, acceptance_prompt: str, node_output: str, node_output_ref: str) -> str:
-        prompt = (
-            f'{acceptance_prompt}\n\n'
-            f'子节点输出摘要：\n{node_output}\n'
-        )
+        prompt = f'{acceptance_prompt}\n\nChild node output summary:\n{node_output}\n'
         if node_output_ref:
-            prompt = f'{prompt}\n子节点输出引用：{node_output_ref}\n{ACCEPTANCE_REF_GUIDANCE}\n'
+            prompt = f'{prompt}\nChild node output ref: {node_output_ref}\n{ACCEPTANCE_REF_GUIDANCE}\n'
         return prompt
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> tuple[str, str]:
@@ -377,6 +617,7 @@ class NodeRunner:
 
     def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED
+        self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
         self._log_service.update_node_status(
             task_id,
             node_id,
@@ -388,6 +629,7 @@ class NodeRunner:
 
     def _mark_failed(self, task_id: str, node_id: str, *, reason: str) -> NodeFinalResult:
         text = str(reason or 'node failed').strip() or 'node failed'
+        self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
         self._log_service.update_node_status(task_id, node_id, status=STATUS_FAILED, final_output=text, failure_reason=text)
         return NodeFinalResult(status=STATUS_FAILED, output=text)
 

@@ -22,6 +22,7 @@ class ChatBackend(Protocol):
         max_tokens: int = 1200,
         temperature: float = 0.2,
         reasoning_effort: str | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> LLMResponse: ...
 
 
@@ -38,6 +39,7 @@ class ConfigChatBackend:
         max_tokens: int = 1200,
         temperature: float = 0.2,
         reasoning_effort: str | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
@@ -59,7 +61,7 @@ class ConfigChatBackend:
                         temperature=float(target.default_temperature) if target.default_temperature is not None else float(temperature),
                         reasoning_effort=target.default_reasoning_effort or reasoning_effort,
                         tool_choice='auto',
-                        parallel_tool_calls=False,
+                        parallel_tool_calls=parallel_tool_calls,
                     )
                 except Exception as exc:
                     last_error = exc

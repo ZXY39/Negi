@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.content import ContentNavigationService, parse_content_envelope
+from g3ku.resources.tool_settings import ContentToolSettings, runtime_tool_settings
 
 
 class ContentTool:
@@ -70,40 +71,56 @@ class ContentTool:
         blocked = self._guard_ref_access(runtime=runtime, ref=ref)
         if blocked is not None:
             return blocked
-        if operation == "describe":
-            return json.dumps(self._content_store.describe(ref=ref, path=path), ensure_ascii=False)
-        if operation == "search":
-            return json.dumps(
-                self._content_store.search(
-                    ref=ref,
-                    path=path,
-                    query=str(query or ""),
-                    limit=int(limit or 10),
-                    before=int(before or 2),
-                    after=int(after or 2),
-                ),
-                ensure_ascii=False,
-            )
-        if operation == "open":
-            return json.dumps(
-                self._content_store.open(
-                    ref=ref,
-                    path=path,
-                    start_line=int(start_line) if start_line is not None else None,
-                    end_line=int(end_line) if end_line is not None else None,
-                    around_line=int(around_line) if around_line is not None else None,
-                    window=int(window) if window is not None else None,
-                ),
-                ensure_ascii=False,
-            )
-        if operation == "head":
-            return json.dumps(self._content_store.head(ref=ref, path=path, lines=int(lines or 80)), ensure_ascii=False)
-        if operation == "tail":
-            return json.dumps(self._content_store.tail(ref=ref, path=path, lines=int(lines or 80)), ensure_ascii=False)
-        return json.dumps({"ok": False, "error": f"Unsupported content action: {operation}"}, ensure_ascii=False)
+        try:
+            if operation == "describe":
+                return json.dumps(self._content_store.describe(ref=ref, path=path), ensure_ascii=False)
+            if operation == "search":
+                return json.dumps(
+                    self._content_store.search(
+                        ref=ref,
+                        path=path,
+                        query=str(query or ""),
+                        limit=int(limit or 10),
+                        before=int(before or 2),
+                        after=int(after or 2),
+                    ),
+                    ensure_ascii=False,
+                )
+            if operation == "open":
+                return json.dumps(
+                    self._content_store.open(
+                        ref=ref,
+                        path=path,
+                        start_line=int(start_line) if start_line is not None else None,
+                        end_line=int(end_line) if end_line is not None else None,
+                        around_line=int(around_line) if around_line is not None else None,
+                        window=int(window) if window is not None else None,
+                    ),
+                    ensure_ascii=False,
+                )
+            if operation == "head":
+                return json.dumps(self._content_store.head(ref=ref, path=path, lines=int(lines or 80)), ensure_ascii=False)
+            if operation == "tail":
+                return json.dumps(self._content_store.tail(ref=ref, path=path, lines=int(lines or 80)), ensure_ascii=False)
+            return json.dumps({"ok": False, "error": f"Unsupported content action: {operation}"}, ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 
 
 def build(runtime):
     service = getattr(runtime.services, "main_task_service", None)
-    content_store = getattr(service, "content_store", None) if service is not None else None
+    settings = runtime_tool_settings(runtime, ContentToolSettings, tool_name='content')
+    shared_store = getattr(service, "content_store", None) if service is not None else None
+    artifact_store = getattr(shared_store, "_artifact_store", None)
+    artifact_lookup = getattr(shared_store, "_artifact_lookup", None)
+    if artifact_store is None and service is not None:
+        artifact_store = getattr(service, "artifact_store", None)
+    if artifact_lookup is None and service is not None:
+        artifact_lookup = getattr(service, "store", None) or artifact_store
+    content_store = ContentNavigationService(
+        workspace=runtime.workspace,
+        allowed_dir=runtime.workspace if settings.restrict_to_workspace else None,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_lookup,
+    )
     return ContentTool(workspace=runtime.workspace, content_store=content_store)
