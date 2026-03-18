@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -143,6 +144,8 @@ class RuntimeAgentSession:
             payload = raw.get("payload")
             event_payload = payload if isinstance(payload, dict) else {}
             event_data = event_payload.get("data") if isinstance(event_payload.get("data"), dict) else {}
+            if event_type == "tool_execution_update" and bool(event_data.get("watchdog")):
+                continue
             if event_type == "tool_execution_start":
                 status = "running"
                 is_update = False
@@ -201,6 +204,19 @@ class RuntimeAgentSession:
             return None
         return snapshot
 
+    @staticmethod
+    def _parse_progress_payload(content: Any) -> dict[str, Any] | None:
+        if not isinstance(content, str):
+            return None
+        text = content.strip()
+        if not text or text[:1] not in {"{", "["}:
+            return None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     def _allocate_tool_call_id(self, tool_name: str) -> str:
         normalized = str(tool_name or "tool").strip() or "tool"
         self._tool_seq += 1
@@ -253,6 +269,21 @@ class RuntimeAgentSession:
             return
 
         if kind == "tool_result":
+            payload = self._parse_progress_payload(content)
+            payload_status = str((payload or {}).get("status") or "").strip().lower()
+            if payload_status == "background_running":
+                resolved_tool_name, call_id = self._resolve_progress_tool_target(data)
+                self._enqueue_background_tool_heartbeat(payload=payload, tool_name=resolved_tool_name)
+                await self._emit(
+                    "tool_execution_update",
+                    kind="tool_background",
+                    tool_name=resolved_tool_name,
+                    tool_call_id=call_id,
+                    text=str(content or ""),
+                    data=data,
+                )
+                await self._emit_state_snapshot()
+                return
             call_id = self._pop_tool_call_id(tool_name)
             self._state.pending_tool_calls.discard(call_id)
             await self._emit(
@@ -319,6 +350,21 @@ class RuntimeAgentSession:
             data=data,
         )
 
+    def _enqueue_background_tool_heartbeat(self, *, payload: dict[str, Any] | None, tool_name: str) -> None:
+        heartbeat = getattr(self._loop, "web_session_heartbeat", None)
+        if heartbeat is None or not hasattr(heartbeat, "enqueue_tool_background"):
+            return
+        session_key = str(self._state.session_key or "").strip()
+        execution_id = str((payload or {}).get("execution_id") or "").strip()
+        if not session_key or not execution_id:
+            return
+        handoff_payload = dict(payload or {})
+        handoff_payload["tool_name"] = str(handoff_payload.get("tool_name") or tool_name or "tool").strip() or "tool"
+        try:
+            heartbeat.enqueue_tool_background(session_id=session_key, payload=handoff_payload)
+        except Exception:
+            logger.debug("Background tool heartbeat enqueue skipped for {}", session_key)
+
     async def _run_message(self, user_input: UserInputMessage) -> str:
         self._multi_agent_runner = getattr(self._loop, "multi_agent_runner", None)
         if self._multi_agent_runner is None:
@@ -382,6 +428,7 @@ class RuntimeAgentSession:
             self._state.status = "completed"
             self._state.pending_tool_calls.clear()
             user_text = self._history_text(user_input.content)
+            interaction_flow = self._interaction_flow_snapshot()
             if getattr(self._loop, "prompt_trace", False):
                 logger.info(render_output_trace(output))
             persisted_session = None
@@ -394,7 +441,10 @@ class RuntimeAgentSession:
                         attachments=list(user_input.attachments or []),
                         metadata=dict(user_input.metadata or {}),
                     )
-                    persisted_session.add_message("assistant", output)
+                    assistant_payload: dict[str, Any] = {}
+                    if interaction_flow:
+                        assistant_payload["tool_events"] = interaction_flow
+                    persisted_session.add_message("assistant", output, **assistant_payload)
                     if self._state.session_key.startswith("web:"):
                         from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
 

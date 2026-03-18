@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import contextvars
 import inspect
+import json
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import ConfigDict, Field, create_model
 
 from g3ku.agent.tools.base import Tool
+from g3ku.runtime.tool_watchdog import run_tool_with_watchdog
+
+_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 
 
 class ToolRegistry:
@@ -80,31 +84,45 @@ class ToolRegistry:
                 await self._emit_progress(f"[tool:{name}] 鍙傛暟鏍￠獙澶辫触: {'; '.join(errors)}")
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
 
-            execute_kwargs = dict(normalized)
             runtime_context = self._runtime_context.get() or {}
             callback = runtime_context.get("on_progress")
             emit_lifecycle = bool(runtime_context.get("emit_lifecycle", False))
-            if runtime_context and self._accepts_runtime_context(tool):
-                execute_kwargs["__g3ku_runtime"] = runtime_context
 
             if callback and emit_lifecycle:
                 try:
-                    await callback(f"{name} started", event_kind="tool_start", event_data={"tool_name": name})
+                    await self._emit_runtime_event(
+                        f"{name} started",
+                        event_kind="tool_start",
+                        event_data={"tool_name": name},
+                    )
                 except Exception:
                     pass
 
-            result = await tool.execute(**execute_kwargs)
+            result = await self._execute_tool_with_runtime(
+                tool=tool,
+                tool_name=name,
+                params=normalized,
+                runtime_context=runtime_context,
+            )
             if isinstance(result, str) and result.startswith("Error"):
                 await self._emit_progress(f"[tool:{name}] 鎵ц澶辫触: {result}")
                 if callback and emit_lifecycle:
                     try:
-                        await callback(result, event_kind="tool_error", event_data={"tool_name": name})
+                        await self._emit_runtime_event(
+                            result,
+                            event_kind="tool_error",
+                            event_data={"tool_name": name},
+                        )
                     except Exception:
                         pass
                 return result + _hint
             if callback and emit_lifecycle:
                 try:
-                    await callback(str(result or ''), event_kind="tool_result", event_data={"tool_name": name})
+                    await self._emit_runtime_event(
+                        self._stringify_result(result),
+                        event_kind="tool_result",
+                        event_data={"tool_name": name},
+                    )
                 except Exception:
                     pass
             return result
@@ -114,7 +132,11 @@ class ToolRegistry:
             callback = runtime_context.get("on_progress")
             if callback and runtime_context.get("emit_lifecycle"):
                 try:
-                    await callback(str(e), event_kind="tool_error", event_data={"tool_name": name})
+                    await self._emit_runtime_event(
+                        str(e),
+                        event_kind="tool_error",
+                        event_data={"tool_name": name},
+                    )
                 except Exception:
                     pass
             return f"Error executing {name}: {str(e)}" + _hint
@@ -203,6 +225,135 @@ class ToolRegistry:
     def get_runtime_context(self) -> dict[str, Any]:
         """Return current tool runtime context."""
         return self._runtime_context.get() or {}
+
+    async def _execute_tool_with_runtime(
+        self,
+        *,
+        tool: Tool,
+        tool_name: str,
+        params: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> Any:
+        execute_kwargs = dict(params)
+        if runtime_context and self._accepts_runtime_context(tool):
+            execute_kwargs["__g3ku_runtime"] = runtime_context
+
+        async def _invoke() -> Any:
+            resource_manager = self._resolve_resource_manager(runtime_context)
+            if resource_manager is not None and resource_manager.get_tool_descriptor(tool_name) is not None:
+                with resource_manager.acquire_tool(tool_name):
+                    return await tool.execute(**execute_kwargs)
+            return await tool.execute(**execute_kwargs)
+
+        execution_manager = self._resolve_tool_execution_manager(runtime_context)
+        if not self._should_use_watchdog(
+            tool_name=tool_name,
+            runtime_context=runtime_context,
+            execution_manager=execution_manager,
+        ):
+            return await _invoke()
+
+        outcome = await run_tool_with_watchdog(
+            _invoke(),
+            tool_name=tool_name,
+            arguments=params,
+            runtime_context=runtime_context,
+            manager=execution_manager,
+            on_poll=(
+                (lambda poll: self._emit_watchdog_progress(tool_name=tool_name, poll=poll))
+                if runtime_context.get("on_progress")
+                else None
+            ),
+        )
+        return outcome.value
+
+    def _should_use_watchdog(
+        self,
+        *,
+        tool_name: str,
+        runtime_context: dict[str, Any],
+        execution_manager: Any,
+    ) -> bool:
+        if not runtime_context:
+            return False
+        if runtime_context.get("skip_tool_registry_watchdog"):
+            return False
+        if tool_name in _CONTROL_TOOL_NAMES:
+            return False
+        if execution_manager is not None:
+            return True
+        if callable(runtime_context.get("tool_snapshot_supplier")):
+            return True
+        if runtime_context.get("cancel_token") is not None:
+            return True
+        return isinstance(runtime_context.get("tool_watchdog"), dict)
+
+    async def _emit_watchdog_progress(self, *, tool_name: str, poll: dict[str, Any]) -> None:
+        if not isinstance(poll, dict):
+            return
+        snapshot = poll.get("snapshot")
+        summary_text = str(snapshot.get("summary_text") or "").strip() if isinstance(snapshot, dict) else ""
+        elapsed = float(poll.get("elapsed_seconds") or 0.0)
+        next_handoff = float(poll.get("next_handoff_in_seconds") or 0.0)
+        text = f"{tool_name} 仍在处理中，已等待 {elapsed:.0f} 秒。"
+        if summary_text:
+            text = f"{text} 当前看到的阶段：{summary_text}"
+        else:
+            text = f"{text} 暂时还没有新的阶段快照。"
+        if next_handoff > 0:
+            text = f"{text} 如果还没完成，我会在约 {next_handoff:.0f} 秒后把新的运行快照交回给 agent。"
+        await self._emit_runtime_event(
+            text,
+            event_kind="tool",
+            event_data={"tool_name": tool_name, "watchdog": True},
+        )
+
+    async def _emit_runtime_event(
+        self,
+        content: str,
+        *,
+        event_kind: str | None = None,
+        event_data: dict[str, Any] | None = None,
+    ) -> None:
+        runtime_context = self._runtime_context.get() or {}
+        callback = runtime_context.get("on_progress")
+        if not callback:
+            return
+        try:
+            result = callback(content, event_kind=event_kind, event_data=event_data)
+        except TypeError:
+            result = callback(content)
+        if inspect.isawaitable(result):
+            await result
+
+    @staticmethod
+    def _resolve_tool_execution_manager(runtime_context: dict[str, Any]) -> Any:
+        manager = runtime_context.get("tool_execution_manager")
+        if manager is not None:
+            return manager
+        loop = runtime_context.get("loop")
+        if loop is not None:
+            return getattr(loop, "tool_execution_manager", None)
+        return None
+
+    @staticmethod
+    def _resolve_resource_manager(runtime_context: dict[str, Any]) -> Any:
+        manager = runtime_context.get("resource_manager")
+        if manager is not None:
+            return manager
+        loop = runtime_context.get("loop")
+        if loop is not None:
+            return getattr(loop, "resource_manager", None)
+        return None
+
+    @staticmethod
+    def _stringify_result(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
 
     @staticmethod
     def _accepts_runtime_context(tool: Tool) -> bool:

@@ -284,6 +284,18 @@ const MD_TOKEN_MARKER = "\uE000";
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const activeSessionId = () => String(S.activeSessionId || ApiClient.getActiveSessionId()).trim() || ApiClient.getActiveSessionId();
 
+function patchCeoSessionRuntimeState(sessionId, isRunning) {
+    const key = String(sessionId || "").trim();
+    if (!key || !Array.isArray(S.ceoSessions)) return false;
+    const index = S.ceoSessions.findIndex((item) => String(item?.session_id || "").trim() === key);
+    if (index < 0) return false;
+    const current = S.ceoSessions[index] && typeof S.ceoSessions[index] === "object" ? S.ceoSessions[index] : {};
+    const nextValue = !!isRunning;
+    if (!!current.is_running === nextValue) return false;
+    S.ceoSessions[index] = { ...current, is_running: nextValue };
+    return true;
+}
+
 function formatSessionTime(value) {
     const raw = String(value || "").trim();
     if (!raw) return "No activity yet";
@@ -626,14 +638,19 @@ function canMutateCeoSessions() {
     return !(S.ceoTurnActive || S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
 }
 
+function canCreateCeoSessions() {
+    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
+}
+
 function canActivateCeoSessions() {
     return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
 }
 
 function syncCeoSessionActions() {
     const mutationDisabled = !canMutateCeoSessions();
+    const creationDisabled = !canCreateCeoSessions();
     const activationDisabled = !canActivateCeoSessions();
-    if (U.ceoNewSession) U.ceoNewSession.disabled = mutationDisabled;
+    if (U.ceoNewSession) U.ceoNewSession.disabled = creationDisabled;
     U.ceoSessionList?.querySelectorAll("[data-session-activate]")?.forEach((button) => {
         const targetId = String(button?.dataset?.sessionActivate || "").trim();
         button.disabled = activationDisabled || targetId === activeSessionId();
@@ -942,6 +959,7 @@ function applyCeoState(state = {}, meta = {}) {
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
     S.ceoTurnActive = running;
+    if (patchCeoSessionRuntimeState(activeSessionId(), running)) renderCeoSessions();
     if (!running) S.ceoPauseBusy = false;
     if (running && !(source === "heartbeat" && !getActiveCeoTurn())) {
         ensureActiveCeoTurn({ source });
@@ -961,6 +979,7 @@ function handleCeoControlAck(payload = {}) {
         return;
     }
     S.ceoTurnActive = false;
+    if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     finalizePausedCeoTurn();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
@@ -969,6 +988,7 @@ function handleCeoControlAck(payload = {}) {
 function handleCeoError(payload = {}) {
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
+    if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
     finalizeCeoTurn(`运行出错：${String(payload?.message || "unknown error")}`);
@@ -1077,8 +1097,14 @@ function restoreCeoInflightTurn(snapshot = null) {
     }
     const status = String(snapshot.status || "").trim().toLowerCase();
     const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
+    const assistantText = String(snapshot.assistant_text || "").trim();
     const needsAssistantTurn = toolEvents.length > 0 || status === "paused" || status === "error" || (!isHeartbeat && status === "running");
-    if (needsAssistantTurn) ensureActiveCeoTurn({ source });
+    const turn = needsAssistantTurn ? ensureActiveCeoTurn({ source }) : null;
+    if (turn?.textEl && assistantText) {
+        turn.textEl.innerHTML = renderMarkdown(assistantText);
+        turn.textEl.classList.remove("pending");
+        turn.textEl.classList.add("markdown-content");
+    }
     toolEvents.forEach((event) => appendCeoToolEvent(event));
     if (status === "error") {
         const errorMessage = String(snapshot?.last_error?.message || "").trim() || "unknown error";
@@ -1086,23 +1112,49 @@ function restoreCeoInflightTurn(snapshot = null) {
     }
 }
 
+function renderPersistedCeoAssistantTurn(item = {}) {
+    const toolEvents = Array.isArray(item?.tool_events) ? item.tool_events : [];
+    const content = String(item?.content || "");
+    if (!toolEvents.length) {
+        addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+        return;
+    }
+    const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
+    if (!turn) {
+        addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+        return;
+    }
+    S.ceoPendingTurns.push(turn);
+    toolEvents.forEach((event) => appendCeoToolEvent({
+        ...(event && typeof event === "object" ? event : {}),
+        source: "history",
+    }));
+    finalizeCeoTurn(content, { source: "history" });
+}
+
 function renderCeoSnapshot(messages = [], inflightTurn = null) {
-    mutateCeoFeed(() => {
-        resetCeoFeed();
-        messages.forEach((item) => {
-            const role = String(item?.role || "").trim().toLowerCase();
-            const content = String(item?.content || "");
-            if (!content.trim()) return;
-            if (role === "user") {
-                addMsg(content, "user", { scrollMode: "preserve" });
-                return;
-            }
-            if (role === "assistant" || role === "system") {
-                addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
-            }
-        });
-        restoreCeoInflightTurn(inflightTurn);
-    }, { scrollMode: "preserve" });
+    resetCeoFeed();
+    messages.forEach((item) => {
+        const role = String(item?.role || "").trim().toLowerCase();
+        const content = String(item?.content || "");
+        const attachments = normalizeUploadList(item?.attachments);
+        if (role === "user") {
+            if (!content.trim() && !attachments.length) return;
+            addMsg(hasRenderableText(content) ? content : summarizeUploads(attachments), "user", {
+                attachments,
+                scrollMode: "preserve",
+            });
+            return;
+        }
+        if (role === "assistant") {
+            renderPersistedCeoAssistantTurn(item);
+            return;
+        }
+        if (role === "system" && content.trim()) {
+            addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+        }
+    });
+    restoreCeoInflightTurn(inflightTurn);
 }
 
 function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
@@ -1241,16 +1293,47 @@ function parseJsonObjectText(raw = "") {
     }
 }
 
+function ceoPayloadStatus(detail = "") {
+    const payload = parseJsonObjectText(detail);
+    return {
+        payload,
+        status: String(payload?.status || "").trim().toLowerCase(),
+    };
+}
+
+function resolveCeoToolEventStatus(event = {}) {
+    const fallback = String(event?.status || "running").trim().toLowerCase() || "running";
+    const { status } = ceoPayloadStatus(event?.text || "");
+    if (status === "background_running") return "running";
+    if (status === "completed") return "success";
+    if (["stopped", "failed", "error", "not_found", "unavailable"].includes(status)) return "error";
+    return fallback;
+}
+
 function ceoFriendlyToolDetail(toolName = "", detail = "", status = "running", kind = "") {
     const normalizedTool = String(toolName || "").trim().toLowerCase();
     const raw = String(detail || "").trim();
     const lower = raw.toLowerCase();
     const normalizedKind = String(kind || "").trim().toLowerCase();
-    const payload = parseJsonObjectText(raw);
+    const { payload, status: payloadStatus } = ceoPayloadStatus(raw);
     if (!raw) {
         if (status === "error") return "处理失败，请检查错误信息";
         if (status === "success") return "处理完成";
         return "正在处理中...";
+    }
+    if (payloadStatus === "background_running") {
+        const snapshotSummary = String(payload?.runtime_snapshot?.summary_text || "").trim();
+        const elapsedSeconds = Number(payload?.elapsed_seconds);
+        const waitSeconds = Number(payload?.recommended_wait_seconds);
+        const fragments = ["已转入后台继续运行"];
+        if (Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0) {
+            fragments.push(`已等待 ${Math.round(elapsedSeconds)} 秒`);
+        }
+        if (snapshotSummary) fragments.push(snapshotSummary);
+        if (Number.isFinite(waitSeconds) && waitSeconds > 0) {
+            fragments.push(`建议约 ${Math.round(waitSeconds)} 秒后再跟进`);
+        }
+        return fragments.join("。");
     }
     if (status === "error") {
         if (payload?.error) return `处理失败：${String(payload.error || "").trim()}`;
@@ -1286,6 +1369,10 @@ function ceoFriendlyToolDetail(toolName = "", detail = "", status = "running", k
 function ceoToolStage(toolName = "", detail = "", status = "running") {
     const normalizedTool = String(toolName || "").trim().toLowerCase();
     const lower = String(detail || "").trim().toLowerCase();
+    const { status: payloadStatus } = ceoPayloadStatus(detail);
+    if (payloadStatus === "background_running") {
+        return { icon: "clock-3", spinning: false, meta: "后台运行中" };
+    }
     if (status === "error") {
         return { icon: "alert-triangle", spinning: false, meta: "处理失败" };
     }
@@ -1462,14 +1549,12 @@ function appendCeoToolEvent(event = {}) {
     const turn = ensureActiveCeoTurn({ source });
     if (!turn?.listEl || !turn.flowEl) return;
     mutateCeoFeed(() => {
-        const status = String(event.status || "running").trim().toLowerCase();
+        const status = resolveCeoToolEventStatus(event);
         const toolName = String(event.tool_name || "tool").trim() || "tool";
         const rawText = String(event.text || "").trim();
         const detail = ceoFriendlyToolDetail(toolName, rawText, status, event.kind);
         const toolCallId = String(event.tool_call_id || "").trim();
         let item = findCeoToolStep(turn, { toolCallId, toolName });
-        const existingDetail = String(item?.querySelector(".interaction-step-detail")?.textContent || "").trim();
-        const mergedDetail = mergeInteractionDetail(existingDetail, detail);
         const stage = ceoToolStage(toolName, rawText, status);
         if (!(item instanceof HTMLElement)) {
             item = document.createElement("div");
@@ -1492,20 +1577,20 @@ function appendCeoToolEvent(event = {}) {
         const eventTimestamp = String(event.timestamp || "").trim();
         const eventElapsed = Number.parseFloat(String(event.elapsed_seconds ?? ""));
         if (!item.dataset.startedAt && eventTimestamp) item.dataset.startedAt = eventTimestamp;
-        if (event.status === "success" || event.status === "error") {
+        if (status === "success" || status === "error") {
             if (eventTimestamp) item.dataset.finishedAt = eventTimestamp;
         } else {
             delete item.dataset.finishedAt;
         }
         if (Number.isFinite(eventElapsed) && eventElapsed >= 0) {
             item.dataset.elapsedSeconds = String(eventElapsed);
-        } else if (event.status === "running") {
+        } else if (status === "running") {
             delete item.dataset.elapsedSeconds;
         }
         applyCeoToolStepState(item, {
             status,
             toolName,
-            detail: mergedDetail || detail,
+            detail,
             toolCallId,
             kind: event.kind,
             stage,
@@ -1524,6 +1609,7 @@ function appendCeoToolEvent(event = {}) {
 function finalizeCeoTurn(text, meta = {}) {
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
+    if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     syncCeoPrimaryButton();
     const turn = pullActiveCeoTurn(meta?.source || "");
     if (!turn?.textEl || !turn.flowEl) {
@@ -1536,9 +1622,13 @@ function finalizeCeoTurn(text, meta = {}) {
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
         if (turn.steps > 0) {
+            const hasRunningStep = !!turn.listEl?.querySelector?.(".interaction-step.running");
             turn.flowEl.hidden = false;
             turn.flowEl.open = false;
-            updateCeoTurnMeta(turn, turn.hasError ? "处理完成，但有异常" : "处理完成");
+            updateCeoTurnMeta(
+                turn,
+                turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
+            );
         } else {
             turn.flowEl.hidden = true;
         }
@@ -3033,19 +3123,22 @@ function renderCeoSessions() {
     U.ceoSessionList.innerHTML = sessions.map((item) => {
         const sessionId = String(item?.session_id || "");
         const isActive = sessionId === currentId;
+        const isRunning = !!item?.is_running;
         const preview = String(item?.preview_text || "").trim() || "No messages yet.";
+        const title = String(item?.title || sessionId || "Session");
         const unreadCount = isActive ? 0 : sessionUnreadCount(sessionId);
         const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
         return `
-            <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}" role="listitem">
+            <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}" role="listitem">
                 <button
                     type="button"
                     class="ceo-session-main ceo-session-select"
                     data-session-activate="${esc(sessionId)}"
                     aria-pressed="${isActive ? "true" : "false"}"
+                    aria-label="${esc(`${title}${isRunning ? "（运行中）" : ""}`)}"
                 >
                     <div class="ceo-session-head">
-                        <div class="ceo-session-title">${esc(String(item.title || sessionId || "Session"))}</div>
+                        <div class="ceo-session-title">${esc(title)}</div>
                         ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
                     </div>
                     <div class="ceo-session-preview">${esc(preview)}</div>
@@ -3134,8 +3227,8 @@ async function activateCeoSession(sessionId) {
 }
 
 async function createNewCeoSession() {
-    if (!canMutateCeoSessions()) {
-        showToast({ title: "当前不可新建", text: "请先等待当前回合完成或暂停后再新建会话。", kind: "warn" });
+    if (!canCreateCeoSessions()) {
+        showToast({ title: "当前不可新建", text: "请先等待当前上传、暂停请求或会话切换操作完成后再新建会话。", kind: "warn" });
         return;
     }
     S.ceoSessionBusy = true;
@@ -3381,6 +3474,7 @@ function sendCeoMessage() {
         if (turn) S.ceoPendingTurns.push(turn);
         S.ceoTurnActive = true;
         S.ceoPauseBusy = false;
+        if (patchCeoSessionRuntimeState(activeSessionId(), true)) renderCeoSessions();
         syncCeoSessionActions();
         syncCeoPrimaryButton();
     } catch (e) {

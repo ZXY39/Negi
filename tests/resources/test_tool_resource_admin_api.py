@@ -568,6 +568,132 @@ def test_ceo_session_activate_endpoint_allows_switching_from_running_session(tmp
     assert ceo_sessions.WebCeoStateStore(tmp_path).get_active_session_id() == other.key
 
 
+def test_ceo_session_list_endpoint_reports_running_state(tmp_path: Path):
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    current = Session(key='web:ceo-current', metadata={'title': 'Current Session'})
+    other = Session(key='web:ceo-other', metadata={'title': 'Other Session'})
+    current_path = tmp_path / 'sessions' / 'web_ceo_current.jsonl'
+    other_path = tmp_path / 'sessions' / 'web_ceo_other.jsonl'
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    other_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    manager = _SessionManager(
+        [current, other],
+        {
+            current.key: current_path,
+            other.key: other_path,
+        },
+    )
+
+    from g3ku.runtime.api import ceo_sessions
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    ceo_sessions.get_agent = lambda: SimpleNamespace(sessions=manager)
+    ceo_sessions.get_runtime_manager = lambda _agent: SimpleNamespace(
+        get=lambda session_id: (
+            SimpleNamespace(state=SimpleNamespace(status='running', is_running=True))
+            if session_id == current.key
+            else None
+        )
+    )
+    ceo_sessions.workspace_path = lambda: tmp_path
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    response = client.get('/api/ceo/sessions')
+
+    assert response.status_code == 200
+    payload = response.json()
+    items = {item['session_id']: item for item in payload['items']}
+    assert items[current.key]['is_running'] is True
+    assert items[other.key]['is_running'] is False
+
+
+def test_ceo_session_create_endpoint_allows_new_session_while_current_session_is_running(
+    tmp_path: Path,
+    monkeypatch,
+):
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            if key not in self._sessions:
+                self._sessions[key] = Session(key=key, metadata={})
+                path = tmp_path / 'sessions' / f"{key.replace(':', '_')}.jsonl"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+                self._paths[key] = path
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+            self._paths.setdefault(
+                session.key,
+                tmp_path / 'sessions' / f"{session.key.replace(':', '_')}.jsonl",
+            )
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    current = Session(key='web:ceo-current', metadata={'title': 'Current Session'})
+    current_path = tmp_path / 'sessions' / 'web_ceo_current.jsonl'
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    manager = _SessionManager([current], {current.key: current_path})
+
+    from g3ku.runtime.api import ceo_sessions
+    from g3ku.runtime import web_ceo_sessions
+
+    monkeypatch.setattr(web_ceo_sessions, 'new_web_ceo_session_id', lambda: 'web:ceo-new')
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    ceo_sessions.get_agent = lambda: SimpleNamespace(sessions=manager)
+    ceo_sessions.get_runtime_manager = lambda _agent: SimpleNamespace(
+        get=lambda session_id: (
+            SimpleNamespace(state=SimpleNamespace(status='running', is_running=True))
+            if session_id == current.key
+            else None
+        )
+    )
+    ceo_sessions.workspace_path = lambda: tmp_path
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    response = client.post('/api/ceo/sessions', json={'title': 'Parallel Session'})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['active_session_id'] == 'web:ceo-new'
+    assert payload['item']['session_id'] == 'web:ceo-new'
+    assert payload['item']['title'] == 'Parallel Session'
+    assert ceo_sessions.WebCeoStateStore(tmp_path).get_active_session_id() == 'web:ceo-new'
+
+
 def test_task_rest_endpoint_normalizes_short_task_id():
     captured: dict[str, str] = {}
 

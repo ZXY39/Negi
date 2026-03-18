@@ -59,6 +59,14 @@ def _assert_no_running_turn(runtime_manager, session_id: str):
         raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
 
 
+def _list_session_items(session_manager, runtime_manager, *, active_session_id: str) -> list[dict]:
+    return list_web_ceo_sessions(
+        session_manager,
+        active_session_id=active_session_id,
+        is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
+    )
+
+
 async def _task_service(agent):
     service = getattr(agent, 'main_task_service', None)
     if service is None:
@@ -121,20 +129,19 @@ def _task_defaults_response(session) -> dict:
 
 @router.get("/ceo/sessions")
 async def list_ceo_sessions():
-    _agent, session_manager, _runtime_manager, state_store = _sessions()
+    _agent, session_manager, runtime_manager, state_store = _sessions()
     active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
-    items = list_web_ceo_sessions(session_manager, active_session_id=active_session_id)
+    items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
     return {"ok": True, "items": items, "active_session_id": active_session_id}
 
 
 @router.post("/ceo/sessions")
 async def create_ceo_session(payload: dict | None = Body(default=None)):
     _agent, session_manager, runtime_manager, state_store = _sessions()
-    current_active = ensure_active_web_ceo_session(session_manager, state_store)
-    _assert_no_running_turn(runtime_manager, current_active)
+    ensure_active_web_ceo_session(session_manager, state_store)
     session = create_web_ceo_session(session_manager, title=str((payload or {}).get("title") or "").strip() or None)
     state_store.set_active_session_id(session.key)
-    items = list_web_ceo_sessions(session_manager, active_session_id=session.key)
+    items = _list_session_items(session_manager, runtime_manager, active_session_id=session.key)
     item = next((entry for entry in items if entry["session_id"] == session.key), None)
     return {"ok": True, "item": item, "items": items, "active_session_id": session.key}
 
@@ -153,7 +160,7 @@ async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     session.updated_at = datetime.now()
     session_manager.save(session)
     active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
-    items = list_web_ceo_sessions(session_manager, active_session_id=active_session_id)
+    items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
     item = next((entry for entry in items if entry["session_id"] == session.key), None)
     return {"ok": True, "item": item, "items": items, "active_session_id": active_session_id}
 
@@ -192,11 +199,11 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
 
 @router.post("/ceo/sessions/{session_id}/activate")
 async def activate_ceo_session(session_id: str):
-    _agent, session_manager, _runtime_manager, state_store = _sessions()
+    _agent, session_manager, runtime_manager, state_store = _sessions()
     target = _assert_known_session(session_manager, session_id)
     ensure_active_web_ceo_session(session_manager, state_store)
     state_store.set_active_session_id(target.key)
-    items = list_web_ceo_sessions(session_manager, active_session_id=target.key)
+    items = _list_session_items(session_manager, runtime_manager, active_session_id=target.key)
     item = next((entry for entry in items if entry["session_id"] == target.key), None)
     return {"ok": True, "item": item, "items": items, "active_session_id": target.key}
 
@@ -243,7 +250,7 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
         await cancel(session.key)
     active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
-    items = list_web_ceo_sessions(session_manager, active_session_id=active_session_id)
+    items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
     return {
         "ok": True,
         "deleted": True,

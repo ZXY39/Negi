@@ -5,7 +5,7 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from g3ku.config.loader import load_config
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
@@ -139,7 +139,7 @@ def upload_dir_for_session(session_id: str, *, create: bool = True) -> Path:
     return ensure_dir(path) if create else path
 
 
-def build_session_summary(session: Any, *, is_active: bool) -> dict[str, Any]:
+def build_session_summary(session: Any, *, is_active: bool, is_running: bool = False) -> dict[str, Any]:
     ensure_ceo_session_metadata(session)
     preview_text = str(session.metadata.get("last_preview_text") or "").strip()
     if not preview_text:
@@ -158,6 +158,7 @@ def build_session_summary(session: Any, *, is_active: bool) -> dict[str, Any]:
         "created_at": created_at.isoformat() if isinstance(created_at, datetime) else str(created_at or ""),
         "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else str(updated_at or ""),
         "is_active": bool(is_active),
+        "is_running": bool(is_running),
         "task_defaults": dict(session.metadata.get("task_defaults") or {}),
     }
 
@@ -213,7 +214,12 @@ def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str) -
         shutil.rmtree(upload_dir, ignore_errors=True)
 
 
-def list_web_ceo_sessions(session_manager: Any, *, active_session_id: str) -> list[dict[str, Any]]:
+def list_web_ceo_sessions(
+    session_manager: Any,
+    *,
+    active_session_id: str,
+    is_running_resolver: Callable[[str], bool] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     changed_keys: list[str] = []
     for item in session_manager.list_sessions():
@@ -223,7 +229,13 @@ def list_web_ceo_sessions(session_manager: Any, *, active_session_id: str) -> li
         session = session_manager.get_or_create(key)
         if ensure_ceo_session_metadata(session):
             changed_keys.append(key)
-        rows.append(build_session_summary(session, is_active=key == active_session_id))
+        is_running = False
+        if callable(is_running_resolver):
+            try:
+                is_running = bool(is_running_resolver(key))
+            except Exception:
+                is_running = False
+        rows.append(build_session_summary(session, is_active=key == active_session_id, is_running=is_running))
     for key in changed_keys:
         session_manager.save(session_manager.get_or_create(key))
     rows.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("session_id") or "")), reverse=True)

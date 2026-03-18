@@ -99,6 +99,7 @@ def _build_web_heartbeat(agent: AgentLoop, runtime_manager: SessionRuntimeManage
     main_task_service = getattr(agent, 'main_task_service', None)
     session_manager = getattr(agent, 'sessions', None)
     if main_task_service is None or session_manager is None:
+        setattr(agent, 'web_session_heartbeat', None)
         return None
     heartbeat = WebSessionHeartbeatService(
         workspace=getattr(agent, 'workspace', '.'),
@@ -107,6 +108,7 @@ def _build_web_heartbeat(agent: AgentLoop, runtime_manager: SessionRuntimeManage
         main_task_service=main_task_service,
         session_manager=session_manager,
     )
+    setattr(agent, 'web_session_heartbeat', heartbeat)
     log_service = getattr(main_task_service, 'log_service', None)
     if log_service is not None and not bool(getattr(log_service, '_web_session_heartbeat_bound', False)):
         log_service.add_task_terminal_listener(heartbeat.enqueue_task_terminal)

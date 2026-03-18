@@ -277,9 +277,22 @@ class MainRuntimeService:
         task_id = self.normalize_task_id(task_id)
         return self.store.get_task(task_id)
 
+    @staticmethod
+    def _normalize_session_key(session_id: str | None) -> str:
+        return str(session_id or 'web:shared').strip() or 'web:shared'
+
+    def _task_origin_session_id(self, task: TaskRecord | None) -> str:
+        if task is None:
+            return 'web:shared'
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        origin_session_id = str(metadata.get('origin_session_id') or '').strip()
+        if origin_session_id:
+            return origin_session_id
+        return self._normalize_session_key(getattr(task, 'session_id', 'web:shared'))
+
     def list_tasks_for_session(self, session_id: str) -> list[TaskRecord]:
-        key = str(session_id or 'web:shared').strip() or 'web:shared'
-        return self.store.list_tasks(key)
+        key = self._normalize_session_key(session_id)
+        return [task for task in self.store.list_tasks() if self._task_origin_session_id(task) == key]
 
     def list_unfinished_tasks_for_session(self, session_id: str) -> list[TaskRecord]:
         return [
@@ -358,7 +371,7 @@ class MainRuntimeService:
 
     def _normalize_task_metadata(self, *, session_id: str, metadata: dict[str, Any] | None) -> dict[str, Any]:
         payload = dict(metadata or {})
-        raw_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+        raw_session_id = self._normalize_session_key(session_id)
         payload.setdefault('origin_session_id', raw_session_id)
         if raw_session_id.startswith('web:'):
             payload['memory_scope'] = normalize_memory_scope(

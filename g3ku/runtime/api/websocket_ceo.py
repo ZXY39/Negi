@@ -206,6 +206,73 @@ def _history_text(content: Any) -> str:
     return str(content or '').strip()
 
 
+def _normalize_snapshot_attachments(message: dict[str, Any]) -> list[dict[str, Any]]:
+    metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
+    uploads = metadata.get('web_ceo_uploads') if isinstance(metadata, dict) else None
+    items: list[dict[str, Any]] = []
+    for raw in list(uploads or []):
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get('path') or '').strip()
+        if not path:
+            continue
+        name = str(raw.get('name') or Path(path).name).strip() or Path(path).name or path
+        mime_type = str(raw.get('mime_type') or raw.get('mimeType') or '').strip()
+        kind = str(raw.get('kind') or '').strip() or _upload_kind(mime_type=mime_type, name=name)
+        item = {
+            'path': path,
+            'name': name,
+            'mime_type': mime_type,
+            'kind': kind,
+        }
+        size = raw.get('size')
+        if isinstance(size, (int, float)):
+            item['size'] = int(size)
+        items.append(item)
+    if items:
+        return items
+    for raw in list(message.get('attachments') or []):
+        path = str(raw or '').strip()
+        if not path:
+            continue
+        name = Path(path).name or path
+        mime_type = _guess_upload_mime_type(name)
+        items.append(
+            {
+                'path': path,
+                'name': name,
+                'mime_type': mime_type,
+                'kind': _upload_kind(mime_type=mime_type, name=name),
+            }
+        )
+    return items
+
+
+def _normalize_snapshot_tool_events(raw_events: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for raw in list(raw_events or []):
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get('status') or '').strip().lower()
+        if status not in {'running', 'success', 'error'}:
+            status = 'error' if bool(raw.get('is_error')) else 'running' if bool(raw.get('is_update')) else 'success'
+        item = {
+            'status': status,
+            'tool_name': str(raw.get('tool_name') or 'tool').strip() or 'tool',
+            'text': str(raw.get('text') or '').strip(),
+            'timestamp': str(raw.get('timestamp') or '').strip(),
+            'tool_call_id': str(raw.get('tool_call_id') or '').strip(),
+            'is_error': bool(raw.get('is_error')),
+            'is_update': bool(raw.get('is_update')),
+            'kind': str(raw.get('kind') or '').strip(),
+        }
+        elapsed_seconds = raw.get('elapsed_seconds')
+        if isinstance(elapsed_seconds, (int, float)):
+            item['elapsed_seconds'] = float(elapsed_seconds)
+        items.append(item)
+    return items
+
+
 def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for raw in list(messages or []):
@@ -216,13 +283,24 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
         role = str(raw.get('role') or '').strip().lower()
         if role not in {'user', 'assistant', 'system'}:
             continue
+        metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
         content = _history_text(raw.get('content'))
-        if not content:
+        if role == 'user':
+            raw_text = metadata.get('web_ceo_raw_text')
+            if isinstance(raw_text, str) and raw_text.strip():
+                content = raw_text.strip()
+        attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
+        tool_events = _normalize_snapshot_tool_events(raw.get('tool_events')) if role == 'assistant' else []
+        if not content and not attachments and not tool_events:
             continue
         item = {'role': role, 'content': content}
         timestamp = raw.get('timestamp')
         if isinstance(timestamp, str) and timestamp.strip():
             item['timestamp'] = timestamp.strip()
+        if attachments:
+            item['attachments'] = attachments
+        if tool_events:
+            item['tool_events'] = tool_events
         items.append(item)
     return items
 
@@ -346,13 +424,12 @@ async def ceo_websocket(websocket: WebSocket):
 
     async def _run_user_turn(user_message: str | UserInputMessage) -> None:
         try:
-            result = await session.prompt(user_message)
+            await session.prompt(user_message)
         except asyncio.CancelledError:
             return
         except Exception as exc:
             await _push_stream_event('ceo.error', {'code': 'turn_failed', 'message': str(exc)})
             return
-        await _push_stream_event('ceo.reply.final', {'text': str(result.output or '')})
 
     async def sender(source_queue: asyncio.Queue[dict[str, Any]]) -> None:
         while True:
@@ -367,6 +444,14 @@ async def ceo_websocket(websocket: WebSocket):
         if event.type == 'state_snapshot':
             state = dict((event.payload or {}).get('state') or {})
             await _push_stream_event('ceo.state', {'state': state})
+            return
+        if event.type == 'message_end':
+            payload = dict(event.payload or {})
+            if str(payload.get('role') or '').strip().lower() != 'assistant':
+                return
+            text = str(payload.get('text') or '').strip()
+            if text:
+                await _push_stream_event('ceo.reply.final', {'text': text})
             return
         if not _should_forward_tool_event(session_id=session_id, event=event):
             return

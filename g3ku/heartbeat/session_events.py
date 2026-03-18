@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,7 @@ class SessionHeartbeatEvent:
     created_at: str
     dedupe_key: str
     payload: dict[str, Any]
+    ready_at_monotonic: float
 
 
 class SessionHeartbeatEventQueue:
@@ -31,6 +33,7 @@ class SessionHeartbeatEventQueue:
         reason: str,
         dedupe_key: str,
         payload: dict[str, Any] | None = None,
+        delay_seconds: float = 0.0,
     ) -> SessionHeartbeatEvent | None:
         key = str(session_id or '').strip()
         dedupe = str(dedupe_key or '').strip()
@@ -47,6 +50,7 @@ class SessionHeartbeatEventQueue:
             created_at=now_iso(),
             dedupe_key=dedupe,
             payload=dict(payload or {}),
+            ready_at_monotonic=time.monotonic() + max(0.0, float(delay_seconds or 0.0)),
         )
         self._events.setdefault(key, []).append(event)
         session_dedupe.add(dedupe)
@@ -93,6 +97,27 @@ class SessionHeartbeatEventQueue:
     def has_events(self, session_id: str) -> bool:
         key = str(session_id or '').strip()
         return bool(self._events.get(key))
+
+    def peek_ready(self, session_id: str, *, now_monotonic: float | None = None) -> list[SessionHeartbeatEvent]:
+        key = str(session_id or '').strip()
+        if not key:
+            return []
+        now_value = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        return [event for event in self._events.get(key, []) if float(event.ready_at_monotonic) <= now_value]
+
+    def next_delay(self, session_id: str, *, now_monotonic: float | None = None) -> float | None:
+        key = str(session_id or '').strip()
+        if not key:
+            return None
+        now_value = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        delays = [
+            max(0.0, float(event.ready_at_monotonic) - now_value)
+            for event in self._events.get(key, [])
+            if float(event.ready_at_monotonic) > now_value
+        ]
+        if not delays:
+            return None
+        return min(delays)
 
     def session_ids(self) -> list[str]:
         return sorted(key for key, events in self._events.items() if events)
