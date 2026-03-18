@@ -694,6 +694,115 @@ def test_ceo_session_create_endpoint_allows_new_session_while_current_session_is
     assert ceo_sessions.WebCeoStateStore(tmp_path).get_active_session_id() == 'web:ceo-new'
 
 
+def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: Path):
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def invalidate(self, key: str) -> None:
+            self._sessions.pop(key, None)
+            self._paths.pop(key, None)
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    class _TaskService:
+        async def startup(self) -> None:
+            return None
+
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return []
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            _ = session_id
+            return {'all': 0, 'in_progress': 0}
+
+    current = Session(key='web:ceo-delete-me', metadata={'title': 'Delete Me'})
+    other = Session(key='web:ceo-keep', metadata={'title': 'Keep Me'})
+    current_path = tmp_path / 'sessions' / 'web_ceo_delete_me.jsonl'
+    other_path = tmp_path / 'sessions' / 'web_ceo_keep.jsonl'
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    other_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    manager = _SessionManager(
+        [current, other],
+        {
+            current.key: current_path,
+            other.key: other_path,
+        },
+    )
+    captured: dict[str, object] = {}
+
+    class _Heartbeat:
+        def clear_session(self, session_id: str) -> None:
+            captured['heartbeat_cleared'] = session_id
+
+    class _ToolExecutionManager:
+        async def stop_session_executions(self, session_key: str, *, reason: str = 'session_deleted', **kwargs):
+            _ = kwargs
+            captured['stopped_session_key'] = session_key
+            captured['stop_reason'] = reason
+            return [
+                {'execution_id': 'tool-exec:1', 'status': 'stopped'},
+                {'execution_id': 'tool-exec:2', 'status': 'stopped'},
+            ]
+
+    class _RuntimeManager:
+        def get(self, session_id: str):
+            _ = session_id
+            return None
+
+        def remove(self, session_id: str):
+            captured['removed_session'] = session_id
+            return None
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        captured['cancelled_session'] = session_key
+        return 0
+
+    from g3ku.runtime.api import ceo_sessions
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    ceo_sessions.get_agent = lambda: SimpleNamespace(
+        sessions=manager,
+        main_task_service=_TaskService(),
+        tool_execution_manager=_ToolExecutionManager(),
+        cancel_session_tasks=_cancel_session_tasks,
+    )
+    ceo_sessions.get_runtime_manager = lambda _agent: _RuntimeManager()
+    ceo_sessions.get_web_heartbeat_service = lambda _agent: _Heartbeat()
+    ceo_sessions.workspace_path = lambda: tmp_path
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    response = client.delete(f'/api/ceo/sessions/{current.key}')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['deleted'] is True
+    assert payload['stopped_background_tool_count'] == 2
+    assert captured == {
+        'stopped_session_key': current.key,
+        'stop_reason': 'session_deleted',
+        'heartbeat_cleared': current.key,
+        'removed_session': current.key,
+        'cancelled_session': current.key,
+    }
+
+
 def test_task_rest_endpoint_normalizes_short_task_id():
     captured: dict[str, str] = {}
 

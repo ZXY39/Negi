@@ -228,6 +228,14 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     delete_check = _session_task_delete_payload(service, session.key)
     if not bool(delete_check.get('can_delete')):
         _raise_session_delete_blocked(session_id=session.key, payload=delete_check)
+    stopped_background_tool_count = 0
+    tool_execution_manager = getattr(agent, 'tool_execution_manager', None)
+    if tool_execution_manager is not None and hasattr(tool_execution_manager, 'stop_session_executions'):
+        stopped_results = await tool_execution_manager.stop_session_executions(
+            session.key,
+            reason='session_deleted',
+        )
+        stopped_background_tool_count = len(list(stopped_results or []))
     heartbeat = get_web_heartbeat_service(agent)
     if heartbeat is not None:
         heartbeat.clear_session(session.key)
@@ -256,6 +264,7 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
         "deleted": True,
         "session_id": session.key,
         "deleted_task_count": deleted_task_count,
+        "stopped_background_tool_count": stopped_background_tool_count,
         "items": items,
         "active_session_id": active_session_id,
     }

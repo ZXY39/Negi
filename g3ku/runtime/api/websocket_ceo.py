@@ -26,6 +26,7 @@ from g3ku.utils.helpers import safe_filename
 from main.protocol import build_envelope
 
 router = APIRouter()
+_HEARTBEAT_OK = "HEARTBEAT_OK"
 
 
 def _session_upload_dir(session_id: str) -> Path:
@@ -345,6 +346,18 @@ def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
     }
 
 
+def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
+    data = payload if isinstance(payload, dict) else {}
+    if str(data.get("role") or "").strip().lower() != "assistant":
+        return False
+    if bool(data.get("heartbeat_internal")):
+        return False
+    text = str(data.get("text") or "").strip()
+    if not text:
+        return False
+    return text != _HEARTBEAT_OK
+
+
 @router.websocket('/ws/ceo')
 async def ceo_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -447,11 +460,10 @@ async def ceo_websocket(websocket: WebSocket):
             return
         if event.type == 'message_end':
             payload = dict(event.payload or {})
-            if str(payload.get('role') or '').strip().lower() != 'assistant':
+            if not _should_forward_message_end(payload):
                 return
             text = str(payload.get('text') or '').strip()
-            if text:
-                await _push_stream_event('ceo.reply.final', {'text': text})
+            await _push_stream_event('ceo.reply.final', {'text': text})
             return
         if not _should_forward_tool_event(session_id=session_id, event=event):
             return

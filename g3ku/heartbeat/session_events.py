@@ -83,6 +83,29 @@ class SessionHeartbeatEventQueue:
                 self._dedupe.pop(key, None)
         return removed
 
+    def remove_where(self, session_id: str, *, predicate) -> list[SessionHeartbeatEvent]:
+        key = str(session_id or "").strip()
+        if not key or not callable(predicate):
+            return []
+        removed: list[SessionHeartbeatEvent] = []
+        retained: list[SessionHeartbeatEvent] = []
+        for event in self._events.get(key, []):
+            if predicate(event):
+                removed.append(event)
+            else:
+                retained.append(event)
+        if retained:
+            self._events[key] = retained
+        else:
+            self._events.pop(key, None)
+        dedupe = self._dedupe.get(key)
+        if dedupe is not None:
+            for event in removed:
+                dedupe.discard(event.dedupe_key)
+            if not dedupe:
+                self._dedupe.pop(key, None)
+        return removed
+
     def clear_session(self, session_id: str) -> None:
         key = str(session_id or '').strip()
         if not key:

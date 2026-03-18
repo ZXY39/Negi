@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sys
 import textwrap
 import time
 from pathlib import Path
@@ -59,6 +58,12 @@ def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.1):
             return last_value
         time.sleep(interval)
     raise AssertionError(f'Condition not met within {timeout:.1f}s; last value={last_value!r}')
+
+
+def _python_launcher() -> str:
+    if os.name == 'nt':
+        return 'py -3'
+    return 'python3' if shutil.which('python3') else 'python'
 
 
 def _write_demo_tool(root: Path, *, name: str = 'demo_echo', guide: str = 'Demo echo guide') -> Path:
@@ -528,7 +533,7 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
         manifest.read_text(encoding='utf-8')
         .replace('timeout: 60', 'timeout: 7')
         .replace("path_append: ''", "path_append: 'D:/bin'")
-        .replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+        .replace('restrict_to_workspace: true', 'restrict_to_workspace: false'),
         encoding='utf-8',
     )
 
@@ -540,7 +545,7 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
         handler = tool._handler
         assert handler.timeout == 7
         assert handler.path_append == 'D:/bin'
-        assert handler.restrict_to_workspace is True
+        assert handler.restrict_to_workspace is False
     finally:
         manager.close()
 
@@ -623,18 +628,34 @@ async def test_exec_tool_auto_refreshes_new_skill_without_full_reload(tmp_path: 
         assert tool is not None
 
         skill_root = workspace / 'skills' / 'exec_skill'
+        manifest = textwrap.dedent(
+            """\
+            schema_version: 1
+            kind: skill
+            name: exec_skill
+            description: Exec refreshed skill.
+            trigger:
+              keywords: []
+            requires:
+              tools: []
+              bins: []
+              env: []
+            exposure:
+              agent: true
+              main_runtime: true
+            """
+        )
+        body = '# exec_skill\n\nExec skill guide\n'
         script = (
             "from pathlib import Path;"
             f"root=Path(r'{skill_root}');"
             "root.mkdir(parents=True, exist_ok=True);"
-            "(root/'resource.yaml').write_text("
-            "'schema_version: 1\\nkind: skill\\nname: exec_skill\\ndescription: Exec refreshed skill.\\ntrigger:\\n  keywords: []\\nrequires:\\n  tools: []\\n  bins: []\\n  env: []\\nexposure:\\n  agent: true\\n  main_runtime: true\\n',"
-            " encoding='utf-8');"
-            "(root/'SKILL.md').write_text('# exec_skill\\n\\nExec skill guide\\n', encoding='utf-8')"
+            f"(root/'resource.yaml').write_text({manifest!r}, encoding='utf-8');"
+            f"(root/'SKILL.md').write_text({body!r}, encoding='utf-8')"
         )
         payload = json.loads(
             await tool.execute(
-                command=f'python -c "{script}"',
+                command=f'{_python_launcher()} -c "{script}"',
                 __g3ku_runtime={'session_key': 'web:shared'},
             )
         )
@@ -668,7 +689,7 @@ async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
         content_tool = manager.get_tool('content')
         assert exec_tool is not None
         assert content_tool is not None
-        command = f'"{sys.executable}" -c "for i in range(90): print(\'line-%03d\' % i)"'
+        command = f'{_python_launcher()} -c "for i in range(90): print(\'line-%03d\' % i)"'
         payload = json.loads(await exec_tool.execute(command=command, __g3ku_runtime={'session_key': 'cli:test'}))
         assert payload['status'] == 'success'
         assert payload['stdout_ref'].startswith('artifact:')
@@ -687,6 +708,45 @@ async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
     finally:
         manager.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_blocks_paths_outside_workspace(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    outside_dir = tmp_path / 'outside'
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('exec')
+        assert tool is not None
+
+        blocked_cwd = json.loads(
+            await tool.execute(
+                command='echo blocked',
+                working_dir=str(outside_dir),
+                __g3ku_runtime={'session_key': 'web:shared'},
+            )
+        )
+        assert blocked_cwd['status'] == 'error'
+        assert 'working_dir outside workspace' in blocked_cwd['error']
+
+        outside_path = outside_dir / 'sample.txt'
+        outside_path.write_text('blocked\n', encoding='utf-8')
+        blocked_path = json.loads(
+            await tool.execute(
+                command=f'type "{outside_path}"' if os.name == 'nt' else f'cat "{outside_path}"',
+                __g3ku_runtime={'session_key': 'web:shared'},
+            )
+        )
+        assert blocked_path['status'] == 'error'
+        assert 'path outside workspace' in blocked_path['error']
+    finally:
+        manager.close()
 
 
 @pytest.mark.asyncio
@@ -895,8 +955,28 @@ def test_resource_loader_injects_tool_secrets(tmp_path: Path):
     loader = ResourceLoader(workspace, app_config=SimpleNamespace(tool_secrets={'filesystem': {'token': 'demo-secret'}}))
     runtime = loader.build_runtime_context(descriptor)
 
-    assert runtime.tool_settings == {'restrict_to_workspace': False}
+    assert runtime.tool_settings == {'restrict_to_workspace': True}
     assert runtime.tool_secrets == {'token': 'demo-secret'}
+
+
+@pytest.mark.asyncio
+async def test_filesystem_tool_blocks_paths_outside_workspace(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    outside_file = tmp_path / 'outside.txt'
+    outside_file.write_text('blocked\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        result = await tool.execute(action='head', path=str(outside_file), lines=5)
+        assert 'path outside workspace' in result
+    finally:
+        manager.close()
 
 
 def test_load_context_bodies_skip_release_reload(tmp_path: Path):

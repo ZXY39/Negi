@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: exec
-description: Execute shell commands inside the workspace runtime and return structured summaries plus content refs.
+description: Execute shell commands within the workspace only and return structured summaries plus content refs.
 source:
   type: ''
   url: ''
@@ -24,7 +24,7 @@ permissions:
 settings:
   timeout: 60
   path_append: ''
-  restrict_to_workspace: false
+  restrict_to_workspace: true
 parameters:
   type: object
   properties:

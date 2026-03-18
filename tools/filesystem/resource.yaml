@@ -23,7 +23,7 @@ permissions:
   filesystem:
     - workspace
 settings:
-  restrict_to_workspace: false
+  restrict_to_workspace: true
 parameters:
   type: object
   properties:

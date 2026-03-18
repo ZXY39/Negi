@@ -1310,6 +1310,61 @@ function resolveCeoToolEventStatus(event = {}) {
     return fallback;
 }
 
+function buildCeoBackgroundPayload({ elapsedSeconds = Number.NaN, snapshotSummary = "", waitSeconds = Number.NaN } = {}) {
+    const payload = { status: "background_running" };
+    if (Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0) payload.elapsed_seconds = elapsedSeconds;
+    if (Number.isFinite(waitSeconds) && waitSeconds > 0) payload.recommended_wait_seconds = waitSeconds;
+    if (snapshotSummary) payload.runtime_snapshot = { summary_text: snapshotSummary };
+    return payload;
+}
+
+function clearCeoBackgroundDetailState(item) {
+    if (!(item instanceof HTMLElement)) return;
+    delete item.dataset.backgroundRunning;
+    delete item.dataset.backgroundSummary;
+    delete item.dataset.backgroundWaitSeconds;
+}
+
+function updateCeoBackgroundDetail(item) {
+    if (!(item instanceof HTMLElement) || item.dataset.backgroundRunning !== "true") return;
+    const detailEl = item.querySelector(".interaction-step-detail");
+    if (!(detailEl instanceof HTMLElement)) return;
+    const toolName = String(item.dataset.toolName || "tool").trim() || "tool";
+    const kind = String(item.dataset.progressKind || "").trim();
+    const snapshotSummary = String(item.dataset.backgroundSummary || "").trim();
+    const waitSeconds = Number.parseFloat(String(item.dataset.backgroundWaitSeconds || ""));
+    const elapsedSeconds = resolveRuntimeSeconds(item);
+    detailEl.textContent = ceoFriendlyToolDetail(
+        toolName,
+        JSON.stringify(
+            buildCeoBackgroundPayload({
+                elapsedSeconds,
+                snapshotSummary,
+                waitSeconds,
+            })
+        ),
+        "running",
+        kind
+    );
+}
+
+function syncCeoBackgroundDetailState(item, { rawDetail = "" } = {}) {
+    if (!(item instanceof HTMLElement)) return;
+    const { payload, status } = ceoPayloadStatus(rawDetail);
+    if (status !== "background_running") {
+        clearCeoBackgroundDetailState(item);
+        return;
+    }
+    item.dataset.backgroundRunning = "true";
+    item.dataset.backgroundSummary = String(payload?.runtime_snapshot?.summary_text || "").trim();
+    const waitSeconds = Number(payload?.recommended_wait_seconds);
+    if (Number.isFinite(waitSeconds) && waitSeconds > 0) {
+        item.dataset.backgroundWaitSeconds = String(waitSeconds);
+    } else {
+        delete item.dataset.backgroundWaitSeconds;
+    }
+}
+
 function ceoFriendlyToolDetail(toolName = "", detail = "", status = "running", kind = "") {
     const normalizedTool = String(toolName || "").trim().toLowerCase();
     const raw = String(detail || "").trim();
@@ -1523,6 +1578,7 @@ function refreshLiveDurationBadges() {
         const runtimeEl = item.querySelector(".interaction-step-runtime");
         if (!(runtimeEl instanceof HTMLElement)) return;
         updateRuntimeBadge(item, runtimeEl);
+        updateCeoBackgroundDetail(item);
     });
     document.querySelectorAll(".task-trace-step").forEach((item) => {
         if (!(item instanceof HTMLElement)) return;
@@ -1595,6 +1651,7 @@ function appendCeoToolEvent(event = {}) {
             kind: event.kind,
             stage,
         });
+        syncCeoBackgroundDetailState(item, { rawDetail: rawText });
         turn.flowEl.hidden = false;
         turn.flowEl.open = true;
         turn.hasError = turn.hasError || status === "error";
@@ -1602,6 +1659,7 @@ function appendCeoToolEvent(event = {}) {
         updateCeoTurnMeta(turn, stage.meta);
         const runtimeEl = item.querySelector(".interaction-step-runtime");
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
+        updateCeoBackgroundDetail(item);
         icons();
     }, { scrollMode: "preserve" });
 }

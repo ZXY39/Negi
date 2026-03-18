@@ -70,7 +70,7 @@ class ExecTool(Tool):
     
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
-        cwd = working_dir or self.working_dir or os.getcwd()
+        cwd = self._resolve_cwd(working_dir)
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return self._build_payload(
@@ -175,21 +175,43 @@ class ExecTool(Tool):
             if "..\\" in cmd or "../" in cmd:
                 return "Error: Command blocked by safety guard (path traversal detected)"
 
-            cwd_path = Path(cwd).resolve()
+            workspace_root = self._workspace_root()
+            cwd_path = Path(cwd).expanduser().resolve()
+            if not self._is_within_workspace(cwd_path, workspace_root):
+                return "Error: Command blocked by safety guard (working_dir outside workspace)"
 
             for raw in self._extract_absolute_paths(cmd):
                 try:
-                    p = Path(raw.strip()).resolve()
+                    p = Path(raw.strip()).expanduser().resolve()
                 except Exception:
                     continue
-                if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
-                    return "Error: Command blocked by safety guard (path outside working dir)"
+                if p.is_absolute() and not self._is_within_workspace(p, workspace_root):
+                    return "Error: Command blocked by safety guard (path outside workspace)"
 
         return None
 
+    def _resolve_cwd(self, working_dir: str | None) -> str:
+        if not working_dir:
+            return self.working_dir or os.getcwd()
+        candidate = Path(working_dir).expanduser()
+        if not candidate.is_absolute() and self.working_dir:
+            candidate = Path(self.working_dir) / candidate
+        return str(candidate)
+
+    def _workspace_root(self) -> Path:
+        return Path(self.working_dir or os.getcwd()).expanduser().resolve()
+
+    @staticmethod
+    def _is_within_workspace(path: Path, workspace_root: Path) -> bool:
+        try:
+            path.relative_to(workspace_root)
+            return True
+        except ValueError:
+            return False
+
     @staticmethod
     def _extract_absolute_paths(command: str) -> list[str]:
-        win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)   # Windows: C:\...
+        win_paths = re.findall(r"(?<![A-Za-z0-9_])[A-Za-z]:(?:\\|/)[^\s\"'|><;]+", command)   # Windows: C:\... or C:/...
         posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", command) # POSIX: /absolute only
         return win_paths + posix_paths
 

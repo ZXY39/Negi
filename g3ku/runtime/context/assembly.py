@@ -18,6 +18,7 @@ class ContextAssemblyService:
         'exec': ('shell', 'command', 'bash', 'powershell', '终端', '执行命令'),
         'model_config': ('model', 'provider', 'config', 'token', 'temperature', '模型', '配置'),
     }
+    RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("wait_tool_execution", "stop_tool_execution")
 
     def __init__(self, *, loop, prompt_builder) -> None:
         self._loop = loop
@@ -277,14 +278,16 @@ class ContextAssemblyService:
         visible_set = {str(name).strip() for name in visible_names if str(name).strip()}
         if not visible_set:
             return [], {'core': [], 'extension': []}
-        selected = {name for name in visible_set if name in core_tools}
+        reserved = [name for name in visible_names if name in self.RESERVED_INTERNAL_TOOLS and name in visible_set]
+        reserved_set = set(reserved)
+        selected = {name for name in visible_set if name in core_tools and name not in reserved_set}
         ext_scored: list[tuple[float, list[str], str]] = []
         for family in visible_families:
             family_names = []
             for action in list(getattr(family, 'actions', []) or []):
                 for executor_name in list(getattr(action, 'executor_names', []) or []):
                     name = str(executor_name or '').strip()
-                    if name and name in visible_set and name not in core_tools:
+                    if name and name in visible_set and name not in core_tools and name not in reserved_set:
                         family_names.append(name)
             family_names = sorted(set(family_names))
             if not family_names:
@@ -314,8 +317,14 @@ class ContextAssemblyService:
                     break
         if not picked_extension:
             for name in sorted(visible_set - selected):
+                if name in reserved_set:
+                    continue
                 picked_extension.append(name)
                 if len(picked_extension) >= extension_top_k:
                     break
-        ordered = [name for name in visible_names if name in selected] + [name for name in visible_names if name in picked_extension]
-        return ordered, {'core': sorted(selected), 'extension': picked_extension}
+        ordered = (
+            reserved
+            + [name for name in visible_names if name in selected]
+            + [name for name in visible_names if name in picked_extension]
+        )
+        return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': picked_extension}

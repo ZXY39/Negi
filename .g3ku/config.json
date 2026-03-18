@@ -55,18 +55,33 @@
         ],
         "retryCount": 3,
         "description": ""
+      },
+      {
+        "key": "loacal 5.2",
+        "llmConfigId": "1458aad1ba534aba9ce7c8e2e3ef3601",
+        "enabled": true,
+        "retryOn": [
+          "network",
+          "429",
+          "5xx"
+        ],
+        "retryCount": 0,
+        "description": ""
       }
     ],
     "roles": {
       "ceo": [
+        "loacal 5.2",
         "gpt-5.4",
         "gpt-5.2"
       ],
       "execution": [
+        "loacal 5.2",
         "subagent gpt-5.4",
         "gpt-5.2"
       ],
       "inspection": [
+        "loacal 5.2",
         "subagent gpt-5.4",
         "gpt-5.2"
       ]

@@ -15,6 +15,8 @@ from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
 from g3ku.runtime.cancellation import ToolCancellationToken
 
+_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
+
 
 class RuntimeAgentSession:
     """Primary AgentSession implementation backed by the runtime engine."""
@@ -45,6 +47,7 @@ class RuntimeAgentSession:
         self._last_prompt: str | UserInputMessage = ""
         self._event_log: list[dict] = []
         self._pending_tool_names: dict[str, str] = {}
+        self._background_tool_targets: dict[str, dict[str, str]] = {}
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
 
@@ -135,6 +138,13 @@ class RuntimeAgentSession:
             payload["timestamp"] = timestamp.strip()
         return payload
 
+    def _is_heartbeat_internal_prompt(self, prompt: Any | None = None) -> bool:
+        current = self._last_prompt if prompt is None else prompt
+        if not isinstance(current, UserInputMessage):
+            return False
+        metadata = dict(current.metadata or {})
+        return bool(metadata.get("heartbeat_internal"))
+
     def _interaction_flow_snapshot(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for raw in self._event_log:
@@ -179,6 +189,38 @@ class RuntimeAgentSession:
         if not tool_name and len(self._pending_tool_names) == 1:
             tool_name, tool_call_id = next(iter(self._pending_tool_names.items()))
         return tool_name or "tool", tool_call_id
+
+    def _remember_background_tool_target(self, *, execution_id: str, tool_name: str, tool_call_id: str) -> None:
+        key = str(execution_id or "").strip()
+        if not key:
+            return
+        self._background_tool_targets[key] = {
+            "tool_name": str(tool_name or "tool").strip() or "tool",
+            "tool_call_id": str(tool_call_id or "").strip(),
+        }
+
+    def _forget_background_tool_target(self, execution_id: str) -> None:
+        self._background_tool_targets.pop(str(execution_id or "").strip(), None)
+
+    def _resolve_control_tool_target(
+        self,
+        *,
+        tool_name: str,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str]:
+        execution_id = str((payload or {}).get("execution_id") or "").strip()
+        mapped = self._background_tool_targets.get(execution_id, {})
+        target_tool_name = str(mapped.get("tool_name") or "").strip()
+        target_tool_call_id = str(mapped.get("tool_call_id") or "").strip()
+        if not target_tool_name:
+            target_tool_name = str((payload or {}).get("tool_name") or "").strip()
+        if not target_tool_call_id and target_tool_name:
+            target_tool_call_id = str(self._pending_tool_names.get(target_tool_name) or "").strip()
+        return (
+            target_tool_name or str(tool_name or "tool").strip() or "tool",
+            target_tool_call_id,
+            execution_id,
+        )
 
     def inflight_turn_snapshot(self) -> dict[str, Any] | None:
         status = str(self._state.status or "").strip().lower()
@@ -255,6 +297,8 @@ class RuntimeAgentSession:
         tool_name = str(data.get("tool_name") or "").strip() or "tool"
 
         if kind == "tool_start":
+            if tool_name in _CONTROL_TOOL_NAMES:
+                return
             call_id = self._allocate_tool_call_id(tool_name)
             self._state.pending_tool_calls.add(call_id)
             await self._emit(
@@ -272,7 +316,20 @@ class RuntimeAgentSession:
             payload = self._parse_progress_payload(content)
             payload_status = str((payload or {}).get("status") or "").strip().lower()
             if payload_status == "background_running":
-                resolved_tool_name, call_id = self._resolve_progress_tool_target(data)
+                if tool_name in _CONTROL_TOOL_NAMES:
+                    resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
+                        tool_name=tool_name,
+                        payload=payload,
+                    )
+                else:
+                    resolved_tool_name, call_id = self._resolve_progress_tool_target(data)
+                    execution_id = str((payload or {}).get("execution_id") or "").strip()
+                if execution_id:
+                    self._remember_background_tool_target(
+                        execution_id=execution_id,
+                        tool_name=resolved_tool_name,
+                        tool_call_id=call_id,
+                    )
                 self._enqueue_background_tool_heartbeat(payload=payload, tool_name=resolved_tool_name)
                 await self._emit(
                     "tool_execution_update",
@@ -280,6 +337,26 @@ class RuntimeAgentSession:
                     tool_name=resolved_tool_name,
                     tool_call_id=call_id,
                     text=str(content or ""),
+                    data=data,
+                )
+                await self._emit_state_snapshot()
+                return
+            if tool_name in _CONTROL_TOOL_NAMES:
+                resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
+                    tool_name=tool_name,
+                    payload=payload,
+                )
+                if execution_id and payload_status in {"completed", "stopped", "failed", "error", "not_found", "unavailable"}:
+                    self._forget_background_tool_target(execution_id)
+                if call_id:
+                    self._state.pending_tool_calls.discard(call_id)
+                await self._emit(
+                    "tool_execution_end",
+                    tool_name=resolved_tool_name,
+                    tool_call_id=call_id,
+                    text=str(content or ""),
+                    kind=kind,
+                    is_error=payload_status in {"stopped", "failed", "error", "not_found", "unavailable"},
                     data=data,
                 )
                 await self._emit_state_snapshot()
@@ -299,6 +376,43 @@ class RuntimeAgentSession:
             return
 
         if kind == "tool_error":
+            if tool_name in _CONTROL_TOOL_NAMES:
+                payload = self._parse_progress_payload(content)
+                resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
+                    tool_name=tool_name,
+                    payload=payload,
+                )
+                if execution_id:
+                    self._forget_background_tool_target(execution_id)
+                if call_id:
+                    self._state.pending_tool_calls.discard(call_id)
+                error = StructuredError(
+                    code="tool_error",
+                    message=str(content or f"{resolved_tool_name} failed"),
+                    recoverable=True,
+                    source="tool",
+                    details={"tool_name": resolved_tool_name, "tool_call_id": call_id, **data},
+                )
+                self._state.last_error = error
+                await self._emit(
+                    "tool_execution_end",
+                    tool_name=resolved_tool_name,
+                    tool_call_id=call_id,
+                    text=error.message,
+                    kind=kind,
+                    is_error=True,
+                    data=data,
+                )
+                await self._emit(
+                    "error",
+                    code=error.code,
+                    message=error.message,
+                    recoverable=error.recoverable,
+                    source=error.source,
+                    details=error.details,
+                )
+                await self._emit_state_snapshot()
+                return
             call_id = self._pop_tool_call_id(tool_name)
             self._state.pending_tool_calls.discard(call_id)
             error = StructuredError(
@@ -495,7 +609,12 @@ class RuntimeAgentSession:
                             kind="persistence_warning",
                             text="RAG memory commit pipeline failed; new turns remain available in session transcript.",
                         )
-            await self._emit("message_end", role="assistant", text=output)
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text=output,
+                heartbeat_internal=self._is_heartbeat_internal_prompt(user_input),
+            )
             await self._emit("turn_end", session_key=self._state.session_key, status="completed")
             await self._emit("agent_end", session_key=self._state.session_key, status="completed")
             await self._emit_state_snapshot()

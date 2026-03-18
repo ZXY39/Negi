@@ -38,6 +38,9 @@ class DetachedToolExecution:
     cancel_token: Any | None
     started_at: float
     created_at: float
+    session_key: str = ""
+    terminal_notifier: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
+    terminal_notified: bool = False
     handoff_count: int = 1
 
 
@@ -59,6 +62,8 @@ class ToolExecutionManager:
         snapshot_supplier: Callable[[], Any] | None,
         cancel_token: Any | None,
         started_at: float,
+        session_key: str = "",
+        terminal_notifier: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> DetachedToolExecution:
         async with self._lock:
             for entry in self._executions.values():
@@ -75,9 +80,16 @@ class ToolExecutionManager:
                 cancel_token=cancel_token,
                 started_at=float(started_at),
                 created_at=time.monotonic(),
+                session_key=str(session_key or "").strip(),
+                terminal_notifier=terminal_notifier if callable(terminal_notifier) else None,
                 handoff_count=1,
             )
             self._executions[execution_id] = entry
+            task.add_done_callback(
+                lambda _task, stored_execution_id=execution_id: self._schedule_terminal_notification(
+                    stored_execution_id
+                )
+            )
             return entry
 
     async def wait_execution(
@@ -184,6 +196,33 @@ class ToolExecutionManager:
         await self._remove_execution(entry.execution_id)
         return payload
 
+    async def stop_session_executions(
+        self,
+        session_key: str,
+        *,
+        reason: str = "session_deleted",
+        stop_grace_seconds: float = 2.0,
+    ) -> list[dict[str, Any]]:
+        key = str(session_key or "").strip()
+        if not key:
+            return []
+        async with self._lock:
+            execution_ids = [
+                entry.execution_id
+                for entry in self._executions.values()
+                if str(entry.session_key or "").strip() == key
+            ]
+        results: list[dict[str, Any]] = []
+        for execution_id in execution_ids:
+            results.append(
+                await self.stop_execution(
+                    execution_id,
+                    reason=reason,
+                    stop_grace_seconds=stop_grace_seconds,
+                )
+            )
+        return results
+
     async def _get_execution(self, execution_id: str) -> DetachedToolExecution | None:
         async with self._lock:
             return self._executions.get(str(execution_id or "").strip())
@@ -191,6 +230,28 @@ class ToolExecutionManager:
     async def _remove_execution(self, execution_id: str) -> None:
         async with self._lock:
             self._executions.pop(str(execution_id or "").strip(), None)
+
+    def _schedule_terminal_notification(self, execution_id: str) -> None:
+        key = str(execution_id or "").strip()
+        if not key:
+            return
+        try:
+            asyncio.get_running_loop().create_task(self._emit_terminal_notification(key))
+        except RuntimeError:
+            return
+
+    async def _emit_terminal_notification(self, execution_id: str) -> None:
+        async with self._lock:
+            entry = self._executions.get(str(execution_id or "").strip())
+            if entry is None or entry.terminal_notified or entry.terminal_notifier is None:
+                return
+            entry.terminal_notified = True
+            notifier = entry.terminal_notifier
+        payload = await _build_terminal_payload(entry)
+        try:
+            await _maybe_await(notifier(payload))
+        except Exception:
+            return
 
     @staticmethod
     def recommended_wait_seconds(entry: DetachedToolExecution | None) -> float:
@@ -228,6 +289,28 @@ def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:
 def resolve_snapshot_supplier(runtime_context: Any) -> Callable[[], Any] | None:
     supplier = runtime_context_value(runtime_context, "tool_snapshot_supplier", None)
     return supplier if callable(supplier) else None
+
+
+def resolve_terminal_notifier(
+    runtime_context: Any,
+) -> Callable[[dict[str, Any]], Awaitable[None] | None] | None:
+    session_key = str(runtime_context_value(runtime_context, "session_key", "") or "").strip()
+    if not session_key:
+        return None
+    notifier = runtime_context_value(runtime_context, "tool_terminal_notifier", None)
+    if callable(notifier):
+        return notifier
+    heartbeat = runtime_context_value(runtime_context, "web_session_heartbeat", None)
+    if heartbeat is None:
+        loop = runtime_context_value(runtime_context, "loop", None)
+        heartbeat = getattr(loop, "web_session_heartbeat", None) if loop is not None else None
+    if heartbeat is None or not hasattr(heartbeat, "enqueue_tool_terminal"):
+        return None
+
+    def _notify(payload: dict[str, Any]) -> None:
+        heartbeat.enqueue_tool_terminal(session_id=session_key, payload=dict(payload or {}))
+
+    return _notify
 
 
 async def request_tool_cancellation(
@@ -398,6 +481,8 @@ async def run_tool_with_watchdog(
     supplier = snapshot_supplier or resolve_snapshot_supplier(runtime_context)
     execution_task = asyncio.create_task(awaitable, name=f"tool-watchdog:{tool_name}")
     cancel_token = runtime_context_value(runtime_context, "cancel_token", None)
+    session_key = str(runtime_context_value(runtime_context, "session_key", "") or "").strip()
+    terminal_notifier = resolve_terminal_notifier(runtime_context)
     started_at = time.monotonic()
 
     try:
@@ -450,6 +535,8 @@ async def run_tool_with_watchdog(
             snapshot_supplier=supplier,
             cancel_token=cancel_token,
             started_at=started_at,
+            session_key=session_key,
+            terminal_notifier=terminal_notifier,
         )
         payload = _build_handoff_payload(
             tool_name=tool_name,
@@ -584,6 +671,41 @@ def _build_completion_payload(*, entry: DetachedToolExecution, result: Any) -> d
         "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
         "final_result": normalized,
     }
+
+
+async def _build_terminal_payload(entry: DetachedToolExecution) -> dict[str, Any]:
+    try:
+        result = await asyncio.shield(entry.task)
+    except asyncio.CancelledError:
+        snapshot = summarize_runtime_snapshot(
+            await _maybe_await_callable(entry.snapshot_supplier),
+            text_char_limit=280,
+            list_limit=3,
+        )
+        return {
+            "status": "stopped",
+            "execution_id": entry.execution_id,
+            "tool_name": entry.tool_name,
+            "message": "后台工具执行已停止。",
+            "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
+            "runtime_snapshot": snapshot,
+        }
+    except Exception as exc:
+        snapshot = summarize_runtime_snapshot(
+            await _maybe_await_callable(entry.snapshot_supplier),
+            text_char_limit=280,
+            list_limit=3,
+        )
+        return {
+            "status": "failed",
+            "execution_id": entry.execution_id,
+            "tool_name": entry.tool_name,
+            "message": "后台工具执行失败。",
+            "error": str(exc),
+            "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
+            "runtime_snapshot": snapshot,
+        }
+    return _build_completion_payload(entry=entry, result=result)
 
 
 def _normalize_detached_result(value: Any) -> Any:
