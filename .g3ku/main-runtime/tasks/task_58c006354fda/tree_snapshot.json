@@ -51,6 +51,9 @@
         "provider_model": "gpt-5.2"
       }
     ],
+    "spawn_rounds": [],
+    "auxiliary_children": [],
+    "default_round_id": "",
     "children": []
   }
 }

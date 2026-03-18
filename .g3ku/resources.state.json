@@ -1,5 +1,5 @@
 {
-  "generation": 4,
+  "generation": 5,
   "tools": [
     {
       "name": "content",
@@ -201,6 +201,14 @@
     },
     {
       "name": "weather",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "ddg-web-search",
       "available": true,
       "busy": false,
       "pendingDelete": false,

@@ -6,6 +6,12 @@ import string
 from typing import Any
 
 import json_repair
+
+# LiteLLM fetches a remote model-cost map during import unless this env var is
+# already set. Default to the bundled backup to avoid slow startup and noisy
+# warnings on networks where GitHub raw content is blocked or unstable.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
+
 import litellm
 from litellm import acompletion
 
