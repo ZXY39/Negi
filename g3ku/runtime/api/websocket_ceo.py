@@ -229,7 +229,7 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
 
 def _should_forward_tool_event(*, session_id: str, event: AgentEvent) -> bool:
     _ = session_id
-    if event.type not in {'tool_execution_start', 'tool_execution_end'}:
+    if event.type not in {'tool_execution_start', 'tool_execution_update', 'tool_execution_end'}:
         return False
     payload = event.payload if isinstance(event.payload, dict) else {}
     data = _coerce_event_data(payload)
@@ -240,22 +240,30 @@ def _should_forward_tool_event(*, session_id: str, event: AgentEvent) -> bool:
 
 def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
     payload = event.payload if isinstance(event.payload, dict) else {}
+    data = _coerce_event_data(payload)
     tool_name = str(payload.get('tool_name') or 'tool').strip() or 'tool'
     text = str(payload.get('text') or '').strip()
     is_error = bool(payload.get('is_error'))
     if event.type == 'tool_execution_start':
         status = 'running'
+        is_update = False
+    elif event.type == 'tool_execution_update':
+        status = 'running'
+        is_update = True
     elif event.type == 'tool_execution_end':
         status = 'error' if is_error else 'success'
+        is_update = False
     else:
         return None
     return {
         'status': status,
-        'tool_name': tool_name,
+        'tool_name': tool_name or str(data.get('tool_name') or 'tool').strip() or 'tool',
         'text': text,
         'timestamp': event.timestamp,
-        'tool_call_id': str(payload.get('tool_call_id') or ''),
+        'tool_call_id': str(payload.get('tool_call_id') or data.get('tool_call_id') or ''),
         'is_error': is_error,
+        'is_update': is_update,
+        'kind': str(payload.get('kind') or '').strip(),
     }
 
 

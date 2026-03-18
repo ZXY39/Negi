@@ -50,6 +50,7 @@ class LoopRuntimeContext:
     chat_id: str | None
     message_id: str | None
     on_progress: Callable[..., Awaitable[None]] | None
+    cancel_token: Any | None = None
 
 
 class LoopRuntimeMiddleware(AgentMiddleware):
@@ -203,6 +204,7 @@ class ModelExecutionBridge:
         chat_id: str | None,
         message_id: str | None,
         on_progress: Callable[..., Awaitable[None]] | None,
+        cancel_token: Any | None = None,
     ) -> LoopRuntimeContext:
         return LoopRuntimeContext(
             session_key=session_key,
@@ -210,6 +212,7 @@ class ModelExecutionBridge:
             chat_id=chat_id,
             message_id=message_id,
             on_progress=on_progress,
+            cancel_token=cancel_token,
         )
 
     def runtime_middlewares(self) -> list[Any]:

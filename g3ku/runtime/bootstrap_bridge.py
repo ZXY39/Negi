@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from types import SimpleNamespace
 
 from loguru import logger
 
+from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
 from g3ku.agent.session_commit import SessionCommitService
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.tool_settings import (
@@ -80,20 +82,22 @@ class RuntimeBootstrapBridge:
             self._loop.main_task_service = None
             return
         try:
+            main_runtime_cfg = getattr(config, 'main_runtime', None) or SimpleNamespace()
+            get_role_max_iterations = getattr(config, 'get_role_max_iterations', None)
             service = MainRuntimeService(
                 chat_backend=ConfigChatBackend(config),
                 app_config=config,
-                store_path=getattr(config.main_runtime, 'store_path', None),
-                files_base_dir=getattr(config.main_runtime, 'files_base_dir', None),
-                artifact_dir=getattr(config.main_runtime, 'artifact_dir', None),
-                governance_store_path=getattr(config.main_runtime, 'governance_store_path', None),
+                store_path=getattr(main_runtime_cfg, 'store_path', None),
+                files_base_dir=getattr(main_runtime_cfg, 'files_base_dir', None),
+                artifact_dir=getattr(main_runtime_cfg, 'artifact_dir', None),
+                governance_store_path=getattr(main_runtime_cfg, 'governance_store_path', None),
                 resource_manager=getattr(self._loop, 'resource_manager', None),
                 execution_model_refs=config.get_role_model_keys('execution'),
                 acceptance_model_refs=config.get_role_model_keys('inspection'),
-                default_max_depth=getattr(config.main_runtime, 'default_max_depth', 1),
-                hard_max_depth=getattr(config.main_runtime, 'hard_max_depth', 4),
-                execution_max_iterations=config.get_role_max_iterations('execution'),
-                acceptance_max_iterations=config.get_role_max_iterations('inspection'),
+                default_max_depth=getattr(main_runtime_cfg, 'default_max_depth', 1),
+                hard_max_depth=getattr(main_runtime_cfg, 'hard_max_depth', 4),
+                execution_max_iterations=(get_role_max_iterations('execution') if callable(get_role_max_iterations) else None),
+                acceptance_max_iterations=(get_role_max_iterations('inspection') if callable(get_role_max_iterations) else None),
             )
             service.bind_runtime_loop(self._loop)
             self._loop.main_task_service = service
@@ -120,6 +124,8 @@ class RuntimeBootstrapBridge:
 
     def register_default_tools(self) -> None:
         self.init_resource_runtime()
+        self._loop.tools.register(WaitToolExecutionTool(lambda: getattr(self._loop, "tool_execution_manager", None)))
+        self._loop.tools.register(StopToolExecutionTool(lambda: getattr(self._loop, "tool_execution_manager", None)))
 
     def _resource_services(self) -> dict[str, object]:
         return {

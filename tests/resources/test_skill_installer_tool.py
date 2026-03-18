@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from types import MethodType
 from uuid import uuid4
@@ -11,6 +12,7 @@ import pytest
 
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
+from g3ku.runtime.cancellation import ToolCancellationRequested, ToolCancellationToken
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -89,7 +91,7 @@ Use DuckDuckGo for quick web lookups.
     assert handler is not None
 
     handler._prepare_repo = MethodType(
-        lambda self, *, source, method, tmp_dir: (source_repo, "mock"),
+        lambda self, *, source, method, tmp_dir, cancel_token=None: (source_repo, "mock"),
         handler,
     )
 
@@ -141,7 +143,7 @@ def test_skill_creator_routes_github_skill_installs_to_skill_installer():
     assert "GitHub skill" in resource_text
 
 
-def test_skill_installer_git_fallback_resets_temp_repo_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_skill_installer_git_fallback_uses_separate_temp_repo_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     module = _load_skill_installer_module()
     tool = module.SkillInstallerTool(workspace=tmp_path)
     source = module.GitHubSource(
@@ -151,21 +153,22 @@ def test_skill_installer_git_fallback_resets_temp_repo_dir(tmp_path: Path, monke
         path="skills/jakelin/ddg-web-search",
         url="https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search",
     )
-    repo_dir = tmp_path / "repo"
     clone_attempts = 0
     git_calls: list[list[str]] = []
+    clone_targets: list[Path] = []
 
-    def fake_run_git(args: list[str]) -> None:
+    def fake_run_git(args: list[str], *, timeout: int, cancel_token=None) -> None:
         nonlocal clone_attempts
         git_calls.append(list(args))
         if args[:2] != ["git", "clone"]:
             return
         clone_attempts += 1
+        repo_dir = Path(args[-1])
+        clone_targets.append(repo_dir)
         if clone_attempts == 1:
             repo_dir.mkdir(parents=True, exist_ok=True)
             (repo_dir / "leftover.txt").write_text("stale", encoding="utf-8")
             raise module.InstallError("initial clone failed")
-        assert not repo_dir.exists()
         repo_dir.mkdir(parents=True, exist_ok=True)
         (repo_dir / ".git").write_text("ok", encoding="utf-8")
 
@@ -179,5 +182,187 @@ def test_skill_installer_git_fallback_resets_temp_repo_dir(tmp_path: Path, monke
     assert len(clone_calls) == 2
     assert "--branch" in clone_calls[0]
     assert "--branch" not in clone_calls[1]
-    assert result == repo_dir.resolve(strict=False)
-    assert not (repo_dir / "leftover.txt").exists()
+    assert len(set(clone_targets)) == 2
+    assert clone_targets[0].name == "repo-branch"
+    assert clone_targets[1].name == "repo-fallback"
+    assert result == clone_targets[1].resolve(strict=False)
+    assert (clone_targets[0] / "leftover.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_skill_installer_execute_uses_ignore_cleanup_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    module = _load_skill_installer_module()
+    workspace = tmp_path / "workspace"
+    (workspace / "skills").mkdir(parents=True, exist_ok=True)
+    source_repo = tmp_path / "source-repo"
+    source_skill = source_repo / "skills" / "jakelin" / "ddg-web-search"
+    source_skill.mkdir(parents=True, exist_ok=True)
+    (source_skill / "SKILL.md").write_text("# ddg-web-search\n\nDuckDuckGo helper.\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    class _FakeTempDir:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["tempdir_args"] = args
+            captured["tempdir_kwargs"] = dict(kwargs)
+            self._path = tmp_path / "fake-tempdir"
+            self._path.mkdir(parents=True, exist_ok=True)
+
+        def __enter__(self):
+            return str(self._path)
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(module.tempfile, "TemporaryDirectory", _FakeTempDir)
+
+    tool = module.SkillInstallerTool(workspace=workspace)
+    monkeypatch.setattr(
+        tool,
+        "_prepare_repo",
+        lambda *, source, method, tmp_dir, cancel_token=None: (source_repo, "mock"),
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            url="https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search",
+            __g3ku_runtime={"actor_role": "ceo", "session_key": "web:shared"},
+        )
+    )
+
+    assert payload["ok"] is True
+    assert captured["tempdir_kwargs"]["ignore_cleanup_errors"] is True
+
+
+def test_skill_installer_auto_prefers_git_when_configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    module = _load_skill_installer_module()
+    settings = module.SkillInstallerToolSettings(auto_prefer="git")
+    tool = module.SkillInstallerTool(workspace=tmp_path, settings=settings)
+    source = module.GitHubSource(
+        owner="openclaw",
+        repo="skills",
+        ref="main",
+        path="skills/jakelin/ddg-web-search",
+        url="https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search",
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        tool,
+        "_git_sparse_checkout",
+        lambda *, source, tmp_dir, cancel_token=None: calls.append("git") or (tmp_path / "repo-git"),
+    )
+    monkeypatch.setattr(
+        tool,
+        "_download_repo_zip",
+        lambda *, source, tmp_dir, cancel_token=None: calls.append("download") or (tmp_path / "repo-download"),
+    )
+
+    repo_root, method_used = tool._prepare_repo(source=source, method="auto", tmp_dir=str(tmp_path))
+
+    assert repo_root == tmp_path / "repo-git"
+    assert method_used == "git"
+    assert calls == ["git"]
+
+
+def test_skill_installer_run_git_uses_timeout_and_noninteractive_env(monkeypatch: pytest.MonkeyPatch):
+    module = _load_skill_installer_module()
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        def __init__(self, args, **kwargs) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self):
+            return "", ""
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(module.subprocess, "Popen", _FakeProcess)
+
+    module._run_git(["git", "clone", "demo"], timeout=77)
+
+    assert captured["kwargs"]["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert captured["kwargs"]["env"]["GCM_INTERACTIVE"] == "never"
+
+
+def test_skill_installer_run_git_terminates_process_when_cancelled(monkeypatch: pytest.MonkeyPatch):
+    module = _load_skill_installer_module()
+    captured = {"terminate": 0, "kill": 0}
+    token = ToolCancellationToken(session_key="web:shared")
+    token.cancel(reason="用户已请求暂停，正在安全停止...")
+
+    class _FakeProcess:
+        def __init__(self, args, **kwargs) -> None:
+            _ = args, kwargs
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self):
+            return "", ""
+
+        def terminate(self):
+            captured["terminate"] += 1
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            _ = timeout
+            return self.returncode
+
+        def kill(self):
+            captured["kill"] += 1
+            self.returncode = -9
+
+    monkeypatch.setattr(module.subprocess, "Popen", _FakeProcess)
+
+    with pytest.raises(ToolCancellationRequested):
+        module._run_git(["git", "clone", "demo"], timeout=30, cancel_token=token)
+
+    assert captured["terminate"] >= 1
+    assert captured["kill"] == 0
+
+
+@pytest.mark.asyncio
+async def test_skill_installer_execute_offloads_blocking_work_to_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    module = _load_skill_installer_module()
+    tool = module.SkillInstallerTool(workspace=tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_execute_blocking(loop, runtime, url, repo, path, ref, dest, name, method):
+        captured["loop"] = loop
+        captured["runtime"] = runtime
+        captured["url"] = url
+        return json.dumps({"ok": True, "tool": "skill-installer"})
+
+    async def fake_to_thread(func, *args):
+        captured["func"] = func
+        captured["args"] = args
+        return func(*args)
+
+    monkeypatch.setattr(tool, "_execute_blocking", fake_execute_blocking)
+    monkeypatch.setattr(module.asyncio, "to_thread", fake_to_thread)
+
+    payload = json.loads(
+        await tool.execute(
+            url="https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search",
+            __g3ku_runtime={"actor_role": "ceo", "session_key": "web:shared"},
+        )
+    )
+
+    assert payload["ok"] is True
+    assert captured["func"] == fake_execute_blocking
+    assert captured["runtime"] == {"actor_role": "ceo", "session_key": "web:shared"}

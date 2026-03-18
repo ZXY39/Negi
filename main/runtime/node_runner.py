@@ -15,6 +15,17 @@ from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SU
 
 SKIPPED_CHECK_RESULT = '未检验'
 ACCEPTANCE_REF_GUIDANCE = '如需查看更多细节，只能先使用 content.search，再使用 content.open 读取局部片段，不要请求全文。'
+EXECUTION_SPAWN_GUIDANCE = """
+
+当前节点仍可派生子节点，请额外遵守以下规则：
+- 在准备进行下一步前，立即评估是否通过派发子节点完成任务效率更高；如果更高，就优先调用 `spawn_child_nodes`，而不是继续由当前节点自行完成。
+- 特别是在以下情况优先考虑拆分：目标文件过多或过大、查询范围广、预计处理时间长、多目录/多模块/多结果集合并、搜索/工具返回结果过多且仅靠一次筛选不足以完成判断。
+- 只有当工具列表中确实存在 `spawn_child_nodes` 时，才允许调用它。
+- 只有在任务可以拆成多个相对独立、边界清晰的子范围时，才调用 `spawn_child_nodes`；拆分时按目录、模块、文件集合、结果批次等维度划分，避免职责重叠。
+- 调用 `spawn_child_nodes` 时，不要把待读取文件的正文、长摘录或整段工具输出直接塞进子节点提示词；只传文件路径、目录路径、artifact/content 引用、搜索关键词、已知行号范围、目标问题和交付要求，让子节点自行读取原始内容。
+- 对每个子节点，都要先判断是否真的需要验收节点，而不是默认必验。
+- 如果拆分后的并行或分段处理明显更高效，就不要继续由当前节点把所有工作都自己做完。
+""".strip()
 
 
 class NodeRunner:
@@ -95,9 +106,9 @@ class NodeRunner:
         return tools
 
     async def _build_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
-        system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
+        system_prompt = self._build_system_prompt(node=node)
         messages = [
-            {'role': 'system', 'content': load_prompt(system_name)},
+            {'role': 'system', 'content': system_prompt},
             {
                 'role': 'user',
                 'content': json.dumps(
@@ -120,6 +131,13 @@ class NodeRunner:
             if isinstance(enriched, list) and enriched:
                 return enriched
         return messages
+
+    def _build_system_prompt(self, *, node: NodeRecord) -> str:
+        system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
+        prompt = load_prompt(system_name).strip()
+        if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
+            return f'{prompt}\n\n{EXECUTION_SPAWN_GUIDANCE}'
+        return prompt
 
     def _model_refs_for(self, node: NodeRecord) -> list[str]:
         return list(self._acceptance_model_refs if node.node_kind == KIND_ACCEPTANCE else self._execution_model_refs)

@@ -4,12 +4,46 @@ import json
 from pathlib import Path
 from typing import Any
 
-from g3ku.content import ContentNavigationService
+from g3ku.content import ContentNavigationService, parse_content_envelope
 
 
 class ContentTool:
     def __init__(self, *, workspace: Path, content_store: ContentNavigationService | None = None) -> None:
         self._content_store = content_store or ContentNavigationService(workspace=workspace)
+
+    @staticmethod
+    def _normalize_ref(ref: str | None) -> str:
+        envelope = parse_content_envelope(ref)
+        if envelope is not None:
+            return str(envelope.ref or '').strip()
+        return str(ref or '').strip()
+
+    @classmethod
+    def _guard_ref_access(cls, *, runtime: dict[str, Any] | None, ref: str | None) -> str | None:
+        payload = runtime if isinstance(runtime, dict) else {}
+        if not bool(payload.get('enforce_content_ref_allowlist')):
+            return None
+        requested_ref = cls._normalize_ref(ref)
+        if not requested_ref.startswith('artifact:'):
+            return None
+        allowed_refs = sorted(
+            {
+                cls._normalize_ref(item)
+                for item in list(payload.get('allowed_content_refs') or [])
+                if cls._normalize_ref(item).startswith('artifact:')
+            }
+        )
+        if requested_ref in allowed_refs:
+            return None
+        return json.dumps(
+            {
+                'ok': False,
+                'error': 'artifact ref not allowed in this context',
+                'requested_ref': requested_ref,
+                'allowed_refs': allowed_refs,
+            },
+            ensure_ascii=False,
+        )
 
     async def execute(
         self,
@@ -25,10 +59,17 @@ class ContentTool:
         around_line: int | None = None,
         window: int | None = None,
         lines: int | None = None,
+        __g3ku_runtime: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
-        del kwargs
+        runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else None
+        if runtime is None:
+            fallback_runtime = kwargs.get('__g3ku_runtime')
+            runtime = fallback_runtime if isinstance(fallback_runtime, dict) else None
         operation = str(action or "").strip().lower()
+        blocked = self._guard_ref_access(runtime=runtime, ref=ref)
+        if blocked is not None:
+            return blocked
         if operation == "describe":
             return json.dumps(self._content_store.describe(ref=ref, path=path), ensure_ascii=False)
         if operation == "search":

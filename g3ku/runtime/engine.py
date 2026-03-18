@@ -13,7 +13,9 @@ from loguru import logger
 from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.bus.events import InboundMessage, OutboundMessage
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
+from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.manager import SessionRuntimeManager
+from g3ku.runtime.tool_watchdog import ToolExecutionManager
 
 
 class AgentRuntimeEngine:
@@ -70,7 +72,9 @@ class AgentRuntimeEngine:
         self._chat_model_factory = chat_model_factory
 
         self.tools = ToolRegistry()
+        self.tool_execution_manager = ToolExecutionManager()
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+        self._session_cancellation_tokens: dict[str, set[ToolCancellationToken]] = {}
         self._checkpointer_lock = asyncio.Lock()
         self._session_notices: dict[str, list[dict[str, Any]]] = {}
         self._consolidating: set[str] = set()
@@ -175,8 +179,39 @@ class AgentRuntimeEngine:
 
         task.add_done_callback(_cleanup)
 
+    def create_session_cancellation_token(self, session_key: str) -> ToolCancellationToken:
+        key = str(session_key or "").strip()
+        token = ToolCancellationToken(session_key=key)
+        if not key:
+            return token
+        bucket = self._session_cancellation_tokens.setdefault(key, set())
+        bucket.add(token)
+        return token
+
+    def release_session_cancellation_token(self, session_key: str, token: ToolCancellationToken | None) -> None:
+        key = str(session_key or "").strip()
+        if not key or token is None:
+            return
+        tokens = self._session_cancellation_tokens.get(key)
+        if tokens is None:
+            return
+        tokens.discard(token)
+        if not tokens:
+            self._session_cancellation_tokens.pop(key, None)
+
+    def signal_session_cancellation(self, session_key: str, *, reason: str = "user_cancelled") -> int:
+        key = str(session_key or "").strip()
+        tokens = list(self._session_cancellation_tokens.get(key, set()))
+        for token in tokens:
+            try:
+                token.cancel(reason=reason)
+            except Exception:
+                continue
+        return len(tokens)
+
     async def cancel_session_tasks(self, session_key: str) -> int:
         key = str(session_key or '').strip()
+        self.signal_session_cancellation(key, reason="user_cancelled")
         tasks = list(self._active_tasks.pop(key, set()))
         for task in tasks:
             task.cancel()

@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any
+
+from g3ku.resources.tool_settings import SkillInstallerToolSettings, runtime_tool_settings
+from g3ku.runtime.cancellation import ToolCancellationRequested
 
 _DEFAULT_REF = "main"
 _GITHUB_HOST = "github.com"
@@ -46,7 +52,7 @@ def _validate_repo_path(path: str) -> str:
     return "/".join(parts)
 
 
-def _request(url: str) -> bytes:
+def _request(url: str, *, timeout: int, cancel_token: Any | None = None) -> bytes:
     headers = {
         "User-Agent": "g3ku-skill-installer/1.0",
         "Accept": "application/octet-stream, application/zip, text/plain;q=0.9, */*;q=0.1",
@@ -55,30 +61,106 @@ def _request(url: str) -> bytes:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=max(1, int(timeout or 30))) as response:
+            chunks: list[bytes] = []
+            while True:
+                if cancel_token is not None and hasattr(cancel_token, "raise_if_cancelled"):
+                    cancel_token.raise_if_cancelled(default_message="用户已请求暂停，正在安全停止...")
+                chunk = response.read(1024 * 64)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+    except TimeoutError as exc:
+        raise InstallError(f"Download timed out after {max(1, int(timeout or 30))} seconds.") from exc
 
 
-def _safe_extract_zip(zip_file: zipfile.ZipFile, dest_dir: str) -> None:
+def _safe_extract_zip(zip_file: zipfile.ZipFile, dest_dir: str, *, cancel_token: Any | None = None) -> None:
     dest_root = os.path.realpath(dest_dir)
     for info in zip_file.infolist():
+        if cancel_token is not None and hasattr(cancel_token, "raise_if_cancelled"):
+            cancel_token.raise_if_cancelled(default_message="用户已请求暂停，正在安全停止...")
         extracted_path = os.path.realpath(os.path.join(dest_dir, info.filename))
         if extracted_path == dest_root or extracted_path.startswith(dest_root + os.sep):
             continue
         raise InstallError("Archive contains files outside the destination.")
-    zip_file.extractall(dest_dir)
+    for info in zip_file.infolist():
+        if cancel_token is not None and hasattr(cancel_token, "raise_if_cancelled"):
+            cancel_token.raise_if_cancelled(default_message="用户已请求暂停，正在安全停止...")
+        zip_file.extract(info, dest_dir)
 
 
-def _run_git(args: list[str]) -> None:
-    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def _run_git(args: list[str], *, timeout: int, cancel_token: Any | None = None) -> None:
+    env = dict(os.environ)
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    env.setdefault("GCM_INTERACTIVE", "never")
+    process: subprocess.Popen[str] | None = None
+    timeout_seconds = max(1, int(timeout or 120))
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        if cancel_token is not None and hasattr(cancel_token, "register_process"):
+            cancel_token.register_process(process)
+        while True:
+            if cancel_token is not None and hasattr(cancel_token, "is_cancelled") and cancel_token.is_cancelled():
+                if process.poll() is None:
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        process.wait(timeout=2.0)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                raise ToolCancellationRequested(str(getattr(cancel_token, "reason", "") or "用户已请求暂停，正在安全停止..."))
+            if process.poll() is not None:
+                break
+            if time.monotonic() >= deadline:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                try:
+                    process.wait(timeout=2.0)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                raise InstallError(
+                    f"Git command timed out after {timeout_seconds} seconds: {' '.join(args[:4])} ..."
+                )
+            time.sleep(0.05)
+        stdout, stderr = process.communicate()
+        result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    finally:
+        if process is not None and cancel_token is not None and hasattr(cancel_token, "unregister_process"):
+            cancel_token.unregister_process(process)
     if result.returncode != 0:
         raise InstallError(result.stderr.strip() or "Git command failed.")
 
 
 class SkillInstallerTool:
-    def __init__(self, *, workspace: Path, main_task_service: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        workspace: Path,
+        main_task_service: Any = None,
+        settings: SkillInstallerToolSettings | None = None,
+    ) -> None:
         self._workspace = Path(workspace).resolve(strict=False)
         self._main_task_service = main_task_service
+        self._settings = settings or SkillInstallerToolSettings()
 
     async def execute(
         self,
@@ -92,14 +174,43 @@ class SkillInstallerTool:
         __g3ku_runtime: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
+        runtime_payload = kwargs.pop("__g3ku_runtime", None)
+        runtime = runtime_payload if isinstance(runtime_payload, dict) else (__g3ku_runtime if isinstance(__g3ku_runtime, dict) else {})
         del kwargs
-        runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
         denied = self._authorize("install", runtime)
         if denied is not None:
             return json.dumps({"ok": False, "error": denied}, ensure_ascii=False)
+        loop = asyncio.get_running_loop()
+        return await asyncio.to_thread(
+            self._execute_blocking,
+            loop,
+            runtime,
+            url,
+            repo,
+            path,
+            ref,
+            dest,
+            name,
+            method,
+        )
 
+    def _execute_blocking(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        runtime: dict[str, Any],
+        url: str | None,
+        repo: str | None,
+        path: str | None,
+        ref: str | None,
+        dest: str | None,
+        name: str | None,
+        method: str | None,
+    ) -> str:
         try:
+            cancel_token = runtime.get("cancel_token") if isinstance(runtime, dict) else None
+            self._check_cancel(cancel_token)
             source = self._resolve_source(url=url, repo=repo, path=path, ref=ref)
+            self._emit_progress_sync(loop, runtime, f"skill-installer: resolving {source.owner}/{source.repo}:{source.path}")
             requested_name = _normalize_skill_id(name or Path(source.path).name or source.repo)
             destination = self._resolve_destination(dest=dest, requested_name=requested_name)
             if destination.exists():
@@ -107,14 +218,23 @@ class SkillInstallerTool:
 
             destination.parent.mkdir(parents=True, exist_ok=True)
 
-            with tempfile.TemporaryDirectory(prefix="g3ku-skill-installer-") as tmp_dir:
+            with tempfile.TemporaryDirectory(
+                prefix="g3ku-skill-installer-",
+                ignore_cleanup_errors=True,
+            ) as tmp_dir:
+                self._check_cancel(cancel_token)
+                self._emit_progress_sync(loop, runtime, "skill-installer: fetching upstream repository")
                 repo_root, method_used = self._prepare_repo(
                     source=source,
                     method=str(method or "auto").strip().lower() or "auto",
                     tmp_dir=tmp_dir,
+                    cancel_token=cancel_token,
                 )
+                self._emit_progress_sync(loop, runtime, f"skill-installer: upstream fetched via {method_used}")
+                self._check_cancel(cancel_token)
                 skill_root = self._resolve_skill_root(repo_root=repo_root, repo_path=source.path)
-                self._copy_skill_tree(skill_root, destination)
+                self._copy_skill_tree(skill_root, destination, cancel_token=cancel_token)
+                self._emit_progress_sync(loop, runtime, f"skill-installer: copied files into {destination}")
 
             manifest_created = self._ensure_resource_manifest(
                 skill_root=destination,
@@ -124,7 +244,8 @@ class SkillInstallerTool:
             detected_skill_id = self._read_manifest_name(destination / "resource.yaml") or requested_name
 
             refresh_payload = self._refresh_resources(destination)
-            catalog_payload = await self._sync_catalog(skill_id=detected_skill_id)
+            catalog_payload = self._sync_catalog_blocking(loop, skill_id=detected_skill_id)
+            self._emit_progress_sync(loop, runtime, f"skill-installer: installed {detected_skill_id}")
 
             warnings: list[str] = []
             if name and not manifest_created and detected_skill_id != requested_name:
@@ -154,7 +275,7 @@ class SkillInstallerTool:
                 },
                 ensure_ascii=False,
             )
-        except InstallError as exc:
+        except (InstallError, ToolCancellationRequested) as exc:
             return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"Unexpected install error: {exc}"}, ensure_ascii=False)
@@ -235,34 +356,50 @@ class SkillInstallerTool:
             raise InstallError("Destination must stay inside the current workspace.") from exc
         return resolved
 
-    def _prepare_repo(self, *, source: GitHubSource, method: str, tmp_dir: str) -> tuple[Path, str]:
+    def _prepare_repo(self, *, source: GitHubSource, method: str, tmp_dir: str, cancel_token: Any | None = None) -> tuple[Path, str]:
         normalized = method if method in {"auto", "download", "git"} else ""
         if not normalized:
             raise InstallError("method must be one of auto, download, or git.")
 
-        if normalized in {"auto", "download"}:
-            try:
-                return self._download_repo_zip(source=source, tmp_dir=tmp_dir), "download"
-            except InstallError:
-                if normalized == "download":
-                    raise
-        if normalized in {"auto", "git"}:
-            return self._git_sparse_checkout(source=source, tmp_dir=tmp_dir), "git"
+        auto_prefer = str(getattr(self._settings, "auto_prefer", "git") or "git").strip().lower()
+        if normalized == "auto":
+            strategies = ["git", "download"] if auto_prefer == "git" else ["download", "git"]
+            last_error: InstallError | None = None
+            for strategy in strategies:
+                try:
+                    if strategy == "git":
+                        return self._git_sparse_checkout(source=source, tmp_dir=tmp_dir, cancel_token=cancel_token), "git"
+                    return self._download_repo_zip(source=source, tmp_dir=tmp_dir, cancel_token=cancel_token), "download"
+                except InstallError as exc:
+                    last_error = exc
+                    continue
+            if last_error is not None:
+                raise last_error
+            raise InstallError("Failed to fetch upstream repository.")
+        if normalized == "download":
+            return self._download_repo_zip(source=source, tmp_dir=tmp_dir, cancel_token=cancel_token), "download"
+        if normalized == "git":
+            return self._git_sparse_checkout(source=source, tmp_dir=tmp_dir, cancel_token=cancel_token), "git"
         raise InstallError("Unsupported install method.")
 
-    def _download_repo_zip(self, *, source: GitHubSource, tmp_dir: str) -> Path:
+    def _download_repo_zip(self, *, source: GitHubSource, tmp_dir: str, cancel_token: Any | None = None) -> Path:
         zip_url = f"https://codeload.github.com/{source.owner}/{source.repo}/zip/{source.ref}"
         zip_path = Path(tmp_dir) / "repo.zip"
         try:
-            payload = _request(zip_url)
+            payload = _request(
+                zip_url,
+                timeout=max(1, int(getattr(self._settings, "download_timeout", 30) or 30)),
+                cancel_token=cancel_token,
+            )
         except urllib.error.HTTPError as exc:
             raise InstallError(f"Download failed: HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
             raise InstallError(f"Download failed: {exc.reason}") from exc
 
+        self._check_cancel(cancel_token)
         zip_path.write_bytes(payload)
         with zipfile.ZipFile(zip_path, "r") as zip_file:
-            _safe_extract_zip(zip_file, tmp_dir)
+            _safe_extract_zip(zip_file, tmp_dir, cancel_token=cancel_token)
             top_levels = {name.split("/")[0] for name in zip_file.namelist() if name}
         if not top_levels:
             raise InstallError("Downloaded archive was empty.")
@@ -270,64 +407,53 @@ class SkillInstallerTool:
             raise InstallError("Unexpected archive layout.")
         return (Path(tmp_dir) / next(iter(top_levels))).resolve(strict=False)
 
-    def _git_sparse_checkout(self, *, source: GitHubSource, tmp_dir: str) -> Path:
+    def _git_sparse_checkout(self, *, source: GitHubSource, tmp_dir: str, cancel_token: Any | None = None) -> Path:
         if shutil.which("git") is None:
             raise InstallError("git is not available for sparse checkout fallback.")
 
         repo_url = f"https://{_GITHUB_HOST}/{source.owner}/{source.repo}.git"
-        repo_dir = Path(tmp_dir) / "repo"
         clone_attempts = [
-            [
-                "git",
-                "clone",
-                "--filter=blob:none",
-                "--depth",
-                "1",
-                "--sparse",
-                "--single-branch",
-                "--branch",
-                source.ref,
-                repo_url,
-                str(repo_dir),
-            ],
-            [
-                "git",
-                "clone",
-                "--filter=blob:none",
-                "--depth",
-                "1",
-                "--sparse",
-                "--single-branch",
-                repo_url,
-                str(repo_dir),
-            ],
+            {"repo_dir": Path(tmp_dir) / "repo-branch", "use_branch": True},
+            {"repo_dir": Path(tmp_dir) / "repo-fallback", "use_branch": False},
         ]
         last_error: InstallError | None = None
-        for clone_cmd in clone_attempts:
-            self._reset_clone_dir(repo_dir)
+        for attempt in clone_attempts:
+            repo_dir = Path(attempt["repo_dir"])
+            clone_cmd = [
+                "git",
+                "clone",
+                "--filter=blob:none",
+                "--depth",
+                "1",
+                "--sparse",
+                "--single-branch",
+            ]
+            if bool(attempt["use_branch"]):
+                clone_cmd.extend(["--branch", source.ref])
+            clone_cmd.extend([repo_url, str(repo_dir)])
             try:
-                _run_git(clone_cmd)
-                last_error = None
-                break
+                _run_git(
+                    clone_cmd,
+                    timeout=max(1, int(getattr(self._settings, "git_timeout", 120) or 120)),
+                    cancel_token=cancel_token,
+                )
+                _run_git(
+                    ["git", "-C", str(repo_dir), "sparse-checkout", "set", source.path],
+                    timeout=max(1, int(getattr(self._settings, "git_timeout", 120) or 120)),
+                    cancel_token=cancel_token,
+                )
+                _run_git(
+                    ["git", "-C", str(repo_dir), "checkout", source.ref],
+                    timeout=max(1, int(getattr(self._settings, "git_timeout", 120) or 120)),
+                    cancel_token=cancel_token,
+                )
+                return repo_dir.resolve(strict=False)
             except InstallError as exc:
                 last_error = exc
+                continue
         if last_error is not None:
             raise last_error
-        _run_git(["git", "-C", str(repo_dir), "sparse-checkout", "set", source.path])
-        _run_git(["git", "-C", str(repo_dir), "checkout", source.ref])
-        return repo_dir.resolve(strict=False)
-
-    @staticmethod
-    def _reset_clone_dir(repo_dir: Path) -> None:
-        if not repo_dir.exists():
-            return
-        try:
-            if repo_dir.is_dir():
-                shutil.rmtree(repo_dir)
-            else:
-                repo_dir.unlink()
-        except OSError as exc:
-            raise InstallError(f"Failed to reset temporary clone directory {repo_dir}: {exc}") from exc
+        raise InstallError("git sparse checkout failed for an unknown reason.")
 
     @staticmethod
     def _resolve_skill_root(*, repo_root: Path, repo_path: str) -> Path:
@@ -343,13 +469,25 @@ class SkillInstallerTool:
         return candidate
 
     @staticmethod
-    def _copy_skill_tree(source_root: Path, destination: Path) -> None:
+    def _copy_skill_tree(source_root: Path, destination: Path, *, cancel_token: Any | None = None) -> None:
         try:
-            shutil.copytree(
-                source_root,
-                destination,
-                ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", ".ruff_cache"),
-            )
+            for current_root, dirnames, filenames in os.walk(source_root):
+                if cancel_token is not None and hasattr(cancel_token, "raise_if_cancelled"):
+                    cancel_token.raise_if_cancelled(default_message="用户已请求暂停，正在安全停止...")
+                dirnames[:] = [
+                    name for name in dirnames
+                    if name not in {".git", "__pycache__", ".pytest_cache", ".ruff_cache"}
+                ]
+                current_path = Path(current_root)
+                relative = current_path.relative_to(source_root)
+                target_root = destination / relative
+                target_root.mkdir(parents=True, exist_ok=True)
+                for filename in filenames:
+                    if filename in {".DS_Store"}:
+                        continue
+                    if cancel_token is not None and hasattr(cancel_token, "raise_if_cancelled"):
+                        cancel_token.raise_if_cancelled(default_message="用户已请求暂停，正在安全停止...")
+                    shutil.copy2(current_path / filename, target_root / filename)
         except FileExistsError as exc:
             raise InstallError(f"Destination already exists: {destination}") from exc
         except OSError as exc:
@@ -516,7 +654,45 @@ class SkillInstallerTool:
             return {"ok": False, "reason": str(exc)}
         return {"ok": True, "payload": payload}
 
+    def _sync_catalog_blocking(self, loop: asyncio.AbstractEventLoop, *, skill_id: str) -> dict[str, Any]:
+        service = self._main_task_service
+        memory_manager = getattr(service, "memory_manager", None) if service is not None else None
+        if memory_manager is None or not hasattr(memory_manager, "sync_catalog"):
+            return {"ok": False, "reason": "memory_manager_unavailable"}
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                memory_manager.sync_catalog(service, skill_ids={skill_id}),
+                loop,
+            )
+            payload = future.result(timeout=max(5, int(getattr(self._settings, "git_timeout", 120) or 120)))
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc)}
+        return {"ok": True, "payload": payload}
+
+    def _emit_progress_sync(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        runtime: dict[str, Any],
+        message: str,
+    ) -> None:
+        callback = runtime.get("on_progress") if isinstance(runtime, dict) else None
+        if callback is None:
+            return
+        try:
+            result = callback(str(message), event_kind="tool")
+            if inspect.isawaitable(result):
+                asyncio.run_coroutine_threadsafe(result, loop).result(timeout=5)
+        except Exception:
+            return
+
+    @staticmethod
+    def _check_cancel(cancel_token: Any | None) -> None:
+        if cancel_token is None or not hasattr(cancel_token, "raise_if_cancelled"):
+            return
+        cancel_token.raise_if_cancelled(default_message="用户已请求暂停，正在安全停止...")
+
 
 def build(runtime):
     service = getattr(runtime.services, "main_task_service", None)
-    return SkillInstallerTool(workspace=runtime.workspace, main_task_service=service)
+    settings = runtime_tool_settings(runtime, SkillInstallerToolSettings, tool_name="skill-installer")
+    return SkillInstallerTool(workspace=runtime.workspace, main_task_service=service, settings=settings)

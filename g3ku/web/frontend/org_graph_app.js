@@ -11,6 +11,9 @@ const TREE_SCALE_MIN = 0.6;
 const TREE_SCALE_MAX = 1.8;
 const TREE_SCALE_FACTOR = 1.12;
 const RESOURCE_PAGE_SIZES = [20, 50, 100];
+const CEO_TOOL_PROGRESS_MAX_LINES = 4;
+const CEO_TOOL_STEP_MAX = 5;
+const CEO_SESSION_POLL_MS = 4000;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -40,6 +43,12 @@ const S = {
     ceoUploads: [],
     ceoUploadBusy: false,
     ceoSessions: [],
+    ceoSessionUnread: {},
+    ceoSessionMessageCounts: {},
+    ceoSessionHydrated: false,
+    ceoSessionPollIntervalId: null,
+    ceoSessionPollInFlight: false,
+    liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
     taskDefaults: {
@@ -283,6 +292,76 @@ function formatSessionTime(value) {
 function normalizeInt(value, fallback = 0) {
     const next = Number(value);
     return Number.isFinite(next) ? Math.trunc(next) : Math.trunc(fallback);
+}
+
+function sessionMessageCount(session) {
+    return Math.max(0, normalizeInt(session?.message_count, 0));
+}
+
+function sessionUnreadCount(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key) return 0;
+    return Math.max(0, normalizeInt(S.ceoSessionUnread?.[key], 0));
+}
+
+function markCeoSessionRead(sessionId, { messageCount = null } = {}) {
+    const key = String(sessionId || "").trim();
+    if (!key) return;
+    S.ceoSessionUnread = { ...S.ceoSessionUnread, [key]: 0 };
+    if (messageCount !== null && messageCount !== undefined) {
+        S.ceoSessionMessageCounts = {
+            ...S.ceoSessionMessageCounts,
+            [key]: Math.max(0, normalizeInt(messageCount, 0)),
+        };
+    }
+}
+
+function syncCeoSessionUnreadState(sessions = [], activeId = activeSessionId()) {
+    const previousCounts = S.ceoSessionMessageCounts && typeof S.ceoSessionMessageCounts === "object"
+        ? S.ceoSessionMessageCounts
+        : {};
+    const previousUnread = S.ceoSessionUnread && typeof S.ceoSessionUnread === "object"
+        ? S.ceoSessionUnread
+        : {};
+    const nextCounts = {};
+    const nextUnread = {};
+    const hydrated = !!S.ceoSessionHydrated;
+
+    (Array.isArray(sessions) ? sessions : []).forEach((item) => {
+        const sessionId = String(item?.session_id || "").trim();
+        if (!sessionId) return;
+        const messageCount = sessionMessageCount(item);
+        nextCounts[sessionId] = messageCount;
+
+        if (sessionId === activeId) {
+            nextUnread[sessionId] = 0;
+            return;
+        }
+
+        const previousCount = Math.max(0, normalizeInt(previousCounts[sessionId], messageCount));
+        const existingUnread = Math.max(0, normalizeInt(previousUnread[sessionId], 0));
+
+        if (!hydrated || !Object.prototype.hasOwnProperty.call(previousCounts, sessionId)) {
+            nextUnread[sessionId] = existingUnread;
+            return;
+        }
+
+        if (messageCount > previousCount) {
+            nextUnread[sessionId] = existingUnread + (messageCount - previousCount);
+            return;
+        }
+
+        if (messageCount < previousCount) {
+            nextUnread[sessionId] = 0;
+            return;
+        }
+
+        nextUnread[sessionId] = existingUnread;
+    });
+
+    S.ceoSessionMessageCounts = nextCounts;
+    S.ceoSessionUnread = nextUnread;
+    S.ceoSessionHydrated = true;
 }
 
 function normalizeResourcePageSize(value, fallback = RESOURCE_PAGE_SIZES[0]) {
@@ -544,11 +623,20 @@ function canMutateCeoSessions() {
     return !(S.ceoTurnActive || S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
 }
 
+function canActivateCeoSessions() {
+    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
+}
+
 function syncCeoSessionActions() {
-    const disabled = !canMutateCeoSessions();
-    if (U.ceoNewSession) U.ceoNewSession.disabled = disabled;
-    U.ceoSessionList?.querySelectorAll("[data-session-activate], [data-session-rename], [data-session-delete]")?.forEach((button) => {
-        button.disabled = disabled;
+    const mutationDisabled = !canMutateCeoSessions();
+    const activationDisabled = !canActivateCeoSessions();
+    if (U.ceoNewSession) U.ceoNewSession.disabled = mutationDisabled;
+    U.ceoSessionList?.querySelectorAll("[data-session-activate]")?.forEach((button) => {
+        const targetId = String(button?.dataset?.sessionActivate || "").trim();
+        button.disabled = activationDisabled || targetId === activeSessionId();
+    });
+    U.ceoSessionList?.querySelectorAll("[data-session-rename], [data-session-delete]")?.forEach((button) => {
+        button.disabled = mutationDisabled;
     });
 }
 
@@ -831,17 +919,18 @@ function syncCeoPrimaryButton() {
 function finalizePausedCeoTurn(text = "已暂停") {
     const turn = pullActiveCeoTurn();
     if (!turn?.textEl || !turn.flowEl) return;
-    turn.finalized = true;
-    turn.textEl.textContent = String(text || "已暂停");
-    turn.textEl.classList.remove("pending");
-    if (turn.steps > 0) {
-        turn.flowEl.hidden = false;
-        turn.flowEl.open = false;
-        updateCeoTurnMeta(turn, "Paused");
-    } else {
-        turn.flowEl.hidden = true;
-    }
-    scrollCeoFeedToBottom();
+    mutateCeoFeed(() => {
+        turn.finalized = true;
+        turn.textEl.textContent = String(text || "已暂停");
+        turn.textEl.classList.remove("pending");
+        if (turn.steps > 0) {
+            turn.flowEl.hidden = false;
+            turn.flowEl.open = false;
+            updateCeoTurnMeta(turn, "已暂停");
+        } else {
+            turn.flowEl.hidden = true;
+        }
+    }, { scrollMode: "preserve" });
 }
 
 function applyCeoState(state = {}, meta = {}) {
@@ -939,16 +1028,32 @@ function removePendingCeoUpload(index) {
     renderPendingCeoUploads();
 }
 
-function addMsg(text, role, { markdown = false, attachments = [] } = {}) {
-    const el = document.createElement("div");
-    el.className = `message ${role}`;
-    const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
-    const content = markdown ? renderMarkdown(text) : esc(text);
-    const attachmentMarkup = renderChatAttachments(attachments);
-    el.innerHTML = `<div class="avatar"><i data-lucide="${role === "system" ? "cpu" : "user"}"></i></div><div class="${contentClass}">${content}${attachmentMarkup}</div>`;
-    U.ceoFeed.appendChild(el);
-    icons();
-    U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
+function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
+    if (typeof mutator !== "function") return null;
+    if (!U.ceoFeed) return mutator();
+    const prevTop = U.ceoFeed.scrollTop;
+    const result = mutator();
+    if (scrollMode === "bottom") {
+        U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
+    } else {
+        const maxTop = Math.max(0, U.ceoFeed.scrollHeight - U.ceoFeed.clientHeight);
+        U.ceoFeed.scrollTop = Math.max(0, Math.min(prevTop, maxTop));
+    }
+    return result;
+}
+
+function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve" } = {}) {
+    mutateCeoFeed(() => {
+        const el = document.createElement("div");
+        el.className = `message ${role}`;
+        const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
+        const content = markdown ? renderMarkdown(text) : esc(text);
+        const attachmentMarkup = renderChatAttachments(attachments);
+        el.innerHTML = `<div class="avatar"><i data-lucide="${role === "system" ? "cpu" : "user"}"></i></div><div class="${contentClass}">${content}${attachmentMarkup}</div>`;
+        U.ceoFeed.appendChild(el);
+        icons();
+        return el;
+    }, { scrollMode });
 }
 
 function resetCeoFeed() {
@@ -965,7 +1070,7 @@ function restoreCeoInflightTurn(snapshot = null) {
     if (userMessage && !isHeartbeat) {
         const attachments = normalizeUploadList(userMessage.attachments);
         const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
-        addMsg(text, "user", { attachments });
+        addMsg(text, "user", { attachments, scrollMode: "preserve" });
     }
     const status = String(snapshot.status || "").trim().toLowerCase();
     const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
@@ -979,59 +1084,69 @@ function restoreCeoInflightTurn(snapshot = null) {
 }
 
 function renderCeoSnapshot(messages = [], inflightTurn = null) {
-    resetCeoFeed();
-    messages.forEach((item) => {
-        const role = String(item?.role || "").trim().toLowerCase();
-        const content = String(item?.content || "");
-        if (!content.trim()) return;
-        if (role === "user") {
-            addMsg(content, "user");
-            return;
-        }
-        if (role === "assistant" || role === "system") {
-            addMsg(content, "system", { markdown: true });
-        }
-    });
-    restoreCeoInflightTurn(inflightTurn);
+    mutateCeoFeed(() => {
+        resetCeoFeed();
+        messages.forEach((item) => {
+            const role = String(item?.role || "").trim().toLowerCase();
+            const content = String(item?.content || "");
+            if (!content.trim()) return;
+            if (role === "user") {
+                addMsg(content, "user", { scrollMode: "preserve" });
+                return;
+            }
+            if (role === "assistant" || role === "system") {
+                addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+            }
+        });
+        restoreCeoInflightTurn(inflightTurn);
+    }, { scrollMode: "preserve" });
 }
 
-function scrollCeoFeedToBottom() {
-    if (!U.ceoFeed) return;
-    U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
-}
-
-function createPendingCeoTurn(source = "user") {
-    if (!U.ceoFeed) return null;
-    const el = document.createElement("div");
-    el.className = "message system ceo-turn-message";
-    el.innerHTML = `
-        <div class="avatar"><i data-lucide="cpu"></i></div>
-        <div class="msg-content ceo-turn-content">
-            <div class="assistant-text pending">Working...</div>
-            <details class="interaction-flow" open hidden>
-                <summary class="interaction-flow-summary">
-                    <span class="interaction-flow-title">Interaction Flow</span>
-                    <span class="interaction-flow-meta">Waiting for tool calls...</span>
-                </summary>
-                <div class="interaction-flow-list" role="list"></div>
-            </details>
-        </div>
-    `;
-    U.ceoFeed.appendChild(el);
-    const turn = {
-        el,
-        textEl: el.querySelector(".assistant-text"),
-        flowEl: el.querySelector(".interaction-flow"),
-        metaEl: el.querySelector(".interaction-flow-meta"),
-        listEl: el.querySelector(".interaction-flow-list"),
-        steps: 0,
-        hasError: false,
-        finalized: false,
-        source: String(source || "").trim().toLowerCase() || "user",
-    };
-    icons();
-    scrollCeoFeedToBottom();
-    return turn;
+function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
+    return mutateCeoFeed(() => {
+        if (!U.ceoFeed) return null;
+        const el = document.createElement("div");
+        el.className = "message system ceo-turn-message";
+        el.innerHTML = `
+            <div class="avatar"><i data-lucide="cpu"></i></div>
+            <div class="msg-content ceo-turn-content">
+                <div class="assistant-text pending">处理中...</div>
+                <details class="interaction-flow" open hidden>
+                    <summary class="interaction-flow-summary">
+                        <span class="interaction-flow-title">Interaction Flow</span>
+                        <span class="interaction-flow-meta">等待工具开始...</span>
+                    </summary>
+                    <div class="interaction-flow-list" role="list"></div>
+                    <div class="interaction-flow-footer" hidden>
+                        <button type="button" class="interaction-flow-toggle">展开全部</button>
+                    </div>
+                </details>
+            </div>
+        `;
+        U.ceoFeed.appendChild(el);
+        const toggleButton = el.querySelector(".interaction-flow-toggle");
+        const turn = {
+            el,
+            textEl: el.querySelector(".assistant-text"),
+            flowEl: el.querySelector(".interaction-flow"),
+            metaEl: el.querySelector(".interaction-flow-meta"),
+            listEl: el.querySelector(".interaction-flow-list"),
+            footerEl: el.querySelector(".interaction-flow-footer"),
+            toggleEl: toggleButton,
+            steps: 0,
+            hasError: false,
+            finalized: false,
+            historyExpanded: false,
+            source: String(source || "").trim().toLowerCase() || "user",
+        };
+        toggleButton?.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleCeoToolHistory(turn);
+        });
+        icons();
+        return turn;
+    }, { scrollMode });
 }
 
 function getActiveCeoTurn() {
@@ -1053,10 +1168,11 @@ function pullActiveCeoTurn(source = "") {
 function discardActiveCeoTurn({ source = "" } = {}) {
     const turn = pullActiveCeoTurn(source);
     if (!turn) return false;
-    turn.finalized = true;
-    turn.el?.remove?.();
-    scrollCeoFeedToBottom();
-    return true;
+    return mutateCeoFeed(() => {
+        turn.finalized = true;
+        turn.el?.remove?.();
+        return true;
+    }, { scrollMode: "preserve" });
 }
 
 function ensureActiveCeoTurn({ source = "" } = {}) {
@@ -1072,36 +1188,334 @@ function ensureActiveCeoTurn({ source = "" } = {}) {
 
 function updateCeoTurnMeta(turn, stateLabel) {
     if (!turn?.metaEl) return;
-    const stepLabel = turn.steps > 0 ? `${turn.steps} steps` : "Waiting for tool calls...";
+    const stepLabel = turn.steps > 0 ? `${turn.steps} 个阶段` : "等待工具开始...";
     turn.metaEl.textContent = stateLabel ? `${stepLabel} - ${stateLabel}` : stepLabel;
+}
+
+function findCeoToolStep(turn, { toolCallId = "", toolName = "" } = {}) {
+    if (!turn?.listEl) return null;
+    const items = [...turn.listEl.querySelectorAll(".interaction-step")];
+    if (toolCallId) {
+        for (let index = items.length - 1; index >= 0; index -= 1) {
+            const item = items[index];
+            if (String(item?.dataset?.toolCallId || "").trim() === toolCallId) return item;
+        }
+    }
+    if (toolName) {
+        for (let index = items.length - 1; index >= 0; index -= 1) {
+            const item = items[index];
+            if (
+                String(item?.dataset?.toolName || "").trim() === toolName
+                && String(item?.dataset?.stepState || "").trim() === "running"
+            ) {
+                return item;
+            }
+        }
+    }
+    return null;
+}
+
+function ceoFriendlyToolName(toolName = "") {
+    const normalized = String(toolName || "").trim().toLowerCase();
+    const map = {
+        "skill-installer": "技能安装",
+        "filesystem": "文件处理",
+        "exec": "命令执行",
+        "load_tool_context": "工具说明",
+        "load_skill_context": "技能说明",
+    };
+    return map[normalized] || String(toolName || "工具").trim() || "工具";
+}
+
+function parseJsonObjectText(raw = "") {
+    const text = String(raw || "").trim();
+    if (!text || !(text.startsWith("{") || text.startsWith("["))) return null;
+    try {
+        const parsed = JSON.parse(text);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function ceoFriendlyToolDetail(toolName = "", detail = "", status = "running", kind = "") {
+    const normalizedTool = String(toolName || "").trim().toLowerCase();
+    const raw = String(detail || "").trim();
+    const lower = raw.toLowerCase();
+    const normalizedKind = String(kind || "").trim().toLowerCase();
+    const payload = parseJsonObjectText(raw);
+    if (!raw) {
+        if (status === "error") return "处理失败，请检查错误信息";
+        if (status === "success") return "处理完成";
+        return "正在处理中...";
+    }
+    if (status === "error") {
+        if (payload?.error) return `处理失败：${String(payload.error || "").trim()}`;
+        if (lower.includes("timed out")) return "等待超时，已停止当前步骤";
+        if (lower.includes("download failed")) return "下载失败，请检查网络或仓库可访问性";
+        if (lower.includes("git command timed out")) return "Git 操作超时，已停止当前步骤";
+        return `处理失败：${raw}`;
+    }
+    if (status === "success") {
+        if (normalizedTool === "skill-installer" && payload?.ok) {
+            const skillId = String(payload.skill_id || "").trim();
+            const installedPath = String(payload.installed_path || "").trim();
+            if (skillId && installedPath) return `技能 ${skillId} 已安装完成`;
+            if (skillId) return `技能 ${skillId} 已安装完成`;
+            return "技能已安装完成";
+        }
+        return raw || "处理完成";
+    }
+    if (normalizedTool === "skill-installer") {
+        if (lower.includes("started")) return "开始安装技能";
+        if (lower.includes("resolving")) return "正在确认技能来源和安装位置";
+        if (lower.includes("fetching upstream repository")) return "正在从远程仓库获取技能文件";
+        if (lower.includes("upstream fetched via git")) return "已获取技能文件，正在准备复制到项目";
+        if (lower.includes("upstream fetched via download")) return "已下载技能文件，正在准备复制到项目";
+        if (lower.includes("copied files into")) return "已复制技能文件，正在整理本地资源";
+        if (lower.includes("installed ")) return "安装已完成，正在刷新本地资源";
+    }
+    if (normalizedKind === "tool_plan") return "正在规划下一步工具操作";
+    if (normalizedKind === "tool") return `正在处理：${raw}`;
+    return raw;
+}
+
+function ceoToolStage(toolName = "", detail = "", status = "running") {
+    const normalizedTool = String(toolName || "").trim().toLowerCase();
+    const lower = String(detail || "").trim().toLowerCase();
+    if (status === "error") {
+        return { icon: "alert-triangle", spinning: false, meta: "处理失败" };
+    }
+    if (status === "success") {
+        return { icon: "check", spinning: false, meta: "处理完成" };
+    }
+    if (normalizedTool === "skill-installer") {
+        if (lower.includes("resolving")) return { icon: "search", spinning: false, meta: "正在确认技能来源" };
+        if (lower.includes("fetching upstream repository")) return { icon: "download", spinning: true, meta: "正在获取技能文件" };
+        if (lower.includes("fetched via")) return { icon: "package", spinning: false, meta: "已获取技能文件" };
+        if (lower.includes("copied files into")) return { icon: "folder-open", spinning: false, meta: "正在整理本地资源" };
+        if (lower.includes("installed ")) return { icon: "refresh-cw", spinning: true, meta: "正在刷新资源索引" };
+        if (lower.includes("started")) return { icon: "loader", spinning: true, meta: "正在准备安装技能" };
+    }
+    return { icon: "loader", spinning: true, meta: "正在处理中" };
+}
+
+function renderCeoToolIcon(iconWrap, iconName = "loader-circle") {
+    if (!(iconWrap instanceof HTMLElement)) return;
+    const nextIcon = String(iconName || "loader-circle").trim() || "loader-circle";
+    if (iconWrap.dataset.iconName === nextIcon && iconWrap.querySelector("svg")) return;
+    iconWrap.dataset.iconName = nextIcon;
+    iconWrap.innerHTML = `<i data-lucide="${esc(nextIcon)}"></i>`;
+}
+
+function trimInteractionLines(text = "", maxLines = CEO_TOOL_PROGRESS_MAX_LINES) {
+    const lines = String(text || "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+    return lines.slice(-maxLines);
+}
+
+function mergeInteractionDetail(existing = "", next = "", maxLines = CEO_TOOL_PROGRESS_MAX_LINES) {
+    const current = trimInteractionLines(existing, maxLines);
+    const incoming = trimInteractionLines(next, maxLines);
+    const merged = [...current];
+    incoming.forEach((line) => {
+        if (!merged.includes(line)) merged.push(line);
+    });
+    return merged.slice(-maxLines).join("\n");
+}
+
+function trimCeoToolSteps(turn) {
+    if (!turn?.listEl) return;
+    const items = [...turn.listEl.querySelectorAll(".interaction-step")];
+    const hiddenCount = Math.max(0, items.length - CEO_TOOL_STEP_MAX);
+    items.forEach((item, index) => {
+        const shouldHide = !turn.historyExpanded && index < hiddenCount;
+        item.hidden = shouldHide;
+        item.classList.toggle("is-collapsed-history", shouldHide);
+    });
+    turn.steps = items.length;
+    if (!turn.footerEl || !turn.toggleEl) return;
+    const hasOverflow = hiddenCount > 0;
+    turn.footerEl.hidden = !hasOverflow;
+    if (!hasOverflow) {
+        turn.toggleEl.textContent = "展开全部";
+        turn.toggleEl.setAttribute("aria-expanded", "false");
+        return;
+    }
+    if (turn.historyExpanded) {
+        turn.toggleEl.textContent = "收起旧进度";
+        turn.toggleEl.setAttribute("aria-expanded", "true");
+    } else {
+        turn.toggleEl.textContent = `展开全部（还有 ${hiddenCount} 条较早进度）`;
+        turn.toggleEl.setAttribute("aria-expanded", "false");
+    }
+}
+
+function toggleCeoToolHistory(turn) {
+    if (!turn?.listEl) return;
+    mutateCeoFeed(() => {
+        turn.historyExpanded = !turn.historyExpanded;
+        trimCeoToolSteps(turn);
+        icons();
+    }, { scrollMode: "preserve" });
+}
+
+function applyCeoToolStepState(item, { status = "running", toolName = "tool", detail = "", toolCallId = "", kind = "", stage = null } = {}) {
+    if (!(item instanceof HTMLElement)) return;
+    const statusLabel = ({ running: "进行中", success: "完成", error: "出错" })[status] || "更新";
+    const resolvedStage = stage || ceoToolStage(toolName, detail, status);
+    item.className = `interaction-step ${status}`;
+    item.dataset.stepState = status;
+    item.dataset.toolName = String(toolName || "tool").trim() || "tool";
+    if (toolCallId) item.dataset.toolCallId = toolCallId;
+    item.dataset.progressKind = String(kind || "").trim();
+    const titleEl = item.querySelector(".interaction-step-title");
+    const statusEl = item.querySelector(".interaction-step-status");
+    const detailEl = item.querySelector(".interaction-step-detail");
+    const iconWrap = item.querySelector(".interaction-step-icon");
+    if (titleEl) titleEl.textContent = ceoFriendlyToolName(toolName);
+    if (statusEl) statusEl.textContent = statusLabel;
+    if (detailEl) detailEl.textContent = detail || `${ceoFriendlyToolName(toolName)}${statusLabel}`;
+    if (iconWrap) {
+        iconWrap.classList.toggle("is-spinning", !!resolvedStage.spinning);
+        renderCeoToolIcon(iconWrap, resolvedStage.icon === "loader" ? "loader-circle" : resolvedStage.icon);
+    }
+}
+
+function parseIsoTimestamp(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatElapsedDuration(totalSeconds) {
+    const value = Number(totalSeconds);
+    if (!Number.isFinite(value) || value < 0) return "";
+    const seconds = Math.max(0, Math.floor(value));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remain = seconds % 60;
+    if (hours > 0) return `${hours}小时${minutes}分${remain}秒`;
+    if (minutes > 0) return `${minutes}分${remain}秒`;
+    return `${remain}秒`;
+}
+
+function resolveRuntimeSeconds(element) {
+    if (!(element instanceof HTMLElement)) return null;
+    const explicitElapsed = Number.parseFloat(String(element.dataset.elapsedSeconds || ""));
+    if (Number.isFinite(explicitElapsed) && explicitElapsed >= 0) return explicitElapsed;
+    const startedAt = parseIsoTimestamp(element.dataset.startedAt || "");
+    if (startedAt === null) return null;
+    const finishedAt = parseIsoTimestamp(element.dataset.finishedAt || "");
+    const end = finishedAt !== null ? finishedAt : Date.now();
+    return Math.max(0, Math.floor((end - startedAt) / 1000));
+}
+
+function updateRuntimeBadge(element, runtimeEl, { runningPrefix = "已运行 ", donePrefix = "耗时 " } = {}) {
+    if (!(element instanceof HTMLElement) || !(runtimeEl instanceof HTMLElement)) return;
+    const seconds = resolveRuntimeSeconds(element);
+    if (!Number.isFinite(seconds)) {
+        runtimeEl.hidden = true;
+        runtimeEl.textContent = "";
+        return;
+    }
+    const status = String(element.dataset.stepState || element.dataset.traceStatus || "").trim().toLowerCase();
+    runtimeEl.hidden = false;
+    runtimeEl.textContent = `${status === "running" ? runningPrefix : donePrefix}${formatElapsedDuration(seconds)}`;
+}
+
+function refreshLiveDurationBadges() {
+    document.querySelectorAll(".interaction-step").forEach((item) => {
+        if (!(item instanceof HTMLElement)) return;
+        const runtimeEl = item.querySelector(".interaction-step-runtime");
+        if (!(runtimeEl instanceof HTMLElement)) return;
+        updateRuntimeBadge(item, runtimeEl);
+    });
+    document.querySelectorAll(".task-trace-step").forEach((item) => {
+        if (!(item instanceof HTMLElement)) return;
+        const runtimeEl = item.querySelector(".task-trace-runtime");
+        if (!(runtimeEl instanceof HTMLElement)) return;
+        updateRuntimeBadge(item, runtimeEl);
+    });
+}
+
+function startLiveDurationTicker() {
+    if (S.liveDurationIntervalId) return;
+    S.liveDurationIntervalId = window.setInterval(refreshLiveDurationBadges, 1000);
+    refreshLiveDurationBadges();
+}
+
+function stopLiveDurationTicker() {
+    if (!S.liveDurationIntervalId) return;
+    window.clearInterval(S.liveDurationIntervalId);
+    S.liveDurationIntervalId = null;
 }
 
 function appendCeoToolEvent(event = {}) {
     const source = String(event?.source || "").trim().toLowerCase();
     const turn = ensureActiveCeoTurn({ source });
     if (!turn?.listEl || !turn.flowEl) return;
-    const status = String(event.status || "running").trim().toLowerCase();
-    const toolName = String(event.tool_name || "tool").trim() || "tool";
-    const detail = String(event.text || "").trim();
-    const statusLabel = ({ running: "Running", success: "Done", error: "Error" })[status] || "Update";
-    const item = document.createElement("div");
-    item.className = `interaction-step ${status}`;
-    item.setAttribute("role", "listitem");
-    item.innerHTML = `
-        <div class="interaction-step-header">
-            <span class="interaction-step-title">${esc(toolName)}</span>
-            <span class="interaction-step-status">${esc(statusLabel)}</span>
-        </div>
-        <div class="interaction-step-detail">${esc(detail || `${toolName} ${statusLabel}`)}</div>
-    `;
-    turn.flowEl.hidden = false;
-    turn.flowEl.open = true;
-    turn.listEl.appendChild(item);
-    turn.steps += 1;
-    turn.hasError = turn.hasError || status === "error";
-    updateCeoTurnMeta(turn, status === "running" ? "In progress" : status === "error" ? "Has errors" : "Processing");
-    icons();
-    scrollCeoFeedToBottom();
+    mutateCeoFeed(() => {
+        const status = String(event.status || "running").trim().toLowerCase();
+        const toolName = String(event.tool_name || "tool").trim() || "tool";
+        const rawText = String(event.text || "").trim();
+        const detail = ceoFriendlyToolDetail(toolName, rawText, status, event.kind);
+        const toolCallId = String(event.tool_call_id || "").trim();
+        let item = findCeoToolStep(turn, { toolCallId, toolName });
+        const existingDetail = String(item?.querySelector(".interaction-step-detail")?.textContent || "").trim();
+        const mergedDetail = mergeInteractionDetail(existingDetail, detail);
+        const stage = ceoToolStage(toolName, rawText, status);
+        if (!(item instanceof HTMLElement)) {
+            item = document.createElement("div");
+            item.setAttribute("role", "listitem");
+            item.innerHTML = `
+                <div class="interaction-step-header">
+                    <span class="interaction-step-lead">
+                        <span class="interaction-step-icon" data-icon-name="loader-circle"><i data-lucide="loader-circle"></i></span>
+                        <span class="interaction-step-title"></span>
+                    </span>
+                    <span class="interaction-step-side">
+                        <span class="interaction-step-runtime" hidden></span>
+                        <span class="interaction-step-status"></span>
+                    </span>
+                </div>
+                <div class="interaction-step-detail"></div>
+            `;
+            turn.listEl.appendChild(item);
+        }
+        const eventTimestamp = String(event.timestamp || "").trim();
+        const eventElapsed = Number.parseFloat(String(event.elapsed_seconds ?? ""));
+        if (!item.dataset.startedAt && eventTimestamp) item.dataset.startedAt = eventTimestamp;
+        if (event.status === "success" || event.status === "error") {
+            if (eventTimestamp) item.dataset.finishedAt = eventTimestamp;
+        } else {
+            delete item.dataset.finishedAt;
+        }
+        if (Number.isFinite(eventElapsed) && eventElapsed >= 0) {
+            item.dataset.elapsedSeconds = String(eventElapsed);
+        } else if (event.status === "running") {
+            delete item.dataset.elapsedSeconds;
+        }
+        applyCeoToolStepState(item, {
+            status,
+            toolName,
+            detail: mergedDetail || detail,
+            toolCallId,
+            kind: event.kind,
+            stage,
+        });
+        turn.flowEl.hidden = false;
+        turn.flowEl.open = true;
+        turn.hasError = turn.hasError || status === "error";
+        trimCeoToolSteps(turn);
+        updateCeoTurnMeta(turn, stage.meta);
+        const runtimeEl = item.querySelector(".interaction-step-runtime");
+        if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
+        icons();
+    }, { scrollMode: "preserve" });
 }
 
 function finalizeCeoTurn(text, meta = {}) {
@@ -1110,21 +1524,23 @@ function finalizeCeoTurn(text, meta = {}) {
     syncCeoPrimaryButton();
     const turn = pullActiveCeoTurn(meta?.source || "");
     if (!turn?.textEl || !turn.flowEl) {
-        addMsg(text, "system", { markdown: true });
+        addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
         return;
     }
-    turn.finalized = true;
-    turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "Done.");
-    turn.textEl.classList.remove("pending");
-    turn.textEl.classList.add("markdown-content");
-    if (turn.steps > 0) {
-        turn.flowEl.hidden = false;
-        turn.flowEl.open = false;
-        updateCeoTurnMeta(turn, turn.hasError ? "Completed with errors" : "Completed");
-    } else {
-        turn.flowEl.hidden = true;
-    }
-    scrollCeoFeedToBottom();
+    mutateCeoFeed(() => {
+        turn.finalized = true;
+        turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
+        turn.textEl.classList.remove("pending");
+        turn.textEl.classList.add("markdown-content");
+        if (turn.steps > 0) {
+            turn.flowEl.hidden = false;
+            turn.flowEl.open = false;
+            updateCeoTurnMeta(turn, turn.hasError ? "处理完成，但有异常" : "处理完成");
+        } else {
+            turn.flowEl.hidden = true;
+        }
+        icons();
+    }, { scrollMode: "preserve" });
 }
 
 function addNotice(notice, _bump = true) {
@@ -2555,6 +2971,32 @@ function resetCeoSessionState() {
     syncCeoPrimaryButton();
 }
 
+function stopCeoSessionPolling() {
+    if (S.ceoSessionPollIntervalId) window.clearInterval(S.ceoSessionPollIntervalId);
+    S.ceoSessionPollIntervalId = null;
+    S.ceoSessionPollInFlight = false;
+}
+
+async function pollCeoSessions() {
+    if (document.hidden || S.ceoSessionBusy || S.ceoSessionPollInFlight) return null;
+    S.ceoSessionPollInFlight = true;
+    try {
+        return await refreshCeoSessions({ background: true });
+    } catch (error) {
+        console.debug("Background CEO session refresh failed.", error);
+        return null;
+    } finally {
+        S.ceoSessionPollInFlight = false;
+    }
+}
+
+function startCeoSessionPolling() {
+    stopCeoSessionPolling();
+    S.ceoSessionPollIntervalId = window.setInterval(() => {
+        void pollCeoSessions();
+    }, CEO_SESSION_POLL_MS);
+}
+
 function closeCeoWs() {
     S.ceoWsToken += 1;
     const socket = S.ceoWs;
@@ -2585,28 +3027,32 @@ function renderCeoSessions() {
         return;
     }
 
-    const disabled = !canMutateCeoSessions();
     U.ceoSessionList.innerHTML = sessions.map((item) => {
         const sessionId = String(item?.session_id || "");
         const isActive = sessionId === currentId;
         const preview = String(item?.preview_text || "").trim() || "No messages yet.";
+        const unreadCount = isActive ? 0 : sessionUnreadCount(sessionId);
+        const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
         return `
-            <div class="ceo-session-card${isActive ? " is-active" : ""}" role="listitem">
+            <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}" role="listitem">
                 <button
                     type="button"
                     class="ceo-session-main ceo-session-select"
                     data-session-activate="${esc(sessionId)}"
                     aria-pressed="${isActive ? "true" : "false"}"
                 >
-                    <div class="ceo-session-title">${esc(String(item.title || sessionId || "Session"))}</div>
+                    <div class="ceo-session-head">
+                        <div class="ceo-session-title">${esc(String(item.title || sessionId || "Session"))}</div>
+                        ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
+                    </div>
                     <div class="ceo-session-preview">${esc(preview)}</div>
                     <div class="ceo-session-meta">${esc(formatSessionTime(item.updated_at))}</div>
                 </button>
                 <div class="ceo-session-actions" aria-label="Session actions">
-                    <button type="button" class="ceo-session-action" data-session-rename="${esc(sessionId)}" aria-label="Rename session" ${disabled ? "disabled" : ""}>
+                    <button type="button" class="ceo-session-action" data-session-rename="${esc(sessionId)}" aria-label="Rename session">
                         <i data-lucide="pencil"></i>
                     </button>
-                    <button type="button" class="ceo-session-action danger" data-session-delete="${esc(sessionId)}" aria-label="Delete session" ${disabled ? "disabled" : ""}>
+                    <button type="button" class="ceo-session-action danger" data-session-delete="${esc(sessionId)}" aria-label="Delete session">
                         <i data-lucide="trash-2"></i>
                     </button>
                 </div>
@@ -2617,43 +3063,54 @@ function renderCeoSessions() {
     icons();
 }
 
-function applyCeoSessionsPayload(payload = {}) {
+function applyCeoSessionsPayload(payload = {}, { preferLocalActive = false } = {}) {
     const sessions = Array.isArray(payload?.items) ? payload.items : [];
+    const previousActiveId = activeSessionId();
+    const localActiveId = preferLocalActive ? previousActiveId : "";
+    const localActiveExists = !!localActiveId && sessions.some((item) => String(item?.session_id || "").trim() === localActiveId);
     const nextActiveId =
-        String(payload?.active_session_id || "").trim()
+        (localActiveExists ? localActiveId : "")
+        || String(payload?.active_session_id || "").trim()
         || String(sessions.find((item) => item?.is_active)?.session_id || "").trim()
         || activeSessionId();
+    syncCeoSessionUnreadState(sessions, nextActiveId);
     S.ceoSessions = sessions;
     S.activeSessionId = nextActiveId;
     if (nextActiveId) ApiClient.setActiveSessionId(nextActiveId);
     renderCeoSessions();
-    if (S.view === "tasks") renderTasks();
+    if (S.view === "tasks" && previousActiveId !== nextActiveId) renderTasks();
     return nextActiveId;
 }
 
-async function refreshCeoSessions({ reconnect = false } = {}) {
-    S.ceoSessionBusy = true;
-    renderCeoSessions();
-    syncCeoPrimaryButton();
+async function refreshCeoSessions({ reconnect = false, background = false } = {}) {
+    if (!background) {
+        S.ceoSessionBusy = true;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+    }
     try {
         const payload = await ApiClient.listCeoSessions();
-        const nextActiveId = applyCeoSessionsPayload(payload);
+        const nextActiveId = applyCeoSessionsPayload(payload, { preferLocalActive: background });
         if (reconnect && nextActiveId) initCeoWs();
         return payload;
     } finally {
-        S.ceoSessionBusy = false;
-        renderCeoSessions();
-        syncCeoPrimaryButton();
+        if (!background) {
+            S.ceoSessionBusy = false;
+            renderCeoSessions();
+            syncCeoPrimaryButton();
+        }
     }
 }
 
 async function activateCeoSession(sessionId) {
     const targetId = String(sessionId || "").trim();
     if (!targetId || targetId === activeSessionId()) return;
-    if (!canMutateCeoSessions()) {
+    if (!canActivateCeoSessions()) {
         showToast({ title: "会话暂不可切换", text: "请先等待当前回合完成或暂停后再切换。", kind: "warn" });
         return;
     }
+    const targetSession = S.ceoSessions.find((item) => String(item?.session_id || "") === targetId) || null;
+    if (targetSession) markCeoSessionRead(targetId, { messageCount: sessionMessageCount(targetSession) });
     S.ceoSessionBusy = true;
     renderCeoSessions();
     syncCeoPrimaryButton();
@@ -3954,6 +4411,9 @@ function buildNodeExecutionTrace(node, detail) {
             tool_name: String(step?.tool_name || "tool"),
             arguments_text: String(step?.arguments_text || ""),
             output_text: String(step?.output_text || ""),
+            started_at: String(step?.started_at || ""),
+            finished_at: String(step?.finished_at || ""),
+            elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
             status: ["running", "success", "error"].includes(String(step?.status || ""))
                 ? String(step.status)
                 : "info",
@@ -3992,8 +4452,13 @@ function renderTraceStep({ title, status = "info", open = false, bodyHtml = "" }
     return `
         <details class="interaction-step task-trace-step ${esc(status)}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
-                <span class="interaction-step-title">${esc(title)}</span>
-                <span class="interaction-step-status">${esc(traceStatusLabel(status))}</span>
+                <span class="interaction-step-lead">
+                    <span class="interaction-step-title">${esc(title)}</span>
+                </span>
+                <span class="interaction-step-side">
+                    <span class="task-trace-runtime" hidden></span>
+                    <span class="interaction-step-status">${esc(traceStatusLabel(status))}</span>
+                </span>
             </summary>
             <div class="task-trace-body">${bodyHtml}</div>
         </details>
@@ -4072,7 +4537,19 @@ function renderExecutionTrace(node) {
         }),
     ];
     U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
+    const traceItems = Array.from(U.adFlow.querySelectorAll(".task-trace-step"));
+    trace.tool_steps.forEach((step, index) => {
+        const item = traceItems[index + 1];
+        if (!(item instanceof HTMLElement)) return;
+        item.dataset.traceStatus = String(step.status || "info");
+        if (step.started_at) item.dataset.startedAt = step.started_at;
+        if (step.finished_at) item.dataset.finishedAt = step.finished_at;
+        if (Number.isFinite(step.elapsed_seconds)) item.dataset.elapsedSeconds = String(step.elapsed_seconds);
+        const runtimeEl = item.querySelector(".task-trace-runtime");
+        if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
+    });
     refreshTaskDetailScrollRegions();
+    refreshLiveDurationBadges();
 }
 
 function renderAcceptanceResult(text) {
@@ -5731,6 +6208,9 @@ function bind() {
         if (S.selectedTool) clearToolSelection();
         if (S.selectedCommunication) clearCommunicationSelection();
     });
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) void pollCeoSessions();
+    });
     renderPendingCeoUploads();
     syncCeoInputHeight();
     renderCeoSessions();
@@ -5743,6 +6223,10 @@ function init() {
     enhanceResourceSelects();
     configureTaskDetailSections();
     bind();
+    startCeoSessionPolling();
+    startLiveDurationTicker();
+    window.addEventListener("beforeunload", stopCeoSessionPolling);
+    window.addEventListener("beforeunload", stopLiveDurationTicker);
     window.addEventListener("resize", refreshTaskDetailScrollRegions);
     bindTreePan();
     icons();

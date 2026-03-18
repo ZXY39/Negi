@@ -143,6 +143,7 @@ class LLMConfigFacade:
         binding = config.get_managed_model(model_key)
         if binding is None or not str(getattr(binding, "llm_config_id", "") or "").strip():
             raise ValueError(f"Unknown model key: {model_key}")
+        config_fields = {"provider_id", "default_model", "base_url", "api_key", "parameters", "extra_headers", "extra_options"}
         next_config_id = str(draft_payload.get("config_id") or draft_payload.get("llm_config_id") or "").strip()
         if next_config_id and next_config_id != binding.llm_config_id:
             self.repository.get(next_config_id)
@@ -156,9 +157,7 @@ class LLMConfigFacade:
         if "retry_count" in draft_payload:
             binding.retry_count = int(draft_payload.get("retry_count") or 0)
 
-        if next_config_id and not any(
-            key in draft_payload for key in ("provider_id", "default_model", "base_url", "api_key", "parameters", "extra_headers", "extra_options")
-        ):
+        if not any(key in draft_payload for key in config_fields):
             return self.get_binding(config, model_key)
 
         current = self.repository.get(binding.llm_config_id)

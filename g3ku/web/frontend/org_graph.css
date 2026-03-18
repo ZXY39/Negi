@@ -1111,6 +1111,13 @@ textarea {
     text-align: left;
 }
 
+.ceo-session-head {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
 .ceo-session-select {
     min-width: 0;
     text-align: left;
@@ -1126,12 +1133,35 @@ textarea {
 }
 
 .ceo-session-title {
+    flex: 1;
+    min-width: 0;
     font-size: 0.92rem;
     font-weight: 700;
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.ceo-session-unread {
+    flex-shrink: 0;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #fb7185, #ef4444);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    box-shadow: 0 10px 20px -14px rgba(239, 68, 68, 0.85);
+}
+
+.ceo-session-card.has-unread:not(.is-active) {
+    border-color: color-mix(in srgb, #fb7185 38%, var(--border-color));
+    box-shadow: 0 0 0 1px color-mix(in srgb, #fb7185 12%, transparent), var(--shadow-sm);
 }
 
 .ceo-session-preview {
@@ -1478,10 +1508,48 @@ textarea {
     padding: 0 var(--space-4) var(--space-4);
 }
 
+.interaction-flow-footer {
+    display: flex;
+    justify-content: flex-start;
+    padding: 0 var(--space-4) var(--space-4);
+}
+
+.interaction-flow-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    padding: 0 14px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 600;
+    transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast), transform var(--transition-fast);
+}
+
+.interaction-flow-toggle:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 32%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-app));
+    transform: translateY(-1px);
+}
+
+.interaction-flow-toggle:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 72%, transparent);
+    outline-offset: 2px;
+}
+
 .interaction-step {
     position: relative;
     padding-left: var(--space-4);
     border-left: 2px solid rgba(148, 163, 184, 0.24);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.interaction-step[hidden] {
+    display: none !important;
 }
 
 .interaction-step::before {
@@ -1498,6 +1566,7 @@ textarea {
 .interaction-step.running::before {
     background: var(--status-running-text);
     box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.14);
+    animation: interaction-step-dot-pulse 1.2s ease-in-out infinite;
 }
 
 .interaction-step.success::before {
@@ -1516,10 +1585,66 @@ textarea {
     margin-bottom: 4px;
 }
 
+.interaction-step-lead {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.interaction-step-side {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.interaction-step-icon {
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--bg-app) 70%, transparent);
+    color: var(--text-secondary);
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+}
+
+.interaction-step.running .interaction-step-icon {
+    color: var(--status-running-text);
+    background: color-mix(in srgb, var(--status-running-bg) 88%, transparent);
+    border-color: color-mix(in srgb, var(--status-running-text) 26%, transparent);
+}
+
+.interaction-step.success .interaction-step-icon {
+    color: var(--status-success-text);
+    background: color-mix(in srgb, var(--status-success-bg) 88%, transparent);
+    border-color: color-mix(in srgb, var(--status-success-text) 28%, transparent);
+}
+
+.interaction-step.error .interaction-step-icon {
+    color: var(--status-failed-text);
+    background: color-mix(in srgb, var(--status-failed-bg) 88%, transparent);
+    border-color: color-mix(in srgb, var(--status-failed-text) 28%, transparent);
+}
+
+.interaction-step-icon svg {
+    width: 14px;
+    height: 14px;
+    transform-origin: center;
+}
+
+.interaction-step-icon.is-spinning svg {
+    animation: interaction-step-icon-spin 0.9s linear infinite;
+}
+
 .interaction-step-title {
     font-size: 0.85rem;
     font-weight: 600;
     color: var(--text-primary);
+    min-width: 0;
 }
 
 .interaction-step-status {
@@ -1533,6 +1658,25 @@ textarea {
     color: var(--status-pending-text);
     font-size: 0.72rem;
     white-space: nowrap;
+}
+
+.interaction-step-runtime,
+.task-trace-runtime {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    padding: 0 10px;
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    color: var(--text-secondary);
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+.interaction-step-runtime[hidden],
+.task-trace-runtime[hidden] {
+    display: none !important;
 }
 
 .interaction-step.running .interaction-step-status {
@@ -1556,6 +1700,24 @@ textarea {
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-word;
+}
+
+@keyframes interaction-step-icon-spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes interaction-step-dot-pulse {
+    0%, 100% {
+        box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.14);
+    }
+    50% {
+        box-shadow: 0 0 0 8px rgba(96, 165, 250, 0.05);
+    }
 }
 
 .task-trace-host {

@@ -12,6 +12,7 @@ class ContentHandle:
     source_kind: str = "text"
     display_name: str = ""
     mime_type: str = "text/plain"
+    origin_ref: str = ""
     size_bytes: int = 0
     line_count: int = 0
     char_count: int = 0
@@ -26,6 +27,7 @@ class ContentHandle:
             "source_kind": self.source_kind,
             "display_name": self.display_name,
             "mime_type": self.mime_type,
+            "origin_ref": self.origin_ref,
             "size_bytes": int(self.size_bytes or 0),
             "line_count": int(self.line_count or 0),
             "char_count": int(self.char_count or 0),

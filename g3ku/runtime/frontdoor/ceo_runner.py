@@ -120,15 +120,6 @@ class CeoFrontDoorRunner:
         system_prompt = assembly.system_prompt
         persisted_history = list(assembly.recent_history or [])
         tool_names = list(assembly.tool_names or list(exposure.get('tool_names') or []))
-        tools = self._loop.tools.to_langchain_tools_filtered(tool_names)
-        model_client, model_chain = self._resolve_ceo_model_client()
-        agent = create_agent(
-            model=model_client,
-            tools=tools,
-            checkpointer=getattr(self._loop, '_checkpointer', None),
-            store=getattr(self._loop, '_store', None),
-            name='g3ku_ceo_frontdoor',
-        )
         config: dict[str, Any] = {
             'recursion_limit': max(8, int(getattr(self._loop, 'max_iterations', 12) or 12) * 2 + 4),
             'configurable': {'thread_id': session.state.session_key},
@@ -138,21 +129,31 @@ class CeoFrontDoorRunner:
             *persisted_history,
             {'role': 'user', 'content': self._model_content(getattr(user_input, 'content', ''))},
         ]
-        token = self._loop.tools.push_runtime_context(
-            {
-                'on_progress': on_progress,
-                'emit_lifecycle': True,
-                'actor_role': 'ceo',
-                'session_key': session.state.session_key,
-                'channel': getattr(session, '_channel', 'cli'),
-                'chat_id': getattr(session, '_chat_id', session.state.session_key),
-                'memory_channel': memory_channel,
-                'memory_chat_id': memory_chat_id,
-                'temp_dir': str(getattr(self._loop, 'temp_dir', '') or ''),
-                'loop': self._loop,
-            }
-        )
+        runtime_context = {
+            'on_progress': on_progress,
+            'emit_lifecycle': True,
+            'actor_role': 'ceo',
+            'session_key': session.state.session_key,
+            'channel': getattr(session, '_channel', 'cli'),
+            'chat_id': getattr(session, '_chat_id', session.state.session_key),
+            'memory_channel': memory_channel,
+            'memory_chat_id': memory_chat_id,
+            'cancel_token': getattr(session, '_active_cancel_token', None),
+            'tool_snapshot_supplier': getattr(session, 'inflight_turn_snapshot', None),
+            'temp_dir': str(getattr(self._loop, 'temp_dir', '') or ''),
+            'loop': self._loop,
+        }
+        token = self._loop.tools.push_runtime_context(runtime_context)
         try:
+            tools = self._loop.tools.to_langchain_tools_filtered(tool_names)
+            model_client, model_chain = self._resolve_ceo_model_client()
+            agent = create_agent(
+                model=model_client,
+                tools=tools,
+                checkpointer=getattr(self._loop, '_checkpointer', None),
+                store=getattr(self._loop, '_store', None),
+                name='g3ku_ceo_frontdoor',
+            )
             result = await agent.ainvoke({'messages': messages}, config=config)
         finally:
             self._loop.tools.pop_runtime_context(token)

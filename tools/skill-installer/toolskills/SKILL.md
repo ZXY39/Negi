@@ -26,8 +26,25 @@
 - `dest`: 自定义目标目录。相对路径从当前 workspace 解析；默认安装到 `skills/<basename>`。
 - `name`: 当上游 skill 没有 `resource.yaml` 时，作为本地 skill id 写入自动生成的 `resource.yaml`。
 - `method`: `auto | download | git`
-  - `auto` 先走 GitHub codeload zip，失败后回退到 `git sparse-checkout`
-  - git 回退重试前会清理临时 clone 目录，避免上一次失败留下的非空 `repo/` 阻塞第二次 clone
+  - `auto` 默认优先走 `git sparse-checkout`，失败后再回退到 GitHub codeload zip
+  - git 回退会改用新的临时 clone 目录，避免 Windows 上被占用的 `.git/objects/pack/*` 阻塞第二次 clone
+  - 临时目录清理使用 `ignore_cleanup_errors=True`，避免安装已经完成却因为临时锁文件残留而被误判失败
+  - `git` 与下载都带明确超时，超时后会直接返回错误，不会长期停在 `Working...`
+
+默认设置来自 `tools/skill-installer/resource.yaml -> settings`：
+
+- `download_timeout`
+- `git_timeout`
+- `auto_prefer`
+
+## 强取消
+
+当前版本支持强取消：
+
+- 通过统一 cancellation token 感知会话暂停 / 取消
+- 对正在运行的 `git` 子进程登记句柄，并在取消时主动 `terminate/kill`
+- 对下载、解压、文件复制这些长步骤在阶段边界主动检查取消状态
+- 当用户请求暂停时，会先显示“用户已请求暂停，正在安全停止...”再进入停止流程
 
 返回结果是 JSON，重点看：
 
@@ -60,6 +77,7 @@
 - 如果是目录冲突，删除旧目录后重试
 - 如果是下载失败，改用 `method="git"` 或安装 `git`
 - 如果上游结构不标准，先安装可行部分，再交给 `skill-creator` 做二次适配
+- 如果日志里出现 `WinError 5` 指向临时目录中的 `.git/objects/pack/*`，优先升级到当前修复版本后再重试
 
 ## 安装与更新
 

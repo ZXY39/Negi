@@ -65,16 +65,25 @@ def _build_signature(schema: dict[str, Any]) -> inspect.Signature:
 
 
 def _accepts_runtime_context(target: Any) -> bool:
+    return _runtime_context_parameter_name(target) is not None
+
+
+def _runtime_context_parameter_name(target: Any) -> str | None:
     candidate = target.execute if hasattr(target, "execute") else target
     if not callable(candidate):
-        return False
+        return None
     try:
         signature = inspect.signature(candidate)
     except (TypeError, ValueError):
-        return False
+        return None
     if "__g3ku_runtime" in signature.parameters:
-        return True
-    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
+        return "__g3ku_runtime"
+    for name in signature.parameters:
+        if str(name).endswith("__g3ku_runtime"):
+            return str(name)
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        return "__g3ku_runtime"
+    return None
 
 
 def _render_mcp_result(value: Any) -> Any:
@@ -125,8 +134,11 @@ class EmbeddedMCPTool(Tool):
             return self._handler.close()
         return None
 
-    async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> Any:
-        token = _RUNTIME_CONTEXT.set(dict(__g3ku_runtime or {}))
+    async def execute(self, runtime_payload: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        runtime_context = kwargs.pop("__g3ku_runtime", None)
+        if not isinstance(runtime_context, dict):
+            runtime_context = runtime_payload if isinstance(runtime_payload, dict) else {}
+        token = _RUNTIME_CONTEXT.set(dict(runtime_context or {}))
         try:
             result = await self._server.call_tool(self.name, arguments=kwargs)
             return _render_mcp_result(result)
@@ -137,8 +149,9 @@ class EmbeddedMCPTool(Tool):
         async def _invoke(**kwargs: Any) -> Any:
             payload = dict(kwargs)
             runtime_context = _RUNTIME_CONTEXT.get() or {}
-            if runtime_context and _accepts_runtime_context(self._handler):
-                payload.setdefault("__g3ku_runtime", runtime_context)
+            runtime_param = _runtime_context_parameter_name(self._handler)
+            if runtime_context and runtime_param:
+                payload.setdefault(runtime_param, runtime_context)
 
             if isinstance(self._handler, Tool):
                 return await self._handler.execute(**payload)

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 from g3ku.content import parse_content_envelope
+from g3ku.runtime.tool_watchdog import resolve_snapshot_supplier, run_tool_with_watchdog, runtime_context_value
 
 try:
     from langchain_core.messages import ToolMessage
@@ -298,8 +299,10 @@ class ToolExecutionBridge:
                 event_data=self._event_data(runtime_context, tool_name=tool_name or "tool"),
             )
 
+        inherited_runtime = dict(self._loop.tools.get_runtime_context() or {}) if hasattr(self._loop.tools, "get_runtime_context") else {}
         token = self._loop.tools.push_runtime_context(
             {
+                **inherited_runtime,
                 "on_progress": on_progress,
                 "actor_role": getattr(runtime_context, "actor_role", None),
                 "session_key": getattr(runtime_context, "session_key", None),
@@ -307,12 +310,41 @@ class ToolExecutionBridge:
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "tool_name": tool_name,
+                "cancel_token": getattr(runtime_context, "cancel_token", None),
+                "tool_snapshot_supplier": runtime_context_value(runtime_context, "tool_snapshot_supplier", inherited_runtime.get("tool_snapshot_supplier")),
+                "tool_watchdog": runtime_context_value(runtime_context, "tool_watchdog", inherited_runtime.get("tool_watchdog")),
                 "temp_dir": str(self._loop.temp_dir),
                 "loop": self._loop,
             }
         )
         try:
-            result = await handler(request)
+            outcome = await run_tool_with_watchdog(
+                handler(request),
+                tool_name=str(tool_name or "tool"),
+                arguments=self.summarize_tool_call(tool_call)[1],
+                runtime_context=runtime_context if runtime_context is not None else self._loop.tools.get_runtime_context(),
+                snapshot_supplier=self._resolve_watchdog_snapshot_supplier(runtime_context),
+                manager=getattr(self._loop, "tool_execution_manager", None),
+                on_poll=(
+                    (lambda poll: self._emit_watchdog_progress(on_progress=on_progress, runtime_context=runtime_context, poll=poll))
+                    if on_progress
+                    else None
+                ),
+            )
+            if outcome.completed:
+                result = outcome.value
+            else:
+                raw_call_id = ""
+                if isinstance(tool_call, dict):
+                    raw_call_id = str(tool_call.get("id") or "")
+                elif tool_call is not None:
+                    raw_call_id = str(getattr(tool_call, "id", "") or "")
+                result = ToolMessage(
+                    content=self._stringify_tool_result(outcome.value),
+                    tool_call_id=raw_call_id or f"{tool_name or 'tool'}:watchdog",
+                    name=str(tool_name or "tool"),
+                    status="success",
+                )
             result_content = self._externalize_tool_result(
                 getattr(result, "content", ""),
                 runtime_context=runtime_context,
@@ -394,8 +426,10 @@ class ToolExecutionBridge:
             )
 
         logger.info("Tool call: {}({})", tool_name, json.dumps(tool_args, ensure_ascii=False)[:200])
+        inherited_runtime = dict(self._loop.tools.get_runtime_context() or {}) if hasattr(self._loop.tools, "get_runtime_context") else {}
         token = self._loop.tools.push_runtime_context(
             {
+                **inherited_runtime,
                 "on_progress": on_progress,
                 "actor_role": getattr(runtime_context, "actor_role", None) if runtime_context else None,
                 "session_key": session_key,
@@ -403,17 +437,35 @@ class ToolExecutionBridge:
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "tool_name": tool_name,
+                "cancel_token": getattr(runtime_context, "cancel_token", None) if runtime_context else None,
+                "tool_snapshot_supplier": runtime_context_value(runtime_context, "tool_snapshot_supplier", inherited_runtime.get("tool_snapshot_supplier")),
+                "tool_watchdog": runtime_context_value(runtime_context, "tool_watchdog", inherited_runtime.get("tool_watchdog")),
                 "temp_dir": str(self._loop.temp_dir),
                 "loop": self._loop,
             }
         )
         try:
             resource_manager = getattr(self._loop, 'resource_manager', None)
-            if resource_manager is not None and resource_manager.get_tool_descriptor(tool_name) is not None:
-                with resource_manager.acquire_tool(tool_name):
-                    result = await self._loop.tools.execute(tool_name, tool_args)
-            else:
-                result = await self._loop.tools.execute(tool_name, tool_args)
+            async def _execute_tool_call() -> Any:
+                if resource_manager is not None and resource_manager.get_tool_descriptor(tool_name) is not None:
+                    with resource_manager.acquire_tool(tool_name):
+                        return await self._loop.tools.execute(tool_name, tool_args)
+                return await self._loop.tools.execute(tool_name, tool_args)
+
+            outcome = await run_tool_with_watchdog(
+                _execute_tool_call(),
+                tool_name=tool_name,
+                arguments=tool_args,
+                runtime_context=runtime_context if runtime_context is not None else self._loop.tools.get_runtime_context(),
+                snapshot_supplier=self._resolve_watchdog_snapshot_supplier(runtime_context),
+                manager=getattr(self._loop, "tool_execution_manager", None),
+                on_poll=(
+                    (lambda poll: self._emit_watchdog_progress(on_progress=on_progress, runtime_context=runtime_context, poll=poll))
+                    if on_progress and emit_progress
+                    else None
+                ),
+            )
+            result = outcome.value
             result = await self.apply_after_middlewares(
                 name=tool_name,
                 arguments=tool_args,
@@ -455,6 +507,40 @@ class ToolExecutionBridge:
             return json.dumps(value, ensure_ascii=False)
         except Exception:
             return str(value)
+
+    def _resolve_watchdog_snapshot_supplier(self, runtime_context: Any):
+        supplier = resolve_snapshot_supplier(runtime_context)
+        if supplier is not None:
+            return supplier
+        registry_runtime = self._loop.tools.get_runtime_context() if hasattr(self._loop.tools, "get_runtime_context") else {}
+        supplier = resolve_snapshot_supplier(registry_runtime)
+        if supplier is not None:
+            return supplier
+        task_id = runtime_context_value(runtime_context, "task_id", None)
+        main_service = getattr(self._loop, "main_task_service", None)
+        if task_id and main_service is not None and hasattr(main_service, "get_task_detail_payload"):
+            return lambda: main_service.get_task_detail_payload(str(task_id), mark_read=False)
+        return None
+
+    async def _emit_watchdog_progress(self, *, on_progress, runtime_context: Any, poll: dict[str, Any]) -> None:
+        snapshot = poll.get("snapshot") if isinstance(poll, dict) else None
+        summary_text = str(snapshot.get("summary_text") or "").strip() if isinstance(snapshot, dict) else ""
+        elapsed = float(poll.get("elapsed_seconds") or 0.0) if isinstance(poll, dict) else 0.0
+        next_handoff = float(poll.get("next_handoff_in_seconds") or 0.0) if isinstance(poll, dict) else 0.0
+        tool_name = str(poll.get("tool_name") or runtime_context_value(runtime_context, "tool_name", None) or "tool")
+        text = f"{tool_name} 仍在处理中，已等待 {elapsed:.0f} 秒。"
+        if summary_text:
+            text = f"{text} 当前看到的阶段：{summary_text}"
+        else:
+            text = f"{text} 暂时还没有新的阶段快照。"
+        if next_handoff > 0:
+            text = f"{text} 如果还没完成，我会在约 {next_handoff:.0f} 秒后把新的运行快照交回给 agent。"
+        await self._loop._emit_progress_event(
+            on_progress,
+            text,
+            event_kind="tool",
+            event_data=self._event_data(runtime_context, tool_name=tool_name, watchdog=True),
+        )
 
     def _externalize_tool_result(self, value: Any, *, runtime_context: Any, tool_name: str) -> Any:
         service = getattr(self._loop, 'main_task_service', None)

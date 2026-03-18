@@ -8,7 +8,7 @@ source:
   url: https://github.com/openai/skills/tree/main/skills/.system/skill-installer
   ref: main
 current_version:
-  summary: 当前版本是仓库内置封装；实现 GitHub 下载、git 稀疏检出、工作区安装与缺失 resource.yaml 的自动补齐，并修复 git 回退重试前未清理临时 repo 目录的问题。
+  summary: 当前版本是仓库内置封装；实现 GitHub 下载、git 稀疏检出、工作区安装与缺失 resource.yaml 的自动补齐，并针对 Windows 锁文件场景改为分离 clone 目录且忽略临时目录清理残留错误，同时接入统一强取消能力。
   compare_rule: 以 main/ 实现、参数契约、目标目录规则或自动生成 resource.yaml 的行为变化为准；仅修改 toolskills 文案不单独视为版本升级。
   source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；toolskills/ 用于补充来源、参数约束和失败处理。
 protocol: mcp
@@ -22,6 +22,10 @@ permissions:
   network: true
   filesystem:
     - workspace
+settings:
+  download_timeout: 30
+  git_timeout: 120
+  auto_prefer: git
 parameters:
   type: object
   properties:

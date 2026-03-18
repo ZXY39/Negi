@@ -29,6 +29,7 @@
           "429",
           "5xx"
         ],
+        "retryCount": 3,
         "description": ""
       },
       {
@@ -40,6 +41,7 @@
           "429",
           "5xx"
         ],
+        "retryCount": 10,
         "description": ""
       },
       {
@@ -51,6 +53,7 @@
           "429",
           "5xx"
         ],
+        "retryCount": 3,
         "description": ""
       }
     ],

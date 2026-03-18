@@ -8,9 +8,11 @@ from typing import Any, Callable
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
 from g3ku.content import ContentNavigationService
 from g3ku.resources.models import ResourceKind
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
+from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from g3ku.runtime.context.summarizer import layered_body_payload
 from main.governance import (
     GovernanceStore,
@@ -105,7 +107,11 @@ class MainRuntimeService:
         self.memory_manager = None
         self._default_max_depth = max(0, int(default_max_depth or 0))
         self._hard_max_depth = max(self._default_max_depth, int(hard_max_depth or self._default_max_depth))
+        self.tool_execution_manager = ToolExecutionManager()
+        self._builtin_tool_cache: dict[str, Tool] | None = None
         react_loop = ReActToolLoop(chat_backend=chat_backend, log_service=self.log_service, max_iterations=max_iterations)
+        react_loop._tool_execution_manager = self.tool_execution_manager
+        self._react_loop = react_loop
         self.node_runner = NodeRunner(
             store=self.store,
             log_service=self.log_service,
@@ -320,6 +326,15 @@ class MainRuntimeService:
 
     def bind_runtime_loop(self, loop: Any | None) -> None:
         self._runtime_loop = loop
+        if loop is None:
+            return
+        manager = getattr(loop, 'tool_execution_manager', None)
+        if manager is None:
+            setattr(loop, 'tool_execution_manager', self.tool_execution_manager)
+            manager = self.tool_execution_manager
+        self.tool_execution_manager = manager
+        if hasattr(self, '_react_loop') and self._react_loop is not None:
+            setattr(self._react_loop, '_tool_execution_manager', manager)
 
     def ensure_runtime_config_current(self, force: bool = False, reason: str = 'runtime') -> bool:
         config, revision, changed = get_runtime_config(force=force)
@@ -1326,11 +1341,21 @@ class MainRuntimeService:
         actor_role = self._actor_role_for_node(node)
         visible = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
         provided = dict(self._external_tool_provider(node) or {})
+        provided.update(self._builtin_tool_instances())
         if self._resource_manager is not None:
             for name, tool in self._resource_manager.tool_instances().items():
                 if name in visible:
                     provided[name] = tool
         return provided
+
+    def _builtin_tool_instances(self) -> dict[str, Tool]:
+        if self._builtin_tool_cache is None:
+            manager_getter = lambda: self.tool_execution_manager
+            self._builtin_tool_cache = {
+                'wait_tool_execution': WaitToolExecutionTool(manager_getter),
+                'stop_tool_execution': StopToolExecutionTool(manager_getter),
+            }
+        return dict(self._builtin_tool_cache)
 
     async def _enrich_node_messages(self, *, task, node: NodeRecord, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         manager = getattr(self, 'memory_manager', None)
@@ -1421,11 +1446,20 @@ class _LegacyCreateAsyncTaskTool(Tool):
 
     @property
     def description(self) -> str:
-        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。'
+        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。对于工作量大的任务，应在 task 说明中显式要求执行节点优先评估拆解并派生子节点。'
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '用户的原始需求。'}}, 'required': ['task']}
+        return {
+            'type': 'object',
+            'properties': {
+                'task': {
+                    'type': 'string',
+                    'description': '用户的原始需求。若任务工作量大，应在说明中写明拆分维度，并显式建议执行节点优先评估拆解/派生子节点。',
+                }
+            },
+            'required': ['task'],
+        }
 
     async def execute(self, task: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
@@ -1522,14 +1556,17 @@ class CreateAsyncTaskTool(Tool):
 
     @property
     def description(self) -> str:
-        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。必要时可同时声明最终结果是否需要验收。'
+        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。对于工作量大的任务，应在 task 说明中显式要求执行节点优先评估拆解并派生子节点。必要时可同时声明最终结果是否需要验收。'
 
     @property
     def parameters(self) -> dict[str, Any]:
         return {
             'type': 'object',
             'properties': {
-                'task': {'type': 'string', 'description': '用户的原始需求。'},
+                'task': {
+                    'type': 'string',
+                    'description': '用户的原始需求。若任务工作量大，应在说明中写明拆分维度，并显式建议执行节点优先评估拆解/派生子节点。',
+                },
                 'requires_final_acceptance': {
                     'type': 'boolean',
                     'description': '是否需要在 root execution 完成后再做最终验收。',

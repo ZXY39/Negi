@@ -122,9 +122,10 @@ class ToolRegistry:
     def to_langchain_tools(self) -> list[BaseTool]:
         """Convert registered tools to official BaseTool instances."""
         tools: list[BaseTool] = []
+        runtime_context = dict(self._runtime_context.get() or {})
         for tool in self.list_tools():
             args_schema = self._build_args_schema(tool)
-            coroutine = self._build_tool_coroutine(tool.name)
+            coroutine = self._build_tool_coroutine(tool.name, runtime_context_snapshot=runtime_context)
             tools.append(
                 StructuredTool.from_function(
                     coroutine=coroutine,
@@ -141,11 +142,12 @@ class ToolRegistry:
         """Convert only the selected registered tools to official BaseTool instances."""
         visible = {str(name or '').strip() for name in (allowed_names or []) if str(name or '').strip()}
         tools: list[BaseTool] = []
+        runtime_context = dict(self._runtime_context.get() or {})
         for tool in self.list_tools():
             if tool.name not in visible:
                 continue
             args_schema = self._build_args_schema(tool)
-            coroutine = self._build_tool_coroutine(tool.name)
+            coroutine = self._build_tool_coroutine(tool.name, runtime_context_snapshot=runtime_context)
             tools.append(
                 StructuredTool.from_function(
                     coroutine=coroutine,
@@ -160,9 +162,22 @@ class ToolRegistry:
                 tools.append(tool)
         return tools
 
-    def _build_tool_coroutine(self, tool_name: str):
+    def _build_tool_coroutine(self, tool_name: str, *, runtime_context_snapshot: dict[str, Any] | None = None):
+        captured_runtime = dict(runtime_context_snapshot or {})
+
         async def _invoke(**kwargs: Any) -> Any:
-            return await self.execute(tool_name, kwargs)
+            token: contextvars.Token | None = None
+            if captured_runtime:
+                current_runtime = self._runtime_context.get() or {}
+                merged_runtime = dict(captured_runtime)
+                merged_runtime.update({key: value for key, value in current_runtime.items() if value not in (None, "")})
+                if merged_runtime != current_runtime:
+                    token = self._runtime_context.set(merged_runtime)
+            try:
+                return await self.execute(tool_name, kwargs)
+            finally:
+                if token is not None:
+                    self._runtime_context.reset(token)
 
         return _invoke
 

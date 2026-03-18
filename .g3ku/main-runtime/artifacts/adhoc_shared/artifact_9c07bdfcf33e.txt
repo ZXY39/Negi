@@ -1,0 +1,1 @@
+Error: Command blocked by safety guard (dangerous pattern detected)

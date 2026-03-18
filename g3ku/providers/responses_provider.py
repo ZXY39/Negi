@@ -102,6 +102,13 @@ class ResponsesProvider(LLMProvider):
                         usage=usage,
                     )
         except Exception as e:
+            partial_content = str(getattr(e, "partial_content", "") or "").strip()
+            if partial_content:
+                logger.warning("Responses API stream failed after partial content; returning partial content for JSON recovery")
+                return LLMResponse(
+                    content=partial_content,
+                    finish_reason="error",
+                )
             error_text = self._format_error(e, url)
             logger.error("Error calling Responses API: {}", error_text)
             return LLMResponse(

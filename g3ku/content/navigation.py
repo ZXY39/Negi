@@ -76,9 +76,54 @@ def _content_summary(handle: ContentHandle) -> str:
         f"({int(handle.line_count or 0)} lines, {int(handle.char_count or 0)} chars). "
         f"Use content.search/open with ref={handle.ref}."
     )
+    if handle.origin_ref and handle.origin_ref != handle.ref:
+        summary = f"{summary}\nOrigin ref: {handle.origin_ref}"
     if handle.head_preview:
         return f"{summary}\nHead preview:\n{handle.head_preview}"
     return summary
+
+
+_ARTIFACT_REF_PATTERN = re.compile(r"artifact:artifact:[A-Za-z0-9_-]+")
+
+
+def _extract_origin_ref(value: Any) -> str:
+    envelope = parse_content_envelope(value)
+    if envelope is not None and str(envelope.ref or "").strip():
+        return str(envelope.ref or "").strip()
+
+    payload: Any = value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") or text.startswith("["):
+            try:
+                payload = json.loads(text)
+            except Exception:
+                payload = value
+
+    refs: list[str] = []
+
+    def _visit(item: Any) -> None:
+        if isinstance(item, dict):
+            ref = str(item.get("ref") or "").strip()
+            if ref.startswith("artifact:artifact:"):
+                refs.append(ref)
+            handle = item.get("handle")
+            if isinstance(handle, dict):
+                handle_ref = str(handle.get("ref") or "").strip()
+                if handle_ref.startswith("artifact:artifact:"):
+                    refs.append(handle_ref)
+            for nested in item.values():
+                _visit(nested)
+            return
+        if isinstance(item, list):
+            for nested in item:
+                _visit(nested)
+            return
+        if isinstance(item, str):
+            refs.extend(_ARTIFACT_REF_PATTERN.findall(item))
+
+    _visit(payload)
+    return refs[0] if refs else ""
 
 
 def parse_content_envelope(value: Any) -> ContentEnvelope | None:
@@ -109,6 +154,7 @@ def parse_content_envelope(value: Any) -> ContentEnvelope | None:
             source_kind=str(raw_handle.get("source_kind") or "text").strip() or "text",
             display_name=str(raw_handle.get("display_name") or "").strip(),
             mime_type=str(raw_handle.get("mime_type") or "text/plain").strip() or "text/plain",
+            origin_ref=str(raw_handle.get("origin_ref") or "").strip(),
             size_bytes=int(raw_handle.get("size_bytes") or 0),
             line_count=int(raw_handle.get("line_count") or 0),
             char_count=int(raw_handle.get("char_count") or 0),
@@ -168,12 +214,14 @@ class ContentNavigationService:
         if not force and len(text) <= INLINE_CHAR_LIMIT and _line_count(text) <= INLINE_LINE_LIMIT:
             return None
         display = _display_name(display_name, source_kind=source_kind, fallback=source_kind)
+        origin_ref = _extract_origin_ref(value)
         handle = self._persist_text(
             text,
             runtime=runtime,
             display_name=display,
             source_kind=source_kind,
             mime_type=mime_type,
+            origin_ref=origin_ref,
         )
         summary = _content_summary(handle)
         return ContentEnvelope(summary=summary, ref=handle.ref, handle=handle)
@@ -364,6 +412,7 @@ class ContentNavigationService:
                 source_kind="workspace_path",
                 display_name=file_path.name,
                 mime_type="text/plain",
+                origin_ref="",
                 text=text,
             )
 
@@ -385,6 +434,7 @@ class ContentNavigationService:
             source_kind=str(getattr(artifact, "kind", "") or "artifact"),
             display_name=str(getattr(artifact, "title", "") or artifact_path.name),
             mime_type=str(getattr(artifact, "mime_type", "") or "text/plain"),
+            origin_ref="",
             text=text,
         )
 
@@ -414,6 +464,7 @@ class ContentNavigationService:
         display_name: str,
         source_kind: str,
         mime_type: str,
+        origin_ref: str,
     ) -> ContentHandle:
         artifact = None
         if self._artifact_store is not None and hasattr(self._artifact_store, "create_text_artifact"):
@@ -436,6 +487,7 @@ class ContentNavigationService:
             source_kind=source_kind,
             display_name=display_name,
             mime_type=mime_type,
+            origin_ref=(origin_ref if origin_ref != ref else ""),
             text=text,
         )
 
@@ -459,6 +511,7 @@ class ContentNavigationService:
         source_kind: str,
         display_name: str,
         mime_type: str,
+        origin_ref: str,
         text: str,
     ) -> ContentHandle:
         encoded = text.encode("utf-8")
@@ -469,6 +522,7 @@ class ContentNavigationService:
             source_kind=source_kind,
             display_name=display_name,
             mime_type=mime_type,
+            origin_ref=origin_ref,
             size_bytes=len(encoded),
             line_count=_line_count(text),
             char_count=len(text),

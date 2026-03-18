@@ -1,0 +1,12 @@
+{
+  "task_id": "task:58c006354fda",
+  "root_node_id": "node:fdaeb26b7044",
+  "updated_at": "2026-03-18T14:09:23+08:00",
+  "paused": false,
+  "pause_requested": false,
+  "cancel_requested": false,
+  "active_node_ids": [],
+  "runnable_node_ids": [],
+  "waiting_node_ids": [],
+  "frames": []
+}

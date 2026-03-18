@@ -509,6 +509,65 @@ def test_main_runtime_settings_endpoint_reads_and_updates_global_depth(tmp_path:
     assert saved['mainRuntime']['defaultMaxDepth'] == 4
 
 
+def test_ceo_session_activate_endpoint_allows_switching_from_running_session(tmp_path: Path):
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    current = Session(key='web:ceo-current', metadata={'title': 'Current Session'})
+    other = Session(key='web:ceo-other', metadata={'title': 'Other Session'})
+    current_path = tmp_path / 'sessions' / 'web_ceo_current.jsonl'
+    other_path = tmp_path / 'sessions' / 'web_ceo_other.jsonl'
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    other_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    manager = _SessionManager(
+        [current, other],
+        {
+            current.key: current_path,
+            other.key: other_path,
+        },
+    )
+
+    from g3ku.runtime.api import ceo_sessions
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    ceo_sessions.get_agent = lambda: SimpleNamespace(sessions=manager)
+    ceo_sessions.get_runtime_manager = lambda _agent: SimpleNamespace(
+        get=lambda session_id: (
+            SimpleNamespace(state=SimpleNamespace(status='running', is_running=True))
+            if session_id == current.key
+            else None
+        )
+    )
+    ceo_sessions.workspace_path = lambda: tmp_path
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    response = client.post(f'/api/ceo/sessions/{other.key}/activate')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['active_session_id'] == other.key
+    assert payload['item']['session_id'] == other.key
+    assert ceo_sessions.WebCeoStateStore(tmp_path).get_active_session_id() == other.key
+
+
 def test_task_rest_endpoint_normalizes_short_task_id():
     captured: dict[str, str] = {}
 
@@ -763,6 +822,37 @@ def test_llm_config_update_refreshes_runtime(monkeypatch):
     assert captured['payload'] == {'default_model': 'gpt-5.2'}
     assert captured['force'] is True
     assert captured['reason'] == 'admin_llm_config_update'
+
+
+def test_llm_binding_retry_count_update_persists_without_provider_probe(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/llm/bindings/m', json={'retry_count': 4})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['retry_count'] == 4
+    assert captured == {'force': True, 'reason': 'admin_llm_binding_update'}
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['catalog'][0]['retryCount'] == 4
 
 
 def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):

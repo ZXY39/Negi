@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
+import time
 from collections import deque
 from typing import Any
 
 import json_repair
 
 from g3ku.agent.tools.base import Tool
+from g3ku.content import parse_content_envelope
+from g3ku.runtime.tool_watchdog import run_tool_with_watchdog
 from main.errors import TaskPausedError
 from main.models import NodeFinalResult
+from main.protocol import now_iso
+
+_ARTIFACT_REF_PATTERN = re.compile(r'artifact:artifact:[A-Za-z0-9_-]+')
 
 
 class RepeatedActionCircuitBreaker:
@@ -27,6 +34,8 @@ class RepeatedActionCircuitBreaker:
 
 
 class ReActToolLoop:
+    _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
+
     def __init__(self, *, chat_backend, log_service, max_iterations: int = 16) -> None:
         self._chat_backend = chat_backend
         self._log_service = log_service
@@ -46,9 +55,12 @@ class ReActToolLoop:
         tool_schemas = [tool.to_schema() for tool in tools.values()]
         breaker = RepeatedActionCircuitBreaker()
         limit = max(2, int(max_iterations or self._max_iterations))
-        for _ in range(limit):
+        attempts = 0
+        while attempts < limit:
+            attempts += 1
             self._check_pause_or_cancel(task.task_id)
             model_messages = self._prepare_messages(messages, runtime_context=runtime_context)
+            allowed_content_refs = self._collect_content_refs(model_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
             self._log_service.upsert_frame(
                 task.task_id,
@@ -83,6 +95,7 @@ class ReActToolLoop:
                 usage_attempts=list(response.attempts or []),
             )
             if response.tool_calls:
+                control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response.tool_calls)
                 assistant_tool_calls = []
                 tool_messages = []
                 self._log_service.upsert_frame(
@@ -102,7 +115,8 @@ class ReActToolLoop:
                 for call in response.tool_calls:
                     self._check_pause_or_cancel(task.task_id)
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
-                    breaker.register(signature)
+                    if call.name not in self._CONTROL_TOOL_NAMES:
+                        breaker.register(signature)
                     assistant_tool_calls.append(
                         {
                             'id': call.id,
@@ -110,13 +124,30 @@ class ReActToolLoop:
                             'function': {'name': call.name, 'arguments': json.dumps(call.arguments, ensure_ascii=False)},
                         }
                     )
+                    started_at = now_iso()
+                    started_monotonic = time.monotonic()
                     tool_content = await self._execute_tool(
                         tools=tools,
                         tool_name=call.name,
                         arguments=dict(call.arguments or {}),
-                        runtime_context={**runtime_context, 'current_tool_call_id': call.id},
+                        runtime_context={
+                            **runtime_context,
+                            'current_tool_call_id': call.id,
+                            'allowed_content_refs': allowed_content_refs,
+                            'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
+                        },
                     )
-                    tool_messages.append({'role': 'tool', 'tool_call_id': call.id, 'name': call.name, 'content': tool_content})
+                    tool_messages.append(
+                        {
+                            'role': 'tool',
+                            'tool_call_id': call.id,
+                            'name': call.name,
+                            'content': tool_content,
+                            'started_at': started_at,
+                            'finished_at': now_iso(),
+                            'elapsed_seconds': round(max(0.0, time.monotonic() - started_monotonic), 1),
+                        }
+                    )
                 messages.append(
                     {
                         'role': 'assistant',
@@ -145,6 +176,8 @@ class ReActToolLoop:
                         'last_error': '',
                     },
                 )
+                if control_only_turn:
+                    attempts = max(0, attempts - 1)
                 continue
 
             parsed = self._parse_final_result(str(response.content or ''))
@@ -164,7 +197,16 @@ class ReActToolLoop:
         execute_kwargs = dict(arguments)
         if self._accepts_runtime_context(tool):
             execute_kwargs['__g3ku_runtime'] = runtime_context
-        result = await tool.execute(**execute_kwargs)
+        outcome = await run_tool_with_watchdog(
+            tool.execute(**execute_kwargs),
+            tool_name=tool_name,
+            arguments=arguments,
+            runtime_context=runtime_context,
+            snapshot_supplier=self._snapshot_supplier(runtime_context),
+            manager=getattr(self, '_tool_execution_manager', None),
+            on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
+        )
+        result = outcome.value
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
         return self._externalize_message_content(
             rendered,
@@ -172,6 +214,19 @@ class ReActToolLoop:
             display_name=f'tool:{tool_name}',
             source_kind=f'tool_result:{tool_name}',
         )
+
+    async def _on_tool_watchdog_poll(self, runtime_context: dict[str, Any]) -> None:
+        task_id = str(runtime_context.get('task_id') or '').strip()
+        if not task_id:
+            return
+        self._check_pause_or_cancel(task_id)
+
+    def _snapshot_supplier(self, runtime_context: dict[str, Any]):
+        task_id = str(runtime_context.get('task_id') or '').strip()
+        builder = getattr(self._log_service, '_snapshot_payload_builder', None)
+        if not task_id or not callable(builder):
+            return None
+        return lambda: builder(task_id)
 
     def _check_pause_or_cancel(self, task_id: str) -> None:
         task = self._log_service._store.get_task(task_id)
@@ -188,16 +243,89 @@ class ReActToolLoop:
         text = str(content or '').strip()
         if not text:
             return None
-        try:
-            parsed = json_repair.loads(text)
-        except Exception:
-            parsed = None
-        if not isinstance(parsed, dict):
-            return None
-        status = str(parsed.get('status') or '').strip().lower()
-        if status not in {'success', 'failed'}:
-            return None
-        return NodeFinalResult(status=status, output=str(parsed.get('output') or ''))
+        candidates = [text, *ReActToolLoop._extract_json_object_candidates(text)]
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = str(candidate or '').strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            try:
+                parsed = json_repair.loads(normalized)
+            except Exception:
+                parsed = None
+            if not isinstance(parsed, dict):
+                continue
+            status = str(parsed.get('status') or '').strip().lower()
+            if status not in {'success', 'failed'}:
+                continue
+            return NodeFinalResult(status=status, output=str(parsed.get('output') or ''))
+        return None
+
+    @staticmethod
+    def _extract_json_object_candidates(content: str) -> list[str]:
+        text = str(content or '')
+        candidates: list[str] = []
+        start_index: int | None = None
+        depth = 0
+        in_string = False
+        escape = False
+        for index, char in enumerate(text):
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == '\\':
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == '{':
+                if depth == 0:
+                    start_index = index
+                depth += 1
+                continue
+            if char == '}' and depth > 0:
+                depth -= 1
+                if depth == 0 and start_index is not None:
+                    candidates.append(text[start_index : index + 1])
+                    start_index = None
+        candidates.reverse()
+        return candidates
+
+    @staticmethod
+    def _collect_content_refs(value: Any) -> list[str]:
+        found: set[str] = set()
+
+        def _visit(item: Any) -> None:
+            envelope = parse_content_envelope(item)
+            if envelope is not None and str(envelope.ref or '').strip():
+                found.add(str(envelope.ref or '').strip())
+            if isinstance(item, dict):
+                for nested in item.values():
+                    _visit(nested)
+                return
+            if isinstance(item, list):
+                for nested in item:
+                    _visit(nested)
+                return
+            if isinstance(item, str):
+                text = str(item or '')
+                for match in _ARTIFACT_REF_PATTERN.finditer(text):
+                    found.add(match.group(0))
+                stripped = text.strip()
+                if stripped.startswith('{') or stripped.startswith('['):
+                    try:
+                        parsed = json.loads(stripped)
+                    except Exception:
+                        parsed = None
+                    if parsed is not None:
+                        _visit(parsed)
+
+        _visit(value)
+        return sorted(found)
 
     @staticmethod
     def _accepts_runtime_context(tool: Tool) -> bool:

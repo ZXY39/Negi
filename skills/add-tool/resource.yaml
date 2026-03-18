@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: add-tool
-description: 新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时使用。适用于内置工具与外置工具双模式注册，重点覆盖 `tool_type`、`install_dir`、`resource.yaml`、`toolskills/SKILL.md`、安装/更新流程与删除安全原则。
+description: 新增、迁移、合并、重构或审核 `tools/<tool_id>/` 下的工具资源时使用。适用于内置工具与外置工具双模式注册，重点覆盖 `tool_type`、`install_dir`、`resource.yaml`、`toolskills/SKILL.md`、安装/更新流程、删除安全原则，以及“工具必须异步执行、不得阻塞整个项目”的接入约束。
 trigger:
   keywords:
     - 添加工具

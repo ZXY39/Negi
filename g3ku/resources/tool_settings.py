@@ -30,6 +30,12 @@ class MemoryRuntimeSettings(MemoryToolsConfig):
     pass
 
 
+class SkillInstallerToolSettings(Base):
+    download_timeout: int = 30
+    git_timeout: int = 120
+    auto_prefer: str = "git"
+
+
 def raw_tool_settings_from_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     payload = (metadata or {}).get("settings") if isinstance(metadata, dict) else None
     return dict(payload or {}) if isinstance(payload, dict) else {}

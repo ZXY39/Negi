@@ -4,6 +4,8 @@ from typing import Any
 
 
 class CeoExposureResolver:
+    _ALWAYS_ALLOWED_INTERNAL_TOOLS = {"wait_tool_execution", "stop_tool_execution"}
+
     def __init__(self, *, loop) -> None:
         self._loop = loop
 
@@ -21,6 +23,7 @@ class CeoExposureResolver:
             for executor_name in (action.executor_names or [])
         }
         registered = set(getattr(self._loop.tools, 'tool_names', []) or [])
+        allowed_tool_names.update(self._ALWAYS_ALLOWED_INTERNAL_TOOLS)
         return {
             'tool_names': sorted(registered & allowed_tool_names),
             'skills': visible_skills,

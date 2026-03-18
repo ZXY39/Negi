@@ -192,11 +192,9 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
 
 @router.post("/ceo/sessions/{session_id}/activate")
 async def activate_ceo_session(session_id: str):
-    _agent, session_manager, runtime_manager, state_store = _sessions()
+    _agent, session_manager, _runtime_manager, state_store = _sessions()
     target = _assert_known_session(session_manager, session_id)
-    current_active = ensure_active_web_ceo_session(session_manager, state_store)
-    if current_active != session_id:
-        _assert_no_running_turn(runtime_manager, current_active)
+    ensure_active_web_ceo_session(session_manager, state_store)
     state_store.set_active_session_id(target.key)
     items = list_web_ceo_sessions(session_manager, active_session_id=target.key)
     item = next((entry for entry in items if entry["session_id"] == target.key), None)

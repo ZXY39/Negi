@@ -19,6 +19,12 @@ DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_ORIGINATOR = "g3ku"
 
 
+class CodexStreamError(RuntimeError):
+    def __init__(self, message: str, *, partial_content: str = "") -> None:
+        super().__init__(message)
+        self.partial_content = str(partial_content or "")
+
+
 class OpenAICodexProvider(LLMProvider):
     """Use Codex OAuth to call the Responses API."""
 
@@ -83,6 +89,13 @@ class OpenAICodexProvider(LLMProvider):
                 usage=usage,
             )
         except Exception as e:
+            partial_content = str(getattr(e, "partial_content", "") or "").strip()
+            if partial_content:
+                logger.warning("Codex stream failed after partial content; returning partial content for JSON recovery")
+                return LLMResponse(
+                    content=partial_content,
+                    finish_reason="error",
+                )
             return LLMResponse(
                 content=f"Error calling Codex: {str(e)}",
                 finish_reason="error",
@@ -432,7 +445,7 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
             finish_reason = _map_finish_reason(status)
             usage = normalize_usage_payload(response_payload.get("usage") or event.get("usage"))
         elif event_type in {"error", "response.failed"}:
-            raise RuntimeError("Codex response failed")
+            raise CodexStreamError("Codex response failed", partial_content=content)
 
     return content, tool_calls, finish_reason, usage
 

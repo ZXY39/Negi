@@ -727,6 +727,130 @@ async def test_content_tool_reads_externalized_artifact_refs(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_content_tool_rejects_artifact_refs_outside_acceptance_allowlist(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    service = _ArtifactService(artifact_store)
+    allowed_artifact = artifact_store.create_text_artifact(
+        task_id='task:test',
+        node_id='node:allowed',
+        kind='tool_output',
+        title='Allowed',
+        content='alpha\nbeta\n',
+        extension='.log',
+        mime_type='text/plain',
+    )
+    blocked_artifact = artifact_store.create_text_artifact(
+        task_id='task:test',
+        node_id='node:blocked',
+        kind='tool_output',
+        title='Blocked',
+        content='gamma\ndelta\n',
+        extension='.log',
+        mime_type='text/plain',
+    )
+
+    runtime = {
+        'task_id': 'task:test',
+        'node_id': 'node:acceptance',
+        'node_kind': 'acceptance',
+        'enforce_content_ref_allowlist': True,
+        'allowed_content_refs': [f'artifact:{allowed_artifact.artifact_id}'],
+    }
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+
+        opened = json.loads(
+            await tool.execute(
+                action='open',
+                ref=f'artifact:{allowed_artifact.artifact_id}',
+                start_line=1,
+                end_line=5,
+                __g3ku_runtime=runtime,
+            )
+        )
+        assert opened['ok'] is True
+        assert 'alpha' in opened['excerpt']
+
+        blocked = json.loads(
+            await tool.execute(
+                action='open',
+                ref=f'artifact:{blocked_artifact.artifact_id}',
+                start_line=1,
+                end_line=5,
+                __g3ku_runtime=runtime,
+            )
+        )
+        assert blocked['ok'] is False
+        assert blocked['requested_ref'] == f'artifact:{blocked_artifact.artifact_id}'
+        assert blocked['allowed_refs'] == [f'artifact:{allowed_artifact.artifact_id}']
+    finally:
+        manager.close()
+        store.close()
+
+
+def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+
+    text = ('line-001\n' * 200).strip()
+    first = navigator.maybe_externalize_text(
+        text,
+        runtime={'task_id': 'task:test', 'node_id': 'node:one'},
+        display_name='first',
+        source_kind='node_input',
+    )
+    second = navigator.maybe_externalize_text(
+        text,
+        runtime={'task_id': 'task:test', 'node_id': 'node:two'},
+        display_name='second',
+        source_kind='react_user',
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.ref == second.ref
+    assert len(store.list_artifacts('task:test')) == 1
+
+    wrapped = navigator.maybe_externalize_text(
+        json.dumps(
+            {
+                'ok': True,
+                'ref': first.ref,
+                'handle': {'ref': first.ref},
+                'payload': 'x' * 1500,
+            },
+            ensure_ascii=False,
+        ),
+        runtime={'task_id': 'task:test', 'node_id': 'node:three'},
+        display_name='wrapped',
+        source_kind='tool_result:content',
+        force=True,
+    )
+
+    assert wrapped is not None
+    assert wrapped.handle is not None
+    assert wrapped.handle.origin_ref == first.ref
+
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_memory_search_reads_manifest_settings(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
