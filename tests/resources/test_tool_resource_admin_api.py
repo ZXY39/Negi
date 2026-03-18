@@ -730,6 +730,41 @@ def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path,
     assert saved['models']['catalog'][0]['retryCount'] == 3
 
 
+def test_llm_config_update_refreshes_runtime(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _StubFacade:
+        def update_config_record(self, config_id: str, payload: dict):
+            captured['config_id'] = config_id
+            captured['payload'] = dict(payload)
+            return {'config_id': config_id, 'provider_id': 'responses'}
+
+    class _StubManager:
+        def __init__(self):
+            self.facade = _StubFacade()
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/llm/configs/cfg-1', json={'default_model': 'gpt-5.2'})
+
+    assert response.status_code == 200
+    assert response.json()['item']['config_id'] == 'cfg-1'
+    assert captured['config_id'] == 'cfg-1'
+    assert captured['payload'] == {'default_model': 'gpt-5.2'}
+    assert captured['force'] is True
+    assert captured['reason'] == 'admin_llm_config_update'
+
+
 def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

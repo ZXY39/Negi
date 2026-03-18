@@ -30,6 +30,10 @@
       modelKey: "",
       providerId: "",
       jsonText: "",
+      initialJsonText: "",
+      retryOn: [...DEFAULT_RETRY_ON],
+      retryCount: 0,
+      description: "",
       validation: null,
       probe: null,
       memory: {
@@ -387,6 +391,10 @@
       mode: "create",
       providerId: provider,
       jsonText: JSON.stringify(draft, null, 2),
+      initialJsonText: JSON.stringify(draft, null, 2),
+      retryOn: [...DEFAULT_RETRY_ON],
+      retryCount: 0,
+      description: "",
     };
     renderAll();
   }
@@ -395,6 +403,7 @@
     const binding = llmState().bindingMap[trim(modelKey)] || null;
     if (!binding) return;
     const record = await ApiClient.getLlmConfig(binding.config_id || binding.llm_config_id, { includeSecrets: true });
+    const jsonText = JSON.stringify(draftFromConfig(record), null, 2);
     llmState().editor = {
       ...emptyEditorState(),
       open: true,
@@ -403,7 +412,11 @@
       configId: trim(binding.config_id || binding.llm_config_id),
       modelKey: trim(binding.key),
       providerId: trim(record?.provider_id || ""),
-      jsonText: JSON.stringify(draftFromConfig(record), null, 2),
+      jsonText,
+      initialJsonText: jsonText,
+      retryOn: Array.isArray(binding.retry_on) ? binding.retry_on.map((item) => trim(item)).filter(Boolean) : [...DEFAULT_RETRY_ON],
+      retryCount: Number.isInteger(Number(binding.retry_count)) ? Math.max(0, Number(binding.retry_count)) : 0,
+      description: trim(binding.description),
     };
     renderAll();
   }
@@ -500,6 +513,67 @@
       </section>`;
   }
 
+  function parseBindingRetryOn(raw) {
+    return String(raw || "")
+      .split(/[\n,]/)
+      .map((item) => trim(item))
+      .filter(Boolean);
+  }
+
+  function syncBindingInputs() {
+    const editor = llmState().editor;
+    if (!editor || editor.mode === "memory") return editor;
+    const modelKeyInput = document.getElementById("llm-model-key-input");
+    const retryOnInput = document.getElementById("llm-binding-retry-on");
+    const retryCountInput = document.getElementById("llm-binding-retry-count");
+    const descriptionInput = document.getElementById("llm-binding-description");
+    if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
+    if (retryOnInput) editor.retryOn = parseBindingRetryOn(retryOnInput.value || "");
+    if (retryCountInput) {
+      const parsed = Number.parseInt(String(retryCountInput.value || "").trim(), 10);
+      editor.retryCount = Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+    }
+    if (descriptionInput) editor.description = trim(descriptionInput.value || "");
+    return editor;
+  }
+
+  function bindingDraftPayload({ requireModelKey = false } = {}) {
+    const editor = syncBindingInputs();
+    const modelKey = trim(editor?.modelKey);
+    const retryOn = Array.isArray(editor?.retryOn) ? editor.retryOn.map((item) => trim(item)).filter(Boolean) : [];
+    const retryCount = Number.parseInt(String(editor?.retryCount ?? 0), 10);
+    const description = trim(editor?.description);
+    if (requireModelKey && !modelKey) throw new Error("模型 Key 不能为空");
+    if (!Number.isInteger(retryCount) || retryCount < 0) {
+      throw new Error("重试次数必须是不小于 0 的整数");
+    }
+    return {
+      modelKey,
+      retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
+      retryCount,
+      description,
+    };
+  }
+
+  function renderBindingPolicyFields() {
+    const editor = llmState().editor || emptyEditorState();
+    return `
+      <div class="llm-form-grid">
+        <label class="resource-field">
+          <span class="resource-field-label">Retry On</span>
+          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
+        </label>
+        <label class="resource-field">
+          <span class="resource-field-label">重试次数</span>
+          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
+        </label>
+      </div>
+      <label class="resource-field">
+        <span class="resource-field-label">说明</span>
+        <textarea id="llm-binding-description" class="resource-editor model-textarea" rows="4" placeholder="用于备注当前模型的用途、成本或降级策略。">${escv(editor.description || "")}</textarea>
+      </label>`;
+  }
+
   function renderEditor() {
     refs();
     const state = llmState();
@@ -534,6 +608,7 @@
                   <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
                 </label>
               </div>
+              ${renderBindingPolicyFields()}
               <label class="resource-field">
                 <span class="resource-field-label">JSON 配置</span>
                 <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
@@ -575,7 +650,7 @@
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
               <h2>${escv(binding?.key || state.editor.bindingKey)}</h2>
-              <p class="subtitle">仅显示并编辑当前模型对应的 JSON 配置。</p>
+              <p class="subtitle">可同时编辑当前模型的 JSON 配置与降级重试策略。</p>
             </div>
             <div class="detail-modal-actions">
               <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
@@ -583,6 +658,7 @@
           </div>
           <div class="detail-modal-body model-config-body">
             <div class="llm-section">
+              ${renderBindingPolicyFields()}
               <label class="resource-field">
                 <span class="resource-field-label">JSON 配置</span>
                 <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
@@ -713,6 +789,7 @@
 
   async function handleProviderChange() {
     const state = llmState();
+    syncBindingInputs();
     const select = document.getElementById("llm-provider-select");
     const providerId = trim(select?.value);
     if (!providerId) return;
@@ -726,6 +803,7 @@
 
     async function handleTest() {
     const state = llmState();
+    syncBindingInputs();
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     state.editor.jsonText = jsonText;
@@ -760,7 +838,8 @@
 
     async function handleCreateSave() {
     const state = llmState();
-    const modelKey = trim(document.getElementById("llm-model-key-input")?.value);
+    const bindingDraft = bindingDraftPayload({ requireModelKey: true });
+    const modelKey = bindingDraft.modelKey;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     if (!modelKey) throw new Error("模型 Key 不能为空");
@@ -797,9 +876,9 @@
           key: modelKey,
           config_id: "",
           enabled: true,
-          description: "",
-          retry_on: [...DEFAULT_RETRY_ON],
-          retry_count: 0,
+          description: bindingDraft.description,
+          retry_on: [...bindingDraft.retryOn],
+          retry_count: bindingDraft.retryCount,
         },
         draft,
       });
@@ -835,6 +914,55 @@
         persistent: true,
       });
       await ApiClient.updateLlmConfig(state.editor.configId, draft);
+      showToast({ title: "修改成功", text: `${state.editor.bindingKey} 已更新`, kind: "success" });
+      closeEditor();
+      await loadAll();
+    } finally {
+      state.saving = false;
+      renderAll();
+    }
+  }
+
+  async function handleDetailSave() {
+    const state = llmState();
+    const binding = currentBinding();
+    if (!binding) throw new Error("当前模型绑定不存在");
+    const bindingDraft = bindingDraftPayload();
+    const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
+    state.editor.jsonText = jsonText;
+    const draft = parseDraftJson(jsonText, state.editor.providerId);
+    const configChanged = trim(jsonText) !== trim(state.editor.initialJsonText || "");
+    const bindingPatch = {};
+    if (JSON.stringify(bindingDraft.retryOn) !== JSON.stringify(binding.retry_on || [])) bindingPatch.retry_on = bindingDraft.retryOn;
+    if (bindingDraft.retryCount !== Number.parseInt(String(binding.retry_count ?? 0), 10)) bindingPatch.retry_count = bindingDraft.retryCount;
+    if (bindingDraft.description !== trim(binding.description)) bindingPatch.description = bindingDraft.description;
+    state.saving = true;
+    renderAll();
+    try {
+      if (configChanged) {
+        showToast({
+          title: "Saving",
+          text: "Validating current JSON config before applying changes...",
+          kind: "success",
+          persistent: true,
+        });
+        const ok = await probeDraft(draft);
+        if (!ok) throw new Error("请先修正 JSON 配置并通过连接测试");
+        await ApiClient.updateLlmConfig(state.editor.configId, draft);
+      }
+      if (Object.keys(bindingPatch).length) {
+        showToast({
+          title: "Saving",
+          text: "Applying current retry and fallback policy...",
+          kind: "success",
+          persistent: true,
+        });
+        await ApiClient.updateLlmBinding(state.editor.bindingKey, bindingPatch);
+      }
+      if (!configChanged && !Object.keys(bindingPatch).length) {
+        showToast({ title: "无需保存", text: "当前没有需要应用的修改。", kind: "info" });
+        return;
+      }
       showToast({ title: "修改成功", text: `${state.editor.bindingKey} 已更新`, kind: "success" });
       closeEditor();
       await loadAll();

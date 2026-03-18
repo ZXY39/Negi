@@ -1,5 +1,5 @@
 {
-  "generation": 9,
+  "generation": 4,
   "tools": [
     {
       "name": "content",
@@ -85,6 +85,14 @@
     },
     {
       "name": "model_config",
+      "available": true,
+      "busy": false,
+      "pendingDelete": false,
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "name": "skill-installer",
       "available": true,
       "busy": false,
       "pendingDelete": false,

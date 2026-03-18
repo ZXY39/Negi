@@ -8,6 +8,21 @@
 - 默认优先产出 **G3KU 本地资源**；只有用户明确需要跨平台分发时，才追加开放标准 `SKILL.md` 技能。
 - 主 `SKILL.md` 只保留入口、分流规则和关键决策；细节步骤、模板和检查项放到 `references/`。
 - 能复用已有脚本、示例和上游资料就复用，不要重复造轮子。
+- 当用户明确要“从 GitHub repo/path 安装现成 skill”时，不要先输出迁移方案或等待用户二次确认；优先直接调用 `skill-installer` 工具。只有安装后仍需改造结构、补充资源或重写触发规则时，才继续本工作流。
+
+## 优先转交给 skill-installer
+
+出现下面这些请求时，先用 `skill-installer`，不要把它当成纯技能设计题：
+
+- “安装这个 GitHub skill”
+- “把这个 repo/path 里的 skill 接入当前 G3KU”
+- “把现成 skill 导入到项目里的 `skills/`”
+
+处理规则：
+
+1. 先调用 `skill-installer`
+2. 如果安装结果已经是可发现、可触发的本地 skill，就在此结束
+3. 只有当上游 skill 需要拆分、重命名、补 references、补治理信息或改造成更符合 G3KU 的结构时，再继续使用 `skill-creator`
 
 ## 先分流
 
@@ -18,6 +33,7 @@
 - 用户要新增或改造 `skills/<skill_id>/`
 - 用户要把一个工作流、知识域、操作规范或协作模式做成可复用 skill
 - 用户给的是文档、流程说明、模板、现有 skill、FAQ、执行清单、最佳实践，而不是一个要直接调用的运行时工具
+- 用户已经通过 `skill-installer` 把 GitHub repo/path 里的现成 skill 拉到本地，但还需要继续做结构适配或能力扩展
 
 执行时：
 

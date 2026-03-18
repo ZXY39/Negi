@@ -527,6 +527,7 @@ async def update_llm_config(config_id: str, payload: dict = Body(...)):
         item = manager.facade.update_config_record(config_id, payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _refresh_runtime('admin_llm_config_update')
     return {'ok': True, 'item': item}
 
 
