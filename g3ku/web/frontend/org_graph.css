@@ -566,6 +566,12 @@ textarea {
     letter-spacing: -0.015em;
 }
 
+.panel-header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+}
+
 .panel-header i {
     width: 18px;
     height: 18px;
@@ -757,6 +763,50 @@ textarea {
     font-weight: 700;
     line-height: 1.45;
     word-break: break-word;
+}
+
+.execution-tree-node-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    width: 100%;
+    align-items: stretch;
+}
+
+.execution-tree-node-rounds {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: 0 var(--space-1);
+}
+
+.execution-tree-round-label {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.execution-tree-round-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 32px;
+    padding: 0 12px;
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 80%, var(--bg-panel) 20%);
+    color: var(--text-primary);
+    font-size: 0.78rem;
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+}
+
+.execution-tree-round-select:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 72%, transparent);
+    outline-offset: 2px;
 }
 
 .detail-drawer.project-detail-drawer {
@@ -955,9 +1005,20 @@ textarea {
     gap: var(--space-3);
 }
 
+.agent-detail-header-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
 .agent-detail-header h3 {
     font-size: 1.05rem;
     font-weight: 700;
+}
+
+.agent-detail-subtitle {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
 }
 
 .agent-detail-section {

@@ -8,6 +8,17 @@ from main.models import Model, ModelTokenUsageRecord, TokenUsageSummary
 from main.types import NodeStatus, TaskStatus
 
 
+class TaskSpawnRound(Model):
+    round_id: str = ''
+    round_index: int = 0
+    label: str = ''
+    is_latest: bool = False
+    created_at: str = ''
+    child_node_ids: list[str] = Field(default_factory=list)
+    source: str = 'explicit'
+    children: list['TaskTreeNode'] = Field(default_factory=list)
+
+
 class TaskTreeNode(Model):
     node_id: str
     parent_node_id: str | None = None
@@ -23,6 +34,9 @@ class TaskTreeNode(Model):
     updated_at: str = ''
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
+    spawn_rounds: list[TaskSpawnRound] = Field(default_factory=list)
+    auxiliary_children: list['TaskTreeNode'] = Field(default_factory=list)
+    default_round_id: str = ''
     children: list['TaskTreeNode'] = Field(default_factory=list)
 
 
@@ -69,4 +83,8 @@ class TaskProgressResult(Model):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
     text: str = ''
+
+
+TaskSpawnRound.model_rebuild()
+TaskTreeNode.model_rebuild()
 

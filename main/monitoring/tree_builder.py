@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from main.models import NodeRecord, TaskRecord
-from main.monitoring.models import TaskTreeNode
+from main.monitoring.models import TaskSpawnRound, TaskTreeNode
 
 
 class TaskTreeBuilder:
@@ -9,6 +11,11 @@ class TaskTreeBuilder:
         if not nodes:
             return None
         ordered = sorted(nodes, key=lambda item: (str(item.created_at or ''), str(item.node_id or '')))
+        node_records = {node.node_id: node for node in ordered}
+        child_ids_by_parent: dict[str, list[str]] = {}
+        for node in ordered:
+            if node.parent_node_id and node.parent_node_id in node_records:
+                child_ids_by_parent.setdefault(node.parent_node_id, []).append(node.node_id)
         index = {
             node.node_id: TaskTreeNode(
                 node_id=node.node_id,
@@ -25,13 +32,26 @@ class TaskTreeBuilder:
                 updated_at=node.updated_at,
                 token_usage=node.token_usage,
                 token_usage_by_model=list(node.token_usage_by_model or []),
+                spawn_rounds=[],
+                auxiliary_children=[],
+                default_round_id='',
                 children=[],
             )
             for node in ordered
         }
         for node in ordered:
-            if node.parent_node_id and node.parent_node_id in index:
-                index[node.parent_node_id].children.append(index[node.node_id])
+            rounds, auxiliary_children = self._build_child_groups(
+                parent=node,
+                child_ids=child_ids_by_parent.get(node.node_id, []),
+                node_records=node_records,
+                tree_nodes=index,
+            )
+            tree_node = index[node.node_id]
+            tree_node.spawn_rounds = rounds
+            tree_node.auxiliary_children = auxiliary_children
+            tree_node.default_round_id = str(rounds[-1].round_id or '') if rounds else ''
+            default_round_children = list(rounds[-1].children or []) if rounds else []
+            tree_node.children = [*auxiliary_children, *default_round_children]
         return index.get(task.root_node_id)
 
     def render_tree_text(self, root: TaskTreeNode | None) -> str:
@@ -51,3 +71,104 @@ class TaskTreeBuilder:
 
         walk(root, is_root=True)
         return '\n'.join(lines)
+
+    def _build_child_groups(
+        self,
+        *,
+        parent: NodeRecord,
+        child_ids: Iterable[str],
+        node_records: dict[str, NodeRecord],
+        tree_nodes: dict[str, TaskTreeNode],
+    ) -> tuple[list[TaskSpawnRound], list[TaskTreeNode]]:
+        ordered_child_ids = [str(child_id or '').strip() for child_id in list(child_ids or []) if str(child_id or '').strip()]
+        if not ordered_child_ids:
+            return [], []
+
+        execution_child_ids = [
+            child_id
+            for child_id in ordered_child_ids
+            if str(getattr(node_records.get(child_id), 'node_kind', '') or '').strip().lower() == 'execution'
+        ]
+        execution_child_set = set(execution_child_ids)
+        auxiliary_children = [
+            tree_nodes[child_id]
+            for child_id in ordered_child_ids
+            if child_id in tree_nodes and child_id not in execution_child_set
+        ]
+
+        round_specs: list[dict[str, object]] = []
+        assigned_execution_ids: set[str] = set()
+        spawn_operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if isinstance(spawn_operations, dict):
+            for position, (round_id, payload) in enumerate(spawn_operations.items()):
+                normalized_round_id = str(round_id or '').strip() or f'explicit:{position + 1}'
+                entries = list(payload.get('entries') or []) if isinstance(payload, dict) else []
+                round_child_ids: list[str] = []
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    child_id = str(entry.get('child_node_id') or '').strip()
+                    if child_id and child_id in execution_child_set and child_id not in round_child_ids:
+                        round_child_ids.append(child_id)
+                assigned_execution_ids.update(round_child_ids)
+                round_specs.append(
+                    {
+                        'round_id': normalized_round_id,
+                        'source': 'explicit',
+                        'position': position,
+                        'created_at': self._round_created_at(parent=parent, child_ids=round_child_ids, node_records=node_records),
+                        'child_ids': round_child_ids,
+                    }
+                )
+
+        implicit_child_ids = [child_id for child_id in execution_child_ids if child_id not in assigned_execution_ids]
+        if implicit_child_ids:
+            round_specs.append(
+                {
+                    'round_id': self._implicit_round_id(parent=parent, child_ids=implicit_child_ids),
+                    'source': 'implicit',
+                    'position': len(round_specs),
+                    'created_at': self._round_created_at(parent=parent, child_ids=implicit_child_ids, node_records=node_records),
+                    'child_ids': implicit_child_ids,
+                }
+            )
+
+        ordered_round_specs = sorted(
+            round_specs,
+            key=lambda item: (
+                str(item.get('created_at') or ''),
+                int(item.get('position') or 0),
+                str(item.get('round_id') or ''),
+            ),
+        )
+        rounds: list[TaskSpawnRound] = []
+        for index, spec in enumerate(ordered_round_specs, start=1):
+            round_child_ids = [child_id for child_id in list(spec.get('child_ids') or []) if child_id in tree_nodes]
+            rounds.append(
+                TaskSpawnRound(
+                    round_id=str(spec.get('round_id') or ''),
+                    round_index=index,
+                    label=f'第 {index} 轮',
+                    is_latest=False,
+                    created_at=str(spec.get('created_at') or ''),
+                    child_node_ids=round_child_ids,
+                    source=str(spec.get('source') or 'explicit'),
+                    children=[tree_nodes[child_id] for child_id in round_child_ids],
+                )
+            )
+        if rounds:
+            rounds[-1].is_latest = True
+        return rounds, auxiliary_children
+
+    @staticmethod
+    def _round_created_at(*, parent: NodeRecord, child_ids: list[str], node_records: dict[str, NodeRecord]) -> str:
+        child_times = sorted(str(node_records[child_id].created_at or '') for child_id in child_ids if child_id in node_records)
+        if child_times:
+            return child_times[0]
+        return str(parent.updated_at or parent.created_at or '')
+
+    @staticmethod
+    def _implicit_round_id(*, parent: NodeRecord, child_ids: list[str]) -> str:
+        if child_ids:
+            return f'implicit:{parent.node_id}:{child_ids[0]}'
+        return f'implicit:{parent.node_id}'

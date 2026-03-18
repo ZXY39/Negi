@@ -412,7 +412,11 @@
                     <div class="org-tree-panel panel">
                         <div class="panel-header">
                             <h2>任务树</h2>
-                            <i data-lucide="network"></i>
+                            <div class="panel-header-actions">
+                                <button id="task-tree-reset-rounds-btn" class="toolbar-btn ghost small" type="button"
+                                    hidden>回到最新树</button>
+                                <i data-lucide="network"></i>
+                            </div>
                         </div>
                         <div class="tree-container" id="org-tree-container">
                             <div class="empty-state">正在加载任务树...</div>
@@ -430,7 +434,10 @@
 
                         <div id="agent-detail-view" class="agent-detail-view" style="display: none;">
                             <div class="agent-detail-header">
-                                <h3 id="ad-role">节点</h3>
+                                <div class="agent-detail-header-copy">
+                                    <h3 id="ad-role">节点</h3>
+                                    <div id="ad-round-summary" class="agent-detail-subtitle">默认显示：最新树</div>
+                                </div>
                                 <span class="status-badge" id="ad-status">STATUS</span>
                                 <button class="btn-secondary" id="close-agent-btn" type="button" data-modal-close
                                     style="padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border-color); cursor: pointer; background: var(--bg-panel); color: var(--text-primary);">关闭</button>

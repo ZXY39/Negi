@@ -99,6 +99,7 @@ const S = {
     },
     tree: null,
     treeView: null,
+    treeRoundSelectionsByNodeId: {},
     treePan: {
         active: false,
         originNodeId: null,
@@ -195,6 +196,7 @@ const U = {
     tdStatus: document.getElementById("td-status"),
     tdSummary: document.getElementById("td-summary"),
     tdActiveCount: document.getElementById("td-active-count"),
+    taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
     tree: document.getElementById("org-tree-container"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
@@ -212,6 +214,7 @@ const U = {
     detail: document.getElementById("agent-detail-view"),
     adRole: document.getElementById("ad-role"),
     adStatus: document.getElementById("ad-status"),
+    adRoundSummary: document.getElementById("ad-round-summary"),
     adFlow: document.getElementById("ad-input"),
     adAcceptance: document.getElementById("ad-check"),
     adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
@@ -4184,6 +4187,7 @@ function resetTaskView() {
     S.artifactContent = "";
     S.tree = null;
     S.treeView = null;
+    S.treeRoundSelectionsByNodeId = {};
     S.selectedNodeId = null;
     S.treePan.active = false;
     S.treePan.originNodeId = null;
@@ -4199,10 +4203,12 @@ function resetTaskView() {
     U.feedTitle.textContent = "Node Details";
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">选择任务树中的节点后，这里会显示执行流程。</div>';
     if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
+    if (U.adRoundSummary) U.adRoundSummary.textContent = "默认显示：最新树";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
     if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
     if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
     if (U.artifactApply) U.artifactApply.hidden = true;
+    syncTaskTreeHeaderState(null);
     refreshTaskDetailScrollRegions();
     if (U.taskTokenButton) U.taskTokenButton.disabled = true;
     if (U.taskTokenSummaryText) U.taskTokenSummaryText.textContent = "任务级 token 消耗会在这里实时刷新。";
@@ -4294,6 +4300,185 @@ function setTaskSelectionEmptyVisible(visible) {
     if (U.taskSelectionEmpty) U.taskSelectionEmpty.hidden = !visible;
 }
 
+function normalizeTreeRoundSelections(value) {
+    const next = {};
+    if (!value || typeof value !== "object") return next;
+    Object.entries(value).forEach(([nodeId, roundId]) => {
+        const normalizedNodeId = String(nodeId || "").trim();
+        const normalizedRoundId = String(roundId || "").trim();
+        if (!normalizedNodeId || !normalizedRoundId) return;
+        next[normalizedNodeId] = normalizedRoundId;
+    });
+    return next;
+}
+
+function dedupeTreeNodes(nodes) {
+    const seen = new Set();
+    const out = [];
+    (Array.isArray(nodes) ? nodes : []).forEach((node) => {
+        const nodeId = String(node?.node_id || "").trim();
+        const key = nodeId || `anon:${out.length}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(node);
+    });
+    return out;
+}
+
+function rawNodeRounds(node) {
+    return (Array.isArray(node?.spawn_rounds) ? node.spawn_rounds : [])
+        .map((round) => ({
+            ...round,
+            round_id: String(round?.round_id || "").trim(),
+            label: String(round?.label || "").trim(),
+            children: dedupeTreeNodes(round?.children),
+        }))
+        .filter((round) => round.round_id);
+}
+
+function rawTreeDirectChildren(node) {
+    const rounds = rawNodeRounds(node);
+    const auxiliary = dedupeTreeNodes(node?.auxiliary_children);
+    const roundChildren = rounds.flatMap((round) => dedupeTreeNodes(round.children));
+    if (auxiliary.length || roundChildren.length) return dedupeTreeNodes([...auxiliary, ...roundChildren]);
+    return dedupeTreeNodes(node?.children);
+}
+
+function walkFullTaskTree(node, visitor, seen = new Set()) {
+    if (!node) return;
+    const nodeId = String(node?.node_id || "").trim();
+    if (nodeId && seen.has(nodeId)) return;
+    if (nodeId) seen.add(nodeId);
+    visitor(node);
+    rawTreeDirectChildren(node).forEach((child) => walkFullTaskTree(child, visitor, seen));
+}
+
+function findRawTaskTreeNode(node, nodeId, seen = new Set()) {
+    if (!node) return null;
+    const currentId = String(node?.node_id || "").trim();
+    if (currentId && seen.has(currentId)) return null;
+    if (currentId) seen.add(currentId);
+    if (currentId === String(nodeId || "").trim()) return node;
+    for (const child of rawTreeDirectChildren(node)) {
+        const found = findRawTaskTreeNode(child, nodeId, seen);
+        if (found) return found;
+    }
+    return null;
+}
+
+function pruneTreeRoundSelections(root, selections) {
+    const source = normalizeTreeRoundSelections(selections);
+    if (!root) return {};
+    const next = {};
+    walkFullTaskTree(root, (node) => {
+        const nodeId = String(node?.node_id || "").trim();
+        if (!nodeId || !source[nodeId]) return;
+        const rounds = rawNodeRounds(node);
+        if (rounds.some((round) => round.round_id === source[nodeId])) {
+            next[nodeId] = source[nodeId];
+        }
+    });
+    return next;
+}
+
+function resolveDefaultRoundId(node) {
+    const rounds = rawNodeRounds(node);
+    if (!rounds.length) return "";
+    const explicitDefault = String(node?.default_round_id || "").trim();
+    if (rounds.some((round) => round.round_id === explicitDefault)) return explicitDefault;
+    return String(rounds.find((round) => round?.is_latest)?.round_id || rounds[rounds.length - 1]?.round_id || "");
+}
+
+function resolveSelectedRoundId(node, selections) {
+    const rounds = rawNodeRounds(node);
+    if (!rounds.length) return "";
+    const nodeId = String(node?.node_id || "").trim();
+    const selected = String(selections?.[nodeId] || "").trim();
+    if (rounds.some((round) => round.round_id === selected)) return selected;
+    return resolveDefaultRoundId(node);
+}
+
+function projectTaskTree(node, selections) {
+    if (!node) return null;
+    const rounds = rawNodeRounds(node);
+    const projectedAuxiliaryChildren = dedupeTreeNodes(node?.auxiliary_children)
+        .map((child) => projectTaskTree(child, selections))
+        .filter(Boolean);
+    const projectedRounds = rounds.map((round) => ({
+        ...round,
+        children: dedupeTreeNodes(round.children).map((child) => projectTaskTree(child, selections)).filter(Boolean),
+    }));
+    const fallbackChildren = (!projectedAuxiliaryChildren.length && !projectedRounds.length)
+        ? dedupeTreeNodes(node?.children).map((child) => projectTaskTree(child, selections)).filter(Boolean)
+        : [];
+    const selectedRoundId = resolveSelectedRoundId(node, selections);
+    const selectedRound = projectedRounds.find((round) => round.round_id === selectedRoundId) || null;
+    const projectedChildren = projectedRounds.length
+        ? [...projectedAuxiliaryChildren, ...((selectedRound?.children) || [])]
+        : (projectedAuxiliaryChildren.length ? projectedAuxiliaryChildren : fallbackChildren);
+    return {
+        ...node,
+        auxiliary_children: projectedAuxiliaryChildren,
+        spawn_rounds: projectedRounds,
+        selected_round_id: selectedRoundId,
+        children: projectedChildren,
+    };
+}
+
+function countVisibleTreeNodes(root, predicate = null) {
+    let count = 0;
+    const walk = (node) => {
+        if (!node) return;
+        if (!predicate || predicate(node)) count += 1;
+        (Array.isArray(node.children) ? node.children : []).forEach(walk);
+    };
+    walk(root);
+    return count;
+}
+
+function hasManualTreeRoundSelections() {
+    return Object.keys(normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId)).length > 0;
+}
+
+function syncTaskTreeHeaderState(projectedRoot = null) {
+    if (U.tdActiveCount) {
+        U.tdActiveCount.textContent = String(
+            projectedRoot
+                ? countVisibleTreeNodes(projectedRoot, (node) => String(node?.status || "").trim().toLowerCase() === "in_progress")
+                : 0,
+        );
+    }
+    if (U.taskTreeResetRounds) {
+        const hasManual = hasManualTreeRoundSelections();
+        U.taskTreeResetRounds.hidden = !hasManual;
+        U.taskTreeResetRounds.disabled = !hasManual;
+        U.taskTreeResetRounds.classList.toggle("active", hasManual);
+    }
+}
+
+function resetTaskTreeRoundSelections() {
+    S.treeRoundSelectionsByNodeId = {};
+    renderTree();
+}
+
+function setNodeRoundSelection(nodeId, roundId) {
+    const normalizedNodeId = String(nodeId || "").trim();
+    if (!normalizedNodeId || !S.tree) return;
+    const rawNode = findRawTaskTreeNode(S.tree, normalizedNodeId);
+    if (!rawNode) return;
+    const rounds = rawNodeRounds(rawNode);
+    const normalizedRoundId = String(roundId || "").trim();
+    const nextSelections = normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId);
+    const defaultRoundId = resolveDefaultRoundId(rawNode);
+    if (!normalizedRoundId || normalizedRoundId === defaultRoundId || !rounds.some((round) => round.round_id === normalizedRoundId)) {
+        delete nextSelections[normalizedNodeId];
+    } else {
+        nextSelections[normalizedNodeId] = normalizedRoundId;
+    }
+    S.treeRoundSelectionsByNodeId = nextSelections;
+    renderTree();
+}
+
 function clearAgentSelection({ rerender = true } = {}) {
     S.selectedNodeId = null;
     U.feedTitle.textContent = "Node Details";
@@ -4340,8 +4525,7 @@ function bindTreePan() {
         if (state.moved) state.suppressClickNodeId = state.originNodeId;
     });
     U.tree.addEventListener("mousedown", (e) => {
-        const node = e.target.closest(".execution-tree-node");
-        if (node) return;
+        if (e.target.closest(".execution-tree-node, .execution-tree-node-rounds")) return;
         state.active = true;
         state.moved = false;
         state.originNodeId = e.target instanceof Element ? e.target.closest(".execution-tree-node")?.dataset?.id || null : null;
@@ -4353,6 +4537,7 @@ function bindTreePan() {
         if (e.target.closest(".execution-tree-node")) e.preventDefault();
     });
     U.tree.addEventListener("wheel", (e) => {
+        if (e.target.closest(".execution-tree-node-rounds")) return;
         const canvas = U.tree?.querySelector(".execution-tree");
         if (!canvas) return;
         e.preventDefault();
@@ -4557,6 +4742,35 @@ function renderAcceptanceResult(text) {
     U.adAcceptance.textContent = String(text || "").trim() || "暂无验收结果";
 }
 
+function buildNodeRoundState(node) {
+    const rounds = rawNodeRounds(node).map((round) => ({
+        roundId: String(round.round_id || ""),
+        roundIndex: normalizeInt(round.round_index, 0),
+        label: String(round.label || "").trim() || `第 ${normalizeInt(round.round_index, 0)} 轮`,
+        isLatest: !!round.is_latest,
+        childCount: Array.isArray(round.children) ? round.children.length : Math.max(0, normalizeInt(round.child_node_ids?.length, 0)),
+        createdAt: String(round.created_at || ""),
+    }));
+    if (!rounds.length) {
+        return {
+            options: [],
+            selectedRoundId: "",
+            defaultRoundId: "",
+            summary: "当前节点无派生轮次",
+        };
+    }
+    const defaultRoundId = resolveDefaultRoundId(node);
+    const selectedRoundId = String(node?.selected_round_id || defaultRoundId || "");
+    const selectedRound = rounds.find((round) => round.roundId === selectedRoundId) || rounds[rounds.length - 1];
+    const selectionMode = selectedRound.roundId && selectedRound.roundId !== defaultRoundId ? "人工切换" : "默认最新";
+    return {
+        options: rounds,
+        selectedRoundId,
+        defaultRoundId,
+        summary: `当前轮次：${selectedRound.label}${selectedRound.isLatest ? "（最新）" : ""} · ${selectionMode} · 共 ${rounds.length} 轮`,
+    };
+}
+
 function buildExecutionTree(rawTree) {
     if (!rawTree) return null;
     const nodeRecords = Array.isArray(S.currentTaskProgress?.nodes) ? S.currentTaskProgress.nodes : [];
@@ -4565,6 +4779,7 @@ function buildExecutionTree(rawTree) {
         const detail = nodeMap.get(String(node.node_id || "")) || {};
         const status = String(node.status || detail.status || "unknown").trim().toLowerCase() || "unknown";
         const title = resolveNodeTitle(node, detail);
+        const roundState = buildNodeRoundState(node);
         return {
             node_id: node.node_id,
             title: title.title,
@@ -4574,6 +4789,10 @@ function buildExecutionTree(rawTree) {
             state: status,
             display_state: status.toUpperCase(),
             executionTrace: buildNodeExecutionTrace(node, detail),
+            roundOptions: roundState.options,
+            selectedRoundId: roundState.selectedRoundId,
+            defaultRoundId: roundState.defaultRoundId,
+            roundSummary: roundState.summary,
             children: Array.isArray(node.children) ? node.children.map(walk) : [],
         };
     };
@@ -4582,7 +4801,9 @@ function buildExecutionTree(rawTree) {
 
 function renderTree() {
     if (!S.tree) return;
-    S.treeView = buildExecutionTree(S.tree);
+    const projectedTree = projectTaskTree(S.tree, S.treeRoundSelectionsByNodeId);
+    syncTaskTreeHeaderState(projectedTree);
+    S.treeView = buildExecutionTree(projectedTree);
     if (!S.treeView) {
         U.tree.innerHTML = '<div class="empty-state">No nodes to display.</div>';
         setTaskSelectionEmptyVisible(false);
@@ -4598,6 +4819,8 @@ function renderTree() {
         const displayState = String(node.display_state || node.state || "").toUpperCase();
         const item = document.createElement("li");
         item.className = "execution-tree-item";
+        const stack = document.createElement("div");
+        stack.className = "execution-tree-node-stack";
         const el = document.createElement("button");
         el.type = "button";
         el.className = `execution-tree-node${S.selectedNodeId === node.node_id ? " selected" : ""}`;
@@ -4616,7 +4839,35 @@ function renderTree() {
             showAgent(node);
             renderTree();
         });
-        item.appendChild(el);
+        stack.appendChild(el);
+        if ((node.roundOptions || []).length > 1) {
+            const roundWrap = document.createElement("div");
+            roundWrap.className = "execution-tree-node-rounds";
+            ["mousedown", "click", "wheel"].forEach((eventName) => {
+                roundWrap.addEventListener(eventName, (event) => event.stopPropagation());
+            });
+            const label = document.createElement("span");
+            label.className = "execution-tree-round-label";
+            label.textContent = "轮次";
+            const select = document.createElement("select");
+            select.className = "execution-tree-round-select";
+            select.setAttribute("aria-label", `${fullTitle} 轮次`);
+            (node.roundOptions || []).forEach((round) => {
+                const option = document.createElement("option");
+                option.value = round.roundId;
+                option.textContent = round.isLatest ? `${round.label}（最新）` : round.label;
+                select.appendChild(option);
+            });
+            if (node.selectedRoundId) select.value = node.selectedRoundId;
+            select.addEventListener("change", (event) => {
+                event.stopPropagation();
+                setNodeRoundSelection(node.node_id, event.target.value);
+            });
+            roundWrap.appendChild(label);
+            roundWrap.appendChild(select);
+            stack.appendChild(roundWrap);
+        }
+        item.appendChild(stack);
         if ((node.children || []).length) {
             const branch = document.createElement("ul");
             branch.className = "execution-tree-list";
@@ -4703,6 +4954,7 @@ function showAgent(node) {
     U.adRole.textContent = node.fullTitle || node.title || node.node_id || "Node";
     U.adStatus.textContent = String(node.display_state || node.state || "").toUpperCase();
     U.adStatus.dataset.status = node.state || "";
+    if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
     renderExecutionTrace(node);
     renderAcceptanceResult(node.executionTrace?.acceptance_result || "");
     U.feedTitle.textContent = `Node: ${node.fullTitle || node.title || node.node_id || ""}`;
@@ -4721,15 +4973,16 @@ function applyTaskPayload(payload) {
     S.currentTask = payload.task;
     S.currentTaskProgress = payload.progress;
     S.tree = payload.progress.root;
+    S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
     U.tdTitle.textContent = payload.task.title || payload.task.task_id || "Loading...";
     U.tdStatus.textContent = taskStatusLabel(payload.task).toUpperCase();
     U.tdStatus.dataset.status = taskStatusKey(payload.task);
     U.tdSummary.textContent = payload.task.user_request || payload.task.final_output || payload.progress.text || "No summary";
-    U.tdActiveCount.textContent = String((payload.progress.nodes || []).filter((node) => String(node.status || "") === "in_progress").length);
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
     if (S.tree) renderTree();
     else {
+        syncTaskTreeHeaderState(null);
         U.tree.innerHTML = '<div class="empty-state">No task tree.</div>';
         setTaskSelectionEmptyVisible(false);
         hideAgent();
@@ -6151,6 +6404,7 @@ function bind() {
     U.taskBatchMenu?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
         await runTaskBatchAction(button.dataset.batchAction, { returnFocus: button });
     }));
+    U.taskTreeResetRounds?.addEventListener("click", () => resetTaskTreeRoundSelections());
     U.closeAgent?.addEventListener("click", () => clearAgentSelection());
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
     [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetSkillPagination));
