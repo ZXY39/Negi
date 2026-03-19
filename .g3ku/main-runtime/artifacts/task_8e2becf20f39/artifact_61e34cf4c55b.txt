@@ -1,0 +1,180 @@
+1:import type { OpenClawConfig } from "../config/config.js";
+2:import { resolvePluginTools } from "../plugins/tools.js";
+3:import { getActiveRuntimeWebToolsMetadata } from "../secrets/runtime.js";
+4:import type { GatewayMessageChannel } from "../utils/message-channel.js";
+5:import { resolveSessionAgentId } from "./agent-scope.js";
+6:import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
+7:import type { SpawnedToolContext } from "./spawned-context.js";
+8:import type { ToolFsPolicy } from "./tool-fs-policy.js";
+9:import { createAgentsListTool } from "./tools/agents-list-tool.js";
+10:import { createBrowserTool } from "./tools/browser-tool.js";
+11:import { createCanvasTool } from "./tools/canvas-tool.js";
+12:import type { AnyAgentTool } from "./tools/common.js";
+13:import { createCronTool } from "./tools/cron-tool.js";
+14:import { createGatewayTool } from "./tools/gateway-tool.js";
+15:import { createImageTool } from "./tools/image-tool.js";
+16:import { createMessageTool } from "./tools/message-tool.js";
+17:import { createNodesTool } from "./tools/nodes-tool.js";
+18:import { createPdfTool } from "./tools/pdf-tool.js";
+19:import { createSessionStatusTool } from "./tools/session-status-tool.js";
+20:import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
+21:import { createSessionsListTool } from "./tools/sessions-list-tool.js";
+22:import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
+23:import { createSessionsSpawnTool } from "./tools/sessions-spawn-tool.js";
+24:import { createSessionsYieldTool } from "./tools/sessions-yield-tool.js";
+25:import { createSubagentsTool } from "./tools/subagents-tool.js";
+26:import { createTtsTool } from "./tools/tts-tool.js";
+27:import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
+28:import { resolveWorkspaceRoot } from "./workspace-dir.js";
+29:
+30:export function createOpenClawTools(
+31:  options?: {
+32:    sandboxBrowserBridgeUrl?: string;
+33:    allowHostBrowserControl?: boolean;
+34:    agentSessionKey?: string;
+35:    agentChannel?: GatewayMessageChannel;
+36:    agentAccountId?: string;
+37:    /** Delivery target (e.g. telegram:group:123:topic:456) for topic/thread routing. */
+38:    agentTo?: string;
+39:    /** Thread/topic identifier for routing replies to the originating thread. */
+40:    agentThreadId?: string | number;
+41:    agentDir?: string;
+42:    sandboxRoot?: string;
+43:    sandboxFsBridge?: SandboxFsBridge;
+44:    fsPolicy?: ToolFsPolicy;
+45:    sandboxed?: boolean;
+46:    config?: OpenClawConfig;
+47:    pluginToolAllowlist?: string[];
+48:    /** Current channel ID for auto-threading (Slack). */
+49:    currentChannelId?: string;
+50:    /** Current thread timestamp for auto-threading (Slack). */
+51:    currentThreadTs?: string;
+52:    /** Current inbound message id for action fallbacks (e.g. Telegram react). */
+53:    currentMessageId?: string | number;
+54:    /** Reply-to mode for Slack auto-threading. */
+55:    replyToMode?: "off" | "first" | "all";
+56:    /** Mutable ref to track if a reply was sent (for "first" mode). */
+57:    hasRepliedRef?: { value: boolean };
+58:    /** If true, the model has native vision capability */
+59:    modelHasVision?: boolean;
+60:    /** If true, nodes action="invoke" can call media-returning commands directly. */
+61:    allowMediaInvokeCommands?: boolean;
+62:    /** Explicit agent ID override for cron/hook sessions. */
+63:    requesterAgentIdOverride?: string;
+64:    /** Require explicit message targets (no implicit last-route sends). */
+65:    requireExplicitMessageTarget?: boolean;
+66:    /** If true, omit the message tool from the tool list. */
+67:    disableMessageTool?: boolean;
+68:    /** Trusted sender id from inbound context (not tool args). */
+69:    requesterSenderId?: string | null;
+70:    /** Whether the requesting sender is an owner. */
+71:    senderIsOwner?: boolean;
+72:    /** Ephemeral session UUID 鈥?regenerated on /new and /reset. */
+73:    sessionId?: string;
+74:    /**
+75:     * Workspace directory to pass to spawned subagents for inheritance.
+76:     * Defaults to workspaceDir. Use this to pass the actual agent workspace when the
+77:     * session itself is running in a copied-workspace sandbox (`ro` or `none`) so
+78:     * subagents inherit the real workspace path instead of the sandbox copy.
+79:     */
+80:    spawnWorkspaceDir?: string;
+81:    /** Callback invoked when sessions_yield tool is called. */
+82:    onYield?: (message: string) => Promise<void> | void;
+83:  } & SpawnedToolContext,
+84:): AnyAgentTool[] {
+85:  const workspaceDir = resolveWorkspaceRoot(options?.workspaceDir);
+86:  const spawnWorkspaceDir = resolveWorkspaceRoot(
+87:    options?.spawnWorkspaceDir ?? options?.workspaceDir,
+88:  );
+89:  const runtimeWebTools = getActiveRuntimeWebToolsMetadata();
+90:  const sandbox =
+91:    options?.sandboxRoot && options?.sandboxFsBridge
+92:      ? { root: options.sandboxRoot, bridge: options.sandboxFsBridge }
+93:      : undefined;
+94:  const imageTool = options?.agentDir?.trim()
+95:    ? createImageTool({
+96:        config: options?.config,
+97:        agentDir: options.agentDir,
+98:        workspaceDir,
+99:        sandbox,
+100:        fsPolicy: options?.fsPolicy,
+101:        modelHasVision: options?.modelHasVision,
+102:      })
+103:    : null;
+104:  const pdfTool = options?.agentDir?.trim()
+105:    ? createPdfTool({
+106:        config: options?.config,
+107:        agentDir: options.agentDir,
+108:        workspaceDir,
+109:        sandbox,
+110:        fsPolicy: options?.fsPolicy,
+111:      })
+112:    : null;
+113:  const webSearchTool = createWebSearchTool({
+114:    config: options?.config,
+115:    sandboxed: options?.sandboxed,
+116:    runtimeWebSearch: runtimeWebTools?.search,
+117:  });
+118:  const webFetchTool = createWebFetchTool({
+119:    config: options?.config,
+120:    sandboxed: options?.sandboxed,
+121:    runtimeFirecrawl: runtimeWebTools?.fetch.firecrawl,
+122:  });
+123:  const messageTool = options?.disableMessageTool
+124:    ? null
+125:    : createMessageTool({
+126:        agentAccountId: options?.agentAccountId,
+127:        agentSessionKey: options?.agentSessionKey,
+128:        config: options?.config,
+129:        currentChannelId: options?.currentChannelId,
+130:        currentChannelProvider: options?.agentChannel,
+131:        currentThreadTs: options?.currentThreadTs,
+132:        currentMessageId: options?.currentMessageId,
+133:        replyToMode: options?.replyToMode,
+134:        hasRepliedRef: options?.hasRepliedRef,
+135:        sandboxRoot: options?.sandboxRoot,
+136:        requireExplicitTarget: options?.requireExplicitMessageTarget,
+137:        requesterSenderId: options?.requesterSenderId ?? undefined,
+138:      });
+139:  const tools: AnyAgentTool[] = [
+140:    createBrowserTool({
+141:      sandboxBridgeUrl: options?.sandboxBrowserBridgeUrl,
+142:      allowHostControl: options?.allowHostBrowserControl,
+143:      agentSessionKey: options?.agentSessionKey,
+144:    }),
+145:    createCanvasTool({ config: options?.config }),
+146:    createNodesTool({
+147:      agentSessionKey: options?.agentSessionKey,
+148:      agentChannel: options?.agentChannel,
+149:      agentAccountId: options?.agentAccountId,
+150:      currentChannelId: options?.currentChannelId,
+151:      currentThreadTs: options?.currentThreadTs,
+152:      config: options?.config,
+153:      modelHasVision: options?.modelHasVision,
+154:      allowMediaInvokeCommands: options?.allowMediaInvokeCommands,
+155:    }),
+156:    createCronTool({
+157:      agentSessionKey: options?.agentSessionKey,
+158:    }),
+159:    ...(messageTool ? [messageTool] : []),
+160:    createTtsTool({
+161:      agentChannel: options?.agentChannel,
+162:      config: options?.config,
+163:    }),
+164:    createGatewayTool({
+165:      agentSessionKey: options?.agentSessionKey,
+166:      config: options?.config,
+167:    }),
+168:    createAgentsListTool({
+169:      agentSessionKey: options?.agentSessionKey,
+170:      requesterAgentIdOverride: options?.requesterAgentIdOverride,
+171:    }),
+172:    createSessionsListTool({
+173:      agentSessionKey: options?.agentSessionKey,
+174:      sandboxed: options?.sandboxed,
+175:      config: options?.config,
+176:    }),
+177:    createSessionsHistoryTool({
+178:      agentSessionKey: options?.agentSessionKey,
+179:      sandboxed: options?.sandboxed,
+180:      config: options?.config,

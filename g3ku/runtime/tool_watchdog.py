@@ -267,6 +267,11 @@ def runtime_context_value(runtime_context: Any, key: str, default: Any = None) -
     return getattr(runtime_context, key, default)
 
 
+def actor_role_allows_watchdog(runtime_context: Any) -> bool:
+    role = str(runtime_context_value(runtime_context, "actor_role", "") or "").strip().lower()
+    return role == "ceo"
+
+
 def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:
     raw = runtime_context_value(runtime_context, "tool_watchdog", None)
     payload = dict(raw) if isinstance(raw, dict) else {}

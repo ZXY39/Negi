@@ -396,6 +396,40 @@ class TaskLogService:
                 self.refresh_task_view(task_id, mark_unread=True)
             return updated or record
 
+    def ensure_node_result_payload_externalized(self, task_id: str, node_id: str) -> NodeRecord | None:
+        with self._task_lock(task_id):
+            record = self._store.get_node(node_id)
+            if record is None:
+                return None
+            metadata = dict(record.metadata or {})
+            payload = metadata.get('result_payload')
+            if not isinstance(payload, dict):
+                return record
+            if str(metadata.get('result_payload_ref') or '').strip():
+                return record
+            text, ref = self._summarize_content(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                task_id=task_id,
+                node_id=node_id,
+                display_name=f'result-payload:{node_id}',
+                source_kind='node_result_payload',
+                force=True,
+            )
+            if not ref:
+                return record
+
+            def _mutate(current: NodeRecord) -> NodeRecord:
+                next_metadata = dict(current.metadata or {})
+                next_metadata['result_payload'] = payload
+                next_metadata['result_payload_ref'] = ref
+                next_metadata['result_payload_summary'] = text
+                return current.model_copy(update={'metadata': next_metadata, 'updated_at': now_iso()})
+
+            updated = self._store.update_node(node_id, _mutate)
+            if updated is not None:
+                self.refresh_task_view(task_id, mark_unread=True)
+            return updated or record
+
     def mark_task_failed(self, task_id: str, *, reason: str) -> TaskRecord | None:
         with self._task_lock(task_id):
             task = self._store.get_task(task_id)
@@ -537,24 +571,29 @@ class TaskLogService:
             root_node = self._store.get_node(task.root_node_id)
             final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
             next_status = self._derive_task_status(root_node=root_node, task_status=task.status, final_acceptance=final_acceptance)
-            brief_text = self._brief_text(task=task, root_node=root_node)
+            output_fields = self._task_output_fields(
+                task=task,
+                root_node=root_node,
+                next_status=next_status,
+                final_acceptance=final_acceptance,
+            )
+            brief_text = self._brief_text(
+                task=task,
+                root_node=root_node,
+                next_status=next_status,
+                final_acceptance=final_acceptance,
+                output_fields=output_fields,
+            )
             task_token_usage, _task_token_usage_by_model = aggregate_node_token_usage(nodes, tracked=bool(getattr(task.token_usage, 'tracked', False)))
-            root_succeeded = bool(root_node is not None and root_node.status == 'success')
-            failure_reason = task.failure_reason
-            if next_status == 'failed':
-                if root_node is not None and root_node.status == 'failed':
-                    failure_reason = root_node.failure_reason
-                elif root_node is not None and str(root_node.check_result or '').strip():
-                    failure_reason = root_node.check_result
             updated = task.model_copy(
                 update={
                     'status': next_status,
                     'brief_text': brief_text,
                     'is_unread': True if mark_unread else task.is_unread,
                     'updated_at': now_iso(),
-                    'final_output': (root_node.final_output if root_succeeded else task.final_output),
-                    'final_output_ref': (root_node.final_output_ref if root_succeeded else task.final_output_ref),
-                    'failure_reason': failure_reason,
+                    'final_output': str(output_fields.get('final_output') or ''),
+                    'final_output_ref': str(output_fields.get('final_output_ref') or ''),
+                    'failure_reason': str(output_fields.get('failure_reason') or ''),
                     'finished_at': now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at,
                     'token_usage': task_token_usage,
                 }
@@ -583,19 +622,102 @@ class TaskLogService:
                 self.update_runtime_state(task.task_id, paused=bool(task.is_paused), active_node_ids=[], runnable_node_ids=[], waiting_node_ids=[], frames=[])
             return self._store.get_task(task_id)
 
-    def _brief_text(self, *, task: TaskRecord, root_node: NodeRecord | None) -> str:
+    def _brief_text(
+        self,
+        *,
+        task: TaskRecord,
+        root_node: NodeRecord | None,
+        next_status: str,
+        final_acceptance,
+        output_fields: dict[str, str],
+    ) -> str:
+        acceptance_failed = bool(
+            getattr(final_acceptance, 'required', False)
+            and str(getattr(final_acceptance, 'status', '') or '').strip().lower() == 'failed'
+        )
+        if acceptance_failed:
+            failure_reason = str(output_fields.get('failure_reason') or '').strip()
+            execution_output = str(((task.metadata or {}).get('final_execution_output') if isinstance(task.metadata, dict) else '') or '').strip()
+            if execution_output:
+                return _single_line_text(f'Acceptance failed: {failure_reason} | Execution deliverable: {execution_output}')
+            if failure_reason:
+                return _single_line_text(failure_reason)
         if root_node is not None:
             if str(root_node.check_result or '').strip():
                 return _single_line_text(root_node.check_result)
+            if str(root_node.final_output or '').strip():
+                return _single_line_text(root_node.final_output)
+            if str(root_node.failure_reason or '').strip():
+                return _single_line_text(root_node.failure_reason)
             if root_node.output:
                 last = str(root_node.output[-1].content or '').strip()
                 if last:
                     return _single_line_text(last)
-        if str(task.final_output or '').strip():
-            return _single_line_text(task.final_output)
-        if str(task.failure_reason or '').strip():
+        if str(output_fields.get('final_output') or '').strip():
+            return _single_line_text(output_fields['final_output'])
+        if str(output_fields.get('failure_reason') or '').strip():
+            return _single_line_text(output_fields['failure_reason'])
+        if next_status == 'failed' and str(task.failure_reason or '').strip():
             return _single_line_text(task.failure_reason)
         return _single_line_text(task.user_request)
+
+    @staticmethod
+    def _task_output_fields(*, task: TaskRecord, root_node: NodeRecord | None, next_status: str, final_acceptance) -> dict[str, str]:
+        if root_node is None:
+            return {
+                'final_output': str(task.final_output or ''),
+                'final_output_ref': str(task.final_output_ref or ''),
+                'failure_reason': str(task.failure_reason or ''),
+            }
+
+        metadata = dict(task.metadata or {})
+        acceptance_failed = bool(
+            getattr(final_acceptance, 'required', False)
+            and str(getattr(final_acceptance, 'status', '') or '').strip().lower() == 'failed'
+        )
+        root_final_output = str(root_node.final_output or '').strip()
+        root_final_output_ref = str(root_node.final_output_ref or '').strip()
+        root_failure_reason = str(root_node.failure_reason or '').strip()
+        root_check_result = str(root_node.check_result or '').strip()
+        execution_output = str(metadata.get('final_execution_output') or '').strip()
+
+        if acceptance_failed:
+            failure_reason = root_failure_reason or root_check_result or str(task.failure_reason or '').strip()
+            deliverable = execution_output or root_final_output
+            return {
+                'final_output': TaskLogService._dual_channel_output(deliverable, failure_reason) if deliverable else failure_reason,
+                'final_output_ref': '',
+                'failure_reason': failure_reason,
+            }
+
+        if str(root_node.status or '').strip().lower() == 'success':
+            return {
+                'final_output': root_final_output,
+                'final_output_ref': root_final_output_ref,
+                'failure_reason': '',
+            }
+
+        if next_status == 'failed':
+            return {
+                'final_output': root_final_output or str(task.final_output or ''),
+                'final_output_ref': root_final_output_ref if root_final_output else str(task.final_output_ref or ''),
+                'failure_reason': root_failure_reason or root_check_result or str(task.failure_reason or '').strip(),
+            }
+
+        return {
+            'final_output': str(task.final_output or ''),
+            'final_output_ref': str(task.final_output_ref or ''),
+            'failure_reason': str(task.failure_reason or ''),
+        }
+
+    @staticmethod
+    def _dual_channel_output(execution_output: str, failure_reason: str) -> str:
+        execution_text = str(execution_output or '').strip()
+        failure_text = str(failure_reason or '').strip()
+        return (
+            f'Execution Deliverable:\n{execution_text or "(empty)"}\n\n'
+            f'Acceptance Failure:\n{failure_text or "(empty)"}'
+        )
 
     @staticmethod
     def _derive_task_status(*, root_node: NodeRecord | None, task_status: str, final_acceptance) -> str:

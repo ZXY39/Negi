@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import difflib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,8 @@ def _resolve_path(
     allowed_dir: Path | None = None,
 ) -> Path:
     candidate = Path(path).expanduser()
-    if not candidate.is_absolute() and workspace is not None:
-        candidate = workspace / candidate
+    if not candidate.is_absolute():
+        raise ValueError(f'relative path is not allowed; provide absolute path: {path}')
     resolved = candidate.resolve()
     if allowed_dir is not None:
         try:
@@ -106,6 +107,8 @@ class FilesystemTool:
             return f'Error: Unsupported filesystem action: {operation}'
         except PermissionError as exc:
             return f'Error: {exc}'
+        except (FileNotFoundError, ValueError) as exc:
+            return f'Error: {exc}'
         except Exception as exc:
             return f'Error executing filesystem action {operation}: {exc}'
 
@@ -132,16 +135,44 @@ class FilesystemTool:
         return json.dumps(self._navigator().describe(path=path), ensure_ascii=False)
 
     def _search(self, path: str, query: Any, limit: Any, before: Any, after: Any) -> str:
-        return json.dumps(
-            self._navigator().search(
-                path=path,
-                query=str(query or ''),
-                limit=int(limit or 10),
-                before=int(before or 2),
-                after=int(after or 2),
-            ),
-            ensure_ascii=False,
+        resolved = _resolve_path(path, self._workspace, self._allowed_dir)
+        needle = str(query or '').strip()
+        if not needle:
+            return json.dumps({'ok': False, 'error': 'query is required'}, ensure_ascii=False)
+        max_hits = max(1, min(int(limit or 10), 50))
+        before_count = max(0, min(int(before or 2), 10))
+        after_count = max(0, min(int(after or 2), 10))
+        if not resolved.exists():
+            missing_kind = 'Directory' if str(path).endswith(('\\', '/')) or not Path(path).suffix else 'File'
+            raise FileNotFoundError(f'{missing_kind} not found: {path}')
+        if resolved.is_dir():
+            hits = self._search_directory(resolved, query=needle, limit=max_hits)
+            return json.dumps(
+                {
+                    'ok': True,
+                    'path': str(resolved),
+                    'query': needle,
+                    'scope_type': 'directory',
+                    'hits': hits,
+                    'count': len(hits),
+                },
+                ensure_ascii=False,
+            )
+        if not resolved.is_file():
+            raise ValueError(f'path is neither a file nor a directory: {path}')
+        result = self._navigator().search(
+            path=str(resolved),
+            query=needle,
+            limit=max_hits,
+            before=before_count,
+            after=after_count,
         )
+        result['scope_type'] = 'file'
+        result['path'] = str(resolved)
+        for hit in list(result.get('hits') or []):
+            if isinstance(hit, dict):
+                hit.setdefault('path', str(resolved))
+        return json.dumps(result, ensure_ascii=False)
 
     def _open(self, path: str, start_line: Any, end_line: Any, around_line: Any, window: Any) -> str:
         return json.dumps(
@@ -310,6 +341,37 @@ class FilesystemTool:
             artifact_store=artifact_store,
             artifact_lookup=self._main_task_service or artifact_store,
         )
+
+    @staticmethod
+    def _search_directory(path: Path, *, query: str, limit: int) -> list[dict[str, Any]]:
+        try:
+            pattern = re.compile(query, re.IGNORECASE)
+        except re.error:
+            pattern = re.compile(re.escape(query), re.IGNORECASE)
+
+        hits: list[dict[str, Any]] = []
+        for file_path in sorted(path.rglob('*')):
+            if not file_path.is_file():
+                continue
+            try:
+                with file_path.open('r', encoding='utf-8') as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        if '\x00' in line:
+                            raise UnicodeDecodeError('utf-8', b'\x00', 0, 1, 'binary content')
+                        if not pattern.search(line):
+                            continue
+                        hits.append(
+                            {
+                                'path': str(file_path.resolve()),
+                                'line': line_number,
+                                'preview': line.strip()[:240],
+                            }
+                        )
+                        if len(hits) >= limit:
+                            return hits
+            except (OSError, UnicodeDecodeError):
+                continue
+        return hits
 
     def _notify_resource_change(self, path: Path, *, trigger: str) -> None:
         service = self._main_task_service

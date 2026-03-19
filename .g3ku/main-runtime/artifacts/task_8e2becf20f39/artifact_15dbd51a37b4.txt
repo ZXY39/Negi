@@ -1,0 +1,11 @@
+7:import { createWebFetchTool } from "./web-tools.js";
+38:        metadata: { title: "Firecrawl Title", sourceURL: url, statusCode: 200 },
+91:  return createWebFetchTool({
+118:function createFirecrawlTool(apiKey = defaultFirecrawlApiKey()) {
+122:function defaultFirecrawlApiKey() {
+134:  tool: ReturnType<typeof createWebFetchTool>;
+293:    const tool = createFirecrawlTool();
+311:    const tool = createFirecrawlTool("firecrawl-test-\r\nkey");
+356:    const tool = createFirecrawlTool();
+359:    ).rejects.toThrow("Readability and Firecrawl returned no content");
+479:    expect(message).toContain("Firecrawl fetch failed (403):");

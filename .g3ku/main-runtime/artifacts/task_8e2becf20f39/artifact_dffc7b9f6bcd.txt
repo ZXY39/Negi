@@ -1,0 +1,31 @@
+146:  }
+147:  return {
+148:    choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
+149:    search_results: [],
+150:  };
+151:}
+152:
+153:describe("web tools defaults", () => {
+154:  it("enables web_fetch by default (non-sandbox)", () => {
+155:    const tool = createWebFetchTool({ config: {}, sandboxed: false });
+156:    expect(tool?.name).toBe("web_fetch");
+157:  });
+158:
+159:  it("disables web_fetch when explicitly disabled", () => {
+160:    const tool = createWebFetchTool({
+161:      config: { tools: { web: { fetch: { enabled: false } } } },
+162:      sandboxed: false,
+163:    });
+164:    expect(tool).toBeNull();
+165:  });
+166:
+167:  it("enables web_search by default", () => {
+168:    const tool = createWebSearchTool({ config: {}, sandboxed: false });
+169:    expect(tool?.name).toBe("web_search");
+170:  });
+171:
+172:  it("prefers runtime-selected web_search provider over local provider config", async () => {
+173:    const mockFetch = installMockFetch(createProviderSuccessPayload("gemini"));
+174:    const tool = createWebSearchTool({
+175:      config: {
+176:        tools: {

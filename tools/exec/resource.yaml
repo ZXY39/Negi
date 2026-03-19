@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: exec
-description: Execute shell commands with workspace-relative defaults and return structured summaries plus content refs.
+description: Execute shell commands with structured summaries plus content refs. Commands run in the host shell and only use an explicit working_dir when provided.
 source:
   type: ''
   url: ''
@@ -33,7 +33,7 @@ parameters:
       description: Shell command to execute.
     working_dir:
       type: string
-      description: Optional working directory override. Relative paths resolve from workspace. Absolute paths are allowed unless restrict_to_workspace is enabled.
+      description: Optional working directory override. Provide an absolute path when you need a specific directory. If omitted, exec uses the process default cwd. When restrict_to_workspace is enabled, working_dir must stay inside the workspace.
   required:
     - command
 exposure:

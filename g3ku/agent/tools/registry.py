@@ -11,7 +11,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import ConfigDict, Field, create_model
 
 from g3ku.agent.tools.base import Tool
-from g3ku.runtime.tool_watchdog import run_tool_with_watchdog
+from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 
@@ -275,6 +275,8 @@ class ToolRegistry:
         execution_manager: Any,
     ) -> bool:
         if not runtime_context:
+            return False
+        if not actor_role_allows_watchdog(runtime_context):
             return False
         if runtime_context.get("skip_tool_registry_watchdog"):
             return False

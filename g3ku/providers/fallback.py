@@ -91,7 +91,8 @@ def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None 
 def response_requires_retry(response: LLMResponse, retry_on: list[str] | None = None) -> bool:
     if str(response.finish_reason or "").lower() != "error":
         return False
-    return is_retryable_model_error(str(response.content or ""), retry_on=retry_on)
+    error_source = str(response.error_text or response.content or "")
+    return is_retryable_model_error(error_source, retry_on=retry_on)
 
 
 def normalized_retry_count(value: int | None) -> int:

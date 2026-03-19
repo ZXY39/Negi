@@ -1,0 +1,9 @@
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:886:  '@aws-sdk/util-user-agent-browser@3.972.6':
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:889:  '@aws-sdk/util-user-agent-browser@3.972.8':
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:6923:      '@aws-sdk/util-user-agent-browser': 3.972.8
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:6972:      '@aws-sdk/util-user-agent-browser': 3.972.8
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:7024:      '@aws-sdk/util-user-agent-browser': 3.972.6
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:7475:      '@aws-sdk/util-user-agent-browser': 3.972.8
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:7518:      '@aws-sdk/util-user-agent-browser': 3.972.6
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:7678:  '@aws-sdk/util-user-agent-browser@3.972.6':
+D:\zxy\project\openclaw-2026.3.13-1\pnpm-lock.yaml:7685:  '@aws-sdk/util-user-agent-browser@3.972.8':

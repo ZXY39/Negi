@@ -1,17 +1,18 @@
 # filesystem
 
-统一的文件工具。相对路径默认从工作区解析，再按“先定位，再打开局部”的方式访问文件。
+统一的本地文件工具。所有 `path` 都必须是绝对路径；不会再把相对路径自动解析到工作区。
 
 ## 何时调用
 
-- 当任务需要访问或修改文件时，优先使用 `filesystem`。
-- 只读场景先用 `action=describe`、`action=search`、`action=open`、`action=head`、`action=tail`、`action=list`。
-- 直接落盘修改使用 `action=write`、`action=edit`、`action=delete`。
-- 需要先生成可审阅变更而不是直接改文件时，使用 `action=propose_patch`。
+- 需要确认目录结构时，用 `action=list`。
+- 需要搜索单文件或整个目录树时，用 `action=search`。
+- 需要读取局部内容时，用 `action=describe`、`action=open`、`action=head`、`action=tail`。
+- 需要直接落盘修改时，用 `action=write`、`action=edit`、`action=delete`。
+- 需要先产出补丁提案而不是直接改文件时，用 `action=propose_patch`。
 
 ## 使用原则
 
-- 不要请求全文读取。
-- 相对路径默认从工作区解析；只有当前工具配置开启 `restrict_to_workspace` 时，才禁止访问工作区外绝对路径。
-- 默认先 `search` 缩小范围，再 `open` 查看命中附近的 20-80 行。
-- 只有明确知道要看文件头部或尾部时，才使用 `head` / `tail`。
+- 先用绝对路径确认目标目录或文件，再做搜索和局部打开。
+- `action=search` 现在既支持单文件，也支持目录递归搜索；目录搜索会跳过二进制和无法解码的文件。
+- 搜索目录时优先缩小到目标目录，不要把整个仓库当作默认搜索范围。
+- 单文件阅读优先 `search` + `open` 的组合，而不是一次性请求完整文件。

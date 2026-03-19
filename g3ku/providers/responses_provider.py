@@ -103,18 +103,18 @@ class ResponsesProvider(LLMProvider):
                     )
         except Exception as e:
             partial_content = str(getattr(e, "partial_content", "") or "").strip()
+            error_text = self._format_error(e, url)
             if partial_content:
-                logger.warning("Responses API stream failed after partial content; returning partial content for JSON recovery")
+                logger.warning("Responses API stream failed after partial content; returning partial content for structured recovery")
                 return LLMResponse(
                     content=partial_content,
                     finish_reason="error",
+                    error_text=error_text,
                 )
-            error_text = self._format_error(e, url)
             logger.error("Error calling Responses API: {}", error_text)
-            return LLMResponse(
-                content=f"Error calling Responses API: {error_text}",
-                finish_reason="error",
-            )
+            if isinstance(e, _RetryableResponsesError):
+                raise
+            raise RuntimeError(error_text) from e
 
     def get_default_model(self) -> str:
         return self.default_model

@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: content
 display_name: Content
-description: Describe, search, and open large content by ref or file path without loading the full body into model context.
+description: Describe, search, and open large content by ref or absolute file path without loading the full body into model context.
 source:
   type: ''
   url: ''
@@ -41,7 +41,7 @@ parameters:
       description: Externalized content ref such as artifact:artifact_xxx.
     path:
       type: string
-      description: Relative paths resolve from workspace. Absolute paths are allowed unless restrict_to_workspace is enabled.
+      description: Absolute file path for path mode. Relative paths are rejected. When restrict_to_workspace is enabled, the path must stay inside the workspace.
     query:
       type: string
       description: Search query used by action=search.

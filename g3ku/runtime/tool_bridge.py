@@ -5,7 +5,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 from g3ku.content import parse_content_envelope
-from g3ku.runtime.tool_watchdog import resolve_snapshot_supplier, run_tool_with_watchdog, runtime_context_value
+from g3ku.runtime.tool_watchdog import (
+    actor_role_allows_watchdog,
+    resolve_snapshot_supplier,
+    run_tool_with_watchdog,
+    runtime_context_value,
+)
 
 try:
     from langchain_core.messages import ToolMessage
@@ -19,6 +24,8 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency fallback
 
 if TYPE_CHECKING:
     from g3ku.agent.loop import AgentLoop
+
+_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 
 
 class ToolExecutionBridge:
@@ -50,6 +57,12 @@ class ToolExecutionBridge:
             if tool := self._loop.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+
+    @staticmethod
+    def _should_use_watchdog(*, runtime_context: Any, tool_name: str) -> bool:
+        if tool_name in _CONTROL_TOOL_NAMES:
+            return False
+        return actor_role_allows_watchdog(runtime_context)
 
     @staticmethod
     def preview(value: Any, *, max_chars: int = 400) -> str:
@@ -319,33 +332,36 @@ class ToolExecutionBridge:
             }
         )
         try:
-            outcome = await run_tool_with_watchdog(
-                handler(request),
-                tool_name=str(tool_name or "tool"),
-                arguments=self.summarize_tool_call(tool_call)[1],
-                runtime_context=runtime_context if runtime_context is not None else self._loop.tools.get_runtime_context(),
-                snapshot_supplier=self._resolve_watchdog_snapshot_supplier(runtime_context),
-                manager=getattr(self._loop, "tool_execution_manager", None),
-                on_poll=(
-                    (lambda poll: self._emit_watchdog_progress(on_progress=on_progress, runtime_context=runtime_context, poll=poll))
-                    if on_progress
-                    else None
-                ),
-            )
-            if outcome.completed:
-                result = outcome.value
-            else:
-                raw_call_id = ""
-                if isinstance(tool_call, dict):
-                    raw_call_id = str(tool_call.get("id") or "")
-                elif tool_call is not None:
-                    raw_call_id = str(getattr(tool_call, "id", "") or "")
-                result = ToolMessage(
-                    content=self._stringify_tool_result(outcome.value),
-                    tool_call_id=raw_call_id or f"{tool_name or 'tool'}:watchdog",
-                    name=str(tool_name or "tool"),
-                    status="success",
+            if self._should_use_watchdog(runtime_context=runtime_context, tool_name=str(tool_name or "tool")):
+                outcome = await run_tool_with_watchdog(
+                    handler(request),
+                    tool_name=str(tool_name or "tool"),
+                    arguments=self.summarize_tool_call(tool_call)[1],
+                    runtime_context=runtime_context if runtime_context is not None else self._loop.tools.get_runtime_context(),
+                    snapshot_supplier=self._resolve_watchdog_snapshot_supplier(runtime_context),
+                    manager=getattr(self._loop, "tool_execution_manager", None),
+                    on_poll=(
+                        (lambda poll: self._emit_watchdog_progress(on_progress=on_progress, runtime_context=runtime_context, poll=poll))
+                        if on_progress
+                        else None
+                    ),
                 )
+                if outcome.completed:
+                    result = outcome.value
+                else:
+                    raw_call_id = ""
+                    if isinstance(tool_call, dict):
+                        raw_call_id = str(tool_call.get("id") or "")
+                    elif tool_call is not None:
+                        raw_call_id = str(getattr(tool_call, "id", "") or "")
+                    result = ToolMessage(
+                        content=self._stringify_tool_result(outcome.value),
+                        tool_call_id=raw_call_id or f"{tool_name or 'tool'}:watchdog",
+                        name=str(tool_name or "tool"),
+                        status="success",
+                    )
+            else:
+                result = await handler(request)
             result_content = self._externalize_tool_result(
                 getattr(result, "content", ""),
                 runtime_context=runtime_context,
@@ -454,20 +470,23 @@ class ToolExecutionBridge:
                         return await self._loop.tools.execute(tool_name, tool_args)
                 return await self._loop.tools.execute(tool_name, tool_args)
 
-            outcome = await run_tool_with_watchdog(
-                _execute_tool_call(),
-                tool_name=tool_name,
-                arguments=tool_args,
-                runtime_context=runtime_context if runtime_context is not None else self._loop.tools.get_runtime_context(),
-                snapshot_supplier=self._resolve_watchdog_snapshot_supplier(runtime_context),
-                manager=getattr(self._loop, "tool_execution_manager", None),
-                on_poll=(
-                    (lambda poll: self._emit_watchdog_progress(on_progress=on_progress, runtime_context=runtime_context, poll=poll))
-                    if on_progress and emit_progress
-                    else None
-                ),
-            )
-            result = outcome.value
+            if self._should_use_watchdog(runtime_context=runtime_context, tool_name=tool_name):
+                outcome = await run_tool_with_watchdog(
+                    _execute_tool_call(),
+                    tool_name=tool_name,
+                    arguments=tool_args,
+                    runtime_context=runtime_context if runtime_context is not None else self._loop.tools.get_runtime_context(),
+                    snapshot_supplier=self._resolve_watchdog_snapshot_supplier(runtime_context),
+                    manager=getattr(self._loop, "tool_execution_manager", None),
+                    on_poll=(
+                        (lambda poll: self._emit_watchdog_progress(on_progress=on_progress, runtime_context=runtime_context, poll=poll))
+                        if on_progress and emit_progress
+                        else None
+                    ),
+                )
+                result = outcome.value
+            else:
+                result = await _execute_tool_call()
             result = await self.apply_after_middlewares(
                 name=tool_name,
                 arguments=tool_args,

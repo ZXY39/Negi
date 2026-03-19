@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,9 +19,54 @@ class NodeOutputEntry(Model):
     created_at: str
 
 
+RESULT_SCHEMA_VERSION = 2
+
+
+class NodeEvidenceItem(Model):
+    kind: Literal['file', 'artifact', 'url'] = 'artifact'
+    path: str = ''
+    ref: str = ''
+    start_line: int | None = None
+    end_line: int | None = None
+    note: str = ''
+
+    def summary_text(self) -> str:
+        location = self.path or self.ref
+        if self.start_line and self.end_line and self.end_line >= self.start_line:
+            location = f'{location}:{self.start_line}-{self.end_line}' if location else f'lines {self.start_line}-{self.end_line}'
+        elif self.start_line:
+            location = f'{location}:{self.start_line}' if location else f'line {self.start_line}'
+        parts = [part for part in [self.kind, location, self.note] if str(part or '').strip()]
+        return ' | '.join(parts)
+
+
 class NodeFinalResult(Model):
-    status: NodeStatus
-    output: str = ''
+    status: Literal['success', 'failed']
+    delivery_status: Literal['final', 'partial', 'blocked'] = 'final'
+    summary: str = ''
+    answer: str = ''
+    evidence: list[NodeEvidenceItem] = Field(default_factory=list)
+    remaining_work: list[str] = Field(default_factory=list)
+    blocking_reason: str = ''
+
+    @property
+    def output(self) -> str:
+        return str(self.answer or self.summary or self.blocking_reason or '')
+
+    @property
+    def failure_text(self) -> str:
+        return str(self.blocking_reason or self.summary or self.output or '')
+
+    def payload_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode='json')
+
+    def evidence_summary(self) -> list[str]:
+        lines: list[str] = []
+        for item in list(self.evidence or []):
+            text = item.summary_text()
+            if text:
+                lines.append(text)
+        return lines
 
 
 class FinalAcceptanceState(Model):
@@ -146,3 +191,14 @@ def normalize_final_acceptance_metadata(value: Any) -> FinalAcceptanceState:
         node_id=str(payload.get('node_id') or '').strip(),
         status=status,
     )
+
+
+def normalize_result_payload(value: Any) -> NodeFinalResult | None:
+    if isinstance(value, NodeFinalResult):
+        return value
+    if not isinstance(value, dict):
+        return None
+    try:
+        return NodeFinalResult.model_validate(value)
+    except Exception:
+        return None

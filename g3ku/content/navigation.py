@@ -126,6 +126,42 @@ def _extract_origin_ref(value: Any) -> str:
     return refs[0] if refs else ""
 
 
+def _looks_like_react_node_payload(value: Any, *, runtime: dict[str, Any] | None = None) -> bool:
+    payload: dict[str, Any] | None = None
+    if isinstance(value, dict):
+        payload = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text.startswith("{"):
+            return False
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return False
+        if isinstance(parsed, dict):
+            payload = parsed
+    if not isinstance(payload, dict):
+        return False
+    required_keys = {"task_id", "node_id", "node_kind", "goal", "prompt"}
+    if not required_keys.issubset(payload.keys()):
+        return False
+    if not isinstance(runtime, dict):
+        return True
+    runtime_task_id = str(runtime.get("task_id") or "").strip()
+    runtime_node_id = str(runtime.get("node_id") or "").strip()
+    runtime_node_kind = str(runtime.get("node_kind") or "").strip().lower()
+    payload_task_id = str(payload.get("task_id") or "").strip()
+    payload_node_id = str(payload.get("node_id") or "").strip()
+    payload_node_kind = str(payload.get("node_kind") or "").strip().lower()
+    if runtime_task_id and payload_task_id and runtime_task_id != payload_task_id:
+        return False
+    if runtime_node_id and payload_node_id and runtime_node_id != payload_node_id:
+        return False
+    if runtime_node_kind and payload_node_kind and runtime_node_kind != payload_node_kind:
+        return False
+    return True
+
+
 def parse_content_envelope(value: Any) -> ContentEnvelope | None:
     if isinstance(value, ContentEnvelope):
         return value
@@ -276,6 +312,7 @@ class ContentNavigationService:
         source_prefix: str = "message",
     ) -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
+        preserved_node_payload = False
         for index, message in enumerate(list(messages or [])):
             if not isinstance(message, dict):
                 prepared.append(message)
@@ -286,12 +323,21 @@ class ContentNavigationService:
                 continue
             updated = dict(message)
             if "content" in updated:
-                updated["content"] = self.externalize_for_message(
-                    updated.get("content"),
-                    runtime=runtime,
-                    display_name=f"{source_prefix}-{role}-{index + 1}",
-                    source_kind=f"{source_prefix}_{role}",
+                preserve_inline = (
+                    not preserved_node_payload
+                    and role == "user"
+                    and str(source_prefix or "").strip().lower() == "react"
+                    and _looks_like_react_node_payload(updated.get("content"), runtime=runtime)
                 )
+                if preserve_inline:
+                    preserved_node_payload = True
+                else:
+                    updated["content"] = self.externalize_for_message(
+                        updated.get("content"),
+                        runtime=runtime,
+                        display_name=f"{source_prefix}-{role}-{index + 1}",
+                        source_kind=f"{source_prefix}_{role}",
+                    )
             prepared.append(updated)
         return prepared
 
@@ -499,7 +545,7 @@ class ContentNavigationService:
     def _resolve_workspace_path(self, path: str) -> Path:
         candidate = Path(path).expanduser()
         if not candidate.is_absolute():
-            candidate = self._workspace / candidate
+            raise ValueError(f"relative path is not allowed; provide absolute path: {path}")
         resolved = candidate.resolve()
         if self._allowed_dir is not None:
             try:

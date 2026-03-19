@@ -58,6 +58,7 @@ async def test_tool_registry_langchain_tool_hands_off_long_tool_for_direct_ceo_p
 
     token = registry.push_runtime_context(
         {
+            "actor_role": "ceo",
             "loop": loop,
             "tool_watchdog": {
                 "poll_interval_seconds": 0.01,
@@ -103,3 +104,39 @@ async def test_tool_registry_langchain_tool_hands_off_long_tool_for_direct_ceo_p
     assert wait_payload["status"] == "completed"
     assert wait_payload["execution_id"] == payload["execution_id"]
     assert wait_payload["final_result"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_bypasses_watchdog_for_non_ceo_roles() -> None:
+    registry = ToolRegistry()
+    registry.register(_SlowCompleteTool())
+    heartbeat = _HeartbeatRecorder()
+    loop = SimpleNamespace(
+        tool_execution_manager=ToolExecutionManager(),
+        resource_manager=None,
+        web_session_heartbeat=heartbeat,
+    )
+
+    token = registry.push_runtime_context(
+        {
+            "actor_role": "execution",
+            "loop": loop,
+            "tool_watchdog": {
+                "poll_interval_seconds": 0.01,
+                "handoff_after_seconds": 0.03,
+            },
+            "tool_snapshot_supplier": lambda: {
+                "status": "running",
+                "assistant_text": "Execution node should never detach this tool",
+            },
+            "session_key": "web:test-no-watchdog",
+        }
+    )
+    try:
+        tools = registry.to_langchain_tools_filtered(["slow_complete"])
+        payload = await tools[0].ainvoke({})
+    finally:
+        registry.pop_runtime_context(token)
+
+    assert payload == "done"
+    assert heartbeat.terminal_calls == []

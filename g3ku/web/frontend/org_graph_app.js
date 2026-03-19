@@ -197,6 +197,7 @@ const U = {
     tdSummary: document.getElementById("td-summary"),
     tdActiveCount: document.getElementById("td-active-count"),
     taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
+    taskTreeRoundHint: document.getElementById("task-tree-round-hint"),
     tree: document.getElementById("org-tree-container"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
@@ -219,6 +220,7 @@ const U = {
     adAcceptance: document.getElementById("ad-check"),
     adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
     adAcceptanceHeading: document.getElementById("ad-check")?.closest(".agent-detail-section")?.querySelector("h4"),
+    artifactHeading: document.getElementById("artifact-list")?.closest(".agent-detail-section")?.querySelector("h4"),
     adOutputSection: document.getElementById("ad-output")?.closest(".agent-detail-section"),
     adLogsSection: document.getElementById("ad-logs")?.closest(".agent-detail-section"),
     nodeEmpty: document.getElementById("task-node-empty"),
@@ -307,6 +309,149 @@ function formatSessionTime(value) {
 function normalizeInt(value, fallback = 0) {
     const next = Number(value);
     return Number.isFinite(next) ? Math.trunc(next) : Math.trunc(fallback);
+}
+
+function countMatches(text, pattern) {
+    if (!(pattern instanceof RegExp)) return 0;
+    const matches = String(text || "").match(pattern);
+    return Array.isArray(matches) ? matches.length : 0;
+}
+
+function decodeJsonStringLiteral(text) {
+    const trimmed = String(text || "").trim();
+    if (!(trimmed.startsWith('"') && trimmed.endsWith('"'))) return "";
+    try {
+        const parsed = JSON.parse(trimmed);
+        return typeof parsed === "string" ? parsed : "";
+    } catch {
+        return "";
+    }
+}
+
+function decodeEscapedDisplayText(value) {
+    const raw = String(value ?? "");
+    if (!raw.trim()) return "";
+
+    const quotedDecoded = decodeJsonStringLiteral(raw);
+    if (quotedDecoded) return quotedDecoded;
+
+    const actualLineBreaks = countMatches(raw, /\r\n|\r|\n/g);
+    const escapedLineBreaks = countMatches(raw, /\\r\\n|\\n|\\r/g);
+    const escapedQuotes = countMatches(raw, /\\"/g);
+    const escapedUnicode = countMatches(raw, /\\u[0-9a-fA-F]{4}/g);
+    const likelyStructured = /^[\s"'[{(]/.test(raw);
+    const shouldDecodeEscapes = actualLineBreaks === 0 && (
+        escapedLineBreaks >= 2
+        || (escapedLineBreaks >= 1 && (escapedQuotes > 0 || escapedUnicode > 0 || likelyStructured))
+        || escapedUnicode > 0
+    );
+
+    if (!shouldDecodeEscapes) return raw;
+
+    try {
+        return JSON.parse(`"${raw
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')
+            .replace(/\u2028/g, "\\u2028")
+            .replace(/\u2029/g, "\\u2029")}"`);
+    } catch {
+        return raw
+            .replace(/\\r\\n/g, "\n")
+            .replace(/\\n/g, "\n")
+            .replace(/\\r/g, "\n")
+            .replace(/\\t/g, "\t")
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, "\\");
+    }
+}
+
+function readableText(value, { decodeEscapes = false, emptyText = "" } = {}) {
+    const raw = String(value ?? "");
+    if (!raw.trim()) return emptyText;
+    return decodeEscapes ? decodeEscapedDisplayText(raw) : raw;
+}
+
+function shouldDecodeArtifactContent(artifact, content) {
+    const kind = String(artifact?.kind || "").trim().toLowerCase();
+    const title = String(artifact?.title || "").trim().toLowerCase();
+    if (kind === "patch") return false;
+    if (/(output|log|trace|result|stdout|stderr)/.test(kind)) return true;
+    if (/(output|log|trace|stdout|stderr)/.test(title)) return true;
+    const raw = String(content ?? "");
+    return !!decodeJsonStringLiteral(raw) || countMatches(raw, /\\r\\n|\\n|\\r/g) >= 2;
+}
+
+function artifactDisplayText(artifact, content) {
+    return readableText(content, {
+        decodeEscapes: shouldDecodeArtifactContent(artifact, content),
+        emptyText: "Select an artifact to view details.",
+    });
+}
+
+function setElementScrollTop(element, value) {
+    if (!(element instanceof HTMLElement)) return;
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return;
+    element.scrollTop = Math.max(0, numericValue);
+}
+
+function captureTaskDetailViewState() {
+    const traceList = U.adFlow?.querySelector(".task-trace-list");
+    const traceItems = traceList instanceof HTMLElement
+        ? Array.from(traceList.querySelectorAll(".task-trace-step")).map((step, index) => ({
+            index,
+            title: String(step.querySelector(".interaction-step-title")?.textContent || "").trim(),
+            open: !!step.open,
+        }))
+        : [];
+    return {
+        detailScrollTop: U.detail instanceof HTMLElement ? U.detail.scrollTop : 0,
+        traceScrollTop: traceList instanceof HTMLElement ? traceList.scrollTop : 0,
+        artifactListScrollTop: U.artifactList instanceof HTMLElement ? U.artifactList.scrollTop : 0,
+        artifactContentScrollTop: U.artifactContent instanceof HTMLElement ? U.artifactContent.scrollTop : 0,
+        traceItems,
+    };
+}
+
+function restoreTaskDetailViewState(state) {
+    if (!state || typeof state !== "object") return;
+    const traceList = U.adFlow?.querySelector(".task-trace-list");
+    if (traceList instanceof HTMLElement && Array.isArray(state.traceItems) && state.traceItems.length) {
+        const titleState = new Map();
+        state.traceItems.forEach((item) => {
+            if (item?.title && !titleState.has(item.title)) titleState.set(item.title, !!item.open);
+        });
+        Array.from(traceList.querySelectorAll(".task-trace-step")).forEach((step, index) => {
+            const title = String(step.querySelector(".interaction-step-title")?.textContent || "").trim();
+            const nextOpen = titleState.has(title) ? titleState.get(title) : state.traceItems[index]?.open;
+            if (typeof nextOpen === "boolean") step.open = nextOpen;
+        });
+    }
+    window.requestAnimationFrame(() => {
+        setElementScrollTop(U.detail, state.detailScrollTop);
+        setElementScrollTop(traceList, state.traceScrollTop);
+        setElementScrollTop(U.artifactList, state.artifactListScrollTop);
+        setElementScrollTop(U.artifactContent, state.artifactContentScrollTop);
+    });
+}
+
+function renderTaskSectionHeading(heading, { icon, label, count = 0 } = {}) {
+    if (!(heading instanceof HTMLElement)) return;
+    heading.innerHTML = `
+        <i data-lucide="${esc(icon || "circle")}"></i>
+        <span>${esc(label || "")}</span>
+        <span class="section-count-badge" data-empty="${count > 0 ? "false" : "true"}">${esc(count)}</span>
+    `;
+}
+
+function renderFlowHeading(count = 0) {
+    renderTaskSectionHeading(U.adFlowHeading, { icon: "workflow", label: "执行流程", count });
+    icons();
+}
+
+function renderArtifactHeading(count = 0) {
+    renderTaskSectionHeading(U.artifactHeading, { icon: "package", label: "工件", count });
+    icons();
 }
 
 function sessionMessageCount(session) {
@@ -1819,7 +1964,8 @@ function resourceDeleteErrorText(error) {
 }
 
 function configureTaskDetailSections() {
-    if (U.adFlowHeading) U.adFlowHeading.innerHTML = '<i data-lucide="workflow"></i> 执行流程';
+    renderFlowHeading(0);
+    renderArtifactHeading(0);
     if (U.adAcceptanceHeading) U.adAcceptanceHeading.innerHTML = '<i data-lucide="shield-check"></i> 验收结果';
     if (U.adFlow) {
         U.adFlow.classList.remove("code-block");
@@ -4352,6 +4498,16 @@ function resetTaskView() {
     S.treePan.moved = false;
     S.treePan.suppressClickNodeId = null;
     U.tree.innerHTML = '<div class="empty-state">Waiting for task tree...</div>';
+    if (U.taskTreeResetRounds) {
+        U.taskTreeResetRounds.hidden = false;
+        U.taskTreeResetRounds.disabled = true;
+        U.taskTreeResetRounds.classList.remove("active");
+        U.taskTreeResetRounds.title = "轮次信息加载中";
+    }
+    if (U.taskTreeRoundHint) {
+        U.taskTreeRoundHint.dataset.state = "loading";
+        U.taskTreeRoundHint.textContent = "轮次信息加载中...";
+    }
     U.feedTitle.textContent = "Node Details";
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">选择任务树中的节点后，这里会显示执行流程。</div>';
     if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
@@ -4360,6 +4516,8 @@ function resetTaskView() {
     if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
     if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
     if (U.artifactApply) U.artifactApply.hidden = true;
+    renderFlowHeading(0);
+    renderArtifactHeading(0);
     syncTaskTreeHeaderState(null);
     refreshTaskDetailScrollRegions();
     if (U.taskTokenButton) U.taskTokenButton.disabled = true;
@@ -4592,7 +4750,18 @@ function hasManualTreeRoundSelections() {
     return Object.keys(normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId)).length > 0;
 }
 
+function countSwitchableRoundNodes(root) {
+    if (!root) return 0;
+    let count = 0;
+    walkFullTaskTree(root, (node) => {
+        if (rawNodeRounds(node).length > 1) count += 1;
+    });
+    return count;
+}
+
 function syncTaskTreeHeaderState(projectedRoot = null) {
+    const switchableCount = countSwitchableRoundNodes(S.tree);
+    const hasManual = hasManualTreeRoundSelections();
     if (U.tdActiveCount) {
         U.tdActiveCount.textContent = String(
             projectedRoot
@@ -4601,10 +4770,18 @@ function syncTaskTreeHeaderState(projectedRoot = null) {
         );
     }
     if (U.taskTreeResetRounds) {
-        const hasManual = hasManualTreeRoundSelections();
-        U.taskTreeResetRounds.hidden = !hasManual;
+        U.taskTreeResetRounds.hidden = false;
         U.taskTreeResetRounds.disabled = !hasManual;
         U.taskTreeResetRounds.classList.toggle("active", hasManual);
+        U.taskTreeResetRounds.title = hasManual
+            ? "恢复所有节点的默认最新轮次"
+            : (switchableCount > 0 ? "当前已经是默认最新轮次" : "当前任务没有可切换的轮次");
+    }
+    if (U.taskTreeRoundHint) {
+        U.taskTreeRoundHint.dataset.state = hasManual ? "manual" : (switchableCount > 0 ? "available" : "empty");
+        U.taskTreeRoundHint.textContent = switchableCount > 0
+            ? `${switchableCount} 个节点支持轮次切换${hasManual ? "，当前为手动轮次视图" : ""}`
+            : "当前任务没有可切换的轮次";
     }
 }
 
@@ -4736,6 +4913,18 @@ function resolveNodeTitle(node, detail) {
         fullTitle,
         title: truncateNodeTitle(fullTitle, 20),
     };
+}
+
+function compactNodeHeading(node, maxChars = 72) {
+    const raw = String(node?.goal || node?.fullTitle || node?.title || node?.node_id || "Node");
+    const singleLine = raw
+        .replace(/\r\n|\r|\n/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!singleLine) return "Node";
+    const chars = Array.from(singleLine);
+    if (chars.length <= maxChars) return singleLine;
+    return `${chars.slice(0, maxChars).join("")}...`;
 }
 
 function liveFramesByNodeId(progress) {
@@ -5017,8 +5206,8 @@ function traceStatusLabel(status) {
     }[String(status || "")] || "Info");
 }
 
-function renderTraceField(label, value, emptyText = "No content") {
-    const text = String(value || "").trim() || emptyText;
+function renderTraceField(label, value, emptyText = "No content", { decodeEscapes = false } = {}) {
+    const text = readableText(value, { decodeEscapes, emptyText });
     return `
         <div class="task-trace-field">
             <div class="task-trace-label">${esc(label)}</div>
@@ -5074,7 +5263,12 @@ function renderExecutionTrace(node) {
             open: false,
             bodyHtml: [
                 renderTraceField("Arguments", step.arguments_text, "No arguments"),
-                renderTraceField("Output", step.output_text, step.status === "running" ? "Waiting for tool output..." : "No tool output"),
+                renderTraceField(
+                    "Output",
+                    step.output_text,
+                    step.status === "running" ? "Waiting for tool output..." : "No tool output",
+                    { decodeEscapes: true },
+                ),
             ].join(""),
         })),
         ...(trace.live_tool_calls.length ? [renderTraceStep({
@@ -5093,10 +5287,11 @@ function renderExecutionTrace(node) {
             title: "Final Output",
             status: nodeFinalTraceStatus(node),
             open: true,
-            bodyHtml: renderTraceField("Content", trace.final_output, "No final output"),
+            bodyHtml: renderTraceField("Content", trace.final_output, "No final output", { decodeEscapes: true }),
         }),
     ];
     U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
+    renderFlowHeading(steps.length);
     const traceItems = Array.from(U.adFlow.querySelectorAll(".task-trace-step"));
     trace.tool_steps.forEach((step, index) => {
         const item = traceItems[index + 1];
@@ -5114,7 +5309,7 @@ function renderExecutionTrace(node) {
 
 function renderAcceptanceResult(text) {
     if (!U.adAcceptance) return;
-    U.adAcceptance.textContent = String(text || "").trim() || "No acceptance result";
+    U.adAcceptance.textContent = readableText(text, { decodeEscapes: true, emptyText: "No acceptance result" });
 }
 
 function buildNodeRoundState(node) {
@@ -5287,15 +5482,18 @@ function renderTree() {
 }
 function renderArtifacts() {
     if (!U.artifactList) return;
+    const visibleArtifacts = getArtifactsForSelectedNode();
+    const emptyText = S.selectedNodeId ? "No artifacts for this node yet." : "Select a node to view artifacts.";
     U.artifactList.innerHTML = "";
-    if (!Array.isArray(S.taskArtifacts) || !S.taskArtifacts.length) {
-        U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
-        if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
+    if (!visibleArtifacts.length) {
+        U.artifactList.innerHTML = `<div class="empty-state" style="padding: 10px;">${esc(emptyText)}</div>`;
+        if (U.artifactContent) U.artifactContent.textContent = emptyText;
         if (U.artifactApply) U.artifactApply.hidden = true;
+        renderArtifactHeading(0);
         refreshTaskDetailScrollRegions();
         return;
     }
-    S.taskArtifacts.forEach((artifact) => {
+    visibleArtifacts.forEach((artifact) => {
         const button = document.createElement("button");
         button.type = "button";
         button.className = `artifact-item${S.selectedArtifactId === artifact.artifact_id ? " active" : ""}`;
@@ -5303,28 +5501,77 @@ function renderArtifacts() {
         button.addEventListener("click", () => void selectArtifact(artifact.artifact_id));
         U.artifactList.appendChild(button);
     });
+    renderArtifactHeading(visibleArtifacts.length);
     refreshTaskDetailScrollRegions();
+}
+
+function getArtifactsForSelectedNode() {
+    if (!Array.isArray(S.taskArtifacts) || !S.taskArtifacts.length) return [];
+    const nodeId = String(S.selectedNodeId || "").trim();
+    if (!nodeId) return [];
+    return S.taskArtifacts.filter((artifact) => String(artifact?.node_id || "").trim() === nodeId);
+}
+
+function getSelectedVisibleArtifact(artifacts = getArtifactsForSelectedNode()) {
+    if (!Array.isArray(artifacts) || !artifacts.length) return null;
+    const artifactId = String(S.selectedArtifactId || "").trim();
+    if (!artifactId) return null;
+    return artifacts.find((item) => String(item?.artifact_id || "").trim() === artifactId) || null;
+}
+
+async function syncArtifactsForSelectedNode({ preserveViewState = true, autoSelect = true } = {}) {
+    const viewState = preserveViewState ? captureTaskDetailViewState() : null;
+    const visibleArtifacts = getArtifactsForSelectedNode();
+    const selectedArtifact = getSelectedVisibleArtifact(visibleArtifacts);
+    if (!selectedArtifact) {
+        S.selectedArtifactId = "";
+        S.artifactContent = "";
+    }
+    renderArtifacts();
+    try {
+        if (selectedArtifact && U.artifactContent) {
+            U.artifactContent.textContent = artifactDisplayText(selectedArtifact, S.artifactContent);
+            if (U.artifactApply) U.artifactApply.hidden = selectedArtifact.kind !== "patch";
+            return visibleArtifacts;
+        }
+        if (!visibleArtifacts.length) {
+            if (U.artifactContent) U.artifactContent.textContent = S.selectedNodeId ? "This node has no artifacts yet." : "Select a node to view artifacts.";
+            if (U.artifactApply) U.artifactApply.hidden = true;
+            return visibleArtifacts;
+        }
+        if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
+        if (U.artifactApply) U.artifactApply.hidden = true;
+        if (autoSelect) {
+            await selectArtifact(visibleArtifacts[0].artifact_id, { preserveViewState: false });
+        }
+        return visibleArtifacts;
+    } finally {
+        restoreTaskDetailViewState(viewState);
+    }
 }
 
 async function loadTaskArtifacts() {
     if (!S.currentTaskId) return [];
-    S.taskArtifacts = await ApiClient.getTaskArtifacts(S.currentTaskId);
-    renderArtifacts();
-    if (S.taskArtifacts.length && !S.selectedArtifactId) {
-        await selectArtifact(S.taskArtifacts[0].artifact_id);
-    }
-    return S.taskArtifacts;
+    const artifacts = await ApiClient.getTaskArtifacts(S.currentTaskId);
+    S.taskArtifacts = artifacts;
+    return syncArtifactsForSelectedNode();
 }
 
-async function selectArtifact(artifactId) {
+async function selectArtifact(artifactId, { preserveViewState = true } = {}) {
     if (!S.currentTaskId || !artifactId) return;
+    const viewState = preserveViewState ? captureTaskDetailViewState() : null;
     S.selectedArtifactId = artifactId;
     renderArtifacts();
-    const data = await ApiClient.getTaskArtifact(S.currentTaskId, artifactId);
-    S.artifactContent = data.content || "";
-    if (U.artifactContent) U.artifactContent.textContent = S.artifactContent || "";
-    const artifact = S.taskArtifacts.find((item) => item.artifact_id === artifactId);
-    if (U.artifactApply) U.artifactApply.hidden = !(artifact && artifact.kind === "patch");
+    try {
+        const data = await ApiClient.getTaskArtifact(S.currentTaskId, artifactId);
+        if (String(S.selectedArtifactId || "") !== String(artifactId || "")) return;
+        S.artifactContent = String(data.content || "");
+        const artifact = getSelectedVisibleArtifact() || null;
+        if (U.artifactContent) U.artifactContent.textContent = artifactDisplayText(artifact, S.artifactContent);
+        if (U.artifactApply) U.artifactApply.hidden = !(artifact && artifact.kind === "patch");
+    } finally {
+        restoreTaskDetailViewState(viewState);
+    }
 }
 
 async function applySelectedArtifact() {
@@ -5335,19 +5582,23 @@ async function applySelectedArtifact() {
 }
 
 function showAgent(node) {
+    const viewState = captureTaskDetailViewState();
+    const compactHeading = compactNodeHeading(node);
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
-    U.adRole.textContent = node.fullTitle || node.title || node.node_id || "Node";
+    if (U.adRole) U.adRole.hidden = true;
     U.adStatus.textContent = String(node.display_state || node.state || "").toUpperCase();
     U.adStatus.dataset.status = node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
     renderExecutionTrace(node);
     renderAcceptanceResult(node.executionTrace?.acceptance_result || "");
-    U.feedTitle.textContent = `Node: ${node.fullTitle || node.title || node.node_id || ""}`;
-    renderArtifacts();
+    U.feedTitle.textContent = `Node: ${compactHeading}`;
+    U.feedTitle.title = compactHeading;
     setTaskDetailOpen(true);
     icons();
+    restoreTaskDetailViewState(viewState);
+    void syncArtifactsForSelectedNode();
 }
 
 function hideAgent() {

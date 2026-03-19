@@ -17,6 +17,7 @@ class ExecTool(Tool):
         self,
         timeout: int = 60,
         working_dir: str | None = None,
+        workspace_root: str | None = None,
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
@@ -26,6 +27,7 @@ class ExecTool(Tool):
     ):
         self.timeout = timeout
         self.working_dir = working_dir
+        self.workspace_root = workspace_root
         self.deny_patterns = deny_patterns or [
             r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
             r"\bdel\s+/[fq]\b",              # del /f, del /q
@@ -193,13 +195,10 @@ class ExecTool(Tool):
     def _resolve_cwd(self, working_dir: str | None) -> str:
         if not working_dir:
             return self.working_dir or os.getcwd()
-        candidate = Path(working_dir).expanduser()
-        if not candidate.is_absolute() and self.working_dir:
-            candidate = Path(self.working_dir) / candidate
-        return str(candidate)
+        return str(Path(working_dir).expanduser())
 
     def _workspace_root(self) -> Path:
-        return Path(self.working_dir or os.getcwd()).expanduser().resolve()
+        return Path(self.workspace_root or self.working_dir or os.getcwd()).expanduser().resolve()
 
     @staticmethod
     def _is_within_workspace(path: Path, workspace_root: Path) -> bool:

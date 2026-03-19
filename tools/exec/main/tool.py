@@ -7,7 +7,8 @@ def build(runtime):
     service = getattr(runtime.services, 'main_task_service', None)
     content_store = getattr(service, 'content_store', None) if service is not None else None
     return ExecTool(
-        working_dir=str(runtime.workspace),
+        working_dir=None,
+        workspace_root=str(runtime.workspace),
         timeout=settings.timeout,
         restrict_to_workspace=settings.restrict_to_workspace,
         path_append=settings.path_append,

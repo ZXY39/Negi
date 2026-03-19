@@ -12,12 +12,21 @@ import json_repair
 
 from g3ku.agent.tools.base import Tool
 from g3ku.content import parse_content_envelope
-from g3ku.runtime.tool_watchdog import run_tool_with_watchdog
+from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.errors import TaskPausedError
-from main.models import NodeFinalResult
+from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION
 from main.protocol import now_iso
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:artifact:[A-Za-z0-9_-]+')
+_RESULT_REQUIRED_KEYS = (
+    'status',
+    'delivery_status',
+    'summary',
+    'answer',
+    'evidence',
+    'remaining_work',
+    'blocking_reason',
+)
 
 
 class RepeatedActionCircuitBreaker:
@@ -67,6 +76,7 @@ class ReActToolLoop:
         breaker = RepeatedActionCircuitBreaker()
         limit = max(2, int(max_iterations or self._max_iterations))
         attempts = 0
+        last_contract_violations: list[str] = []
         while attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
@@ -183,9 +193,27 @@ class ReActToolLoop:
 
             parsed = self._parse_final_result(str(response.content or ''))
             if parsed is not None:
-                self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
-                return parsed
-            messages.append({'role': 'user', 'content': 'Your previous reply was not valid final JSON. Return only {"status":"success|failed","output":"..."}.'})
+                result, raw_payload = parsed
+                contract_violations = self._validate_final_result(
+                    result=result,
+                    raw_payload=raw_payload,
+                    has_tool_results=self._has_tool_results(messages),
+                )
+                if not contract_violations:
+                    self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
+                    return result
+                last_contract_violations = list(contract_violations)
+                messages.append({'role': 'user', 'content': self._result_contract_violation_message(contract_violations)})
+                continue
+
+            if str(response.finish_reason or '').strip().lower() == 'error':
+                error_text = str(getattr(response, 'error_text', None) or response.content or 'model response failed').strip() or 'model response failed'
+                raise RuntimeError(error_text)
+
+            messages.append({'role': 'user', 'content': self._result_protocol_message()})
+
+        if last_contract_violations:
+            raise RuntimeError('result contract violation: ' + '; '.join(last_contract_violations))
         raise RuntimeError('node exceeded maximum ReAct iterations')
 
     async def _execute_tool_calls(
@@ -338,6 +366,8 @@ class ReActToolLoop:
         execute_kwargs = dict(arguments)
         if self._accepts_runtime_context(tool):
             execute_kwargs['__g3ku_runtime'] = runtime_context
+        if not actor_role_allows_watchdog(runtime_context):
+            return await tool.execute(**execute_kwargs)
         outcome = await run_tool_with_watchdog(
             tool.execute(**execute_kwargs),
             tool_name=tool_name,
@@ -380,7 +410,7 @@ class ReActToolLoop:
             raise TaskPausedError(task_id)
 
     @staticmethod
-    def _parse_final_result(content: str) -> NodeFinalResult | None:
+    def _parse_final_result(content: str) -> tuple[NodeFinalResult, dict[str, Any]] | None:
         text = str(content or '').strip()
         if not text:
             return None
@@ -400,8 +430,147 @@ class ReActToolLoop:
             status = str(parsed.get('status') or '').strip().lower()
             if status not in {'success', 'failed'}:
                 continue
-            return NodeFinalResult(status=status, output=str(parsed.get('output') or ''))
+            evidence_items: list[NodeEvidenceItem] = []
+            for item in list(parsed.get('evidence') or []):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    evidence_items.append(NodeEvidenceItem.model_validate(item))
+                except Exception:
+                    continue
+            remaining_work_raw = parsed.get('remaining_work')
+            remaining_work = [
+                str(item or '').strip()
+                for item in (remaining_work_raw if isinstance(remaining_work_raw, list) else [])
+                if str(item or '').strip()
+            ]
+            delivery_status = str(parsed.get('delivery_status') or '').strip().lower()
+            normalized_delivery_status = delivery_status if delivery_status in {'final', 'partial', 'blocked'} else 'final'
+            return (
+                NodeFinalResult(
+                    status=status,
+                    delivery_status=normalized_delivery_status,
+                    summary=str(parsed.get('summary') or '').strip(),
+                    answer=str(parsed.get('answer') or '').strip(),
+                    evidence=evidence_items,
+                    remaining_work=remaining_work,
+                    blocking_reason=str(parsed.get('blocking_reason') or '').strip(),
+                ),
+                dict(parsed),
+            )
         return None
+
+    @staticmethod
+    def _validate_final_result(
+        *,
+        result: NodeFinalResult,
+        raw_payload: dict[str, Any],
+        has_tool_results: bool,
+    ) -> list[str]:
+        violations: list[str] = []
+        missing_keys = [key for key in _RESULT_REQUIRED_KEYS if key not in raw_payload]
+        violations.extend([f'missing required field: {key}' for key in missing_keys])
+
+        raw_delivery_status = str(raw_payload.get('delivery_status') or '').strip().lower()
+        if raw_delivery_status not in {'final', 'partial', 'blocked'}:
+            violations.append('delivery_status must be one of final|partial|blocked')
+        if not str(result.summary or '').strip():
+            violations.append('summary must not be empty')
+
+        if result.status == 'success':
+            if result.delivery_status != 'final':
+                violations.append('success requires delivery_status=final')
+            if not str(result.answer or '').strip():
+                violations.append('success requires non-empty answer')
+            if list(result.remaining_work or []):
+                violations.append('success requires remaining_work to be empty')
+            if str(result.blocking_reason or '').strip():
+                violations.append('success requires blocking_reason to be empty')
+            if has_tool_results and not list(result.evidence or []):
+                violations.append('success after tool usage requires at least one evidence item')
+
+        if result.status == 'failed' and result.delivery_status == 'partial' and not list(result.remaining_work or []):
+            violations.append('failed+partial requires non-empty remaining_work')
+        if result.status == 'failed' and result.delivery_status == 'blocked' and not str(result.blocking_reason or '').strip():
+            violations.append('failed+blocked requires non-empty blocking_reason')
+
+        raw_evidence = raw_payload.get('evidence')
+        if not isinstance(raw_evidence, list):
+            violations.append('evidence must be an array')
+        else:
+            for index, item in enumerate(raw_evidence):
+                if not isinstance(item, dict):
+                    violations.append(f'evidence[{index}] must be an object')
+                    continue
+                kind = str(item.get('kind') or '').strip().lower()
+                if kind not in {'file', 'artifact', 'url'}:
+                    violations.append(f'evidence[{index}].kind must be file|artifact|url')
+                if not any(str(item.get(key) or '').strip() for key in ('path', 'ref', 'note')):
+                    violations.append(f'evidence[{index}] must include at least one of path/ref/note')
+                start_line = item.get('start_line')
+                end_line = item.get('end_line')
+                if start_line not in {None, ''}:
+                    try:
+                        start_value = int(start_line)
+                    except (TypeError, ValueError):
+                        violations.append(f'evidence[{index}].start_line must be an integer')
+                    else:
+                        if start_value <= 0:
+                            violations.append(f'evidence[{index}].start_line must be >= 1')
+                if end_line not in {None, ''}:
+                    try:
+                        end_value = int(end_line)
+                    except (TypeError, ValueError):
+                        violations.append(f'evidence[{index}].end_line must be an integer')
+                    else:
+                        if end_value <= 0:
+                            violations.append(f'evidence[{index}].end_line must be >= 1')
+                        if start_line not in {None, ''}:
+                            try:
+                                if int(start_line) > end_value:
+                                    violations.append(f'evidence[{index}].end_line must be >= start_line')
+                            except (TypeError, ValueError):
+                                pass
+
+        remaining_work_raw = raw_payload.get('remaining_work')
+        if not isinstance(remaining_work_raw, list):
+            violations.append('remaining_work must be an array')
+        elif any(not str(item or '').strip() for item in remaining_work_raw):
+            violations.append('remaining_work items must be non-empty strings')
+        return violations
+
+    @staticmethod
+    def _has_tool_results(messages: list[dict[str, Any]]) -> bool:
+        for message in list(messages or []):
+            if str(message.get('role') or '').strip().lower() == 'tool':
+                return True
+            if list(message.get('tool_calls') or []):
+                return True
+        return False
+
+    @staticmethod
+    def _result_protocol_message() -> str:
+        return (
+            f'Your previous reply was not valid result JSON for schema v{RESULT_SCHEMA_VERSION}. '
+            'Reply with only one JSON object using exactly these keys: '
+            '{"status":"success|failed","delivery_status":"final|partial|blocked","summary":"...",'
+            '"answer":"...","evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
+            '"remaining_work":["..."],"blocking_reason":"..."}. '
+            'Do not use Markdown. '
+            'If the task is not actually complete yet, do not return success. Continue using tools when helpful; '
+            'otherwise return failed+partial for incomplete work or failed+blocked for blockers.'
+        )
+
+    @staticmethod
+    def _result_contract_violation_message(violations: list[str]) -> str:
+        bullet_text = '; '.join(str(item or '').strip() for item in violations if str(item or '').strip()) or 'result contract violation'
+        return (
+            f'Your previous reply produced parseable JSON but violated result schema v{RESULT_SCHEMA_VERSION}: {bullet_text}. '
+            'Fix every violation and reply with only one JSON object. '
+            'Do not claim success unless the deliverable is fully complete. '
+            'If you only have intermediate findings, return failed+partial with remaining_work. '
+            'If you are blocked, return failed+blocked with blocking_reason.'
+        )
 
     @staticmethod
     def _extract_json_object_candidates(content: str) -> list[str]:

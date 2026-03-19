@@ -40,6 +40,7 @@ class LLMResponse:
     content: str | None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
+    error_text: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
     attempts: list[LLMModelAttempt] = field(default_factory=list)
     reasoning_content: str | None = None

@@ -567,10 +567,35 @@ textarea {
     letter-spacing: -0.015em;
 }
 
+#feed-target-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .panel-header-actions {
     display: flex;
     align-items: center;
     gap: var(--space-3);
+}
+
+.task-tree-round-hint {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+    max-width: min(36vw, 320px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.task-tree-round-hint[data-state="available"] {
+    color: var(--text-secondary);
+}
+
+.task-tree-round-hint[data-state="manual"] {
+    color: var(--brand-primary);
 }
 
 .panel-header i {
@@ -770,8 +795,11 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    width: 100%;
+    width: fit-content;
+    min-width: 220px;
+    max-width: 320px;
     align-items: stretch;
+    flex: 0 0 auto;
 }
 
 .execution-tree-node-rounds {
@@ -1010,11 +1038,18 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
+    flex: 1 1 280px;
 }
 
 .agent-detail-header h3 {
     font-size: 1.05rem;
     font-weight: 700;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .agent-detail-subtitle {
@@ -1042,6 +1077,28 @@ textarea {
 .agent-detail-section h4 i {
     width: 16px;
     height: 16px;
+}
+
+.section-count-badge {
+    margin-left: 2px;
+    min-width: 1.8rem;
+    height: 1.5rem;
+    padding: 0 0.5rem;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--brand-primary) 18%, var(--bg-app));
+    border: 1px solid color-mix(in srgb, var(--brand-primary) 26%, var(--border-color));
+}
+
+.section-count-badge[data-empty="true"] {
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--bg-app) 90%, var(--border-color));
+    border-color: color-mix(in srgb, var(--border-color) 86%, transparent);
 }
 
 .code-block {
@@ -2406,6 +2463,7 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    min-width: 0;
     padding: var(--space-4);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
@@ -2422,13 +2480,20 @@ textarea {
 
 .llm-binding-card-head,
 .llm-editor-toolbar,
-.llm-inline-actions,
 .llm-status-row,
 .llm-memory-row,
 .llm-config-record-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.llm-inline-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
     gap: var(--space-3);
     flex-wrap: wrap;
 }
@@ -3343,6 +3408,8 @@ textarea {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+    width: 100%;
+    align-content: flex-start;
 }
 
 .role-toggle {
@@ -3946,7 +4013,7 @@ textarea {
 
 .model-shared-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
     gap: var(--space-4);
     min-height: 180px;
     align-content: start;
@@ -3968,15 +4035,30 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+    min-width: 0;
+    overflow: hidden;
     padding: var(--space-4);
     border-radius: 18px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     background: color-mix(in srgb, var(--bg-panel) 90%, var(--bg-app) 10%);
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+    container-type: inline-size;
 }
 
 .model-available-item[draggable="true"] {
     cursor: grab;
+}
+
+.model-available-item .llm-binding-card-head {
+    align-items: flex-start;
+}
+
+.model-available-item .model-available-main {
+    width: 100%;
+}
+
+.model-available-item .llm-binding-meta:empty {
+    display: none;
 }
 
 .model-role-shortcuts {
@@ -3988,6 +4070,17 @@ textarea {
 
 .model-role-shortcut:disabled {
     opacity: 0.55;
+}
+
+@container (max-width: 320px) {
+    .model-available-item .llm-binding-card-head {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .model-available-item .llm-capability-badge {
+        align-self: flex-start;
+    }
 }
 
 .detail-backdrop,

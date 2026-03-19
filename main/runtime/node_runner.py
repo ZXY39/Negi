@@ -3,13 +3,25 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
+import platform
+from pathlib import Path
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from main.errors import TaskPausedError
 from main.ids import new_node_id
-from main.models import NodeFinalResult, NodeRecord, SpawnChildResult, SpawnChildSpec, TokenUsageSummary
+from main.models import (
+    NodeFinalResult,
+    NodeRecord,
+    RESULT_SCHEMA_VERSION,
+    SpawnChildResult,
+    SpawnChildSpec,
+    TokenUsageSummary,
+    normalize_final_acceptance_metadata,
+    normalize_result_payload,
+)
 from main.prompts import load_prompt
 from main.runtime.internal_tools import SpawnChildNodesTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -22,12 +34,14 @@ ACCEPTANCE_REF_GUIDANCE = (
 EXECUTION_SPAWN_GUIDANCE = """
 This execution node may spawn child nodes.
 
-Before doing the next step, check whether the work should be split into child pipelines first.
+Before any local search, file read, or broad inspection, you must first decide whether the work should be split into child pipelines.
+- If the work can be cleanly split into independent scopes, call `spawn_child_nodes` first instead of starting local execution yourself.
 - Prefer `spawn_child_nodes` when the workload is broad, slow, or naturally decomposes into independent scopes.
 - Only call `spawn_child_nodes` when the tool is present in the current tool list.
 - Split by directory, module, file group, result batch, or another clear ownership boundary.
 - Pass paths, refs, search clues, and acceptance requirements to children. Do not inline large source excerpts.
 - Decide per child whether acceptance is actually required instead of defaulting every child to acceptance.
+- Only continue locally without spawning children when you can justify that splitting would not improve speed, reliability, or clarity.
 """.strip()
 
 
@@ -63,7 +77,7 @@ class NodeRunner:
         if task is None or node is None:
             raise ValueError(f'missing task or node: {task_id} / {node_id}')
         if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
-            return NodeFinalResult(status=node.status, output=node.final_output or node.failure_reason)
+            return self._result_from_record(node)
         if task.cancel_requested:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         try:
@@ -112,23 +126,33 @@ class NodeRunner:
 
     async def _build_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
         system_prompt = self._build_system_prompt(node=node)
+        payload: dict[str, Any] = {
+            'task_id': task.task_id,
+            'node_id': node.node_id,
+            'node_kind': node.node_kind,
+            'depth': node.depth,
+            'can_spawn_children': bool(node.can_spawn_children),
+            'goal': node.goal,
+            'prompt': node.prompt,
+            'runtime_environment': self._runtime_environment_payload(),
+        }
+        if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
+            payload['split_directive'] = {
+                'required_precheck': True,
+                'instruction': (
+                    'Before any local search, file inspection, or broad local probing, first evaluate whether the task '
+                    'should be split. If it can be cleanly split into independent scopes, call spawn_child_nodes first '
+                    'instead of restoring context locally or searching around on your own.'
+                ),
+            }
+        completion_contract = self._completion_contract_payload(task=task, node=node)
+        if completion_contract is not None:
+            payload['completion_contract'] = completion_contract
         messages = [
             {'role': 'system', 'content': system_prompt},
             {
                 'role': 'user',
-                'content': json.dumps(
-                    {
-                        'task_id': task.task_id,
-                        'node_id': node.node_id,
-                        'node_kind': node.node_kind,
-                        'depth': node.depth,
-                        'can_spawn_children': bool(node.can_spawn_children),
-                        'goal': node.goal,
-                        'prompt': node.prompt,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
+                'content': json.dumps(payload, ensure_ascii=False, indent=2),
             },
         ]
         if self._context_enricher is not None:
@@ -140,9 +164,20 @@ class NodeRunner:
     def _build_system_prompt(self, *, node: NodeRecord) -> str:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
         prompt = load_prompt(system_name).strip()
+        environment_guidance = self._environment_context_guidance(node=node)
         if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
-            return f'{prompt}\n\n{EXECUTION_SPAWN_GUIDANCE}'
-        return prompt
+            return f'{prompt}\n\n{EXECUTION_SPAWN_GUIDANCE}\n\n{environment_guidance}'
+        return f'{prompt}\n\n{environment_guidance}'
+
+    def _completion_contract_payload(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
+        if node.node_kind != KIND_EXECUTION or node.parent_node_id is not None:
+            return None
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+        return {
+            'result_schema_version': RESULT_SCHEMA_VERSION,
+            'final_acceptance_required': bool(final_acceptance.required),
+            'final_acceptance_prompt': str(final_acceptance.prompt or ''),
+        }
 
     def _model_refs_for(self, node: NodeRecord) -> list[str]:
         return list(self._acceptance_model_refs if node.node_kind == KIND_ACCEPTANCE else self._execution_model_refs)
@@ -165,6 +200,91 @@ class NodeRunner:
             'memory_channel': str(memory_scope.get('channel') or 'unknown'),
             'memory_chat_id': str(memory_scope.get('chat_id') or 'unknown'),
         }
+
+    @staticmethod
+    def _workspace_root() -> Path:
+        return Path.cwd().expanduser().resolve()
+
+    @staticmethod
+    def _process_cwd() -> Path:
+        return Path(os.getcwd()).expanduser().resolve()
+
+    @staticmethod
+    def _os_family() -> str:
+        system = platform.system().strip().lower()
+        if system:
+            return system
+        return 'windows' if os.name == 'nt' else os.name or 'unknown'
+
+    @staticmethod
+    def _shell_family() -> str:
+        if os.name == 'nt':
+            comspec = str(os.environ.get('COMSPEC') or '').strip().lower()
+            if 'powershell' in comspec or 'pwsh' in comspec:
+                return 'powershell'
+            return 'cmd'
+        shell = str(os.environ.get('SHELL') or '').strip().lower()
+        if 'powershell' in shell or 'pwsh' in shell:
+            return 'powershell'
+        if 'bash' in shell:
+            return 'bash'
+        if 'zsh' in shell:
+            return 'zsh'
+        if shell:
+            return Path(shell).name
+        return 'sh'
+
+    def _runtime_environment_payload(self) -> dict[str, Any]:
+        return {
+            'os_family': self._os_family(),
+            'shell_family': self._shell_family(),
+            'process_cwd': str(self._process_cwd()),
+            'workspace_root': str(self._workspace_root()),
+            'path_policy': {
+                'relative_paths_bind_to_workspace': False,
+                'filesystem_requires_absolute_path': True,
+                'content_requires_absolute_path': True,
+                'exec_default_working_dir': 'process_cwd',
+                'exec_requires_explicit_working_dir_for_target_dir': True,
+            },
+            'tool_guidance': {
+                'filesystem': 'Use absolute paths. Prefer filesystem.search for recursive directory searches.',
+                'content': 'Use ref navigation or absolute file paths for a single content body; do not expect directory search here.',
+                'exec': 'Exec runs in the host shell. Do not assume bash heredocs or rg are available. Pass an explicit working_dir when you need a specific directory.',
+            },
+        }
+
+    def _environment_context_guidance(self, *, node: NodeRecord) -> str:
+        env = self._runtime_environment_payload()
+        path_policy = env['path_policy']
+        tool_guidance = env['tool_guidance']
+        lines = [
+            'Runtime environment:',
+            f"- OS family: {env['os_family']}",
+            f"- Shell family for `exec`: {env['shell_family']}",
+            f"- Current process cwd: {env['process_cwd']}",
+            f"- Workspace root: {env['workspace_root']}",
+            '- Relative path policy: Do not assume relative paths bind to workspace. '
+            f"`filesystem` absolute-only={str(path_policy['filesystem_requires_absolute_path']).lower()}, "
+            f"`content` absolute-only={str(path_policy['content_requires_absolute_path']).lower()}, "
+            f"`exec` default working_dir={path_policy['exec_default_working_dir']}.",
+            '- Tool usage guidance:',
+        ]
+        if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
+            lines.append(
+                '- Before any local search, file read, or broad inspection, decide whether you should split the task '
+                'and use `spawn_child_nodes` first when the work cleanly decomposes.'
+            )
+        lines.extend(
+            [
+                f"- `filesystem`: {tool_guidance['filesystem']}",
+                f"- `content`: {tool_guidance['content']}",
+                f"- `exec`: {tool_guidance['exec']}",
+                '- If the real target project is outside the current workspace, use explicit absolute paths to that '
+                'target instead of broad fallback searches inside the current repo.',
+            ]
+        )
+        return '\n'.join(lines)
 
     @staticmethod
     def _actor_role_for_node(node: NodeRecord) -> str:
@@ -271,11 +391,13 @@ class NodeRunner:
 
             child_result = await self.run_node(task.task_id, child.node_id)
             child = self._store.get_node(child.node_id) or child
-            child_summary, child_ref = self._child_handoff_payload(
+            child_handoff = self._child_handoff_payload(
                 task_id=task.task_id,
                 node=child,
                 fallback_output=child_result.output,
             )
+            child_summary = str(child_handoff.get('summary') or '')
+            child_ref = str(child_handoff.get('output_ref') or '')
 
             if child_result.status != STATUS_SUCCESS:
                 self._log_service.update_node_check_result(task.task_id, child.node_id, SKIPPED_CHECK_RESULT)
@@ -343,7 +465,7 @@ class NodeRunner:
 
             acceptance_result = await self.run_node(task.task_id, acceptance.node_id)
             acceptance = self._store.get_node(acceptance.node_id) or acceptance
-            check_result = str(acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
+            check_result = str(acceptance_result.summary or acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
             self._log_service.update_node_check_result(task.task_id, child.node_id, check_result)
             result = SpawnChildResult(
                 goal=spec.goal,
@@ -570,15 +692,17 @@ class NodeRunner:
         parent_node_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> NodeRecord:
-        child_summary, child_ref = self._child_handoff_payload(
+        child_handoff = self._child_handoff_payload(
             task_id=task.task_id,
             node=accepted_node,
             fallback_output='',
         )
         prompt = self._compose_acceptance_prompt(
             acceptance_prompt=str(acceptance_prompt or ''),
-            node_output=child_summary,
-            node_output_ref=child_ref,
+            node_output=str(child_handoff.get('summary') or ''),
+            node_output_ref=str(child_handoff.get('output_ref') or ''),
+            result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
+            evidence_summary=str(child_handoff.get('evidence_summary') or ''),
         )
         acceptance = NodeRecord(
             node_id=new_node_id(),
@@ -603,35 +727,99 @@ class NodeRunner:
         )
         return self._log_service.create_node(task.task_id, acceptance)
 
-    def _compose_acceptance_prompt(self, *, acceptance_prompt: str, node_output: str, node_output_ref: str) -> str:
-        prompt = f'{acceptance_prompt}\n\nChild node output summary:\n{node_output}\n'
-        if node_output_ref:
-            prompt = f'{prompt}\nChild node output ref: {node_output_ref}\n{ACCEPTANCE_REF_GUIDANCE}\n'
+    def _compose_acceptance_prompt(
+        self,
+        *,
+        acceptance_prompt: str,
+        node_output: str,
+        node_output_ref: str,
+        result_payload_ref: str,
+        evidence_summary: str,
+    ) -> str:
+        prompt = (
+            f'{acceptance_prompt}\n\n'
+            f'Child node output summary:\n{node_output or "(empty)"}\n\n'
+            f'Child node output ref: {node_output_ref or "(none)"}\n'
+            f'Child node result payload ref: {result_payload_ref or "(none)"}\n'
+            f'Child node evidence summary:\n{evidence_summary or "(none)"}\n'
+        )
+        if node_output_ref or result_payload_ref:
+            prompt = f'{prompt}\n{ACCEPTANCE_REF_GUIDANCE}\n'
         return prompt
 
-    def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> tuple[str, str]:
+    def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:
         latest = self._log_service.ensure_node_output_externalized(task_id, node.node_id) or self._store.get_node(node.node_id) or node
+        latest = self._log_service.ensure_node_result_payload_externalized(task_id, latest.node_id) or self._store.get_node(latest.node_id) or latest
+        result_payload = normalize_result_payload((latest.metadata or {}).get('result_payload'))
         summary = str(getattr(latest, 'final_output', '') or fallback_output or getattr(latest, 'failure_reason', '') or '').strip()
-        ref = str(getattr(latest, 'final_output_ref', '') or '').strip()
-        return summary, ref
+        output_ref = str(getattr(latest, 'final_output_ref', '') or '').strip()
+        result_payload_ref = str((latest.metadata or {}).get('result_payload_ref') or '').strip()
+        evidence_summary = '\n'.join(f'- {line}' for line in list(result_payload.evidence_summary() if result_payload is not None else []))
+        return {
+            'summary': summary,
+            'output_ref': output_ref,
+            'result_payload_ref': result_payload_ref,
+            'evidence_summary': evidence_summary,
+        }
 
     def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED
         self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
+        self._persist_result_payload(task_id, node_id, result)
         self._log_service.update_node_status(
             task_id,
             node_id,
             status=status,
             final_output=result.output,
-            failure_reason='' if status == STATUS_SUCCESS else result.output,
+            failure_reason='' if status == STATUS_SUCCESS else result.failure_text,
         )
-        return NodeFinalResult(status=status, output=result.output)
+        self._log_service.ensure_node_result_payload_externalized(task_id, node_id)
+        latest = self._store.get_node(node_id)
+        return self._result_from_record(latest) if latest is not None else result
 
     def _mark_failed(self, task_id: str, node_id: str, *, reason: str) -> NodeFinalResult:
         text = str(reason or 'node failed').strip() or 'node failed'
-        self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
-        self._log_service.update_node_status(task_id, node_id, status=STATUS_FAILED, final_output=text, failure_reason=text)
-        return NodeFinalResult(status=STATUS_FAILED, output=text)
+        return self._mark_finished(
+            task_id,
+            node_id,
+            NodeFinalResult(
+                status=STATUS_FAILED,
+                delivery_status='blocked',
+                summary=text,
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason=text,
+            ),
+        )
+
+    def _persist_result_payload(self, task_id: str, node_id: str, result: NodeFinalResult) -> None:
+        payload = result.payload_dict()
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            metadata['result_schema_version'] = RESULT_SCHEMA_VERSION
+            metadata['result_payload'] = payload
+            return metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+
+    @staticmethod
+    def _result_from_record(node: NodeRecord) -> NodeFinalResult:
+        payload = normalize_result_payload((node.metadata or {}).get('result_payload'))
+        if payload is not None and str(payload.status or '').strip().lower() == str(node.status or '').strip().lower():
+            return payload
+        status = STATUS_SUCCESS if node.status == STATUS_SUCCESS else STATUS_FAILED
+        final_output = str(node.final_output or '').strip()
+        failure_reason = str(node.failure_reason or '').strip()
+        return NodeFinalResult(
+            status=status,
+            delivery_status=('final' if status == STATUS_FAILED and (final_output or str(node.check_result or '').strip()) else 'blocked') if status == STATUS_FAILED else 'final',
+            summary=failure_reason or final_output or 'node finished',
+            answer=final_output if status == STATUS_SUCCESS else final_output,
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=failure_reason if status == STATUS_FAILED else '',
+        )
 
 
 def _now() -> str:

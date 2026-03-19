@@ -1,0 +1,4 @@
+  File "<string>", line 1
+    import json, pathlib; p=pathlib.Path(r'.g3ku\main-runtime\artifacts\task_f3261d124644\artifact_614ddaea2186.txt'); data=json.loads(p.read_text(encoding='utf-8'));\nfor h in data.get('hits', []):\n print('{}:{}: {}'.format(h['path'], h['line'], h['preview']))
+                                                                                                                                                                       ^
+SyntaxError: unexpected character after line continuation character

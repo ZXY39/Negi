@@ -696,8 +696,9 @@
     U.llmBindingsList.innerHTML = items.map((item) => {
       const scopes = MODEL_SCOPES.filter((scope) => (llmState().routes?.[scope.key] || []).includes(item.key)).map((scope) => scope.key);
       const canDrag = S.modelCatalog.roleEditing;
+      const description = trim(item.description);
       return `
-        <article class="llm-binding-card model-available-item${trim(item.key) === trim(llmState().editor.bindingKey) ? " is-selected" : ""}" data-model-available-key="${escv(item.key)}"${canDrag ? ' draggable="true"' : ""}>
+        <article class="llm-binding-card model-available-item${trim(item.key) === trim(llmState().editor.bindingKey) ? " is-selected" : ""}" data-model-available-key="${escv(item.key)}" data-model-open="${escv(item.key)}"${canDrag ? ' draggable="true"' : ""}>
           <div class="llm-binding-card-head">
             <button type="button" class="model-available-main" data-model-open="${escv(item.key)}">
               <span class="resource-list-title">${escv(item.key)}</span>
@@ -705,11 +706,8 @@
             </button>
             <span class="llm-capability-badge chat">Chat</span>
           </div>
-          <div class="llm-binding-meta">${escv(item.description || "未填写描述")}</div>
+          ${description ? `<div class="llm-binding-meta">${escv(description)}</div>` : ""}
           <div class="model-inline-meta">${item.enabled === false ? '<span class="policy-chip neutral">Disabled</span>' : '<span class="policy-chip risk-low">Enabled</span>'}${scopes.length ? scopes.map((scope) => `<span class="policy-chip neutral">${escv(SCOPE_LABELS[scope] || scope)}</span>`).join("") : '<span class="policy-chip neutral">未进入 Role Routes</span>'}</div>
-          <div class="llm-inline-actions">
-            <button class="toolbar-btn ghost small" type="button" data-model-open="${escv(item.key)}">详情</button>
-          </div>
         </article>`;
     }).join("");
   }

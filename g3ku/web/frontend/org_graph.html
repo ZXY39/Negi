@@ -414,7 +414,8 @@
                             <h2>任务树</h2>
                             <div class="panel-header-actions">
                                 <button id="task-tree-reset-rounds-btn" class="toolbar-btn ghost small" type="button"
-                                    hidden>回到最新树</button>
+                                    disabled>回到最新树</button>
+                                <span id="task-tree-round-hint" class="task-tree-round-hint" aria-live="polite">轮次信息加载中...</span>
                                 <i data-lucide="network"></i>
                             </div>
                         </div>
@@ -435,7 +436,7 @@
                         <div id="agent-detail-view" class="agent-detail-view" style="display: none;">
                             <div class="agent-detail-header">
                                 <div class="agent-detail-header-copy">
-                                    <h3 id="ad-role">节点</h3>
+                                    <h3 id="ad-role" hidden>节点</h3>
                                     <div id="ad-round-summary" class="agent-detail-subtitle">默认显示：最新树</div>
                                 </div>
                                 <span class="status-badge" id="ad-status">STATUS</span>

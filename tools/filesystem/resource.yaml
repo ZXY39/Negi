@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: filesystem
 display_name: Filesystem
-description: Describe, search, and open files by local excerpt, plus write, edit, delete, and patch actions.
+description: Describe, search, and open files or directories by local excerpt, plus write, edit, delete, and patch actions.
 source:
   type: ''
   url: ''
@@ -43,19 +43,19 @@ parameters:
       description: Filesystem action to execute.
     path:
       type: string
-      description: Target file or directory path. Relative paths resolve from workspace. Absolute paths are allowed unless restrict_to_workspace is enabled.
+      description: Target file or directory path. Provide an absolute path. When restrict_to_workspace is enabled, the path must stay inside the workspace.
     query:
       type: string
-      description: Required when action=search.
+      description: Required when action=search on a file or directory.
     limit:
       type: integer
       description: Optional max hits when action=search.
     before:
       type: integer
-      description: Optional context lines before each hit when action=search.
+      description: Optional context lines before each hit when action=search on a single file.
     after:
       type: integer
-      description: Optional context lines after each hit when action=search.
+      description: Optional context lines after each hit when action=search on a single file.
     start_line:
       type: integer
       description: Optional start line when action=open.
@@ -89,7 +89,7 @@ parameters:
 governance:
   family: filesystem
   display_name: Filesystem
-  description: Describe, search, and open files by local excerpt, plus write, edit, delete, and patch actions.
+  description: Describe, search, and open files or directories by local excerpt, plus write, edit, delete, and patch actions.
   actions:
     - id: describe
       label: Describe File
@@ -100,7 +100,7 @@ governance:
         - execution
         - inspection
     - id: search
-      label: Search File
+      label: Search Path
       risk_level: low
       destructive: false
       allowed_roles:

@@ -117,7 +117,7 @@ class MainRuntimeService:
             parallel_tool_calls_enabled=parallel_enabled,
             max_parallel_tool_calls=max_parallel_tool_calls,
         )
-        react_loop._tool_execution_manager = self.tool_execution_manager
+        react_loop._tool_execution_manager = None
         self._react_loop = react_loop
         self.node_runner = NodeRunner(
             store=self.store,
@@ -355,7 +355,7 @@ class MainRuntimeService:
             manager = self.tool_execution_manager
         self.tool_execution_manager = manager
         if hasattr(self, '_react_loop') and self._react_loop is not None:
-            setattr(self._react_loop, '_tool_execution_manager', manager)
+            setattr(self._react_loop, '_tool_execution_manager', None)
 
     @staticmethod
     def _node_parallelism_settings(config: Any | None) -> tuple[bool, int, int]:
@@ -1377,14 +1377,16 @@ class MainRuntimeService:
         actor_role = self._actor_role_for_node(node)
         visible = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
         provided = dict(self._external_tool_provider(node) or {})
-        provided.update(self._builtin_tool_instances())
+        provided.update(self._builtin_tool_instances(actor_role=actor_role))
         if self._resource_manager is not None:
             for name, tool in self._resource_manager.tool_instances().items():
                 if name in visible:
                     provided[name] = tool
         return provided
 
-    def _builtin_tool_instances(self) -> dict[str, Tool]:
+    def _builtin_tool_instances(self, *, actor_role: str) -> dict[str, Tool]:
+        if str(actor_role or '').strip().lower() != 'ceo':
+            return {}
         if self._builtin_tool_cache is None:
             manager_getter = lambda: self.tool_execution_manager
             self._builtin_tool_cache = {

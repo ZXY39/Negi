@@ -1,0 +1,18 @@
+{
+  "status": "success",
+  "delivery_status": "final",
+  "summary": "A pass",
+  "answer": "A pass",
+  "evidence": [
+    {
+      "kind": "artifact",
+      "path": "",
+      "ref": "",
+      "start_line": 1,
+      "end_line": 1,
+      "note": "legacy test evidence"
+    }
+  ],
+  "remaining_work": [],
+  "blocking_reason": ""
+}

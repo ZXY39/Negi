@@ -1,0 +1,18 @@
+84:function resolveFetchConfig(cfg?: OpenClawConfig): WebFetchConfig {
+92:function resolveFetchEnabled(params: { fetch?: WebFetchConfig; sandboxed?: boolean }): boolean {
+247:const WEB_FETCH_WRAPPER_WITH_WARNING_OVERHEAD = wrapWebContent("", "web_fetch").length;
+249:  source: "web_fetch",
+271:      ? wrapWebContent("", "web_fetch")
+272:      : wrapExternalContent("", { source: "web_fetch", includeWarning: false });
+284:    ? wrapWebContent(truncated.text, "web_fetch")
+285:    : wrapExternalContent(truncated.text, { source: "web_fetch", includeWarning: false });
+292:      ? wrapWebContent(truncated.text, "web_fetch")
+293:      : wrapExternalContent(truncated.text, { source: "web_fetch", includeWarning: false });
+308:  return wrapExternalContent(value, { source: "web_fetch", includeWarning: false });
+334:      source: "web_fetch",
+413:      `Firecrawl fetch failed (${res.status}): ${wrapWebContent(detail || res.statusText, "web_fetch")}`.trim(),
+665:        source: "web_fetch",
+718:export function createWebFetchTool(options?: {
+723:  const fetch = resolveFetchConfig(options?.config);
+724:  if (!resolveFetchEnabled({ fetch, sandboxed: options?.sandboxed })) {
+750:    name: "web_fetch",

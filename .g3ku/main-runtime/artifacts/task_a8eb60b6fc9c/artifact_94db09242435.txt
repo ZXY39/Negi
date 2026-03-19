@@ -1,0 +1,9 @@
+{
+  "status": "failed",
+  "delivery_status": "blocked",
+  "summary": "canceled",
+  "answer": "",
+  "evidence": [],
+  "remaining_work": [],
+  "blocking_reason": "canceled"
+}

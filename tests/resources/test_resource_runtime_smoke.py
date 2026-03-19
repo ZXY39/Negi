@@ -383,6 +383,7 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
 
     target_file = workspace / 'target.txt'
+    written_file = workspace / 'written.txt'
     target_file.write_text('before value\n', encoding='utf-8')
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
@@ -396,27 +397,28 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
-        assert 'target.txt' in await tool.execute(action='list', path='.')
-        described = json.loads(await tool.execute(action='describe', path='target.txt'))
+        assert 'target.txt' in await tool.execute(action='list', path=str(workspace))
+        described = json.loads(await tool.execute(action='describe', path=str(target_file)))
         assert described['handle']['line_count'] == 1
-        opened = json.loads(await tool.execute(action='open', path='target.txt', start_line=1, end_line=5))
+        opened = json.loads(await tool.execute(action='open', path=str(target_file), start_line=1, end_line=5))
         assert opened['excerpt'] == 'before value'
-        assert 'Successfully wrote' in await tool.execute(action='write', path='written.txt', content='hello\n')
-        written = json.loads(await tool.execute(action='head', path='written.txt', lines=5))
+        assert 'Successfully wrote' in await tool.execute(action='write', path=str(written_file), content='hello\n')
+        written = json.loads(await tool.execute(action='head', path=str(written_file), lines=5))
         assert written['excerpt'] == 'hello'
         assert 'Successfully edited' in await tool.execute(
             action='edit',
-            path='target.txt',
+            path=str(target_file),
             old_text='before value',
             new_text='after value',
         )
-        searched = json.loads(await tool.execute(action='search', path='target.txt', query='after'))
+        searched = json.loads(await tool.execute(action='search', path=str(target_file), query='after'))
+        assert searched['scope_type'] == 'file'
         assert searched['hits'][0]['line'] == 1
 
         result = json.loads(
             await tool.execute(
                 action='propose_patch',
-                path='target.txt',
+                path=str(target_file),
                 old_text='after value',
                 new_text='patched value',
                 summary='Patch target',
@@ -437,11 +439,62 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
         metadata, diff_text = parse_patch_artifact(artifact_path.read_text(encoding='utf-8'))
         assert Path(metadata['path']) == target_file.resolve()
         assert 'patched value' in diff_text
-        assert 'Successfully deleted' in await tool.execute(action='delete', path='written.txt')
-        assert not (workspace / 'written.txt').exists()
+        assert 'Successfully deleted' in await tool.execute(action='delete', path=str(written_file))
+        assert not written_file.exists()
     finally:
         manager.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_tool_rejects_relative_paths(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('hello\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        result = await tool.execute(action='head', path='target.txt', lines=5)
+        assert 'relative path is not allowed; provide absolute path' in result
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_search_recurses_directories(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    search_root = workspace / 'search-root'
+    nested = search_root / 'nested'
+    nested.mkdir(parents=True, exist_ok=True)
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    (search_root / 'alpha.txt').write_text('first hit\n', encoding='utf-8')
+    (nested / 'beta.txt').write_text('second HIT\n', encoding='utf-8')
+    (nested / 'binary.bin').write_bytes(b'\x00\xffhit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        payload = json.loads(await tool.execute(action='search', path=str(search_root), query='hit', limit=10))
+        assert payload['ok'] is True
+        assert payload['scope_type'] == 'directory'
+        assert payload['path'] == str(search_root.resolve())
+        assert payload['count'] == 2
+        assert all(item['path'].endswith('.txt') for item in payload['hits'])
+        assert all('hit' in item['preview'].lower() for item in payload['hits'])
+    finally:
+        manager.close()
 
 
 def test_external_tool_is_discovered_but_not_loaded_as_callable_instance(tmp_path: Path):
@@ -544,6 +597,8 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
         assert tool is not None
         handler = tool._handler
         assert handler.timeout == 7
+        assert handler.working_dir is None
+        assert handler.workspace_root == str(workspace)
         assert handler.path_append == 'D:/bin'
         assert handler.restrict_to_workspace is True
     finally:
@@ -784,6 +839,7 @@ async def test_exec_tool_blocks_paths_outside_workspace_when_restricted(tmp_path
         blocked_path = json.loads(
             await tool.execute(
                 command=f'type "{outside_path}"' if os.name == 'nt' else f'cat "{outside_path}"',
+                working_dir=str(workspace),
                 __g3ku_runtime={'session_key': 'web:shared'},
             )
         )
@@ -828,6 +884,28 @@ async def test_content_tool_reads_externalized_artifact_refs(tmp_path: Path):
     finally:
         manager.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_content_tool_rejects_relative_paths(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'relative.log'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('alpha\nneedle\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+        blocked = json.loads(await tool.execute(action='search', path='relative.log', query='needle'))
+        assert blocked['ok'] is False
+        assert 'relative path is not allowed; provide absolute path' in blocked['error']
+    finally:
+        manager.close()
 
 
 @pytest.mark.asyncio
