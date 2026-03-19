@@ -306,6 +306,11 @@ function formatSessionTime(value) {
     return parsed.toLocaleString();
 }
 
+function ceoSessionDisplayTime(session) {
+    const item = session && typeof session === "object" ? session : {};
+    return String(item.last_llm_output_at || item.updated_at || item.created_at || "").trim();
+}
+
 function normalizeInt(value, fallback = 0) {
     const next = Number(value);
     return Number.isFinite(next) ? Math.trunc(next) : Math.trunc(fallback);
@@ -3311,7 +3316,7 @@ function renderCeoSessions() {
     U.ceoSessionCurrent.innerHTML = current
         ? `
             <div class="ceo-session-current-title">${esc(String(current.title || current.session_id || "Session"))}</div>
-            <div class="ceo-session-current-meta">当前会话 · ${esc(formatSessionTime(current.updated_at))}</div>
+            <div class="ceo-session-current-meta">当前会话 · ${esc(formatSessionTime(ceoSessionDisplayTime(current)))}</div>
         `
         : `
             <div class="ceo-session-current-title">正在准备会话</div>
@@ -3332,6 +3337,7 @@ function renderCeoSessions() {
         const title = String(item?.title || sessionId || "Session");
         const unreadCount = isActive ? 0 : sessionUnreadCount(sessionId);
         const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
+        const displayTime = ceoSessionDisplayTime(item);
         return `
             <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}" role="listitem">
                 <button
@@ -3346,7 +3352,7 @@ function renderCeoSessions() {
                         ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
                     </div>
                     <div class="ceo-session-preview">${esc(preview)}</div>
-                    <div class="ceo-session-meta">${esc(formatSessionTime(item.updated_at))}</div>
+                    <div class="ceo-session-meta">${esc(formatSessionTime(displayTime))}</div>
                 </button>
                 <div class="ceo-session-actions" aria-label="Session actions">
                     <button type="button" class="ceo-session-action" data-session-rename="${esc(sessionId)}" aria-label="Rename session">
@@ -5053,22 +5059,38 @@ function toPixels(value) {
     return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function setScrollViewportLimit(container, itemSelector, visibleCount, measureItem = null) {
+function setScrollViewportLimit(container, itemSelector, visibleCount, measureItem = null, fillToVisibleCount = false) {
     if (!(container instanceof HTMLElement)) return;
+    container.style.height = "";
     container.style.maxHeight = "";
     const items = Array.from(container.querySelectorAll(itemSelector)).filter((item) => item instanceof HTMLElement);
     if (!items.length || visibleCount <= 0) return;
     const styles = window.getComputedStyle(container);
     const gap = toPixels(styles.rowGap || styles.gap);
     const targetCount = Math.min(visibleCount, items.length);
+    const measuredHeights = [];
     let height = 0;
     for (let index = 0; index < targetCount; index += 1) {
         const item = items[index];
         const measured = measureItem ? Number(measureItem(item, index)) : item.getBoundingClientRect().height;
-        height += measured > 0 ? measured : 0;
+        const resolvedHeight = measured > 0 ? measured : 0;
+        measuredHeights.push(resolvedHeight);
+        height += resolvedHeight;
         if (index < targetCount - 1) height += gap;
     }
-    if (height > 0) container.style.maxHeight = `${Math.ceil(height)}px`;
+    if (fillToVisibleCount && measuredHeights.length) {
+        const averageHeight = measuredHeights.reduce((sum, value) => sum + value, 0) / measuredHeights.length;
+        const remainingCount = Math.max(0, visibleCount - measuredHeights.length);
+        if (remainingCount > 0) {
+            height += averageHeight * remainingCount;
+            height += gap * remainingCount;
+        }
+    }
+    if (height > 0) {
+        const resolvedHeight = `${Math.ceil(height)}px`;
+        if (fillToVisibleCount) container.style.height = resolvedHeight;
+        container.style.maxHeight = resolvedHeight;
+    }
 }
 
 function traceStepSummaryHeight(step) {
@@ -5086,7 +5108,7 @@ function traceStepSummaryHeight(step) {
 function refreshTaskDetailScrollRegions() {
     const traceList = U.adFlow?.querySelector(".task-trace-list");
     if (traceList instanceof HTMLElement) {
-        setScrollViewportLimit(traceList, ".task-trace-step", 10, traceStepSummaryHeight);
+        setScrollViewportLimit(traceList, ".task-trace-step", 10, traceStepSummaryHeight, true);
     }
     if (U.artifactList instanceof HTMLElement) {
         setScrollViewportLimit(U.artifactList, ".artifact-item", 5);

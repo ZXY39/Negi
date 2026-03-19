@@ -47,6 +47,28 @@ def summarize_preview_text(text: str, *, max_chars: int = 96) -> str:
     return f"{compact[: max_chars - 1].rstrip()}…"
 
 
+def _has_visible_message_content(content: Any) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(_has_visible_message_content(item) for item in content)
+    if isinstance(content, dict):
+        return any(_has_visible_message_content(value) for value in content.values())
+    return content is not None
+
+
+def latest_llm_output_at(session: Any) -> str:
+    for item in reversed(list(getattr(session, "messages", []) or [])):
+        if str(item.get("role") or "").strip().lower() != "assistant":
+            continue
+        if not _has_visible_message_content(item.get("content")):
+            continue
+        timestamp = str(item.get("timestamp") or "").strip()
+        if timestamp:
+            return timestamp
+    return ""
+
+
 def main_runtime_depth_limits() -> dict[str, int]:
     try:
         cfg = load_config()
@@ -141,22 +163,25 @@ def upload_dir_for_session(session_id: str, *, create: bool = True) -> Path:
 
 def build_session_summary(session: Any, *, is_active: bool, is_running: bool = False) -> dict[str, Any]:
     ensure_ceo_session_metadata(session)
+    messages = list(getattr(session, "messages", []) or [])
     preview_text = str(session.metadata.get("last_preview_text") or "").strip()
     if not preview_text:
-        for item in reversed(list(getattr(session, "messages", []) or [])):
+        for item in reversed(messages):
             content = item.get("content")
             if isinstance(content, str) and content.strip():
                 preview_text = summarize_preview_text(content)
                 break
     created_at = getattr(session, "created_at", None)
     updated_at = getattr(session, "updated_at", None)
+    last_llm_output = latest_llm_output_at(session)
     return {
         "session_id": str(getattr(session, "key", "") or ""),
         "title": str(session.metadata.get("title") or DEFAULT_CEO_SESSION_TITLE),
         "preview_text": preview_text,
-        "message_count": len(list(getattr(session, "messages", []) or [])),
+        "message_count": len(messages),
         "created_at": created_at.isoformat() if isinstance(created_at, datetime) else str(created_at or ""),
         "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else str(updated_at or ""),
+        "last_llm_output_at": last_llm_output,
         "is_active": bool(is_active),
         "is_running": bool(is_running),
         "task_defaults": dict(session.metadata.get("task_defaults") or {}),
