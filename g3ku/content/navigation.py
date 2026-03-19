@@ -74,7 +74,7 @@ def _content_summary(handle: ContentHandle) -> str:
     summary = (
         f"Externalized {label} "
         f"({int(handle.line_count or 0)} lines, {int(handle.char_count or 0)} chars). "
-        f"Use content.search/open with ref={handle.ref}."
+        f"Use content.search/open with ref={handle.ref}. Do not pass this ref as filesystem path."
     )
     if handle.origin_ref and handle.origin_ref != handle.ref:
         summary = f"{summary}\nOrigin ref: {handle.origin_ref}"
@@ -543,6 +543,9 @@ class ContentNavigationService:
         )
 
     def _resolve_workspace_path(self, path: str) -> Path:
+        raw = str(path or "").strip()
+        if raw.startswith("artifact:"):
+            raise ValueError(f"content ref must be passed via ref, not path: {path}")
         candidate = Path(path).expanduser()
         if not candidate.is_absolute():
             raise ValueError(f"relative path is not allowed; provide absolute path: {path}")

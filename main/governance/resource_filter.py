@@ -10,6 +10,8 @@ def list_effective_tool_names(*, subject, supported_tool_names: list[str], resou
     executor_actions: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for family in resource_registry.list_tool_families():
         for action in family.actions:
+            if not bool(getattr(action, 'agent_visible', True)):
+                continue
             for executor_name in list(action.executor_names or []):
                 executor_actions[str(executor_name)].append((family.tool_id, action.action_id))
 

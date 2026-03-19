@@ -4,6 +4,7 @@ import atexit
 import asyncio
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -14,6 +15,12 @@ import typer
 import uvicorn
 
 from g3ku.config.loader import load_config
+from main.service.task_terminal_callback import (
+    TASK_TERMINAL_CALLBACK_PATH,
+    TASK_TERMINAL_CALLBACK_TOKEN_ENV,
+    TASK_TERMINAL_CALLBACK_URL_ENV,
+    save_task_terminal_callback_config,
+)
 
 
 app = typer.Typer(
@@ -217,11 +224,18 @@ def start(
 
     _acquire_start_lock(root, port=resolved_port)
     worker_process: subprocess.Popen | None = None
+    callback_token = secrets.token_urlsafe(24)
+    callback_url = f"http://127.0.0.1:{resolved_port}{TASK_TERMINAL_CALLBACK_PATH}"
+    os.environ[TASK_TERMINAL_CALLBACK_URL_ENV] = callback_url
+    os.environ[TASK_TERMINAL_CALLBACK_TOKEN_ENV] = callback_token
+    save_task_terminal_callback_config(workspace=root, url=callback_url, token=callback_token)
     try:
         if with_worker and not reload:
+            worker_env = os.environ.copy()
             worker_process = subprocess.Popen(
                 [sys.executable, "-m", "g3ku", "worker"],
                 cwd=str(root),
+                env=worker_env,
             )
         elif with_worker and reload:
             typer.echo("[g3ku] worker auto-start is disabled when --reload is enabled; run `python -m g3ku worker` separately.")

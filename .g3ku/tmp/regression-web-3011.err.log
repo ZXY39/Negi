@@ -1,4 +1,0 @@
-Usage: python -m g3ku.g3ku_cli [OPTIONS] COMMAND [ARGS]...
-Try 'python -m g3ku.g3ku_cli --help' for help.
-
-Error: No such command 'web'.

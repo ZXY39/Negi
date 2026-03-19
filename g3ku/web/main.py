@@ -7,7 +7,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from g3ku.shells.web import shutdown_web_runtime
+from g3ku.shells.web import ensure_web_runtime_services, get_agent, shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
 from main.api import router as main_router
 
@@ -19,6 +19,8 @@ os.environ.setdefault('G3KU_TASK_RUNTIME_ROLE', 'web')
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     try:
+        agent = get_agent()
+        await ensure_web_runtime_services(agent)
         yield
     finally:
         await shutdown_web_runtime()

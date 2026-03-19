@@ -13,12 +13,23 @@ ALL_ROLES = list(DEFAULT_ALLOWED_ROLES)
 
 
 def _primary_executor_name(actions: list[ToolActionRecord]) -> str:
-    for action in actions:
+    preferred = [action for action in actions if bool(getattr(action, 'agent_visible', True))]
+    for action in preferred or actions:
         for executor_name in action.executor_names or []:
             name = str(executor_name or '').strip()
             if name:
                 return name
     return ''
+
+
+def _ordered_actions(actions: list[ToolActionRecord]) -> list[ToolActionRecord]:
+    return sorted(
+        actions,
+        key=lambda action: (
+            not bool(getattr(action, 'agent_visible', True)),
+            str(getattr(action, 'admin_mode', 'editable') or 'editable') == 'readonly_system',
+        ),
+    )
 
 
 def build_skill_resources(skill_descriptors: list[SkillResourceDescriptor], *, default_risk_level: str, exclude_names: set[str] | None = None) -> list[SkillResourceRecord]:
@@ -105,6 +116,8 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
                     label=str(action.get('label') or action_id),
                     risk_level=str(action.get('risk_level') or 'medium'),
                     destructive=bool(action.get('destructive', False)),
+                    agent_visible=bool(action.get('agent_visible', True)),
+                    admin_mode=str(action.get('admin_mode') or 'editable'),
                     allowed_roles=to_public_allowed_roles([str(role) for role in (action.get('allowed_roles') or ALL_ROLES)]),
                     executor_names=executor_names,
                 )
@@ -115,7 +128,7 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
                 family['actions'][action_id] = current.model_copy(update={'executor_names': merged_executors})
     items: list[ToolFamilyRecord] = []
     for payload in grouped.values():
-        actions = list(payload['actions'].values())
+        actions = _ordered_actions(list(payload['actions'].values()))
         items.append(
             ToolFamilyRecord(
                 tool_id=payload['tool_id'],

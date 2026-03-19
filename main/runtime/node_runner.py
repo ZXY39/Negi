@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import platform
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from main.models import (
     normalize_final_acceptance_metadata,
     normalize_result_payload,
 )
-from main.prompts import load_prompt
+from main.prompts import STRICT_CHILD_SPAWN_POLICY_PROMPT, load_prompt
 from main.runtime.internal_tools import SpawnChildNodesTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
@@ -31,18 +32,12 @@ ACCEPTANCE_REF_GUIDANCE = (
     'If more detail is needed, use content.search first and then content.open for targeted reads. '
     'Do not request the full document body.'
 )
-EXECUTION_SPAWN_GUIDANCE = """
-This execution node may spawn child nodes.
-
-Before any local search, file read, or broad inspection, you must first decide whether the work should be split into child pipelines.
-- If the work can be cleanly split into independent scopes, call `spawn_child_nodes` first instead of starting local execution yourself.
-- Prefer `spawn_child_nodes` when the workload is broad, slow, or naturally decomposes into independent scopes.
-- Only call `spawn_child_nodes` when the tool is present in the current tool list.
-- Split by directory, module, file group, result batch, or another clear ownership boundary.
-- Pass paths, refs, search clues, and acceptance requirements to children. Do not inline large source excerpts.
-- Decide per child whether acceptance is actually required instead of defaulting every child to acceptance.
-- Only continue locally without spawning children when you can justify that splitting would not improve speed, reliability, or clarity.
-""".strip()
+CHILD_SPAWN_PRECHECK_PAYLOAD_KEY = 'child_spawn_precheck'
+CHILD_SPAWN_PRECHECK_SOURCE = 'system_prompt'
+CORE_REQUIREMENT_NOTICE_TEMPLATE = '注意：你正在完成的任务是核心需求【{core_requirement}】的细分任务之一，不要做与核心需求或细分任务无关的事。'
+CORE_REQUIREMENT_NOTICE_PATTERN = re.compile(
+    r'^注意：你正在完成的任务是核心需求【.*】的细分任务之一，不要做与核心需求或细分任务无关的事。$'
+)
 
 
 class NodeRunner:
@@ -134,17 +129,11 @@ class NodeRunner:
             'can_spawn_children': bool(node.can_spawn_children),
             'goal': node.goal,
             'prompt': node.prompt,
+            'core_requirement': self._resolve_core_requirement(task),
             'runtime_environment': self._runtime_environment_payload(),
         }
         if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
-            payload['split_directive'] = {
-                'required_precheck': True,
-                'instruction': (
-                    'Before any local search, file inspection, or broad local probing, first evaluate whether the task '
-                    'should be split. If it can be cleanly split into independent scopes, call spawn_child_nodes first '
-                    'instead of restoring context locally or searching around on your own.'
-                ),
-            }
+            payload[CHILD_SPAWN_PRECHECK_PAYLOAD_KEY] = self._child_spawn_precheck_payload()
         completion_contract = self._completion_contract_payload(task=task, node=node)
         if completion_contract is not None:
             payload['completion_contract'] = completion_contract
@@ -166,8 +155,15 @@ class NodeRunner:
         prompt = load_prompt(system_name).strip()
         environment_guidance = self._environment_context_guidance(node=node)
         if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
-            return f'{prompt}\n\n{EXECUTION_SPAWN_GUIDANCE}\n\n{environment_guidance}'
+            return f'{prompt}\n\n{STRICT_CHILD_SPAWN_POLICY_PROMPT}\n\n{environment_guidance}'
         return f'{prompt}\n\n{environment_guidance}'
+
+    @staticmethod
+    def _child_spawn_precheck_payload() -> dict[str, Any]:
+        return {
+            'required': True,
+            'source': CHILD_SPAWN_PRECHECK_SOURCE,
+        }
 
     def _completion_contract_payload(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
         if node.node_kind != KIND_EXECUTION or node.parent_node_id is not None:
@@ -270,11 +266,6 @@ class NodeRunner:
             f"`exec` default working_dir={path_policy['exec_default_working_dir']}.",
             '- Tool usage guidance:',
         ]
-        if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
-            lines.append(
-                '- Before any local search, file read, or broad inspection, decide whether you should split the task '
-                'and use `spawn_child_nodes` first when the work cleanly decomposes.'
-            )
         lines.extend(
             [
                 f"- `filesystem`: {tool_guidance['filesystem']}",
@@ -658,7 +649,31 @@ class NodeRunner:
             return False
         return bool(str(spec.acceptance_prompt or '').strip())
 
+    @staticmethod
+    def _core_requirement_notice(core_requirement: str) -> str:
+        return CORE_REQUIREMENT_NOTICE_TEMPLATE.format(core_requirement=str(core_requirement or '').strip())
+
+    def _resolve_core_requirement(self, task) -> str:
+        metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
+        return str(metadata.get('core_requirement') or getattr(task, 'user_request', '') or getattr(task, 'title', '') or '').strip()
+
+    def _inject_core_requirement_notice(self, prompt: str, core_requirement: str) -> str:
+        normalized_core_requirement = str(core_requirement or '').strip()
+        base_lines = []
+        for line in str(prompt or '').splitlines():
+            if CORE_REQUIREMENT_NOTICE_PATTERN.fullmatch(str(line or '').strip()):
+                continue
+            base_lines.append(line)
+        base_prompt = '\n'.join(base_lines).strip()
+        if not normalized_core_requirement:
+            return base_prompt
+        notice = self._core_requirement_notice(normalized_core_requirement)
+        if not base_prompt:
+            return notice
+        return f'{notice}\n\n{base_prompt}'
+
     def _create_execution_child(self, *, task, parent: NodeRecord, spec: SpawnChildSpec) -> NodeRecord:
+        child_prompt = self._inject_core_requirement_notice(spec.prompt, self._resolve_core_requirement(task))
         child = NodeRecord(
             node_id=new_node_id(),
             task_id=task.task_id,
@@ -668,8 +683,8 @@ class NodeRunner:
             node_kind=KIND_EXECUTION,
             status='in_progress',
             goal=spec.goal,
-            prompt=spec.prompt,
-            input=spec.prompt,
+            prompt=child_prompt,
+            input=child_prompt,
             output=[],
             check_result='',
             final_output='',
@@ -703,6 +718,7 @@ class NodeRunner:
             node_output_ref=str(child_handoff.get('output_ref') or ''),
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
+            core_requirement=self._resolve_core_requirement(task),
         )
         acceptance = NodeRecord(
             node_id=new_node_id(),
@@ -735,6 +751,7 @@ class NodeRunner:
         node_output_ref: str,
         result_payload_ref: str,
         evidence_summary: str,
+        core_requirement: str,
     ) -> str:
         prompt = (
             f'{acceptance_prompt}\n\n'
@@ -745,7 +762,7 @@ class NodeRunner:
         )
         if node_output_ref or result_payload_ref:
             prompt = f'{prompt}\n{ACCEPTANCE_REF_GUIDANCE}\n'
-        return prompt
+        return self._inject_core_requirement_notice(prompt, core_requirement)
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:
         latest = self._log_service.ensure_node_output_externalized(task_id, node.node_id) or self._store.get_node(node.node_id) or node

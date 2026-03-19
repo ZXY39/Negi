@@ -30,7 +30,7 @@ def _infer_auth_mode(provider_id: str) -> AuthMode:
     return AuthMode.API_KEY
 
 
-def _legacy_chat_draft(
+def _chat_binding_draft(
     *,
     provider_model: str,
     api_key: str,
@@ -118,7 +118,7 @@ class ModelManager:
             raise ValueError(f"Model key already exists: {clean_key}")
         item = self.facade.create_binding(
             self.config,
-            draft_payload=_legacy_chat_draft(
+            draft_payload=_chat_binding_draft(
                 provider_model=str(provider_model or "").strip(),
                 api_key=str(api_key or "").strip(),
                 api_base=str(api_base or "").strip(),

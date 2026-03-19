@@ -106,7 +106,16 @@ def _resource_delete_http_error(exc: ValueError) -> HTTPException:
         code = str(payload.get('code') or '').strip()
         if code in {'skill_not_found', 'tool_not_found'}:
             status_code = 404
-        elif code in {'skill_busy', 'tool_busy', 'skill_in_use', 'tool_in_use'}:
+        elif code in {
+            'skill_busy',
+            'tool_busy',
+            'skill_in_use',
+            'tool_in_use',
+            'core_tool_disable_forbidden',
+            'core_tool_delete_forbidden',
+            'core_tool_ceo_visibility_required',
+            'tool_action_readonly',
+        }:
             status_code = 409
         else:
             status_code = 400
@@ -918,7 +927,10 @@ async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id
             str(action_id): [str(role) for role in (roles or [])]
             for action_id, roles in actions_payload.items()
         }
-    item = service.update_tool_policy(tool_id, session_id=session_id, enabled=payload.get('enabled'), allowed_roles_by_action=normalized_actions)
+    try:
+        item = service.update_tool_policy(tool_id, session_id=session_id, enabled=payload.get('enabled'), allowed_roles_by_action=normalized_actions)
+    except ValueError as exc:
+        raise _resource_delete_http_error(exc) from exc
     if item is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
     return {'ok': True, 'item': item.model_dump(mode='json')}
@@ -927,7 +939,10 @@ async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id
 @router.post('/resources/tools/{tool_id}/enable')
 async def enable_tool(tool_id: str, session_id: str = Query('web:shared')):
     service = _service()
-    item = service.enable_tool(tool_id, session_id=session_id)
+    try:
+        item = service.enable_tool(tool_id, session_id=session_id)
+    except ValueError as exc:
+        raise _resource_delete_http_error(exc) from exc
     if item is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
     return {'ok': True, 'item': item.model_dump(mode='json')}
@@ -936,7 +951,10 @@ async def enable_tool(tool_id: str, session_id: str = Query('web:shared')):
 @router.post('/resources/tools/{tool_id}/disable')
 async def disable_tool(tool_id: str, session_id: str = Query('web:shared')):
     service = _service()
-    item = service.disable_tool(tool_id, session_id=session_id)
+    try:
+        item = service.disable_tool(tool_id, session_id=session_id)
+    except ValueError as exc:
+        raise _resource_delete_http_error(exc) from exc
     if item is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
     return {'ok': True, 'item': item.model_dump(mode='json')}

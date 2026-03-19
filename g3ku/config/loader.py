@@ -105,7 +105,7 @@ _LEGACY_MODEL_PAYLOAD_FIELDS = (
 )
 
 
-def _ensure_no_legacy_model_fields(raw_data: dict[str, Any]) -> None:
+def _ensure_no_removed_model_fields(raw_data: dict[str, Any]) -> None:
     legacy_paths = (
         ("agents", "defaults", "model"),
         ("agents", "multiAgent", "orchestratorModel"),
@@ -130,7 +130,7 @@ def _ensure_no_removed_role_scopes(raw_data: dict[str, Any]) -> None:
         )
 
 
-def _ensure_no_legacy_tools_config(raw_data: dict[str, Any]) -> None:
+def _ensure_no_removed_tools_config(raw_data: dict[str, Any]) -> None:
     if "tools" not in raw_data:
         return
     raise ValueError(
@@ -139,7 +139,7 @@ def _ensure_no_legacy_tools_config(raw_data: dict[str, Any]) -> None:
     )
 
 
-def _ensure_no_legacy_channel_config(raw_data: dict[str, Any]) -> None:
+def _ensure_no_removed_channel_config(raw_data: dict[str, Any]) -> None:
     channels = raw_data.get("channels")
     if not isinstance(channels, dict):
         return
@@ -178,7 +178,7 @@ def _referenced_provider_names(cfg: Config) -> list[str]:
     return sorted(names)
 
 
-def _raw_uses_legacy_model_payload(raw_data: dict[str, Any]) -> bool:
+def _raw_uses_inline_model_payload(raw_data: dict[str, Any]) -> bool:
     models = raw_data.get("models") if isinstance(raw_data.get("models"), dict) else None
     catalog = (models or {}).get("catalog")
     if not isinstance(catalog, list):
@@ -189,13 +189,13 @@ def _raw_uses_legacy_model_payload(raw_data: dict[str, Any]) -> bool:
     return False
 
 
-def _legacy_auth_mode(provider_id: str) -> str:
+def _binding_auth_mode(provider_id: str) -> str:
     if provider_id in {"openai_codex", "github_copilot"}:
         return "oauth_cache"
     return "api_key"
 
 
-def _normalize_legacy_model_bindings(cfg: Config) -> bool:
+def _normalize_inline_model_bindings(cfg: Config) -> bool:
     from g3ku.llm_config.models import ProviderConfigDraft
     from g3ku.llm_config.facade import LLMConfigFacade
 
@@ -209,7 +209,7 @@ def _normalize_legacy_model_bindings(cfg: Config) -> bool:
         draft = ProviderConfigDraft(
             provider_id=provider_id,
             capability="chat",
-            auth_mode=_legacy_auth_mode(provider_id),
+            auth_mode=_binding_auth_mode(provider_id),
             api_key=str(
                 item.api_key
                 or (provider_cfg.api_key if provider_cfg is not None else "")
@@ -435,10 +435,10 @@ def load_config(config_path: Path | None = None) -> Config:
     if path != expected_path:
         raise ValueError(f"Config must be loaded from {expected_path}, got {path}")
     raw_data = _load_json_file(expected_path)
-    _ensure_no_legacy_model_fields(raw_data)
+    _ensure_no_removed_model_fields(raw_data)
     _ensure_no_removed_role_scopes(raw_data)
-    _ensure_no_legacy_tools_config(raw_data)
-    _ensure_no_legacy_channel_config(raw_data)
+    _ensure_no_removed_tools_config(raw_data)
+    _ensure_no_removed_channel_config(raw_data)
     migrated_llm, changed = migrate_raw_config_if_needed(deepcopy(raw_data), workspace=Path.cwd())
     if changed:
         raw_data = migrated_llm
@@ -446,7 +446,7 @@ def load_config(config_path: Path | None = None) -> Config:
     migrated = _migrate_config(deepcopy(raw_data))
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(migrated, cfg)
-    if changed or _raw_uses_legacy_model_payload(raw_data):
+    if changed or _raw_uses_inline_model_payload(raw_data):
         save_config(cfg, expected_path)
     return cfg
 
@@ -456,7 +456,7 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     path = config_path or get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    _normalize_legacy_model_bindings(config)
+    _normalize_inline_model_bindings(config)
     data = _runtime_config_payload(config)
 
     with open(path, "w", encoding="utf-8") as f:

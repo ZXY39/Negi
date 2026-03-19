@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.context.summarizer import estimate_tokens, score_query, truncate_by_tokens
 from g3ku.runtime.context.types import ContextAssemblyResult
 
@@ -278,16 +279,31 @@ class ContextAssemblyService:
         visible_set = {str(name).strip() for name in visible_names if str(name).strip()}
         if not visible_set:
             return [], {'core': [], 'extension': []}
+        raw_core_entries = {str(name).strip() for name in list(core_tools or []) if str(name).strip()}
+        core_resolution = resolve_core_tool_targets(core_tools, visible_families)
         reserved = [name for name in visible_names if name in self.RESERVED_INTERNAL_TOOLS and name in visible_set]
         reserved_set = set(reserved)
-        selected = {name for name in visible_set if name in core_tools and name not in reserved_set}
+        selected = {
+            name
+            for name in visible_set
+            if (name in core_resolution.executor_names or name in raw_core_entries) and name not in reserved_set
+        }
+        if extension_top_k <= 0:
+            ordered = reserved + [name for name in visible_names if name in selected]
+            return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': []}
         ext_scored: list[tuple[float, list[str], str]] = []
         for family in visible_families:
             family_names = []
             for action in list(getattr(family, 'actions', []) or []):
                 for executor_name in list(getattr(action, 'executor_names', []) or []):
                     name = str(executor_name or '').strip()
-                    if name and name in visible_set and name not in core_tools and name not in reserved_set:
+                    if (
+                        name
+                        and name in visible_set
+                        and name not in core_resolution.executor_names
+                        and name not in raw_core_entries
+                        and name not in reserved_set
+                    ):
                         family_names.append(name)
             family_names = sorted(set(family_names))
             if not family_names:

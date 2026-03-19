@@ -7,12 +7,13 @@ const MODEL_SCOPES = [
 const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
 const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
 const DEFAULT_ROLE_ITERATIONS = () => ({ ceo: 40, execution: 16, inspection: 16 });
-const TREE_SCALE_MIN = 0.6;
-const TREE_SCALE_MAX = 1.8;
+const TREE_SCALE_MIN = 0.12;
+const TREE_SCALE_MAX = 3.5;
 const TREE_SCALE_FACTOR = 1.12;
 const RESOURCE_PAGE_SIZES = [20, 50, 100];
 const CEO_TOOL_PROGRESS_MAX_LINES = 4;
 const CEO_TOOL_STEP_MAX = 5;
+const TASK_DETAIL_SESSION_KEY = "g3ku.task-detail.session.v1";
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -67,6 +68,8 @@ const S = {
     currentTaskRuntimeSummary: null,
     currentNodeDetail: null,
     taskNodeDetails: {},
+    taskDetailViewStates: {},
+    pendingTaskDetailRestore: null,
     taskNodeBusy: false,
     tasksWorkerOnline: true,
     tasksWorker: null,
@@ -406,11 +409,164 @@ function setElementScrollTop(element, value) {
     element.scrollTop = Math.max(0, numericValue);
 }
 
+function readSessionJson(key) {
+    try {
+        const raw = window.sessionStorage?.getItem?.(key);
+        return raw ? JSON.parse(raw) : null;
+    } catch {
+        return null;
+    }
+}
+
+function writeSessionJson(key, value) {
+    try {
+        window.sessionStorage?.setItem?.(key, JSON.stringify(value));
+    } catch {}
+}
+
+function removeSessionJson(key) {
+    try {
+        window.sessionStorage?.removeItem?.(key);
+    } catch {}
+}
+
+function isTaskDetailsViewActive() {
+    return !!U.viewTaskDetails?.classList.contains("active");
+}
+
+function taskDetailStateKey(taskId = S.currentTaskId, nodeId = S.selectedNodeId) {
+    const normalizedTaskId = String(taskId || "").trim();
+    const normalizedNodeId = String(nodeId || "").trim();
+    if (!normalizedTaskId || !normalizedNodeId) return "";
+    return `${normalizedTaskId}::${normalizedNodeId}`;
+}
+
+function normalizeTaskDetailViewState(value) {
+    if (!value || typeof value !== "object") return null;
+    const normalizeScrollTop = (input) => {
+        const numericValue = Number(input);
+        return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : 0;
+    };
+    const traceItems = Array.isArray(value.traceItems)
+        ? value.traceItems.map((item, index) => ({
+            index: Number.isInteger(item?.index) && item.index >= 0 ? item.index : index,
+            key: String(item?.key || "").trim(),
+            title: String(item?.title || "").trim(),
+            open: !!item?.open,
+        }))
+        : [];
+    return {
+        detailScrollTop: normalizeScrollTop(value.detailScrollTop),
+        traceScrollTop: normalizeScrollTop(value.traceScrollTop),
+        artifactListScrollTop: normalizeScrollTop(value.artifactListScrollTop),
+        artifactContentScrollTop: normalizeScrollTop(value.artifactContentScrollTop),
+        traceItems,
+    };
+}
+
+function captureTaskDetailSessionSnapshot() {
+    const currentTaskId = String(S.currentTaskId || "").trim();
+    if (!currentTaskId || !isTaskDetailsViewActive()) return null;
+    const nodeViewStates = { ...(S.taskDetailViewStates || {}) };
+    const currentKey = taskDetailStateKey(currentTaskId, S.selectedNodeId);
+    const currentViewState = normalizeTaskDetailViewState(captureTaskDetailViewState());
+    if (currentKey && currentViewState) nodeViewStates[currentKey] = currentViewState;
+    return {
+        currentTaskId,
+        selectedNodeId: String(S.selectedNodeId || "").trim(),
+        selectedArtifactId: String(S.selectedArtifactId || "").trim(),
+        treeRoundSelectionsByNodeId: normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId),
+        nodeViewStates,
+    };
+}
+
+let taskDetailSessionPersistTimer = 0;
+
+function persistTaskDetailSessionNow() {
+    const snapshot = captureTaskDetailSessionSnapshot();
+    if (!snapshot) {
+        removeSessionJson(TASK_DETAIL_SESSION_KEY);
+        return;
+    }
+    writeSessionJson(TASK_DETAIL_SESSION_KEY, snapshot);
+}
+
+function scheduleTaskDetailSessionPersist() {
+    if (taskDetailSessionPersistTimer) return;
+    taskDetailSessionPersistTimer = window.setTimeout(() => {
+        taskDetailSessionPersistTimer = 0;
+        persistTaskDetailSessionNow();
+    }, 120);
+}
+
+function flushTaskDetailSessionPersist() {
+    if (taskDetailSessionPersistTimer) {
+        window.clearTimeout(taskDetailSessionPersistTimer);
+        taskDetailSessionPersistTimer = 0;
+    }
+    persistTaskDetailSessionNow();
+}
+
+function clearTaskDetailSession() {
+    if (taskDetailSessionPersistTimer) {
+        window.clearTimeout(taskDetailSessionPersistTimer);
+        taskDetailSessionPersistTimer = 0;
+    }
+    S.taskDetailViewStates = {};
+    S.pendingTaskDetailRestore = null;
+    removeSessionJson(TASK_DETAIL_SESSION_KEY);
+}
+
+function stashTaskDetailViewState({ taskId = S.currentTaskId, nodeId = S.selectedNodeId, viewState = null } = {}) {
+    const key = taskDetailStateKey(taskId, nodeId);
+    if (!key) return null;
+    const normalizedState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
+    if (!normalizedState) return null;
+    S.taskDetailViewStates = { ...(S.taskDetailViewStates || {}), [key]: normalizedState };
+    scheduleTaskDetailSessionPersist();
+    return normalizedState;
+}
+
+function getStoredTaskDetailViewState(taskId = S.currentTaskId, nodeId = S.selectedNodeId) {
+    const key = taskDetailStateKey(taskId, nodeId);
+    if (!key) return null;
+    return normalizeTaskDetailViewState(S.taskDetailViewStates?.[key]);
+}
+
+function consumePendingTaskDetailRestore(nodeId) {
+    const pending = S.pendingTaskDetailRestore;
+    const normalizedNodeId = String(nodeId || "").trim();
+    if (!pending || String(pending.nodeId || "").trim() !== normalizedNodeId) return null;
+    S.pendingTaskDetailRestore = null;
+    return normalizeTaskDetailViewState(pending.viewState);
+}
+
+function readTaskDetailSessionSnapshot() {
+    const raw = readSessionJson(TASK_DETAIL_SESSION_KEY);
+    const currentTaskId = String(raw?.currentTaskId || "").trim();
+    if (!currentTaskId) return null;
+    const nodeViewStates = {};
+    Object.entries(raw?.nodeViewStates || {}).forEach(([key, value]) => {
+        const normalizedKey = String(key || "").trim();
+        const normalizedState = normalizeTaskDetailViewState(value);
+        if (!normalizedKey || !normalizedState) return;
+        nodeViewStates[normalizedKey] = normalizedState;
+    });
+    return {
+        currentTaskId,
+        selectedNodeId: String(raw?.selectedNodeId || "").trim(),
+        selectedArtifactId: String(raw?.selectedArtifactId || "").trim(),
+        treeRoundSelectionsByNodeId: normalizeTreeRoundSelections(raw?.treeRoundSelectionsByNodeId),
+        nodeViewStates,
+    };
+}
+
 function captureTaskDetailViewState() {
     const traceList = U.adFlow?.querySelector(".task-trace-list");
     const traceItems = traceList instanceof HTMLElement
         ? Array.from(traceList.querySelectorAll(".task-trace-step")).map((step, index) => ({
             index,
+            key: String(step.dataset.traceKey || "").trim(),
             title: String(step.querySelector(".interaction-step-title")?.textContent || "").trim(),
             open: !!step.open,
         }))
@@ -424,26 +580,36 @@ function captureTaskDetailViewState() {
     };
 }
 
+function applyTaskTraceItemViewState(traceList, traceItems) {
+    if (!(traceList instanceof HTMLElement) || !Array.isArray(traceItems) || !traceItems.length) return;
+    const keyState = new Map();
+    const titleState = new Map();
+    traceItems.forEach((item) => {
+        if (item?.key && !keyState.has(item.key)) keyState.set(item.key, !!item.open);
+        if (item?.title && !titleState.has(item.title)) titleState.set(item.title, !!item.open);
+    });
+    Array.from(traceList.querySelectorAll(".task-trace-step")).forEach((step, index) => {
+        const traceKey = String(step.dataset.traceKey || "").trim();
+        const title = String(step.querySelector(".interaction-step-title")?.textContent || "").trim();
+        const nextOpen = keyState.has(traceKey)
+            ? keyState.get(traceKey)
+            : (titleState.has(title) ? titleState.get(title) : traceItems[index]?.open);
+        if (typeof nextOpen === "boolean") step.open = nextOpen;
+    });
+}
+
 function restoreTaskDetailViewState(state) {
     if (!state || typeof state !== "object") return;
     const traceList = U.adFlow?.querySelector(".task-trace-list");
-    if (traceList instanceof HTMLElement && Array.isArray(state.traceItems) && state.traceItems.length) {
-        const titleState = new Map();
-        state.traceItems.forEach((item) => {
-            if (item?.title && !titleState.has(item.title)) titleState.set(item.title, !!item.open);
-        });
-        Array.from(traceList.querySelectorAll(".task-trace-step")).forEach((step, index) => {
-            const title = String(step.querySelector(".interaction-step-title")?.textContent || "").trim();
-            const nextOpen = titleState.has(title) ? titleState.get(title) : state.traceItems[index]?.open;
-            if (typeof nextOpen === "boolean") step.open = nextOpen;
-        });
-    }
-    window.requestAnimationFrame(() => {
+    applyTaskTraceItemViewState(traceList, state.traceItems);
+    const applyScrollPositions = () => {
         setElementScrollTop(U.detail, state.detailScrollTop);
         setElementScrollTop(traceList, state.traceScrollTop);
         setElementScrollTop(U.artifactList, state.artifactListScrollTop);
         setElementScrollTop(U.artifactContent, state.artifactContentScrollTop);
-    });
+    };
+    applyScrollPositions();
+    window.requestAnimationFrame(applyScrollPositions);
 }
 
 function renderTaskSectionHeading(heading, { icon, label, count = 0 } = {}) {
@@ -3882,11 +4048,19 @@ function renderToolActions() {
     });
     const deleteButton = U.toolDetail?.querySelector("#tool-delete-btn");
     if (deleteButton) {
-        deleteButton.textContent = S.toolBusy ? "删除中..." : "删除";
-        deleteButton.disabled = S.toolBusy || !S.selectedTool;
+        if (S.selectedTool?.is_core) {
+            deleteButton.textContent = "核心工具不可删除";
+            deleteButton.disabled = true;
+        } else {
+            deleteButton.textContent = S.toolBusy ? "删除中..." : "删除";
+            deleteButton.disabled = S.toolBusy || !S.selectedTool;
+        }
     }
     const toggleButton = U.toolDetail?.querySelector(S.selectedTool?.enabled ? "#tool-disable-btn" : "#tool-enable-btn");
-    if (toggleButton) toggleButton.disabled = S.toolBusy || !S.selectedTool;
+    if (toggleButton) {
+        if (S.selectedTool?.is_core) toggleButton.disabled = true;
+        else toggleButton.disabled = S.toolBusy || !S.selectedTool;
+    }
     syncDetailSaveButton("tool");
 }
 
@@ -4543,6 +4717,7 @@ function resetTaskView() {
         S.taskWs.close();
         S.taskWs = null;
     }
+    clearTaskDetailSession();
     S.currentTask = null;
     S.currentTaskProgress = null;
     S.currentTaskTreeRoot = null;
@@ -4858,6 +5033,7 @@ function syncTaskTreeHeaderState(projectedRoot = null) {
 function resetTaskTreeRoundSelections() {
     S.treeRoundSelectionsByNodeId = {};
     renderTree();
+    scheduleTaskDetailSessionPersist();
 }
 
 function setNodeRoundSelection(nodeId, roundId) {
@@ -4876,12 +5052,17 @@ function setNodeRoundSelection(nodeId, roundId) {
     }
     S.treeRoundSelectionsByNodeId = nextSelections;
     renderTree();
+    scheduleTaskDetailSessionPersist();
 }
 
 function clearAgentSelection({ rerender = true } = {}) {
+    const previousNodeId = String(S.selectedNodeId || "").trim();
+    if (previousNodeId) stashTaskDetailViewState({ nodeId: previousNodeId });
     S.selectedNodeId = null;
+    S.pendingTaskDetailRestore = null;
     U.feedTitle.textContent = "Node Details";
     hideAgent();
+    scheduleTaskDetailSessionPersist();
     if (rerender) renderTree();
 }
 function findTreeNode(node, nodeId) {
@@ -5101,9 +5282,9 @@ function renderTraceField(label, value, emptyText = "暂无内容") {
     `;
 }
 
-function renderTraceStep({ title, status = "info", open = false, bodyHtml = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", open = false, bodyHtml = "" }) {
     return `
-        <details class="interaction-step task-trace-step ${esc(status)}"${open ? " open" : ""}>
+        <details class="interaction-step task-trace-step ${esc(status)}" data-trace-key="${esc(traceKey)}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
                 <span class="interaction-step-lead">
                     <span class="interaction-step-title">${esc(title)}</span>
@@ -5116,6 +5297,71 @@ function renderTraceStep({ title, status = "info", open = false, bodyHtml = "" }
             <div class="task-trace-body">${bodyHtml}</div>
         </details>
     `;
+}
+
+function resolveTraceStepOpenState(step, state, index) {
+    if (!state || typeof state !== "object") return !!step.open;
+    const traceItems = Array.isArray(state.traceItems) ? state.traceItems : [];
+    const stepKey = String(step.traceKey || "").trim();
+    if (stepKey) {
+        const keyed = traceItems.find((item) => String(item?.key || "").trim() === stepKey);
+        if (keyed && typeof keyed.open === "boolean") return keyed.open;
+    }
+    const stepTitle = String(step.title || "").trim();
+    if (stepTitle) {
+        const titled = traceItems.find((item) => String(item?.title || "").trim() === stepTitle);
+        if (titled && typeof titled.open === "boolean") return titled.open;
+    }
+    if (typeof traceItems[index]?.open === "boolean") return traceItems[index].open;
+    return !!step.open;
+}
+
+function buildExecutionTraceSteps(trace, node) {
+    return [
+        {
+            traceKey: "initial_prompt",
+            title: "Initial Prompt",
+            status: "info",
+            open: false,
+            bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
+        },
+        ...trace.tool_steps.map((step, index) => ({
+            traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
+            title: `Tool - ${step.tool_name || "tool"}`,
+            status: step.status || "info",
+            open: false,
+            bodyHtml: [
+                renderTraceField("Arguments", step.arguments_text, "No arguments"),
+                renderTraceField(
+                    "Output",
+                    step.output_text,
+                    step.status === "running" ? "Waiting for tool output..." : "No tool output",
+                    { decodeEscapes: true },
+                ),
+            ].join(""),
+        })),
+        ...(trace.live_tool_calls.length ? [{
+            traceKey: "live_tools",
+            title: `Live Tools (${trace.live_tool_calls.length})`,
+            status: buildLiveSectionStatus(trace.live_tool_calls),
+            open: true,
+            bodyHtml: renderLiveToolFields(trace.live_tool_calls),
+        }] : []),
+        ...(trace.live_child_pipelines.length ? [{
+            traceKey: "live_child_pipelines",
+            title: `Live Child Pipelines (${trace.live_child_pipelines.length})`,
+            status: buildLiveSectionStatus(trace.live_child_pipelines),
+            open: true,
+            bodyHtml: renderLiveChildFields(trace.live_child_pipelines),
+        }] : []),
+        {
+            traceKey: "final_output",
+            title: "Final Output",
+            status: nodeFinalTraceStatus(node),
+            open: true,
+            bodyHtml: renderTraceField("Content", trace.final_output, "No final output", { decodeEscapes: true }),
+        },
+    ];
 }
 
 function toPixels(value) {
@@ -5331,53 +5577,18 @@ function renderLiveChildFields(childPipelines) {
     ].join("")).join("");
 }
 
-function renderExecutionTrace(node) {
+function renderExecutionTrace(node, { viewState = null } = {}) {
     if (!U.adFlow) return;
     const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
     const fallbackLiveFrame = liveFrameMap.get(String(node?.node_id || "").trim()) || null;
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node, fallbackLiveFrame);
-    const steps = [
-        renderTraceStep({
-            title: "Initial Prompt",
-            status: "info",
-            open: false,
-            bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
-        }),
-        ...trace.tool_steps.map((step) => renderTraceStep({
-            title: `Tool - ${step.tool_name || "tool"}`,
-            status: step.status || "info",
-            open: false,
-            bodyHtml: [
-                renderTraceField("Arguments", step.arguments_text, "No arguments"),
-                renderTraceField(
-                    "Output",
-                    step.output_text,
-                    step.status === "running" ? "Waiting for tool output..." : "No tool output",
-                    { decodeEscapes: true },
-                ),
-            ].join(""),
-        })),
-        ...(trace.live_tool_calls.length ? [renderTraceStep({
-            title: `Live Tools (${trace.live_tool_calls.length})`,
-            status: buildLiveSectionStatus(trace.live_tool_calls),
-            open: true,
-            bodyHtml: renderLiveToolFields(trace.live_tool_calls),
-        })] : []),
-        ...(trace.live_child_pipelines.length ? [renderTraceStep({
-            title: `Live Child Pipelines (${trace.live_child_pipelines.length})`,
-            status: buildLiveSectionStatus(trace.live_child_pipelines),
-            open: true,
-            bodyHtml: renderLiveChildFields(trace.live_child_pipelines),
-        })] : []),
-        renderTraceStep({
-            title: "Final Output",
-            status: nodeFinalTraceStatus(node),
-            open: true,
-            bodyHtml: renderTraceField("Content", trace.final_output, "No final output", { decodeEscapes: true }),
-        }),
-    ];
+    const stepDescriptors = buildExecutionTraceSteps(trace, node);
+    const steps = stepDescriptors.map((step, index) => renderTraceStep({
+        ...step,
+        open: resolveTraceStepOpenState(step, viewState, index),
+    }));
     U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
-    renderFlowHeading(steps.length);
+    renderFlowHeading(stepDescriptors.length);
     const traceItems = Array.from(U.adFlow.querySelectorAll(".task-trace-step"));
     trace.tool_steps.forEach((step, index) => {
         const item = traceItems[index + 1];
@@ -5484,9 +5695,11 @@ function renderTree() {
     const walk = (node) => {
         const title = String(node.title || node.node_id || "");
         const fullTitle = String(node.fullTitle || title);
+        const nodeStatus = String(node.state || "").trim().toLowerCase();
         const displayState = String(node.display_state || node.state || "").toUpperCase();
         const item = document.createElement("li");
         item.className = "execution-tree-item";
+        item.dataset.status = nodeStatus;
         const stack = document.createElement("div");
         stack.className = "execution-tree-node-stack";
         const el = document.createElement("button");
@@ -5494,6 +5707,7 @@ function renderTree() {
         el.className = `execution-tree-node${S.selectedNodeId === node.node_id ? " selected" : ""}`;
         el.dataset.id = node.node_id;
         el.dataset.kind = node.kind || "execution";
+        el.dataset.status = nodeStatus;
         el.title = fullTitle;
         el.setAttribute("aria-pressed", S.selectedNodeId === node.node_id ? "true" : "false");
         el.innerHTML = `<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.state || "")}">${esc(displayState)}</span></span>`;
@@ -5503,8 +5717,13 @@ function renderTree() {
                 return;
             }
             e.stopPropagation();
+            const previousNodeId = String(S.selectedNodeId || "").trim();
+            const nextNodeId = String(node.node_id || "").trim();
+            if (previousNodeId && previousNodeId !== nextNodeId) {
+                stashTaskDetailViewState({ nodeId: previousNodeId });
+            }
             S.selectedNodeId = node.node_id;
-            void showAgent(node);
+            void showAgent(node, { preserveViewState: false });
             renderTree();
         });
         stack.appendChild(el);
@@ -5539,6 +5758,7 @@ function renderTree() {
         if ((node.children || []).length) {
             const branch = document.createElement("ul");
             branch.className = "execution-tree-list";
+            branch.dataset.parentStatus = nodeStatus;
             (node.children || []).forEach((child) => branch.appendChild(walk(child)));
             item.appendChild(branch);
         }
@@ -5633,6 +5853,7 @@ async function syncArtifactsForSelectedNode({ preserveViewState = true, autoSele
         return visibleArtifacts;
     } finally {
         restoreTaskDetailViewState(viewState);
+        scheduleTaskDetailSessionPersist();
     }
 }
 
@@ -5657,6 +5878,7 @@ async function selectArtifact(artifactId, { preserveViewState = true } = {}) {
         if (U.artifactApply) U.artifactApply.hidden = !(artifact && artifact.kind === "patch");
     } finally {
         restoreTaskDetailViewState(viewState);
+        scheduleTaskDetailSessionPersist();
     }
 }
 
@@ -5688,10 +5910,11 @@ async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
     }
 }
 
-async function showAgent(node) {
+async function showAgent(node, { preserveViewState = true } = {}) {
     const nodeId = String(node?.node_id || "").trim();
     if (!nodeId) return;
-    const viewState = captureTaskDetailViewState();
+    const viewState = consumePendingTaskDetailRestore(nodeId)
+        || (preserveViewState ? captureTaskDetailViewState() : getStoredTaskDetailViewState(S.currentTaskId, nodeId));
     const detail = await ensureTaskNodeDetail(nodeId);
     const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
     const mergedNode = {
@@ -5699,26 +5922,23 @@ async function showAgent(node) {
         ...(detail || {}),
         executionTrace: buildNodeExecutionTrace(node, detail || {}, liveFrameMap.get(nodeId) || null),
     };
-    const compactHeading = compactNodeHeading(node);
+    const compactHeading = compactNodeHeading(mergedNode);
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
     if (U.adRole) U.adRole.hidden = true;
-    U.adStatus.textContent = String(node.display_state || node.state || "").toUpperCase();
-    U.adStatus.dataset.status = node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
-    renderExecutionTrace(node);
-    renderAcceptanceResult(node.executionTrace?.acceptance_result || "");
     U.adStatus.textContent = String(mergedNode.display_state || mergedNode.state || mergedNode.status || "").toUpperCase();
-    U.adStatus.dataset.status = mergedNode.state || mergedNode.status || "";
+    U.adStatus.dataset.status = mergedNode.state || mergedNode.status || node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
-    renderExecutionTrace(mergedNode);
+    renderExecutionTrace(mergedNode, { viewState });
     renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
     U.feedTitle.textContent = `Node: ${compactHeading}`;
     U.feedTitle.title = compactHeading;
     setTaskDetailOpen(true);
     icons();
     restoreTaskDetailViewState(viewState);
+    stashTaskDetailViewState({ nodeId, viewState });
     void syncArtifactsForSelectedNode();
 }
 
@@ -5777,10 +5997,34 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
     return payload;
 }
 
+async function restoreTaskDetailSession() {
+    const snapshot = readTaskDetailSessionSnapshot();
+    if (!snapshot?.currentTaskId) return false;
+    try {
+        await loadTaskDetail(snapshot.currentTaskId);
+        S.taskDetailViewStates = snapshot.nodeViewStates || {};
+        S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, snapshot.treeRoundSelectionsByNodeId);
+        S.selectedArtifactId = snapshot.selectedArtifactId || "";
+        if (snapshot.selectedNodeId) {
+            const pendingViewState = getStoredTaskDetailViewState(snapshot.currentTaskId, snapshot.selectedNodeId);
+            S.pendingTaskDetailRestore = { nodeId: snapshot.selectedNodeId, viewState: pendingViewState };
+            S.selectedNodeId = snapshot.selectedNodeId;
+            renderTree();
+        }
+        await loadTaskArtifacts();
+        scheduleTaskDetailSessionPersist();
+        return true;
+    } catch {
+        clearTaskDetailSession();
+        return false;
+    }
+}
+
 async function openTask(taskId) {
     try {
         await loadTaskDetail(taskId);
         await loadTaskArtifacts();
+        scheduleTaskDetailSessionPersist();
     } catch (e) {
         U.tree.innerHTML = `<div class="empty-state error">Failed to open task: ${esc(e.message)}</div>`;
         showToast({ title: "Task open failed", text: e.message || "Unknown error", kind: "error" });
@@ -5815,10 +6059,13 @@ function handleTaskEvent(payload) {
     if (payload.type === "task.node.updated") {
         const nodeId = String(payload.data?.node_id || "").trim();
         if (nodeId) {
+            if (String(S.selectedNodeId || "") === nodeId) {
+                stashTaskDetailViewState({ nodeId, viewState: captureTaskDetailViewState() });
+            }
             delete S.taskNodeDetails[nodeId];
             if (String(S.selectedNodeId || "") === nodeId) {
                 const selected = findTreeNode(S.treeView || S.tree, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
-                void showAgent(selected);
+                void showAgent(selected, { preserveViewState: false });
             }
         }
         return;
@@ -6025,6 +6272,7 @@ function renderTools() {
             <div class="resource-list-subtitle">${esc(subtitle)}</div>
             <div class="resource-list-meta">
                 <span class="meta-tag status-${resourceAvailabilityStatus(tool)}">${esc(displayEnabledLabel(tool.enabled, tool.available))}</span>
+                ${tool.is_core ? '<span class="meta-tag">核心工具</span>' : ''}
                 <span class="meta-tag tool-actions">${(tool.actions || []).length} 个 action</span>
             </div>`;
         el.addEventListener("click", () => openTool(tool.tool_id));
@@ -6694,11 +6942,12 @@ function renderToolDetail() {
     const actions = Array.isArray(S.selectedTool.actions) ? S.selectedTool.actions : [];
     const description = String(S.selectedTool.description || "").trim();
     const toolskillContent = String(S.selectedTool.toolskill_content || "").trim();
+    const isCoreTool = !!S.selectedTool.is_core;
     U.toolDetail.innerHTML = `
         <article class="resource-detail-card detail-modal-shell">
             <div class="detail-modal-header">
                 <div class="detail-modal-title">
-                    <h2 id="tool-detail-title">${esc(S.selectedTool.display_name)}</h2>
+                    <h2 id="tool-detail-title">${esc(S.selectedTool.display_name)}${isCoreTool ? ' <span class="meta-tag">核心工具</span>' : ''}</h2>
                     <p class="subtitle">${esc(S.selectedTool.tool_id)}</p>
                 </div>
                 <div class="detail-modal-actions">
@@ -6708,9 +6957,11 @@ function renderToolDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
-                    ${S.selectedTool.enabled
-                        ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>`
-                        : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`}
+                    ${isCoreTool
+                        ? `<button type="button" class="toolbar-btn ghost" id="tool-disable-btn" disabled>核心工具不可禁用</button>`
+                        : (S.selectedTool.enabled
+                            ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>`
+                            : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`)}
                 </div>
                 <div class="resource-section">
                     <h3>描述</h3>
@@ -6741,6 +6992,21 @@ function renderToolDetail() {
                             const actionId = esc(action.action_id);
                             const riskLevel = esc(displayRiskLabel(action.risk_level || "medium"));
                             const riskClass = `risk-${String(action.risk_level || "medium").toLowerCase()}`;
+                            const adminMode = String(action.admin_mode || "editable").trim().toLowerCase();
+                            const agentVisible = action.agent_visible !== false;
+                            if (adminMode === "readonly_system") {
+                                return `
+                                <article class="tool-permission-card">
+                                    <div class="tool-permission-card-head">
+                                        <div class="tool-action-meta">
+                                            <div class="tool-action-name">${actionName}</div>
+                                            <div class="tool-action-id">${actionId}</div>
+                                        </div>
+                                        <span class="risk-pill ${riskClass}">${riskLevel}</span>
+                                    </div>
+                                    <div class="resource-copy-block">系统只读项；不参与 Agent 工具可见性，不支持角色权限编辑。</div>
+                                </article>`;
+                            }
                             return `
                                 <article class="tool-permission-card">
                                     <div class="tool-permission-card-head">
@@ -6752,8 +7018,8 @@ function renderToolDetail() {
                                     </div>
                                     <div class="tool-role-toggle-group">
                                         ${roles.map((role) => `
-                                            <label class="role-toggle tool-role-toggle ${action.allowed_roles?.includes(role) ? "checked" : ""}">
-                                                <input type="checkbox" class="tool-role tool-role-input" data-action="${actionId}" data-role="${role}" aria-label="${actionName} - ${esc(displayRoleLabel(role))}" ${action.allowed_roles?.includes(role) ? "checked" : ""}>
+                                            <label class="role-toggle tool-role-toggle ${((isCoreTool && agentVisible && role === "ceo") || action.allowed_roles?.includes(role)) ? "checked" : ""}">
+                                                <input type="checkbox" class="tool-role tool-role-input" data-action="${actionId}" data-role="${role}" aria-label="${actionName} - ${esc(displayRoleLabel(role))}" ${((isCoreTool && agentVisible && role === "ceo") || action.allowed_roles?.includes(role)) ? "checked" : ""} ${(isCoreTool && agentVisible && role === "ceo") ? "disabled" : ""}>
                                                 <span>${esc(displayRoleLabel(role))}</span>
                                             </label>
                                         `).join("")}
@@ -6768,9 +7034,10 @@ function renderToolDetail() {
     if (toolStatusRow && !toolStatusRow.querySelector("#tool-delete-btn")) {
         const deleteButton = document.createElement("button");
         deleteButton.type = "button";
-        deleteButton.className = "toolbar-btn danger";
+        deleteButton.className = `toolbar-btn ${isCoreTool ? "ghost" : "danger"}`;
         deleteButton.id = "tool-delete-btn";
-        deleteButton.textContent = "删除";
+        deleteButton.textContent = isCoreTool ? "核心工具不可删除" : "删除";
+        deleteButton.disabled = isCoreTool;
         toolStatusRow.appendChild(deleteButton);
     }
     U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
@@ -6923,6 +7190,10 @@ function requestDeleteTool() {
 
 async function performDeleteTool(toolId, displayName) {
     if (!toolId) return;
+    if (S.selectedTool?.is_core) {
+        showToast({ title: "无法删除", text: "核心工具不可删除。", kind: "error", durationMs: 2200 });
+        return;
+    }
     S.toolBusy = true;
     renderToolActions();
     showToast({ title: "正在删除", text: `正在移除 ${displayName || toolId}...`, kind: "info", persistent: true });
@@ -6992,12 +7263,14 @@ function switchView(view) {
         el.style.display = active ? "" : "none";
     });
     if (view !== "task-details") {
+        stashTaskDetailViewState();
         setTaskTokenStatsOpen(false);
         clearAgentSelection({ rerender: false });
         if (S.taskWs) {
             S.taskWs.close();
             S.taskWs = null;
         }
+        scheduleTaskDetailSessionPersist();
     }
     if (view === "tasks") {
         void loadTasks();
@@ -7363,7 +7636,11 @@ function init() {
     configureTaskDetailSections();
     bind();
     startLiveDurationTicker();
-    window.addEventListener("beforeunload", stopLiveDurationTicker);
+    window.addEventListener("beforeunload", () => {
+        flushTaskDetailSessionPersist();
+        stopLiveDurationTicker();
+    });
+    window.addEventListener("pagehide", flushTaskDetailSessionPersist);
     window.addEventListener("resize", refreshTaskDetailScrollRegions);
     bindTreePan();
     icons();
@@ -7374,6 +7651,7 @@ function init() {
     renderCommunicationActions();
     void loadModels();
     void loadTasks();
+    void restoreTaskDetailSession();
     initCeoWs();
 }
 

@@ -3,15 +3,21 @@
 ## 结构
 
 - `memory/MEMORY.md` — 长期事实（偏好、项目背景、关系）。始终加载到您的上下文中。
-- `memory/HISTORY.md` — 仅追加的事件日志。**不**加载到上下文中。请使用 grep 进行搜索。每个条目都以 [YYYY-MM-DD HH:MM] 开头。
+- `memory/HISTORY.md` — 仅追加的事件日志。**不**加载到上下文中。优先使用 `exec` + `rg` 搜索；如果环境没有 `rg`，再退回 PowerShell `Select-String`。每个条目都以 [YYYY-MM-DD HH:MM] 开头。
 
 ## 搜索过去发生的事件
 
 ```bash
-grep -i "关键词" memory/HISTORY.md
+rg -n -i "关键词" memory/HISTORY.md
 ```
 
-使用 `exec` 工具运行 grep。组合模式：`grep -iE "会议|截止日期" memory/HISTORY.md`
+使用 `exec` 工具运行搜索。组合模式：`rg -n -i "会议|截止日期" memory/HISTORY.md`
+
+如果当前环境没有 `rg`，改用 PowerShell：
+
+```powershell
+Select-String -Path memory/HISTORY.md -Pattern "会议|截止日期" -CaseSensitive:$false
+```
 
 ## 何时更新 MEMORY.md
 

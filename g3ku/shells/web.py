@@ -13,6 +13,7 @@ from g3ku.cli.commands import _make_provider
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.runtime import SessionRuntimeManager
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
+from main.protocol import now_iso
 
 _global_agent: Optional[AgentLoop] = None
 _global_bus: Optional[MessageBus] = None
@@ -126,9 +127,21 @@ def get_web_heartbeat_service(agent: AgentLoop | None = None):
 
 
 async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
+    runtime_agent = agent or get_agent()
+    main_task_service = getattr(runtime_agent, 'main_task_service', None)
+    if main_task_service is not None:
+        await main_task_service.startup()
     heartbeat = get_web_heartbeat_service(agent)
     if heartbeat is not None:
         await heartbeat.start()
+        if main_task_service is not None:
+            for entry in main_task_service.store.list_pending_task_terminal_outbox(limit=500):
+                payload = dict(entry.get('payload') or {})
+                dedupe_key = str(entry.get('dedupe_key') or '').strip()
+                if not dedupe_key:
+                    continue
+                if heartbeat.enqueue_task_terminal_payload(payload):
+                    main_task_service.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
 
 
 async def shutdown_web_runtime() -> None:

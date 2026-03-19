@@ -45,6 +45,8 @@ class ToolActionRecord(Model):
     label: str
     risk_level: PermissionRiskLevel = 'medium'
     destructive: bool = False
+    agent_visible: bool = True
+    admin_mode: Literal['editable', 'readonly_system'] = 'editable'
     allowed_roles: list[ActorRole] = Field(default_factory=list)
     executor_names: list[str] = Field(default_factory=list)
 
@@ -54,6 +56,7 @@ class ToolFamilyRecord(Model):
     display_name: str
     description: str
     primary_executor_name: str = ''
+    is_core: bool = False
     enabled: bool = True
     available: bool = True
     tool_type: str = 'internal'

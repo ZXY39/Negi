@@ -40,3 +40,16 @@ tests/resources/**/*.pyc
 !tests/test_china_bridge_session_keys.py
 !tests/test_china_bridge_transport.py
 !tests/test_channel_manager_china_bridge.py
+
+# Runtime and local state
+.g3ku/
+memory/
+!memory/*.md
+*.sqlite3*
+*.db*
+*.lock
+*.jsonl
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

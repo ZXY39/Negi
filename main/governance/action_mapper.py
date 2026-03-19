@@ -59,8 +59,32 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'memory_search': {
         'tool_id': 'memory',
         'display_name': 'Memory',
-        'description': 'Search long-term memory.',
-        'actions': [{'id': 'search', 'label': 'Search Memory', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
+        'description': 'Search long-term memory and expose memory runtime internals.',
+        'actions': [
+            {
+                'id': 'search',
+                'label': 'Search Memory',
+                'risk_level': 'low',
+                'destructive': False,
+                'allowed_roles': DEFAULT_ALLOWED_ROLES,
+            }
+        ],
+    },
+    'memory_runtime': {
+        'tool_id': 'memory',
+        'display_name': 'Memory',
+        'description': 'Search long-term memory and expose memory runtime internals.',
+        'actions': [
+            {
+                'id': 'runtime',
+                'label': 'Memory Runtime',
+                'risk_level': 'low',
+                'destructive': False,
+                'agent_visible': False,
+                'admin_mode': 'readonly_system',
+                'allowed_roles': DEFAULT_ALLOWED_ROLES,
+            }
+        ],
     },
     'create_async_task': {
         'tool_id': 'task_runtime',

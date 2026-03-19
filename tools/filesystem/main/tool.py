@@ -14,11 +14,27 @@ _METADATA_START = '### G3KU_PATCH_METADATA ###'
 _DIFF_START = '### G3KU_PATCH_DIFF ###'
 
 
+def _content_ref_path_error(path: str) -> str | None:
+    raw = str(path or '').strip()
+    if not raw:
+        return None
+    if raw.startswith('artifact:'):
+        return f'content ref is not a filesystem path: {path}; use the content tool with ref={raw}'
+    return None
+
+
+def _raise_if_content_ref_path(path: str) -> None:
+    content_ref_error = _content_ref_path_error(path)
+    if content_ref_error is not None:
+        raise ValueError(content_ref_error)
+
+
 def _resolve_path(
     path: str,
     workspace: Path | None = None,
     allowed_dir: Path | None = None,
 ) -> Path:
+    _raise_if_content_ref_path(path)
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
         raise ValueError(f'relative path is not allowed; provide absolute path: {path}')
@@ -132,6 +148,7 @@ class FilesystemTool:
         return f'Error: Action not allowed for role {actor_role}: filesystem.{action_id}'
 
     def _describe(self, path: str) -> str:
+        _raise_if_content_ref_path(path)
         return json.dumps(self._navigator().describe(path=path), ensure_ascii=False)
 
     def _search(self, path: str, query: Any, limit: Any, before: Any, after: Any) -> str:
@@ -175,6 +192,7 @@ class FilesystemTool:
         return json.dumps(result, ensure_ascii=False)
 
     def _open(self, path: str, start_line: Any, end_line: Any, around_line: Any, window: Any) -> str:
+        _raise_if_content_ref_path(path)
         return json.dumps(
             self._navigator().open(
                 path=path,
@@ -187,9 +205,11 @@ class FilesystemTool:
         )
 
     def _head(self, path: str, lines: Any) -> str:
+        _raise_if_content_ref_path(path)
         return json.dumps(self._navigator().head(path=path, lines=int(lines or 80)), ensure_ascii=False)
 
     def _tail(self, path: str, lines: Any) -> str:
+        _raise_if_content_ref_path(path)
         return json.dumps(self._navigator().tail(path=path, lines=int(lines or 80)), ensure_ascii=False)
 
     def _list(self, path: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any
 
 from main.errors import TaskPausedError
@@ -55,6 +56,11 @@ class TaskRunner:
             self._active_tasks.pop(task_id, None)
             return
         except asyncio.CancelledError:
+            latest = self._store.get_task(task_id)
+            if latest is not None and bool(latest.pause_requested) and not bool(latest.cancel_requested):
+                self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+                self._active_tasks.pop(task_id, None)
+                return
             result = NodeFinalResult(
                 status='failed',
                 delivery_status='blocked',
@@ -253,6 +259,11 @@ class TaskRunner:
 
     async def pause(self, task_id: str) -> None:
         self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+        active = self._active_tasks.get(task_id)
+        if active is not None and not active.done():
+            active.cancel()
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(active), timeout=1.0)
 
     async def resume(self, task_id: str) -> None:
         task_record = self._store.get_task(task_id)

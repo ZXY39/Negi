@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from g3ku.resources import ResourceManager
 from g3ku.session.manager import Session
 from main.api import admin_rest
+from main.governance.resource_filter import list_effective_tool_names
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
 from main.models import TaskRecord
 from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService
@@ -136,6 +137,11 @@ exposure:
         '# Demo Skill\n\nThis skill is used by tests.\n',
         encoding='utf-8',
     )
+
+
+def _copy_repo_tools(workspace: Path, *names: str) -> None:
+    for name in names:
+        shutil.copytree(REPO_ROOT / 'tools' / name, workspace / 'tools' / name)
 
 
 def _running_task_record(
@@ -413,6 +419,7 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     tool = CreateAsyncTaskTool(_StubService())
     result = await tool.execute(
         '整理需求',
+        core_requirement='梳理用户需求的核心目标',
         __g3ku_runtime={'session_key': 'web:ceo-demo', 'task_defaults': {'max_depth': 3}},
     )
 
@@ -420,6 +427,30 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     assert captured['task'] == '整理需求'
     assert captured['session_id'] == 'web:ceo-demo'
     assert captured['max_depth'] == 3
+    assert captured['kwargs']['metadata']['core_requirement'] == '梳理用户需求的核心目标'
+
+
+@pytest.mark.asyncio
+async def test_main_runtime_service_falls_back_core_requirement_to_task_prompt(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    service.task_runner.start_background = lambda task_id: None
+
+    try:
+        record = await service.create_task('整理需求', session_id='web:shared', metadata={})
+
+        assert record.metadata['core_requirement'] == '整理需求'
+        stored = service.get_task(record.task_id)
+        assert stored is not None
+        assert stored.metadata['core_requirement'] == '整理需求'
+    finally:
+        await service.close()
 
 
 def test_ceo_session_task_defaults_endpoint_reads_and_updates_depth(tmp_path: Path):
@@ -1442,6 +1473,177 @@ async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Pa
         assert payload['usage']['ceo_sessions'][0]['title'] == '删除测试会话'
         assert (workspace / 'tools' / 'external_browser').exists()
         assert service.get_tool_family('external_browser') is not None
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(
+        workspace,
+        'content',
+        'memory_search',
+        'memory_runtime',
+        'message',
+        'load_skill_context',
+        'load_tool_context',
+        'create_async_task_cn',
+        'task_fetch_cn',
+        'task_progress_cn',
+        'task_summary_cn',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        items = {item.tool_id: item for item in service.list_tool_resources()}
+
+        assert items['content'].is_core is True
+        assert items['memory'].is_core is True
+        assert items['messaging'].is_core is True
+        assert items['skill_access'].is_core is True
+        assert items['task_runtime'].is_core is True
+
+        memory_actions = {action.action_id: action for action in items['memory'].actions}
+        assert set(memory_actions) == {'search', 'runtime'}
+        assert memory_actions['search'].agent_visible is True
+        assert memory_actions['search'].admin_mode == 'editable'
+        assert memory_actions['runtime'].agent_visible is False
+        assert memory_actions['runtime'].admin_mode == 'readonly_system'
+
+        class _Registry:
+            def list_tool_families(self):
+                return list(items.values())
+
+        class _PolicyEngine:
+            @staticmethod
+            def evaluate_tool_action(**kwargs):
+                _ = kwargs
+                return SimpleNamespace(allowed=True)
+
+        visible = set(
+            list_effective_tool_names(
+                subject=SimpleNamespace(actor_role='ceo'),
+                supported_tool_names=['memory_search', 'memory_runtime'],
+                resource_registry=_Registry(),
+                policy_engine=_PolicyEngine(),
+                mutation_allowed=True,
+            )
+        )
+        assert visible == {'memory_search'}
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'load_skill_context', 'load_tool_context', 'memory_runtime')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        families = {item.tool_id: item for item in service.resource_registry.refresh_from_current_resources()[1]}
+        broken = families['skill_access'].model_copy(
+            update={
+                'enabled': False,
+                'actions': [
+                    action.model_copy(update={'allowed_roles': ['execution', 'inspection']})
+                    for action in families['skill_access'].actions
+                ],
+            }
+        )
+        service.governance_store.upsert_tool_family(broken, updated_at=datetime.now().isoformat())
+
+        await service.startup()
+
+        reconciled = service.get_tool_family('skill_access')
+        assert reconciled is not None
+        assert reconciled.is_core is True
+        assert reconciled.enabled is True
+        assert all('ceo' in action.allowed_roles for action in reconciled.actions if action.agent_visible)
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_core_tool_admin_endpoints_block_disable_delete_and_ceo_removal(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(
+        workspace,
+        'content',
+        'message',
+        'memory_runtime',
+        'load_skill_context',
+        'load_tool_context',
+        'create_async_task_cn',
+        'task_fetch_cn',
+        'task_progress_cn',
+        'task_summary_cn',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        client = TestClient(_build_app(service))
+
+        disable_response = client.post('/api/resources/tools/task_runtime/disable', params={'session_id': 'web:shared'})
+        assert disable_response.status_code == 409
+        assert disable_response.json()['detail']['code'] == 'core_tool_disable_forbidden'
+
+        delete_response = client.delete('/api/resources/tools/skill_access', params={'session_id': 'web:shared'})
+        assert delete_response.status_code == 409
+        assert delete_response.json()['detail']['code'] == 'core_tool_delete_forbidden'
+
+        policy_response = client.put(
+            '/api/resources/tools/content/policy',
+            params={'session_id': 'web:shared'},
+            json={'actions': {'inspect': ['execution', 'inspection']}},
+        )
+        assert policy_response.status_code == 409
+        assert policy_response.json()['detail']['code'] == 'core_tool_ceo_visibility_required'
     finally:
         await service.close()
         manager.close()

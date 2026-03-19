@@ -16,9 +16,8 @@ class ModelConfigTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Manage .g3ku/config.json model catalog and role model chains. "
-            "Supports listing models, adding/updating models, enabling/disabling models, "
-            "and setting ordered fallback chains for ceo/execution/inspection scopes."
+            "Manage .g3ku/config.json model catalog, provider templates/drafts/bindings, "
+            "and ordered fallback chains for ceo/execution/inspection scopes."
         )
 
     @property
@@ -35,7 +34,6 @@ class ModelConfigTool(Tool):
                         "probe_draft",
                         "create_binding",
                         "update_binding",
-                        "set_memory_models",
                         "migrate_legacy",
                         "list_models",
                         "get_model",
@@ -75,8 +73,6 @@ class ModelConfigTool(Tool):
                 "provider_id": {"type": "string", "description": "Provider template id."},
                 "draft": {"type": "object", "description": "New LLM config draft payload."},
                 "binding": {"type": "object", "description": "Binding payload containing key/config_id/enabled/retry settings."},
-                "embedding_model_key": {"type": "string", "description": "Memory embedding model key."},
-                "rerank_model_key": {"type": "string", "description": "Memory rerank model key."},
                 "model_keys": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -119,11 +115,6 @@ class ModelConfigTool(Tool):
             manager.save()
             await self._refresh_runtime(kwargs)
             return result
-
-        if action_name == "set_memory_models":
-            result = manager.facade.get_memory_binding()
-            await self._refresh_runtime(kwargs)
-            return result.model_dump(mode='json')
 
         if action_name == "migrate_legacy":
             from g3ku.config.loader import load_config

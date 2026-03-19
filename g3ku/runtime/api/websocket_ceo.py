@@ -12,7 +12,6 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
-from g3ku.runtime.legacy_metadata import is_legacy_runtime_metadata_message
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_session_summary,
@@ -359,8 +358,6 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
     items: list[dict[str, Any]] = []
     for raw in list(messages or []):
         if not isinstance(raw, dict):
-            continue
-        if is_legacy_runtime_metadata_message(raw):
             continue
         role = str(raw.get('role') or '').strip().lower()
         if role not in {'user', 'assistant', 'system'}:

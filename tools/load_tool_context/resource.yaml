@@ -22,11 +22,14 @@ parameters:
   properties:
     tool_id:
       type: string
+      description: 要加载的工具 family id 或 executor tool name。
     level:
       type: string
       enum: [l0, l1, l2]
+      description: 请求的上下文层级。默认 l1。
     query:
       type: string
+      description: 可选：用于提取聚焦 L2 摘录的查询。
     max_tokens:
       type: integer
       description: 可选的返回 token 预算。

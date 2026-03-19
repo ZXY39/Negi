@@ -10,6 +10,11 @@
 
 ## 目标产物
 
+当前仓库区分两类工具：
+
+- `internal`：`tools/<tool_id>/main/tool.py` 中有实际运行时代码，可直接进入 callable tool 列表
+- `external`：第三方项目安装在 `tools/` 之外，`tools/<tool_id>/` 只负责注册，不包含 `main/`
+
 ```text
 tools/
   <tool_id>/
@@ -31,7 +36,7 @@ tools/
 - 需要稳定的参数接口
 - 需要显式权限声明
 - 需要读写文件、调用外部程序、访问网络或产生副作用
-- 需要一个真正可执行的 `main/tool.py`
+- 需要一个真正可执行的工具入口；`internal` 走 `main/tool.py`，`external` 则通过注册目录 + `install_dir` 接入
 
 如果核心是知识说明、步骤路由和上下文组织，改走 `references/create-skill-workflow.md`。
 
@@ -48,8 +53,10 @@ tools/
 ## 步骤 3：设计目录与接入方式
 
 - `tool_id` 使用 `snake_case`
-- 新代码放在 `main/`
-- 包装已有项目时，把上游项目放进 `main/<project>/`
+- 先决定是 `internal` 还是 `external`
+- `internal` 的新代码放在 `main/`
+- `internal` 包装已有项目时，把上游项目放进 `main/<project>/`
+- `external` 不写 `main/`，而是把第三方项目安装到 `tools/` 外，并在 `resource.yaml` 里声明 `install_dir`
 - 面向模型的说明统一写到 `toolskills/SKILL.md`
 - 非机密配置写 `resource.yaml -> settings`
 - 机密配置保留在 `.g3ku/config.json -> toolSecrets`
@@ -62,6 +69,7 @@ tools/
 - `kind: tool`
 - `name`
 - `description`
+- `tool_type: internal | external`
 - `protocol: mcp`
 - `mcp.transport: embedded`
 - `requires`
@@ -77,10 +85,17 @@ tools/
 - `settings`
 - `governance`
 
-## 步骤 5：实现 `main/tool.py`
+额外约束：
 
-- `main/tool.py` 是唯一入口
-- 优先遵循仓库已有 `build(runtime)` 或装载模式
+- `internal` 必须有 `main/tool.py`，且不得写 `install_dir`
+- `external` 必须写 `install_dir`，不得包含 `main/`
+- `external.install_dir` 必须位于 `tools/` 之外
+
+## 步骤 5：实现入口
+
+- `internal`：`main/tool.py` 是唯一入口
+- `external`：在外部安装目录维护真实入口，`tools/<tool_id>/` 只保留注册与 toolskill
+- 内置入口优先遵循仓库已有 `build(runtime)` 或装载模式
 - 处理参数校验、运行时上下文、错误信息和返回结构
 - 不要把副作用散落到 G3KU 内核目录
 

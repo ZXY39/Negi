@@ -36,12 +36,13 @@ async def tasks_websocket(websocket: WebSocket):
         return
     await service.startup()
     effective_session_id = None if requested_session_id.lower() == 'all' else requested_session_id
+    current_seq = max(after_seq, service.store.latest_task_event_seq(session_id=effective_session_id))
     snapshot = [item.model_dump(mode='json') for item in service.query_service.get_tasks(effective_session_id, 1)]
     await websocket.send_json(
         build_envelope(
             channel='task',
             session_id=requested_session_id,
-            seq=after_seq,
+            seq=current_seq,
             type='hello',
             data={'session_id': requested_session_id},
         )
@@ -50,7 +51,7 @@ async def tasks_websocket(websocket: WebSocket):
         build_envelope(
             channel='task',
             session_id=requested_session_id,
-            seq=after_seq,
+            seq=current_seq,
             type='task.list.snapshot',
             data={
                 'items': snapshot,
@@ -59,7 +60,6 @@ async def tasks_websocket(websocket: WebSocket):
             },
         )
     )
-    current_seq = after_seq
     try:
         while True:
             try:
@@ -111,6 +111,7 @@ async def task_websocket(websocket: WebSocket, task_id: str):
         return
     await service.startup()
     task_id = service.normalize_task_id(task_id)
+    current_seq = max(after_seq, service.store.latest_task_event_seq(task_id=task_id))
     payload = service.get_task_detail_payload(task_id, mark_read=False)
     if payload is None:
         await websocket.send_json(
@@ -131,7 +132,7 @@ async def task_websocket(websocket: WebSocket, task_id: str):
             channel='task',
             session_id=session_id,
             task_id=task_id,
-            seq=after_seq,
+            seq=current_seq,
             type='hello',
             data={'task_id': task_id, 'session_id': session_id},
         )
@@ -141,12 +142,11 @@ async def task_websocket(websocket: WebSocket, task_id: str):
             channel='task',
             session_id=session_id,
             task_id=task_id,
-            seq=after_seq,
+            seq=current_seq,
             type='task.snapshot',
             data=payload,
         )
     )
-    current_seq = after_seq
     try:
         while True:
             try:

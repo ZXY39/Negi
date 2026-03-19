@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: load_skill_context
-description: 加载当前可见技能的详细正文，便于 CEO 使用。
+description: 加载当前可见技能的分层上下文。默认返回 L1 概览；可用 level=l2 + query 获取聚焦摘录。
 source:
   type: ''
   url: ''
@@ -22,14 +22,17 @@ parameters:
   properties:
     skill_id:
       type: string
+      description: 要加载的 skill id。
     level:
       type: string
       enum: [l0, l1, l2]
+      description: 请求的上下文层级。默认 l1。
     query:
       type: string
+      description: 可选：用于提取聚焦 L2 摘录的查询。
     max_tokens:
       type: integer
-      description: 要加载的 skill id。
+      description: 可选的返回 token 预算。
   required:
   - skill_id
 exposure:

@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: model_config
-description: 管理 .g3ku/config.json 的模型目录与角色模型链。支持列出模型、添加/更新、启用/禁用，以及设置 ceo/execution/inspection 的有序回退链。
+description: 管理 .g3ku/config.json 的模型目录、Provider 模板/草稿/绑定，以及 ceo/execution/inspection 的有序回退链。
 source:
   type: ''
   url: ''
@@ -23,6 +23,13 @@ parameters:
     action:
       type: string
       enum:
+      - list_templates
+      - get_template
+      - validate_draft
+      - probe_draft
+      - create_binding
+      - update_binding
+      - migrate_legacy
       - list_models
       - get_model
       - add_model
@@ -46,6 +53,15 @@ parameters:
     extra_headers:
       type: object
       description: 可选：该模型的额外请求头。
+    provider_id:
+      type: string
+      description: Provider 模板 id，用于 get_template。
+    draft:
+      type: object
+      description: LLM 配置草稿，用于 validate_draft、probe_draft、create_binding、update_binding。
+    binding:
+      type: object
+      description: 绑定载荷，包含 key/config_id/enabled/retry 等字段，用于 create_binding。
     enabled:
       type: boolean
       description: 可选：add/update 的 enabled 标记。
@@ -63,6 +79,9 @@ parameters:
       items:
         type: string
       description: 重试触发条件，如 network、429、5xx。
+    retry_count:
+      type: integer
+      description: 在同一模型上允许的可重试失败次数，超过后再进入回退链。
     description:
       type: string
       description: 可选：人类可读的描述。

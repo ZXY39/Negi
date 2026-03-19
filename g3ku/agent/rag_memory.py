@@ -82,6 +82,80 @@ def _decode_ns(raw: str) -> tuple[str, ...]:
     return tuple(part for part in raw.split(_NS_SEP) if part)
 
 
+def _read_lock_metadata(handle: Any) -> dict[str, object]:
+    try:
+        handle.seek(0)
+        raw = handle.read().strip()
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _try_acquire_file_lock(path: Path, *, metadata: dict[str, object] | None = None) -> Any | None:
+    ensure_dir(path.parent)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+
+    if metadata:
+        handle.seek(0)
+        handle.truncate(0)
+        handle.write(json.dumps(metadata, ensure_ascii=False))
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
+    return handle
+
+
+def _release_file_lock(handle: Any) -> None:
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
+def _dense_owner_lock_path(qdrant_path: Path) -> Path:
+    resolved = qdrant_path.expanduser().resolve()
+    return resolved.parent / f".{resolved.name}.g3ku.dense.lock"
+
+
+def _task_runtime_role() -> str:
+    return str(os.getenv("G3KU_TASK_RUNTIME_ROLE", "embedded") or "embedded").strip().lower()
+
+
 def _ns_prefix_match(namespace: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
     if len(namespace) < len(prefix):
         return False
@@ -488,6 +562,7 @@ class _SharedDenseBackend:
 
     store: Any
     refs: int = 0
+    owner_lock: Any = None
 
 
 class G3kuHybridStore(BaseStore):
@@ -602,6 +677,14 @@ class G3kuHybridStore(BaseStore):
             )
 
     def _init_dense_backend(self) -> None:
+        if _task_runtime_role() == "worker":
+            logger.info("Hybrid store dense backend disabled for worker runtime; using sparse-only")
+            self._dense_enabled = False
+            self._qdrant = None
+            self._shared_dense_key = None
+            return
+
+        dense_owner_lock = None
         try:
             from langchain_qdrant import QdrantVectorStore
 
@@ -617,6 +700,31 @@ class G3kuHybridStore(BaseStore):
                     self._shared_dense_key = dense_key
                     self._qdrant = shared.store
                     self._dense_enabled = True
+                    return
+
+                dense_lock_path = _dense_owner_lock_path(self.qdrant_path)
+                dense_owner_lock = _try_acquire_file_lock(
+                    dense_lock_path,
+                    metadata={
+                        "pid": os.getpid(),
+                        "qdrant_path": str(self.qdrant_path),
+                        "collection": self.qdrant_collection,
+                    },
+                )
+                if dense_owner_lock is None:
+                    try:
+                        with dense_lock_path.open("r", encoding="utf-8") as handle:
+                            holder_pid = _read_lock_metadata(handle).get("pid", "unknown")
+                    except Exception:
+                        holder_pid = "unknown"
+                    logger.info(
+                        "Hybrid store dense backend busy at {}; owned by pid={}, using sparse-only",
+                        self.qdrant_path,
+                        holder_pid,
+                    )
+                    self._dense_enabled = False
+                    self._qdrant = None
+                    self._shared_dense_key = None
                     return
 
                 if _is_dashscope_vl_embedding_model(self.embedding_model):
@@ -657,11 +765,24 @@ class G3kuHybridStore(BaseStore):
                 self._qdrant = qdrant_store
                 self._dense_enabled = True
                 self._shared_dense_key = dense_key
-                self._dense_backend_registry[dense_key] = _SharedDenseBackend(store=qdrant_store, refs=1)
+                self._dense_backend_registry[dense_key] = _SharedDenseBackend(
+                    store=qdrant_store,
+                    refs=1,
+                    owner_lock=dense_owner_lock,
+                )
         except Exception as exc:
-            logger.warning("Hybrid store dense backend unavailable; fallback to sparse-only: {}", exc)
+            if dense_owner_lock is not None:
+                _release_file_lock(dense_owner_lock)
+            if "already accessed by another instance of Qdrant client" in str(exc):
+                logger.info(
+                    "Hybrid store dense backend busy at {}; local Qdrant is in use, using sparse-only",
+                    self.qdrant_path,
+                )
+            else:
+                logger.warning("Hybrid store dense backend unavailable; fallback to sparse-only: {}", exc)
             self._dense_enabled = False
             self._qdrant = None
+            self._shared_dense_key = None
 
     @staticmethod
     def _close_qdrant_store(store: Any) -> None:
@@ -684,6 +805,7 @@ class G3kuHybridStore(BaseStore):
     def close(self) -> None:
         qdrant_store = self._qdrant
         dense_key = self._shared_dense_key
+        dense_owner_lock = None
         self._qdrant = None
         self._shared_dense_key = None
         self._dense_enabled = False
@@ -697,9 +819,11 @@ class G3kuHybridStore(BaseStore):
                     if shared.refs > 0:
                         should_close_dense = False
                     else:
+                        dense_owner_lock = shared.owner_lock
                         self._dense_backend_registry.pop(dense_key, None)
             if should_close_dense:
                 self._close_qdrant_store(qdrant_store)
+                _release_file_lock(dense_owner_lock)
         try:
             self._conn.close()
         except Exception:

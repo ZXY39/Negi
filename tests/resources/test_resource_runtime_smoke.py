@@ -468,6 +468,25 @@ async def test_filesystem_tool_rejects_relative_paths(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_filesystem_tool_rejects_artifact_refs_with_content_guidance(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        result = await tool.execute(action='head', path='artifact:artifact:demo123', lines=5)
+        assert 'content ref is not a filesystem path' in result
+        assert 'use the content tool with ref=artifact:artifact:demo123' in result
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_filesystem_search_recurses_directories(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     search_root = workspace / 'search-root'
@@ -909,6 +928,25 @@ async def test_content_tool_rejects_relative_paths(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_content_tool_rejects_artifact_refs_in_path_mode(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+        blocked = json.loads(await tool.execute(action='search', path='artifact:artifact:demo123', query='needle'))
+        assert blocked['ok'] is False
+        assert 'content ref must be passed via ref, not path' in blocked['error']
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_content_tool_reads_absolute_paths_outside_workspace_by_default(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     outside_file = tmp_path / 'outside.log'
@@ -1055,6 +1093,8 @@ def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp
     assert first is not None
     assert second is not None
     assert first.ref == second.ref
+    assert 'Use content.search/open with ref=' in first.summary
+    assert 'Do not pass this ref as filesystem path.' in first.summary
     assert len(store.list_artifacts('task:test')) == 1
 
     wrapped = navigator.maybe_externalize_text(

@@ -209,6 +209,137 @@ def test_g3ku_hybrid_store_reuses_qdrant_backend_per_process(tmp_path, monkeypat
         G3kuHybridStore._dense_backend_registry.clear()
 
 
+def test_g3ku_hybrid_store_skips_dense_backend_when_owner_lock_is_busy(tmp_path, monkeypatch):
+    calls = {"existing": 0}
+
+    class FakeQdrantVectorStore:
+        @classmethod
+        def from_existing_collection(cls, **kwargs):
+            _ = kwargs
+            calls["existing"] += 1
+            return object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_qdrant",
+        SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setattr(
+        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr("g3ku.agent.rag_memory._try_acquire_file_lock", lambda *args, **kwargs: None)
+
+    G3kuHybridStore._dense_backend_registry.clear()
+    store = G3kuHybridStore(
+        sqlite_path=tmp_path / "memory.db",
+        qdrant_path=tmp_path / "qdrant",
+        qdrant_collection="test_collection",
+        embedding_model="dashscope:qwen3-vl-embedding",
+        dashscope_api_key="test-key",
+    )
+
+    try:
+        assert calls["existing"] == 0
+        assert store._qdrant is None
+        assert store._dense_enabled is False
+    finally:
+        store.close()
+        G3kuHybridStore._dense_backend_registry.clear()
+
+
+def test_g3ku_hybrid_store_disables_dense_backend_for_worker_runtime(tmp_path, monkeypatch):
+    calls = {"existing": 0}
+
+    class FakeQdrantVectorStore:
+        @classmethod
+        def from_existing_collection(cls, **kwargs):
+            _ = kwargs
+            calls["existing"] += 1
+            return object()
+
+    monkeypatch.setenv("G3KU_TASK_RUNTIME_ROLE", "worker")
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_qdrant",
+        SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+
+    G3kuHybridStore._dense_backend_registry.clear()
+    store = G3kuHybridStore(
+        sqlite_path=tmp_path / "memory.db",
+        qdrant_path=tmp_path / "qdrant",
+        qdrant_collection="test_collection",
+        embedding_model="dashscope:qwen3-vl-embedding",
+        dashscope_api_key="test-key",
+    )
+
+    try:
+        assert calls["existing"] == 0
+        assert store._qdrant is None
+        assert store._dense_enabled is False
+    finally:
+        store.close()
+        G3kuHybridStore._dense_backend_registry.clear()
+
+
+def test_g3ku_hybrid_store_releases_owner_lock_after_last_reference(tmp_path, monkeypatch):
+    calls = {"existing": 0, "closed": 0, "released": 0}
+    owner_lock = object()
+
+    class FakeDenseStore:
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    class FakeQdrantVectorStore:
+        @classmethod
+        def from_existing_collection(cls, **kwargs):
+            _ = kwargs
+            calls["existing"] += 1
+            return FakeDenseStore()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_qdrant",
+        SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setattr(
+        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr("g3ku.agent.rag_memory._try_acquire_file_lock", lambda *args, **kwargs: owner_lock)
+    monkeypatch.setattr(
+        "g3ku.agent.rag_memory._release_file_lock",
+        lambda handle: calls.__setitem__("released", calls["released"] + int(handle is owner_lock)),
+    )
+
+    G3kuHybridStore._dense_backend_registry.clear()
+    store1 = G3kuHybridStore(
+        sqlite_path=tmp_path / "memory.db",
+        qdrant_path=tmp_path / "qdrant",
+        qdrant_collection="test_collection",
+        embedding_model="dashscope:qwen3-vl-embedding",
+        dashscope_api_key="test-key",
+    )
+    store2 = G3kuHybridStore(
+        sqlite_path=tmp_path / "memory.db",
+        qdrant_path=tmp_path / "qdrant",
+        qdrant_collection="test_collection",
+        embedding_model="dashscope:qwen3-vl-embedding",
+        dashscope_api_key="test-key",
+    )
+
+    try:
+        assert calls["existing"] == 1
+        store1.close()
+        assert calls["released"] == 0
+        store2.close()
+        assert calls["closed"] == 1
+        assert calls["released"] == 1
+    finally:
+        G3kuHybridStore._dense_backend_registry.clear()
+
+
 
 def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
     workspace = tmp_path / 'workspace'

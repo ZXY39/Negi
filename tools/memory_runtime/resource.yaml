@@ -74,12 +74,15 @@ settings:
     skill_inventory_max_tokens: 480
     extension_tool_top_k: 6
     core_tools:
+    - content
     - create_async_task
     - task_summary
     - task_list
     - task_progress
     - memory_search
     - message
+    - task_runtime
+    - skill_access
   catalog_summary:
     model_key: ceo_primary
   bootstrap_mode: new_only

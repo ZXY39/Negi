@@ -13,6 +13,7 @@ from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.web_ceo_sessions import normalize_ceo_metadata, update_ceo_session_after_turn
 from main.models import TaskRecord
 from main.protocol import build_envelope
+from main.service.task_terminal_callback import build_task_terminal_payload, normalize_task_terminal_payload
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
 
@@ -68,31 +69,28 @@ class WebSessionHeartbeatService:
         record = task if isinstance(task, TaskRecord) else None
         if record is None:
             return
-        session_id = str(getattr(record, "session_id", "") or "").strip()
-        task_id = str(getattr(record, "task_id", "") or "").strip()
-        status = str(getattr(record, "status", "") or "").strip().lower()
+        self.enqueue_task_terminal_payload(build_task_terminal_payload(record))
+
+    def enqueue_task_terminal_payload(self, payload: dict[str, Any] | None) -> bool:
+        normalized_payload = normalize_task_terminal_payload(payload)
+        session_id = str(normalized_payload.get("session_id") or "").strip()
+        task_id = str(normalized_payload.get("task_id") or "").strip()
+        status = str(normalized_payload.get("status") or "").strip().lower()
         if not session_id or not task_id or status not in {"success", "failed"}:
-            return
+            return False
         event = self._events.enqueue(
             session_id=session_id,
             source="main_runtime",
             reason="task_terminal",
-            dedupe_key=f"task-terminal:{task_id}:{status}",
-            payload={
-                "task_id": task_id,
-                "session_id": session_id,
-                "title": str(getattr(record, "title", "") or task_id).strip() or task_id,
-                "status": status,
-                "brief_text": str(getattr(record, "brief_text", "") or "").strip(),
-                "failure_reason": str(getattr(record, "failure_reason", "") or "").strip(),
-                "finished_at": str(getattr(record, "finished_at", "") or "").strip(),
-            },
+            dedupe_key=str(normalized_payload.get("dedupe_key") or f"task-terminal:{task_id}:{status}").strip(),
+            payload=dict(normalized_payload),
             delay_seconds=0.0,
         )
         if event is None:
-            return
+            return False
         if self._started:
             self._wake.request(session_id, delay_s=0.25)
+        return True
 
     def enqueue_tool_background(self, *, session_id: str, payload: dict[str, Any] | None) -> None:
         key = str(session_id or "").strip()

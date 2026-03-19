@@ -169,7 +169,7 @@ class ModelFallbackTarget(Base):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_legacy_payload(cls, value: Any) -> Any:
+    def _migrate_alias_payload(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
         payload = dict(value)
@@ -281,7 +281,7 @@ class ManagedModelConfig(Base):
         return int(value)
 
     @model_validator(mode="after")
-    def _validate_binding_or_legacy_payload(self) -> "ManagedModelConfig":
+    def _validate_binding_or_inline_credentials(self) -> "ManagedModelConfig":
         llm_config_id = str(self.llm_config_id or "").strip()
         provider_model = str(self.provider_model or "").strip()
         api_key = str(self.api_key or "").strip()
@@ -516,12 +516,15 @@ class MemoryAssemblyConfig(Base):
     extension_tool_top_k: int = 6
     core_tools: list[str] = Field(
         default_factory=lambda: [
+            'content',
             'create_async_task',
             'task_summary',
             'task_list',
             'task_progress',
             'memory_search',
             'message',
+            'task_runtime',
+            'skill_access',
         ]
     )
 

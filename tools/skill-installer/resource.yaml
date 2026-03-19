@@ -53,7 +53,7 @@ parameters:
         - auto
         - download
         - git
-      description: Download strategy. auto prefers codeload zip and falls back to git sparse checkout.
+      description: 下载策略。auto 会遵循 settings.auto_prefer；当前默认优先 git sparse checkout，失败后回退到 GitHub codeload zip。
   required: []
 governance:
   family: skill-installer

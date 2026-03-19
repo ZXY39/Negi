@@ -189,6 +189,21 @@ class SQLiteTaskStore:
                 PRIMARY KEY (task_id, parent_node_id, round_id)
             )
             ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_terminal_outbox (
+                dedupe_key TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                delivery_state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                last_attempt_at TEXT NOT NULL,
+                last_error TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
             'CREATE INDEX IF NOT EXISTS idx_nodes_task_id ON nodes(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id)',
@@ -203,6 +218,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_node_details_task_id ON task_node_details(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_runtime_frames_task_id ON task_runtime_frames(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_rounds_task_parent ON task_node_rounds(task_id, parent_node_id, round_index)',
+            'CREATE INDEX IF NOT EXISTS idx_task_terminal_outbox_state_created_at ON task_terminal_outbox(delivery_state, created_at)',
         ]
         with self._lock, self._conn:
             for statement in statements:
@@ -325,6 +341,7 @@ class SQLiteTaskStore:
             self._conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM runtime_states WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
+            self._conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM artifacts WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
@@ -399,6 +416,26 @@ class SQLiteTaskStore:
             )
         return events
 
+    def latest_task_event_seq(
+        self,
+        *,
+        task_id: str | None = None,
+        session_id: str | None = None,
+    ) -> int:
+        predicates = ['1 = 1']
+        params: list[object] = []
+        if task_id is not None:
+            predicates.append('task_id = ?')
+            params.append(str(task_id or ''))
+        if session_id is not None:
+            predicates.append('session_id = ?')
+            params.append(str(session_id or ''))
+        row = self._fetchone(
+            f'SELECT COALESCE(MAX(seq), 0) AS seq FROM task_events WHERE {" AND ".join(predicates)}',
+            tuple(params),
+        )
+        return int((row['seq'] if row is not None else 0) or 0)
+
     def enqueue_task_command(
         self,
         *,
@@ -467,6 +504,81 @@ class SQLiteTaskStore:
             self._conn.execute(
                 'UPDATE task_commands SET status = ?, finished_at = ?, error_text = ? WHERE command_id = ?',
                 ('completed' if success else 'failed', finished_at, str(error_text or ''), command_id),
+            )
+
+    def put_task_terminal_outbox(
+        self,
+        *,
+        dedupe_key: str,
+        task_id: str,
+        session_id: str,
+        created_at: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            raise ValueError('dedupe_key_required')
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+                'FROM task_terminal_outbox WHERE dedupe_key = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                payload_json = json.dumps(payload, ensure_ascii=False)
+                self._conn.execute(
+                    'INSERT INTO task_terminal_outbox (dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (key, task_id, session_id, 'pending', created_at, created_at, '', 0, '', '', payload_json),
+                )
+                row = self._conn.execute(
+                    'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+                    'FROM task_terminal_outbox WHERE dedupe_key = ?',
+                    (key,),
+                ).fetchone()
+        return self._task_terminal_outbox_row(row)
+
+    def get_task_terminal_outbox(self, dedupe_key: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+            'FROM task_terminal_outbox WHERE dedupe_key = ?',
+            (str(dedupe_key or '').strip(),),
+        )
+        return self._task_terminal_outbox_row(row) if row else None
+
+    def list_pending_task_terminal_outbox(self, *, limit: int = 200) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+            'FROM task_terminal_outbox WHERE delivery_state != ? ORDER BY created_at ASC LIMIT ?',
+            ('delivered', max(1, int(limit or 200))),
+        )
+        return [self._task_terminal_outbox_row(row) for row in rows]
+
+    def mark_task_terminal_outbox_attempt(self, dedupe_key: str, *, attempted_at: str, error_text: str) -> None:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            return
+        with self._lock, self._conn:
+            row = self._conn.execute('SELECT attempts, delivery_state FROM task_terminal_outbox WHERE dedupe_key = ?', (key,)).fetchone()
+            if row is None:
+                return
+            delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
+            if delivery_state == 'delivered':
+                return
+            attempts = int(row['attempts'] or 0) + 1
+            self._conn.execute(
+                'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE dedupe_key = ?',
+                ('pending', attempted_at, attempts, attempted_at, str(error_text or ''), key),
+            )
+
+    def mark_task_terminal_outbox_delivered(self, dedupe_key: str, *, delivered_at: str) -> None:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            return
+        with self._lock, self._conn:
+            self._conn.execute(
+                'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ? WHERE dedupe_key = ?',
+                ('delivered', delivered_at, delivered_at, '', key),
             )
 
     def upsert_worker_status(
@@ -663,6 +775,25 @@ class SQLiteTaskStore:
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
         with self._lock:
             return list(self._conn.execute(sql, params).fetchall())
+
+    @staticmethod
+    def _task_terminal_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return {}
+        payload = json.loads(row['payload_json'])
+        return {
+            'dedupe_key': row['dedupe_key'],
+            'task_id': row['task_id'],
+            'session_id': row['session_id'],
+            'delivery_state': row['delivery_state'],
+            'created_at': row['created_at'],
+            'updated_at': row['updated_at'],
+            'delivered_at': row['delivered_at'],
+            'attempts': int(row['attempts'] or 0),
+            'last_attempt_at': row['last_attempt_at'],
+            'last_error': row['last_error'],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
 
     @staticmethod
     def _parse(payload_json: str, model_cls: type[T]) -> T:

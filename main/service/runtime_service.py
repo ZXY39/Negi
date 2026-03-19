@@ -7,11 +7,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
+from loguru import logger
+
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
 from g3ku.content import ContentNavigationService
+from g3ku.resources.tool_settings import (
+    MemoryRuntimeSettings,
+    raw_tool_settings_from_descriptor,
+    validate_tool_settings,
+)
 from g3ku.resources.models import ResourceKind
+from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from g3ku.runtime.context.summarizer import layered_body_payload
@@ -23,6 +32,7 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
+from main.governance.roles import to_public_allowed_roles
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import NodeRecord, TaskArtifactRecord, TaskRecord, TokenUsageSummary, normalize_final_acceptance_metadata
 from main.monitoring.file_store import TaskFileStore
@@ -35,6 +45,12 @@ from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_runner import TaskRunner
 from main.service.event_registry import TaskEventRegistry
+from main.service.task_terminal_callback import (
+    build_task_terminal_payload,
+    normalize_task_terminal_payload,
+    resolve_task_terminal_callback_token,
+    resolve_task_terminal_callback_url,
+)
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -56,6 +72,26 @@ class ResourceDeleteBlockedError(ValueError):
             'resource_kind': str(resource_kind or '').strip(),
             'resource_id': str(resource_id or '').strip(),
             'usage': dict(usage or {}),
+        }
+
+
+class ResourceMutationBlockedError(ValueError):
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        resource_kind: str,
+        resource_id: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.payload = {
+            'code': str(code or '').strip(),
+            'message': str(message or '').strip(),
+            'resource_kind': str(resource_kind or '').strip(),
+            'resource_id': str(resource_id or '').strip(),
+            'details': dict(details or {}),
         }
 
 
@@ -144,12 +180,16 @@ class MainRuntimeService:
         self._runtime_loop = None
         self._command_poller_task: asyncio.Task[Any] | None = None
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
+        self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        if self.execution_mode == 'worker':
+            self.log_service.add_task_terminal_listener(self._enqueue_task_terminal_callback)
 
     async def startup(self) -> None:
         if self._started:
             return
         self._started = True
         self.resource_registry.refresh_from_current_resources()
+        self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
         if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
             try:
@@ -171,6 +211,7 @@ class MainRuntimeService:
                 self.task_runner.start_background(task.task_id)
         if self.execution_mode == 'worker':
             self._start_worker_loops()
+            self._schedule_pending_task_terminal_callbacks()
 
     def _start_worker_loops(self) -> None:
         if self._command_poller_task is None or self._command_poller_task.done():
@@ -236,7 +277,13 @@ class MainRuntimeService:
                 if task_id:
                     await self.task_runner.resume(task_id)
                 success = True
-            elif command_type in {'pause_task', 'cancel_task'}:
+            elif command_type == 'pause_task':
+                if task_id:
+                    await self.task_runner.pause(task_id)
+                success = True
+            elif command_type == 'cancel_task':
+                if task_id:
+                    await self.task_runner.cancel(task_id)
                 success = True
             else:
                 error_text = f'unsupported_command:{command_type}'
@@ -286,7 +333,11 @@ class MainRuntimeService:
         task_id = new_task_id()
         root_node_id = new_node_id()
         now = now_iso()
-        task_metadata = self._normalize_task_metadata(session_id=session_id, metadata=metadata)
+        task_metadata = self._normalize_task_metadata(
+            session_id=session_id,
+            metadata=metadata,
+            task_prompt=prompt,
+        )
         record = TaskRecord(
             task_id=task_id,
             session_id=str(session_id or 'web:shared').strip() or 'web:shared',
@@ -572,6 +623,97 @@ class MainRuntimeService:
         if hasattr(self, '_react_loop') and self._react_loop is not None:
             setattr(self._react_loop, '_tool_execution_manager', None)
 
+    def _enqueue_task_terminal_callback(self, task: TaskRecord) -> None:
+        if self.execution_mode != 'worker':
+            return
+        payload = normalize_task_terminal_payload(build_task_terminal_payload(task))
+        if not payload:
+            return
+        dedupe_key = str(payload.get('dedupe_key') or '').strip()
+        if not dedupe_key:
+            return
+        created_at = str(payload.get('finished_at') or now_iso()).strip() or now_iso()
+        try:
+            self.store.put_task_terminal_outbox(
+                dedupe_key=dedupe_key,
+                task_id=str(payload.get('task_id') or '').strip(),
+                session_id=str(payload.get('session_id') or '').strip() or 'web:shared',
+                created_at=created_at,
+                payload=payload,
+            )
+        except Exception:
+            logger.exception('failed to persist task terminal outbox for {}', dedupe_key)
+            return
+        self._schedule_task_terminal_delivery(dedupe_key)
+
+    def _schedule_pending_task_terminal_callbacks(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        for entry in self.store.list_pending_task_terminal_outbox(limit=500):
+            dedupe_key = str(entry.get('dedupe_key') or '').strip()
+            if dedupe_key:
+                self._schedule_task_terminal_delivery(dedupe_key)
+
+    def _schedule_task_terminal_delivery(self, dedupe_key: str) -> None:
+        key = str(dedupe_key or '').strip()
+        if self.execution_mode != 'worker' or not key:
+            return
+        current = self._task_terminal_delivery_tasks.get(key)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._deliver_task_terminal_outbox(key), name=f'main-runtime-task-terminal:{key}')
+        self._task_terminal_delivery_tasks[key] = task
+        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_terminal_delivery_task(stored_key, done_task))
+
+    def _clear_task_terminal_delivery_task(self, dedupe_key: str, done_task: asyncio.Task[Any]) -> None:
+        current = self._task_terminal_delivery_tasks.get(dedupe_key)
+        if current is done_task:
+            self._task_terminal_delivery_tasks.pop(dedupe_key, None)
+
+    async def _deliver_task_terminal_outbox(self, dedupe_key: str) -> None:
+        retry_delays = [0.0, 0.5, 2.0, 5.0]
+        for delay_seconds in retry_delays:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            entry = self.store.get_task_terminal_outbox(dedupe_key)
+            if not entry:
+                return
+            if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+                return
+            payload = dict(entry.get('payload') or {})
+            callback_url = resolve_task_terminal_callback_url(workspace=Path.cwd())
+            if not callback_url:
+                self.store.mark_task_terminal_outbox_attempt(
+                    dedupe_key,
+                    attempted_at=now_iso(),
+                    error_text='task_terminal_callback_url_unavailable',
+                )
+                return
+            headers: dict[str, str] = {}
+            callback_token = resolve_task_terminal_callback_token(workspace=Path.cwd())
+            if callback_token:
+                headers['x-g3ku-internal-token'] = callback_token
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    response = await client.post(callback_url, json=payload, headers=headers)
+                if 200 <= int(response.status_code or 0) < 300:
+                    self.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
+                    return
+                error_text = f'task_terminal_callback_http_{int(response.status_code or 0)}'
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_text = str(exc or 'task_terminal_callback_failed').strip() or 'task_terminal_callback_failed'
+            self.store.mark_task_terminal_outbox_attempt(
+                dedupe_key,
+                attempted_at=now_iso(),
+                error_text=error_text,
+            )
+
     @staticmethod
     def _node_parallelism_settings(config: Any | None) -> tuple[bool, int, int]:
         agents = getattr(config, 'agents', None) if config is not None else None
@@ -603,11 +745,18 @@ class MainRuntimeService:
         if self._resource_manager is not None and hasattr(self._resource_manager, 'bind_app_config'):
             self._resource_manager.bind_app_config(config)
         self.resource_registry.refresh_from_current_resources()
+        self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
         self._runtime_model_revision = int(revision or 0)
         return True
 
-    def _normalize_task_metadata(self, *, session_id: str, metadata: dict[str, Any] | None) -> dict[str, Any]:
+    def _normalize_task_metadata(
+        self,
+        *,
+        session_id: str,
+        metadata: dict[str, Any] | None,
+        task_prompt: str = '',
+    ) -> dict[str, Any]:
         payload = dict(metadata or {})
         raw_session_id = self._normalize_session_key(session_id)
         payload.setdefault('origin_session_id', raw_session_id)
@@ -622,6 +771,11 @@ class MainRuntimeService:
                 payload.get('memory_scope'),
                 fallback_session_key=raw_session_id,
             )
+        core_requirement = str(payload.get('core_requirement') or '').strip() or str(task_prompt or '').strip()
+        if core_requirement:
+            payload['core_requirement'] = core_requirement
+        else:
+            payload.pop('core_requirement', None)
         payload['final_acceptance'] = normalize_final_acceptance_metadata(payload.get('final_acceptance')).model_dump(mode='json')
         return payload
 
@@ -1257,11 +1411,66 @@ class MainRuntimeService:
     def disable_skill(self, skill_id: str, *, session_id: str = 'web:shared'):
         return self.update_skill_policy(skill_id, session_id=session_id, enabled=False)
 
+    def _raw_tool_family(self, tool_id: str):
+        return self.resource_registry.get_tool_family(str(tool_id or '').strip())
+
+    def _configured_core_tool_entries(self) -> list[str]:
+        if self._resource_manager is not None:
+            descriptor = self._resource_manager.get_tool_descriptor('memory_runtime')
+            if descriptor is not None:
+                try:
+                    settings = validate_tool_settings(
+                        MemoryRuntimeSettings,
+                        raw_tool_settings_from_descriptor(descriptor),
+                        tool_name='memory_runtime',
+                    )
+                    return [str(item).strip() for item in list(settings.assembly.core_tools or []) if str(item).strip()]
+                except Exception:
+                    pass
+        return configured_core_tools(resource_manager=self._resource_manager)
+
+    def _core_tool_resolution(self):
+        return resolve_core_tool_targets(
+            self._configured_core_tool_entries(),
+            list(self.resource_registry.list_tool_families()),
+        )
+
+    def _decorate_tool_family(self, family):
+        if family is None:
+            return None
+        resolution = self._core_tool_resolution()
+        return family.model_copy(update={'is_core': family.tool_id in resolution.family_ids})
+
     def list_tool_resources(self) -> list[Any]:
-        return list(self.resource_registry.list_tool_families())
+        resolution = self._core_tool_resolution()
+        return [
+            item.model_copy(update={'is_core': item.tool_id in resolution.family_ids})
+            for item in self.resource_registry.list_tool_families()
+        ]
 
     def get_tool_family(self, tool_id: str):
-        return self.resource_registry.get_tool_family(str(tool_id or '').strip())
+        return self._decorate_tool_family(self._raw_tool_family(tool_id))
+
+    def reconcile_core_tool_families(self) -> bool:
+        resolution = self._core_tool_resolution()
+        changed = False
+        for family in list(self.resource_registry.list_tool_families()):
+            if str(getattr(family, 'tool_id', '') or '').strip() not in resolution.family_ids:
+                continue
+            family_changed = not bool(getattr(family, 'enabled', True))
+            actions = []
+            for action in list(getattr(family, 'actions', []) or []):
+                roles = list(getattr(action, 'allowed_roles', []) or [])
+                if bool(getattr(action, 'agent_visible', True)) and 'ceo' not in roles:
+                    roles = to_public_allowed_roles([*roles, 'ceo'])
+                    family_changed = True
+                actions.append(action.model_copy(update={'allowed_roles': roles}))
+            if not family_changed:
+                continue
+            updated = family.model_copy(update={'enabled': True, 'actions': actions})
+            self.governance_store.upsert_tool_family(updated, updated_at=now_iso())
+            changed = True
+        return changed
 
     def _tool_family_executor_name(self, family) -> str:
         primary = str(getattr(family, 'primary_executor_name', '') or '').strip()
@@ -1280,10 +1489,10 @@ class MainRuntimeService:
         return ''
 
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
-        family = self.get_tool_family(tool_id)
+        family = self._raw_tool_family(tool_id)
         if family is None:
             needle = str(tool_id or '').strip()
-            for item in self.list_tool_resources():
+            for item in self.resource_registry.list_tool_families():
                 action_names = {
                     str(executor_name or '').strip()
                     for action in list(getattr(item, 'actions', []) or [])
@@ -1330,11 +1539,18 @@ class MainRuntimeService:
         }
 
     def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
-        family = self.get_tool_family(tool_id)
+        family = self._raw_tool_family(tool_id)
         if family is None:
             raise ValueError('tool_not_found')
 
         target_tool_id = str(family.tool_id or '').strip()
+        if target_tool_id in self._core_tool_resolution().family_ids:
+            raise ResourceMutationBlockedError(
+                code='core_tool_delete_forbidden',
+                message='Core tool families cannot be deleted.',
+                resource_kind='tool_family',
+                resource_id=target_tool_id,
+            )
         self._raise_if_tool_in_use(family)
         descriptor_names: set[str] = {
             str(getattr(family, 'primary_executor_name', '') or '').strip(),
@@ -1421,18 +1637,49 @@ class MainRuntimeService:
         return item
 
     def update_tool_policy(self, tool_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles_by_action: dict[str, list[str]] | None = None):
-        family = self.get_tool_family(tool_id)
+        family = self._raw_tool_family(tool_id)
         if family is None:
             return None
+        target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+        is_core = target_tool_id in self._core_tool_resolution().family_ids
+        if is_core and enabled is not None and not bool(enabled):
+            raise ResourceMutationBlockedError(
+                code='core_tool_disable_forbidden',
+                message='Core tool families cannot be disabled.',
+                resource_kind='tool_family',
+                resource_id=target_tool_id,
+            )
         allowed_roles_by_action = dict(allowed_roles_by_action or {})
         actions = []
         for action in family.actions:
             roles = allowed_roles_by_action.get(action.action_id)
-            actions.append(action.model_copy(update={'allowed_roles': list(action.allowed_roles if roles is None else roles)}))
+            if str(getattr(action, 'admin_mode', 'editable') or 'editable') == 'readonly_system' and roles is not None:
+                normalized_roles = to_public_allowed_roles([str(role) for role in (roles or [])])
+                current_roles = to_public_allowed_roles(list(getattr(action, 'allowed_roles', []) or []))
+                if normalized_roles != current_roles:
+                    raise ResourceMutationBlockedError(
+                        code='tool_action_readonly',
+                        message='Readonly system actions cannot be edited.',
+                        resource_kind='tool_family',
+                        resource_id=target_tool_id,
+                        details={'action_id': action.action_id},
+                    )
+            next_roles = to_public_allowed_roles(
+                [str(role) for role in (action.allowed_roles if roles is None else roles)]
+            )
+            if is_core and bool(getattr(action, 'agent_visible', True)) and 'ceo' not in next_roles:
+                raise ResourceMutationBlockedError(
+                    code='core_tool_ceo_visibility_required',
+                    message='Core tool families must remain visible to the CEO for agent-visible actions.',
+                    resource_kind='tool_family',
+                    resource_id=target_tool_id,
+                    details={'action_id': action.action_id},
+                )
+            actions.append(action.model_copy(update={'allowed_roles': next_roles}))
         updated = family.model_copy(update={'enabled': family.enabled if enabled is None else bool(enabled), 'actions': actions})
         self.governance_store.upsert_tool_family(updated, updated_at=now_iso())
         self.policy_engine.sync_default_role_policies()
-        return updated
+        return self.get_tool_family(target_tool_id)
 
     def enable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
         return self.update_tool_policy(tool_id, session_id=session_id, enabled=True)
@@ -1461,6 +1708,7 @@ class MainRuntimeService:
         if self._resource_manager is not None:
             self._resource_manager.reload_now(trigger='manual')
         skills, tools = self.resource_registry.refresh_from_current_resources()
+        self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
         return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
 
@@ -1661,6 +1909,12 @@ class MainRuntimeService:
                 *(task for task in [self._command_poller_task, self._worker_heartbeat_task] if task is not None),
                 return_exceptions=True,
             )
+        delivery_tasks = [task for task in self._task_terminal_delivery_tasks.values() if task is not None and not task.done()]
+        for task in delivery_tasks:
+            task.cancel()
+        if delivery_tasks:
+            await asyncio.gather(*delivery_tasks, return_exceptions=True)
+        self._task_terminal_delivery_tasks.clear()
         if self.execution_mode == 'worker' and self.worker_id:
             self.store.upsert_worker_status(
                 worker_id=self.worker_id,
@@ -1699,47 +1953,6 @@ def _tool_runtime_payload(runtime: dict[str, Any] | None, kwargs: dict[str, Any]
         return runtime
     fallback = kwargs.get('__g3ku_runtime')
     return fallback if isinstance(fallback, dict) else {}
-
-
-class _LegacyCreateAsyncTaskTool(Tool):
-    def __init__(self, service: MainRuntimeService):
-        self._service = service
-
-    @property
-    def name(self) -> str:
-        return 'create_async_task'
-
-    @property
-    def description(self) -> str:
-        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。对于工作量大的任务，应在 task 说明中显式要求执行节点优先评估拆解并派生子节点。'
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                'task': {
-                    'type': 'string',
-                    'description': '用户的原始需求。若任务工作量大，应在说明中写明拆分维度，并显式建议执行节点优先评估拆解/派生子节点。',
-                }
-            },
-            'required': ['task'],
-        }
-
-    async def execute(self, task: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
-        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
-        session_id = str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared'
-        explicit_max_depth = kwargs.get('max_depth', kwargs.get('maxDepth'))
-        if explicit_max_depth in (None, ''):
-            explicit_max_depth = _runtime_task_default_max_depth(runtime)
-        record = await self._service.create_task(
-            str(task or ''),
-            session_id=session_id,
-            max_depth=explicit_max_depth,
-        )
-        return f'创建任务成功{record.task_id}'
-
-
 class TaskSummaryTool(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service
@@ -1821,7 +2034,7 @@ class CreateAsyncTaskTool(Tool):
 
     @property
     def description(self) -> str:
-        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。对于工作量大的任务，应在 task 说明中显式要求执行节点优先评估拆解并派生子节点。必要时可同时声明最终结果是否需要验收。'
+        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。对于工作量大的任务，应在 task 说明中显式要求执行节点优先评估拆解并派生子节点。调用时必须提供一句高度概括核心需求的 core_requirement，且其内容不能等于 task 原文。必要时可同时声明最终结果是否需要验收。'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -1832,6 +2045,10 @@ class CreateAsyncTaskTool(Tool):
                     'type': 'string',
                     'description': '用户的原始需求。若任务工作量大，应在说明中写明拆分维度，并显式建议执行节点优先评估拆解/派生子节点。',
                 },
+                'core_requirement': {
+                    'type': 'string',
+                    'description': 'CEO 对用户需求的核心需求概括。只能是一句高度概括核心需求的句子；不能等于 task 内容，不能复制 task 的大段原文。该句子会沿任务树传播到所有下游子节点。',
+                },
                 'requires_final_acceptance': {
                     'type': 'boolean',
                     'description': '是否需要在 root execution 完成后再做最终验收。',
@@ -1841,23 +2058,34 @@ class CreateAsyncTaskTool(Tool):
                     'description': '最终验收提示词。仅当 requires_final_acceptance=true 时必填。',
                 },
             },
-            'required': ['task'],
+            'required': ['task', 'core_requirement'],
         }
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         errors = super().validate_params(params)
+        if 'core_requirement' in (params or {}):
+            core_requirement = str((params or {}).get('core_requirement') or '').strip()
+            if not core_requirement:
+                errors.append('core_requirement must not be empty')
         requires_final_acceptance = (params or {}).get('requires_final_acceptance')
         final_acceptance_prompt = str((params or {}).get('final_acceptance_prompt') or '').strip()
         if requires_final_acceptance is True and not final_acceptance_prompt:
             errors.append('final_acceptance_prompt is required when requires_final_acceptance=true')
         return errors
 
-    async def execute(self, task: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        task: str,
+        core_requirement: str = '',
+        __g3ku_runtime: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
         runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
         session_id = str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared'
         explicit_max_depth = kwargs.get('max_depth', kwargs.get('maxDepth'))
         if explicit_max_depth in (None, ''):
             explicit_max_depth = _runtime_task_default_max_depth(runtime)
+        normalized_core_requirement = str(core_requirement or kwargs.get('core_requirement') or '').strip() or str(task or '').strip()
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))
@@ -1866,6 +2094,7 @@ class CreateAsyncTaskTool(Tool):
             session_id=session_id,
             max_depth=explicit_max_depth,
             metadata={
+                'core_requirement': normalized_core_requirement,
                 'final_acceptance': {
                     'required': requires_final_acceptance,
                     'prompt': final_acceptance_prompt,

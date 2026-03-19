@@ -17,19 +17,22 @@
 ## exec
 
 - 运行 shell 命令
-- 相对路径和默认 `working_dir` 基于 workspace；超时、`PATH` 补充和 `restrict_to_workspace` 都来自 `tools/exec/resource.yaml -> settings`
+- 默认使用进程当前目录；只有显式传入 `working_dir` 时才会切换目录，且应提供绝对路径
+- 超时、`PATH` 补充和 `restrict_to_workspace` 都来自 `tools/exec/resource.yaml -> settings`
 - 仍然带有危险命令拦截
 
 ## filesystem
 
 - 统一文件工具，支持 `read`、`list`、`write`、`edit`、`delete`、`propose_patch`
-- 相对路径基于 workspace；`restrict_to_workspace` 来自 `tools/filesystem/resource.yaml -> settings`
+- `path` 必须是绝对本地路径；`artifact:` / content 引用不是 filesystem 路径
+- `restrict_to_workspace` 来自 `tools/filesystem/resource.yaml -> settings`
 - `propose_patch` 生成补丁工件，不直接修改文件
 
 ## content
 
 - 统一的大内容导航工具，支持 `describe`、`search`、`open`、`head`、`tail`
-- 相对路径基于 workspace；`restrict_to_workspace` 来自 `tools/content/resource.yaml -> settings`
+- 读取 `artifact:` 这类外部化内容时，使用 `ref`
+- `path` 只接受绝对本地路径；`restrict_to_workspace` 来自 `tools/content/resource.yaml -> settings`
 
 ## memory_search
 

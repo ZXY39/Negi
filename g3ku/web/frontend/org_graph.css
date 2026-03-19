@@ -55,6 +55,9 @@
     --status-pending-text: #475569;
     /* Slate 600 */
     --ceo-session-running-ring: #39c5bb;
+    --tree-node-bg: color-mix(in srgb, var(--bg-panel) 92%, #eef6ff 8%);
+    --tree-node-border: color-mix(in srgb, var(--border-strong) 78%, white 22%);
+    --tree-node-shadow: 0 14px 28px -20px rgba(15, 23, 42, 0.28), 0 4px 12px -8px rgba(15, 23, 42, 0.16);
 
     /* Diffuse Modern Shadows for ToC Feel */
     --shadow-sm: 0 2px 8px -2px rgba(15, 23, 42, 0.05);
@@ -99,6 +102,9 @@
     --status-failed-text: #f87171;
     --status-pending-bg: rgba(71, 85, 105, 0.4);
     --status-pending-text: #cbd5e1;
+    --tree-node-bg: var(--bg-panel);
+    --tree-node-border: color-mix(in srgb, var(--border-color) 82%, transparent);
+    --tree-node-shadow: var(--shadow-sm);
 
     --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.2);
     --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
@@ -635,6 +641,10 @@ textarea {
 
 .execution-tree {
     --tree-line: color-mix(in srgb, var(--border-color) 82%, transparent);
+    --tree-line-width: 4px;
+    --tree-line-running: color-mix(in srgb, var(--status-running-text) 84%, white 16%);
+    --tree-line-success: color-mix(in srgb, var(--status-success-text) 82%, white 18%);
+    --tree-line-failed: color-mix(in srgb, var(--status-failed-text) 84%, white 16%);
     display: flex;
     justify-content: center;
     align-items: flex-start;
@@ -647,6 +657,7 @@ textarea {
 }
 
 .execution-tree-list {
+    --tree-branch-color: var(--tree-line);
     position: relative;
     display: flex;
     justify-content: center;
@@ -665,7 +676,7 @@ textarea {
     left: 50%;
     width: 0;
     height: var(--space-8);
-    border-left: 1px solid var(--tree-line);
+    border-left: var(--tree-line-width) solid var(--tree-branch-color);
 }
 
 .execution-tree > .execution-tree-list::before {
@@ -673,6 +684,7 @@ textarea {
 }
 
 .execution-tree-item {
+    --tree-branch-color: var(--tree-line);
     position: relative;
     list-style: none;
     display: flex;
@@ -693,7 +705,7 @@ textarea {
     top: 0;
     width: 50%;
     height: var(--space-8);
-    border-top: 1px solid var(--tree-line);
+    border-top: var(--tree-line-width) solid var(--tree-branch-color);
 }
 
 .execution-tree-item::before {
@@ -702,7 +714,7 @@ textarea {
 
 .execution-tree-item::after {
     left: 50%;
-    border-left: 1px solid var(--tree-line);
+    border-left: var(--tree-line-width) solid var(--tree-branch-color);
 }
 
 .execution-tree-item:only-child::before,
@@ -716,7 +728,7 @@ textarea {
 }
 
 .execution-tree-item:last-child::before {
-    border-right: 1px solid var(--tree-line);
+    border-right: var(--tree-line-width) solid var(--tree-branch-color);
     border-radius: 0 16px 0 0;
 }
 
@@ -724,20 +736,90 @@ textarea {
     border-radius: 16px 0 0 0;
 }
 
+.execution-tree-item[data-status="running"],
+.execution-tree-item[data-status="in_progress"] {
+    --tree-branch-color: var(--tree-line-running);
+}
+
+.execution-tree-item[data-status="completed"],
+.execution-tree-item[data-status="passed"],
+.execution-tree-item[data-status="success"] {
+    --tree-branch-color: var(--tree-line-success);
+}
+
+.execution-tree-item[data-status="failed"],
+.execution-tree-item[data-status="error"] {
+    --tree-branch-color: var(--tree-line-failed);
+}
+
+.execution-tree-list[data-parent-status="running"],
+.execution-tree-list[data-parent-status="in_progress"] {
+    --tree-branch-color: var(--tree-line-running);
+}
+
+.execution-tree-list[data-parent-status="completed"],
+.execution-tree-list[data-parent-status="passed"],
+.execution-tree-list[data-parent-status="success"] {
+    --tree-branch-color: var(--tree-line-success);
+}
+
+.execution-tree-list[data-parent-status="failed"],
+.execution-tree-list[data-parent-status="error"] {
+    --tree-branch-color: var(--tree-line-failed);
+}
+
 .execution-tree-node {
     position: relative;
+    isolation: isolate;
     min-width: 220px;
     max-width: 320px;
     width: 100%;
     padding: var(--space-3) var(--space-4) var(--space-3) calc(var(--space-4) + 8px);
     border-radius: 18px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background-color: var(--bg-panel);
-    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--tree-node-border);
+    background: var(--tree-node-bg);
+    box-shadow: var(--tree-node-shadow);
     color: var(--text-primary);
     text-align: left;
     transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
     cursor: pointer;
+}
+
+.execution-tree-node::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: 1px solid transparent;
+    pointer-events: none;
+    opacity: 0;
+    box-shadow: inset 0 0 0 0 rgba(57, 197, 187, 0);
+}
+
+.execution-tree-node[data-status="running"],
+.execution-tree-node[data-status="in_progress"] {
+    border-color: color-mix(in srgb, var(--status-running-text) 24%, var(--tree-node-border));
+    background: color-mix(in srgb, var(--status-running-bg) 24%, var(--bg-panel));
+}
+
+.execution-tree-node[data-status="success"],
+.execution-tree-node[data-status="completed"],
+.execution-tree-node[data-status="passed"] {
+    border-color: color-mix(in srgb, var(--status-success-text) 22%, var(--tree-node-border));
+    background: color-mix(in srgb, var(--status-success-bg) 24%, var(--bg-panel));
+}
+
+.execution-tree-node[data-status="failed"],
+.execution-tree-node[data-status="error"] {
+    border-color: color-mix(in srgb, var(--status-failed-text) 20%, var(--tree-node-border));
+    background: color-mix(in srgb, var(--status-failed-bg) 22%, var(--bg-panel));
+}
+
+.execution-tree-node[data-status="running"]::after,
+.execution-tree-node[data-status="in_progress"]::after {
+    border-color: color-mix(in srgb, var(--ceo-session-running-ring) 88%, var(--tree-node-border));
+    opacity: 1;
+    animation: ceo-session-breathe 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 .execution-tree-node:hover {
@@ -1888,6 +1970,7 @@ textarea {
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
+    padding-left: 6px;
     padding-right: 6px;
 }
 
@@ -4248,6 +4331,7 @@ textarea {
     align-content: start;
     overflow-y: auto;
     scrollbar-gutter: stable;
+    padding-top: 4px;
     padding-right: 4px;
 }
 
