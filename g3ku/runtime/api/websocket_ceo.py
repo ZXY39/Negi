@@ -15,9 +15,11 @@ from g3ku.core.events import AgentEvent
 from g3ku.runtime.legacy_metadata import is_legacy_runtime_metadata_message
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
+    build_session_summary,
     create_web_ceo_session,
     ensure_active_web_ceo_session,
     ensure_ceo_session_metadata,
+    list_web_ceo_sessions,
     upload_dir_for_session,
     workspace_path,
 )
@@ -27,6 +29,85 @@ from main.protocol import build_envelope
 
 router = APIRouter()
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+
+
+def _registry(agent):
+    service = getattr(agent, 'main_task_service', None)
+    return getattr(service, 'registry', None) if service is not None else None
+
+
+def _runtime_session(runtime_manager, session_id: str):
+    getter = getattr(runtime_manager, 'get', None)
+    return getter(session_id) if callable(getter) else None
+
+
+def _session_is_running(runtime_manager, session_id: str) -> bool:
+    session = _runtime_session(runtime_manager, session_id)
+    if session is None:
+        return False
+    state = getattr(session, 'state', None)
+    status = str(getattr(state, 'status', '') or '').strip().lower()
+    return bool(getattr(state, 'is_running', False)) or status == 'running'
+
+
+def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, state_store) -> None:
+    registry = _registry(agent)
+    if registry is None or transcript_store is None:
+        return
+    active_session_id = ensure_active_web_ceo_session(transcript_store, state_store)
+    items = list_web_ceo_sessions(
+        transcript_store,
+        active_session_id=active_session_id,
+        is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
+    )
+    registry.publish_global_ceo(
+        build_envelope(
+            channel='ceo',
+            session_id=active_session_id or 'web:shared',
+            seq=registry.next_ceo_seq(active_session_id or 'web:shared'),
+            type='ceo.sessions.snapshot',
+            data={'items': items, 'active_session_id': active_session_id},
+        )
+    )
+
+
+def _publish_ceo_session_patch(
+    *,
+    agent,
+    transcript_store,
+    runtime_manager,
+    state_store,
+    session_id: str,
+    preview_text: str | None = None,
+    message_count: int | None = None,
+    is_running: bool | None = None,
+) -> None:
+    registry = _registry(agent)
+    if registry is None or transcript_store is None:
+        return
+    key = str(session_id or '').strip()
+    if not key:
+        return
+    session = transcript_store.get_or_create(key)
+    active_session_id = ensure_active_web_ceo_session(transcript_store, state_store)
+    item = build_session_summary(
+        session,
+        is_active=key == active_session_id,
+        is_running=_session_is_running(runtime_manager, key) if is_running is None else bool(is_running),
+    )
+    if preview_text is not None:
+        item['preview_text'] = str(preview_text or '').strip()
+    if message_count is not None:
+        item['message_count'] = max(0, int(message_count))
+    registry.publish_global_ceo(
+        build_envelope(
+            channel='ceo',
+            session_id=key,
+            seq=registry.next_ceo_seq(key),
+            type='ceo.sessions.patch',
+            data={'item': item, 'active_session_id': active_session_id},
+        )
+    )
 
 
 def _session_upload_dir(session_id: str) -> Path:
@@ -415,7 +496,7 @@ async def ceo_websocket(websocket: WebSocket):
         except RuntimeError:
             return
 
-    def _session_is_running() -> bool:
+    def _current_session_is_running() -> bool:
         status = str(getattr(session.state, 'status', '') or '').strip().lower()
         return bool(getattr(session.state, 'is_running', False)) or status == 'running'
 
@@ -453,10 +534,26 @@ async def ceo_websocket(websocket: WebSocket):
         if event.type == 'control_ack':
             payload = dict(event.payload or {})
             await _push_stream_event('ceo.control_ack', payload)
+            _publish_ceo_session_patch(
+                agent=agent,
+                transcript_store=transcript_store,
+                runtime_manager=runtime_manager,
+                state_store=state_store,
+                session_id=session_id,
+                is_running=_current_session_is_running(),
+            )
             return
         if event.type == 'state_snapshot':
             state = dict((event.payload or {}).get('state') or {})
             await _push_stream_event('ceo.state', {'state': state})
+            _publish_ceo_session_patch(
+                agent=agent,
+                transcript_store=transcript_store,
+                runtime_manager=runtime_manager,
+                state_store=state_store,
+                session_id=session_id,
+                is_running=bool(state.get('is_running')) or str(state.get('status') or '').strip().lower() == 'running',
+            )
             return
         if event.type == 'message_end':
             payload = dict(event.payload or {})
@@ -464,6 +561,17 @@ async def ceo_websocket(websocket: WebSocket):
                 return
             text = str(payload.get('text') or '').strip()
             await _push_stream_event('ceo.reply.final', {'text': text})
+            persisted = transcript_store.get_or_create(session_id)
+            _publish_ceo_session_patch(
+                agent=agent,
+                transcript_store=transcript_store,
+                runtime_manager=runtime_manager,
+                state_store=state_store,
+                session_id=session_id,
+                preview_text=text,
+                message_count=len(list(getattr(persisted, 'messages', []) or [])),
+                is_running=False,
+            )
             return
         if not _should_forward_tool_event(session_id=session_id, event=event):
             return
@@ -488,11 +596,26 @@ async def ceo_websocket(websocket: WebSocket):
             )
         )
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='ceo.state', data={'state': session.state_dict()}))
+        await _safe_send(
+            build_envelope(
+                channel='ceo',
+                session_id=session_id,
+                type='ceo.sessions.snapshot',
+                data={
+                    'items': list_web_ceo_sessions(
+                        transcript_store,
+                        active_session_id=ensure_active_web_ceo_session(transcript_store, state_store),
+                        is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
+                    ),
+                    'active_session_id': ensure_active_web_ceo_session(transcript_store, state_store),
+                },
+            )
+        )
         while True:
             data = await websocket.receive_json()
             message_type = str(data.get('type') or '')
             if message_type == 'client.pause_turn':
-                if _session_is_running():
+                if _current_session_is_running():
                     await session.pause()
                 else:
                     await _push_stream_event('ceo.control_ack', {'action': 'pause', 'accepted': False, 'reason': 'no_active_turn'})
@@ -514,7 +637,7 @@ async def ceo_websocket(websocket: WebSocket):
                 continue
             if not text.strip() and not uploads:
                 continue
-            if _session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
+            if _current_session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
                 await _safe_send(
                     build_envelope(
                         channel='ceo',
@@ -524,6 +647,17 @@ async def ceo_websocket(websocket: WebSocket):
                     )
                 )
                 continue
+            persisted = transcript_store.get_or_create(session_id)
+            _publish_ceo_session_patch(
+                agent=agent,
+                transcript_store=transcript_store,
+                runtime_manager=runtime_manager,
+                state_store=state_store,
+                session_id=session_id,
+                preview_text=text,
+                message_count=len(list(getattr(persisted, 'messages', []) or [])) + 1,
+                is_running=True,
+            )
             user_message = _build_user_message(text, uploads)
             current_turn_task = asyncio.create_task(_run_user_turn(user_message))
             _register_turn_task(current_turn_task)

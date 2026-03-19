@@ -1,3 +1,0 @@
-true
-origin	https://github.com/ZXY39/G3KU.git (fetch)
-origin	https://github.com/ZXY39/G3KU.git (push)

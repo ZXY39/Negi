@@ -21,3 +21,11 @@ def new_artifact_id() -> str:
 
 def new_policy_id() -> str:
     return _new_id('policy')
+
+
+def new_command_id() -> str:
+    return _new_id('command')
+
+
+def new_worker_id() -> str:
+    return _new_id('worker')

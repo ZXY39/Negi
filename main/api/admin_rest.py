@@ -687,14 +687,12 @@ async def run_llm_migration():
 @router.get('/resources/skills')
 async def list_skills():
     service = _service()
-    await service.startup()
     return {'ok': True, 'items': [item.model_dump(mode='json') for item in service.list_skill_resources()]}
 
 
 @router.get('/resources/skills/{skill_id}')
 async def get_skill(skill_id: str):
     service = _service()
-    await service.startup()
     item = service.get_skill_resource(skill_id)
     if item is None:
         raise HTTPException(status_code=404, detail='skill_not_found')
@@ -708,7 +706,6 @@ async def get_skill(skill_id: str):
 @router.get('/resources/skills/{skill_id}/files')
 async def list_skill_files(skill_id: str):
     service = _service()
-    await service.startup()
     item = service.get_skill_resource(skill_id)
     if item is None:
         raise HTTPException(status_code=404, detail='skill_not_found')
@@ -718,7 +715,6 @@ async def list_skill_files(skill_id: str):
 @router.get('/resources/skills/{skill_id}/files/{file_key}')
 async def get_skill_file(skill_id: str, file_key: str):
     service = _service()
-    await service.startup()
     if service.get_skill_resource(skill_id) is None:
         raise HTTPException(status_code=404, detail='skill_not_found')
     try:
@@ -736,7 +732,6 @@ async def get_skill_file(skill_id: str, file_key: str):
 @router.put('/resources/skills/{skill_id}/files/{file_key}')
 async def update_skill_file(skill_id: str, file_key: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     if service.get_skill_resource(skill_id) is None:
         raise HTTPException(status_code=404, detail='skill_not_found')
     try:
@@ -749,7 +744,6 @@ async def update_skill_file(skill_id: str, file_key: str, payload: dict = Body(.
 @router.put('/resources/skills/{skill_id}/policy')
 async def update_skill_policy(skill_id: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     item = service.update_skill_policy(
         skill_id,
         session_id=session_id,
@@ -764,7 +758,6 @@ async def update_skill_policy(skill_id: str, payload: dict = Body(...), session_
 @router.post('/resources/skills/{skill_id}/enable')
 async def enable_skill(skill_id: str, session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     item = service.enable_skill(skill_id, session_id=session_id)
     if item is None:
         raise HTTPException(status_code=404, detail='skill_not_found')
@@ -774,7 +767,6 @@ async def enable_skill(skill_id: str, session_id: str = Query('web:shared')):
 @router.post('/resources/skills/{skill_id}/disable')
 async def disable_skill(skill_id: str, session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     item = service.disable_skill(skill_id, session_id=session_id)
     if item is None:
         raise HTTPException(status_code=404, detail='skill_not_found')
@@ -784,7 +776,6 @@ async def disable_skill(skill_id: str, session_id: str = Query('web:shared')):
 @router.delete('/resources/skills/{skill_id}')
 async def delete_skill(skill_id: str, session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     try:
         item = await service.delete_skill_resource_async(skill_id, session_id=session_id)
     except ValueError as exc:
@@ -795,14 +786,12 @@ async def delete_skill(skill_id: str, session_id: str = Query('web:shared')):
 @router.get('/resources/tools')
 async def list_tools():
     service = _service()
-    await service.startup()
     return {'ok': True, 'items': [item.model_dump(mode='json') for item in service.list_tool_resources()]}
 
 
 @router.get('/resources/tools/{tool_id}')
 async def get_tool(tool_id: str):
     service = _service()
-    await service.startup()
     item = service.get_tool_family(tool_id)
     if item is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
@@ -812,7 +801,6 @@ async def get_tool(tool_id: str):
 @router.get('/resources/tools/{tool_id}/toolskill')
 async def get_tool_toolskill(tool_id: str):
     service = _service()
-    await service.startup()
     payload = service.get_tool_toolskill(tool_id)
     if payload is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
@@ -923,7 +911,6 @@ async def restart_china_bridge():
 @router.put('/resources/tools/{tool_id}/policy')
 async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     actions_payload = payload.get('actions') if isinstance(payload.get('actions'), dict) else None
     normalized_actions: dict[str, list[str]] | None = None
     if actions_payload is not None:
@@ -940,7 +927,6 @@ async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id
 @router.post('/resources/tools/{tool_id}/enable')
 async def enable_tool(tool_id: str, session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     item = service.enable_tool(tool_id, session_id=session_id)
     if item is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
@@ -950,7 +936,6 @@ async def enable_tool(tool_id: str, session_id: str = Query('web:shared')):
 @router.post('/resources/tools/{tool_id}/disable')
 async def disable_tool(tool_id: str, session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     item = service.disable_tool(tool_id, session_id=session_id)
     if item is None:
         raise HTTPException(status_code=404, detail='tool_not_found')
@@ -960,7 +945,6 @@ async def disable_tool(tool_id: str, session_id: str = Query('web:shared')):
 @router.delete('/resources/tools/{tool_id}')
 async def delete_tool(tool_id: str, session_id: str = Query('web:shared')):
     service = _service()
-    await service.startup()
     try:
         item = await service.delete_tool_resource_async(tool_id, session_id=session_id)
     except ValueError as exc:

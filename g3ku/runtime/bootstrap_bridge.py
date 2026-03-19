@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from types import SimpleNamespace
 
 from loguru import logger
@@ -98,6 +99,7 @@ class RuntimeBootstrapBridge:
                 hard_max_depth=getattr(main_runtime_cfg, 'hard_max_depth', 4),
                 execution_max_iterations=(get_role_max_iterations('execution') if callable(get_role_max_iterations) else None),
                 acceptance_max_iterations=(get_role_max_iterations('inspection') if callable(get_role_max_iterations) else None),
+                execution_mode=str(os.getenv('G3KU_TASK_RUNTIME_ROLE', 'embedded') or 'embedded').strip().lower(),
             )
             service.bind_runtime_loop(self._loop)
             self._loop.main_task_service = service

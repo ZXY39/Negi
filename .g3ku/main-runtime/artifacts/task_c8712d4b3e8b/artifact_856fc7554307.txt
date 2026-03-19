@@ -1,9 +1,0 @@
-{
-  "status": "success",
-  "delivery_status": "final",
-  "summary": "done",
-  "answer": "done",
-  "evidence": [],
-  "remaining_work": [],
-  "blocking_reason": ""
-}

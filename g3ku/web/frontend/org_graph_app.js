@@ -13,7 +13,6 @@ const TREE_SCALE_FACTOR = 1.12;
 const RESOURCE_PAGE_SIZES = [20, 50, 100];
 const CEO_TOOL_PROGRESS_MAX_LINES = 4;
 const CEO_TOOL_STEP_MAX = 5;
-const CEO_SESSION_POLL_MS = 4000;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -46,8 +45,6 @@ const S = {
     ceoSessionUnread: {},
     ceoSessionMessageCounts: {},
     ceoSessionHydrated: false,
-    ceoSessionPollIntervalId: null,
-    ceoSessionPollInFlight: false,
     liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
@@ -61,10 +58,18 @@ const S = {
         requestToken: 0,
     },
     taskWs: null,
+    tasksWs: null,
     currentTaskId: null,
     tasks: [],
     currentTask: null,
     currentTaskProgress: null,
+    currentTaskTreeRoot: null,
+    currentTaskRuntimeSummary: null,
+    currentNodeDetail: null,
+    taskNodeDetails: {},
+    taskNodeBusy: false,
+    tasksWorkerOnline: true,
+    tasksWorker: null,
     taskTokenStatsOpen: false,
     taskArtifacts: [],
     selectedArtifactId: "",
@@ -76,6 +81,7 @@ const S = {
     taskBusy: false,
     taskPage: 1,
     taskPageSize: RESOURCE_PAGE_SIZES[0],
+    taskGridSignature: "",
     confirmState: null,
     toastState: { timeoutId: null, intervalId: null, remaining: 0 },
     openResourceSelectId: "",
@@ -3273,32 +3279,6 @@ function resetCeoSessionState() {
     syncCeoPrimaryButton();
 }
 
-function stopCeoSessionPolling() {
-    if (S.ceoSessionPollIntervalId) window.clearInterval(S.ceoSessionPollIntervalId);
-    S.ceoSessionPollIntervalId = null;
-    S.ceoSessionPollInFlight = false;
-}
-
-async function pollCeoSessions() {
-    if (document.hidden || S.ceoSessionBusy || S.ceoSessionPollInFlight) return null;
-    S.ceoSessionPollInFlight = true;
-    try {
-        return await refreshCeoSessions({ background: true });
-    } catch (error) {
-        console.debug("Background CEO session refresh failed.", error);
-        return null;
-    } finally {
-        S.ceoSessionPollInFlight = false;
-    }
-}
-
-function startCeoSessionPolling() {
-    stopCeoSessionPolling();
-    S.ceoSessionPollIntervalId = window.setInterval(() => {
-        void pollCeoSessions();
-    }, CEO_SESSION_POLL_MS);
-}
-
 function closeCeoWs() {
     S.ceoWsToken += 1;
     const socket = S.ceoWs;
@@ -3386,6 +3366,23 @@ function applyCeoSessionsPayload(payload = {}, { preferLocalActive = false } = {
     renderCeoSessions();
     if (S.view === "tasks" && previousActiveId !== nextActiveId) renderTasks();
     return nextActiveId;
+}
+
+function applyCeoSessionPatch(payload = {}) {
+    const item = payload?.item && typeof payload.item === "object" ? payload.item : null;
+    if (!item) return;
+    const sessionId = String(item.session_id || "").trim();
+    if (!sessionId) return;
+    const next = [...(S.ceoSessions || [])];
+    const index = next.findIndex((entry) => String(entry?.session_id || "").trim() === sessionId);
+    if (index >= 0) next[index] = { ...next[index], ...item };
+    else next.unshift(item);
+    const activeId = String(payload?.active_session_id || activeSessionId()).trim() || activeSessionId();
+    syncCeoSessionUnreadState(next, activeId);
+    S.ceoSessions = next;
+    S.activeSessionId = activeId;
+    if (activeId) ApiClient.setActiveSessionId(activeId);
+    renderCeoSessions();
 }
 
 async function refreshCeoSessions({ reconnect = false, background = false } = {}) {
@@ -3611,13 +3608,12 @@ async function requestDeleteCeoSession(sessionId) {
 }
 
 function initCeoWs() {
-    const sessionId = activeSessionId();
-    if (!sessionId) return;
-    if (S.ceoWs && S.ceoWs.readyState <= 1 && S.ceoWs.sessionId === sessionId) return;
+    const requestedSessionId = String(S.activeSessionId || "").trim();
+    if (S.ceoWs && S.ceoWs.readyState <= 1 && S.ceoWs.sessionId === requestedSessionId) return;
     closeCeoWs();
     const token = ++S.ceoWsToken;
-    const socket = new WebSocket(ApiClient.getCeoWsUrl(sessionId));
-    socket.sessionId = sessionId;
+    const socket = new WebSocket(ApiClient.getCeoWsUrl(requestedSessionId));
+    socket.sessionId = requestedSessionId;
     S.ceoWs = socket;
     S.ceoWs.onmessage = (ev) => {
         const payload = JSON.parse(ev.data);
@@ -3628,7 +3624,8 @@ function initCeoWs() {
         if (payload.type === "ceo.error") handleCeoError(payload.data || {});
         if (payload.type === "ceo.reply.final") finalizeCeoTurn(payload.data?.text || "", payload.data || {});
         if (payload.type === "ceo.turn.discard") discardActiveCeoTurn({ source: payload.data?.source || "" });
-        if (payload.type === "task.summary.changed" && S.view === "tasks") void loadTasks();
+        if (payload.type === "ceo.sessions.snapshot") applyCeoSessionsPayload(payload.data || {});
+        if (payload.type === "ceo.sessions.patch") applyCeoSessionPatch(payload.data || {});
         if (payload.type === "task.artifact.applied" && payload.data?.task_id === S.currentTaskId) void loadTaskArtifacts();
     };
     S.ceoWs.onclose = () => {
@@ -3638,7 +3635,6 @@ function initCeoWs() {
         syncCeoPrimaryButton();
         window.setTimeout(() => {
             if (token !== S.ceoWsToken) return;
-            if (activeSessionId() !== sessionId) return;
             initCeoWs();
         }, 1000);
     };
@@ -4085,6 +4081,7 @@ function taskSessionQueryValue() {
 }
 
 function taskSessionEmptyText() {
+    if (S.tasksWorkerOnline === false) return "Worker is offline. Task control is unavailable.";
     return "No tasks yet.";
 }
 
@@ -4112,13 +4109,70 @@ function taskMetaText(task) {
     if (task.created_at) parts.push(`Created ${formatSessionTime(task.created_at)}`);
     return parts.join(" · ") || "No timestamp";
 }
+function taskGridRenderSignature(meta) {
+    const visibleItems = Array.isArray(meta?.items) ? meta.items : [];
+    const sessionLabels = (S.ceoSessions || []).map((session) => ({
+        session_id: String(session?.session_id || ""),
+        title: String(session?.title || ""),
+    }));
+    return JSON.stringify({
+        total: Number(meta?.total || 0),
+        currentPage: Number(meta?.currentPage || 1),
+        pageSize: Number(S.taskPageSize || 0),
+        workerOnline: S.tasksWorkerOnline !== false,
+        workerState: String(S.tasksWorker?.status || S.tasksWorker?.state || ""),
+        taskBusy: !!S.taskBusy,
+        multiSelectMode: !!S.multiSelectMode,
+        emptyText: taskSessionEmptyText(),
+        selectedTaskIds: [...S.selectedTaskIds].map((id) => String(id || "")).sort(),
+        sessionLabels,
+        items: visibleItems.map((task) => {
+            const taskId = String(task?.task_id || "");
+            const primaryAction = primaryTaskAction(task);
+            return {
+                taskId,
+                selected: S.selectedTaskIds.has(taskId),
+                title: String(task?.title || ""),
+                brief: String(task?.brief || ""),
+                statusKey: taskStatusKey(task),
+                statusLabel: taskStatusLabel(task),
+                meta: taskMetaText(task),
+                tokenSummary: taskTokenSummaryLine(task?.token_usage),
+                primaryAction: primaryAction ? `${primaryAction.action}:${primaryAction.label}:${primaryAction.tone}` : "",
+                canDelete: canDelete(task),
+            };
+        }),
+    });
+}
+
 function renderTasks() {
-    U.taskGrid.innerHTML = "";
     const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
     S.taskPage = meta.currentPage;
     syncTaskPagination(meta);
+    const signature = taskGridRenderSignature(meta);
+    if (signature === S.taskGridSignature) {
+        updateTaskToolbar();
+        return;
+    }
+    S.taskGridSignature = signature;
+    U.taskGrid.innerHTML = "";
+    if (S.tasksWorkerOnline === false) {
+        const warning = document.createElement("div");
+        warning.className = "empty-state error";
+        warning.style.gridColumn = "1/-1";
+        warning.textContent = "Task worker is offline. You can still browse records, but create/resume controls are unavailable.";
+        U.taskGrid.appendChild(warning);
+    }
     if (!meta.total) {
-        U.taskGrid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${esc(taskSessionEmptyText())}</div>`;
+        if (S.tasksWorkerOnline === false) {
+            const empty = document.createElement("div");
+            empty.className = "empty-state";
+            empty.style.gridColumn = "1/-1";
+            empty.textContent = taskSessionEmptyText();
+            U.taskGrid.appendChild(empty);
+        } else {
+            U.taskGrid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${esc(taskSessionEmptyText())}</div>`;
+        }
         return updateTaskToolbar();
     }
     meta.items.forEach((task) => {
@@ -4172,14 +4226,19 @@ function renderTasks() {
 }
 
 async function loadTasks() {
-    U.taskGrid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">Loading tasks...</div>';
+    if (!(S.tasks || []).length) {
+        S.taskGridSignature = "";
+        U.taskGrid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">Loading tasks...</div>';
+    }
     try {
-        S.tasks = await ApiClient.getTasks(1, taskSessionQueryValue());
-        syncTaskSelection();
-        renderTaskSessionScope();
-        renderTasks();
+        const payload = await ApiClient.getTasks(1, taskSessionQueryValue());
+        applyTaskListResponse(payload || {});
+        if (S.view === "tasks") initTasksWs();
     } catch (e) {
-        U.taskGrid.innerHTML = `<div class="empty-state error" style="grid-column: 1/-1;">Failed to load tasks: ${esc(e.message)}</div>`;
+        if (isAbortLike(e)) return;
+        if (!(S.tasks || []).length) {
+            U.taskGrid.innerHTML = `<div class="empty-state error" style="grid-column: 1/-1;">Failed to load tasks: ${esc(e.message)}</div>`;
+        }
         showToast({ title: "Load failed", text: e.message || "Unknown error", kind: "error" });
     }
 }
@@ -4486,6 +4545,11 @@ function resetTaskView() {
     }
     S.currentTask = null;
     S.currentTaskProgress = null;
+    S.currentTaskTreeRoot = null;
+    S.currentTaskRuntimeSummary = null;
+    S.currentNodeDetail = null;
+    S.taskNodeDetails = {};
+    S.taskNodeBusy = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
     S.artifactContent = "";
@@ -5193,7 +5257,7 @@ function buildNodeRoundState(node) {
 
 function buildExecutionTree(rawTree) {
     if (!rawTree) return null;
-    const nodeRecords = Array.isArray(S.currentTaskProgress?.nodes) ? S.currentTaskProgress.nodes : [];
+    const nodeRecords = Object.values(S.taskNodeDetails || {}).filter((item) => item && typeof item === "object");
     const nodeMap = new Map(nodeRecords.map((item) => [String(item.node_id || ""), item]));
     const walk = (node) => {
         const detail = nodeMap.get(String(node.node_id || "")) || {};
@@ -5440,7 +5504,7 @@ function renderTree() {
             }
             e.stopPropagation();
             S.selectedNodeId = node.node_id;
-            showAgent(node);
+            void showAgent(node);
             renderTree();
         });
         stack.appendChild(el);
@@ -5490,7 +5554,7 @@ function renderTree() {
         const selected = findTreeNode(S.treeView, S.selectedNodeId);
         if (selected) {
             setTaskSelectionEmptyVisible(false);
-            showAgent(selected);
+            void showAgent(selected);
         }
         else {
             S.selectedNodeId = null;
@@ -5603,8 +5667,38 @@ async function applySelectedArtifact() {
     await loadTaskArtifacts();
 }
 
-function showAgent(node) {
+async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
+    const key = String(nodeId || "").trim();
+    if (!S.currentTaskId || !key) return null;
+    if (!force && S.taskNodeDetails[key]) return S.taskNodeDetails[key];
+    S.taskNodeBusy = true;
+    try {
+        const detail = await ApiClient.getTaskNodeDetail(S.currentTaskId, key);
+        if (!detail) return null;
+        S.taskNodeDetails = { ...S.taskNodeDetails, [key]: detail };
+        if (String(S.selectedNodeId || "") === key) S.currentNodeDetail = detail;
+        return detail;
+    } catch (error) {
+        if (!isAbortLike(error)) {
+            showToast({ title: "Node load failed", text: error.message || "Unknown error", kind: "error" });
+        }
+        return S.taskNodeDetails[key] || null;
+    } finally {
+        S.taskNodeBusy = false;
+    }
+}
+
+async function showAgent(node) {
+    const nodeId = String(node?.node_id || "").trim();
+    if (!nodeId) return;
     const viewState = captureTaskDetailViewState();
+    const detail = await ensureTaskNodeDetail(nodeId);
+    const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
+    const mergedNode = {
+        ...node,
+        ...(detail || {}),
+        executionTrace: buildNodeExecutionTrace(node, detail || {}, liveFrameMap.get(nodeId) || null),
+    };
     const compactHeading = compactNodeHeading(node);
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
@@ -5615,6 +5709,11 @@ function showAgent(node) {
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
     renderExecutionTrace(node);
     renderAcceptanceResult(node.executionTrace?.acceptance_result || "");
+    U.adStatus.textContent = String(mergedNode.display_state || mergedNode.state || mergedNode.status || "").toUpperCase();
+    U.adStatus.dataset.status = mergedNode.state || mergedNode.status || "";
+    if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
+    renderExecutionTrace(mergedNode);
+    renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
     U.feedTitle.textContent = `Node: ${compactHeading}`;
     U.feedTitle.title = compactHeading;
     setTaskDetailOpen(true);
@@ -5629,15 +5728,24 @@ function hideAgent() {
 }
 
 function applyTaskPayload(payload) {
-    if (!payload || !payload.task || !payload.progress) return;
+    if (!payload || !payload.task) return;
+    const treeRoot = payload.tree_root || payload.progress?.root || null;
+    const runtimeSummary = payload.runtime_summary || payload.progress?.live_state || null;
     S.currentTask = payload.task;
-    S.currentTaskProgress = payload.progress;
-    S.tree = payload.progress.root;
+    S.currentTaskTreeRoot = treeRoot;
+    S.currentTaskRuntimeSummary = runtimeSummary;
+    S.currentTaskProgress = {
+        ...(payload.progress || {}),
+        root: treeRoot,
+        live_state: runtimeSummary,
+        nodes: [],
+    };
+    S.tree = treeRoot;
     S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
     U.tdTitle.textContent = payload.task.title || payload.task.task_id || "Loading...";
     U.tdStatus.textContent = taskStatusLabel(payload.task).toUpperCase();
     U.tdStatus.dataset.status = taskStatusKey(payload.task);
-    U.tdSummary.textContent = payload.task.user_request || payload.task.final_output || payload.progress.text || "No summary";
+    U.tdSummary.textContent = payload.task.user_request || payload.task.final_output || payload.progress?.text || "No summary";
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
     if (S.tree) renderTree();
@@ -5680,14 +5788,119 @@ async function openTask(taskId) {
 }
 
 function handleTaskEvent(payload) {
-    if (payload.type === "snapshot.task") {
+    if (payload.type === "snapshot.task" || payload.type === "task.snapshot") {
         applyTaskPayload(payload.data || {});
         return;
     }
-    if (payload.type === "artifact.applied") {
-        showToast({ title: "Artifact applied", text: payload.data?.artifact_id || "", kind: "success" });
-        void loadTaskArtifacts();
+    if (payload.type === "task.summary.updated" && payload.data?.task) {
+        S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
+        U.tdStatus.textContent = taskStatusLabel(S.currentTask).toUpperCase();
+        U.tdStatus.dataset.status = taskStatusKey(S.currentTask);
+        renderTaskTokenStats();
+        return;
     }
+    if (payload.type === "task.tree.updated") {
+        S.tree = payload.data?.tree_root || null;
+        S.currentTaskTreeRoot = S.tree;
+        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), root: S.tree };
+        renderTree();
+        return;
+    }
+    if (payload.type === "task.runtime.updated") {
+        S.currentTaskRuntimeSummary = payload.data?.runtime_summary || null;
+        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), live_state: S.currentTaskRuntimeSummary };
+        if (S.tree) renderTree();
+        return;
+    }
+    if (payload.type === "task.node.updated") {
+        const nodeId = String(payload.data?.node_id || "").trim();
+        if (nodeId) {
+            delete S.taskNodeDetails[nodeId];
+            if (String(S.selectedNodeId || "") === nodeId) {
+                const selected = findTreeNode(S.treeView || S.tree, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
+                void showAgent(selected);
+            }
+        }
+        return;
+    }
+    if (payload.type === "task.artifact.added" || payload.type === "task.artifact.applied" || payload.type === "artifact.applied") {
+        void loadTaskArtifacts();
+        return;
+    }
+    if (payload.type === "task.terminal" && payload.data?.task) {
+        S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
+        renderTaskTokenStats();
+    }
+}
+
+function isAbortLike(error) {
+    return String(error?.name || "").trim() === "AbortError";
+}
+
+function applyTaskListResponse(payload = {}) {
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    S.tasks = items;
+    S.tasksWorkerOnline = payload?.worker_online !== false;
+    S.tasksWorker = payload?.worker || null;
+    syncTaskSelection();
+    renderTaskSessionScope();
+    renderTasks();
+}
+
+function patchTaskListItem(task) {
+    const taskId = String(task?.task_id || "").trim();
+    if (!taskId) return;
+    const next = [...(S.tasks || [])];
+    const index = next.findIndex((item) => String(item?.task_id || "").trim() === taskId);
+    if (index >= 0) next[index] = { ...next[index], ...task };
+    else next.unshift(task);
+    S.tasks = next;
+    syncTaskSelection();
+    renderTasks();
+}
+
+function removeTaskListItem(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return;
+    S.tasks = (S.tasks || []).filter((item) => String(item?.task_id || "").trim() !== key);
+    handleDeletedTasks([key]);
+    syncTaskSelection();
+    renderTasks();
+}
+
+function closeTasksWs() {
+    const socket = S.tasksWs;
+    S.tasksWs = null;
+    if (!socket) return;
+    socket.onclose = null;
+    socket.close();
+}
+
+function initTasksWs() {
+    if (S.tasksWs && S.tasksWs.readyState <= 1) return;
+    closeTasksWs();
+    const socket = new WebSocket(ApiClient.getTasksWsUrl(taskSessionQueryValue()));
+    S.tasksWs = socket;
+    socket.onmessage = (event) => {
+        const payload = JSON.parse(event.data || "{}");
+        if (payload.type === "task.list.snapshot") {
+            applyTaskListResponse(payload.data || {});
+            return;
+        }
+        if (payload.type === "task.list.patch") {
+            patchTaskListItem(payload.data?.task || {});
+            return;
+        }
+        if (payload.type === "task.deleted") {
+            removeTaskListItem(payload.data?.task_id || "");
+        }
+    };
+    socket.onclose = () => {
+        if (S.view !== "tasks") return;
+        window.setTimeout(() => {
+            if (S.view === "tasks") initTasksWs();
+        }, 1000);
+    };
 }
 
 
@@ -6331,7 +6544,9 @@ function renderSkillDetail() {
 }
 
 async function loadSkills({ renderDetail = true } = {}) {
-    U.skillList.innerHTML = '<div class="empty-state">Loading skills...</div>';
+    if (!(S.skills || []).length) {
+        U.skillList.innerHTML = '<div class="empty-state">Loading skills...</div>';
+    }
     const selectedId = S.selectedSkill?.skill_id || "";
     try {
         S.skills = await ApiClient.getSkills(0, 300);
@@ -6346,7 +6561,10 @@ async function loadSkills({ renderDetail = true } = {}) {
         renderSkills();
         if (renderDetail) renderSkillDetail();
     } catch (e) {
-        U.skillList.innerHTML = `<div class="empty-state error">Failed to load skills: ${esc(e.message)}</div>`;
+        if (isAbortLike(e)) return;
+        if (!(S.skills || []).length) {
+            U.skillList.innerHTML = `<div class="empty-state error">Failed to load skills: ${esc(e.message)}</div>`;
+        }
         addNotice({ kind: "resource_failed", title: "Skill load failed", text: e.message || "Unknown error" });
     } finally {
         renderSkillActions();
@@ -6582,7 +6800,9 @@ function renderToolDetail() {
 }
 
 async function loadTools({ renderDetail = true } = {}) {
-    U.toolList.innerHTML = '<div class="empty-state">Loading tools...</div>';
+    if (!(S.tools || []).length) {
+        U.toolList.innerHTML = '<div class="empty-state">Loading tools...</div>';
+    }
     const selectedId = S.selectedTool?.tool_id || "";
     try {
         S.tools = await ApiClient.getTools(0, 300);
@@ -6601,7 +6821,10 @@ async function loadTools({ renderDetail = true } = {}) {
         renderTools();
         if (renderDetail) renderToolDetail();
     } catch (e) {
-        U.toolList.innerHTML = `<div class="empty-state error">Failed to load tools: ${esc(e.message)}</div>`;
+        if (isAbortLike(e)) return;
+        if (!(S.tools || []).length) {
+            U.toolList.innerHTML = `<div class="empty-state error">Failed to load tools: ${esc(e.message)}</div>`;
+        }
         addNotice({ kind: "resource_failed", title: "Tool load failed", text: e.message || "Unknown error" });
     } finally {
         renderToolActions();
@@ -6776,7 +6999,12 @@ function switchView(view) {
             S.taskWs = null;
         }
     }
-    if (view === "tasks") void loadTasks();
+    if (view === "tasks") {
+        void loadTasks();
+        initTasksWs();
+    } else {
+        closeTasksWs();
+    }
     if (view === "skills") void loadSkills();
     if (view === "tools") void loadTools();
     if (view === "models") void loadModels();
@@ -7122,9 +7350,6 @@ function bind() {
         if (S.selectedTool) clearToolSelection();
         if (S.selectedCommunication) clearCommunicationSelection();
     });
-    document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) void pollCeoSessions();
-    });
     renderPendingCeoUploads();
     syncCeoInputHeight();
     renderCeoSessions();
@@ -7137,9 +7362,7 @@ function init() {
     enhanceResourceSelects();
     configureTaskDetailSections();
     bind();
-    startCeoSessionPolling();
     startLiveDurationTicker();
-    window.addEventListener("beforeunload", stopCeoSessionPolling);
     window.addEventListener("beforeunload", stopLiveDurationTicker);
     window.addEventListener("resize", refreshTaskDetailScrollRegions);
     bindTreePan();
@@ -7151,9 +7374,7 @@ function init() {
     renderCommunicationActions();
     void loadModels();
     void loadTasks();
-    void refreshCeoSessions({ reconnect: true }).catch((error) => {
-        showToast({ title: "会话加载失败", text: error.message || "Unknown error", kind: "error" });
-    });
+    initCeoWs();
 }
 
 document.addEventListener("DOMContentLoaded", init);

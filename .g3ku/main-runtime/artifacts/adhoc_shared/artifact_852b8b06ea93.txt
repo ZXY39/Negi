@@ -1,1 +1,0 @@
-['acp', 'agents', 'auto-reply', 'browser', 'canvas-host', 'channel-web.ts', 'channels', 'cli', 'commands', 'compat']

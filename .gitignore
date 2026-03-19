@@ -33,6 +33,8 @@ tests/
 tests/*
 !tests/resources/
 !tests/resources/**
+tests/resources/__pycache__/
+tests/resources/**/*.pyc
 !tests/test_memory_runtime_sharing.py
 !tests/test_china_bridge_config.py
 !tests/test_china_bridge_session_keys.py

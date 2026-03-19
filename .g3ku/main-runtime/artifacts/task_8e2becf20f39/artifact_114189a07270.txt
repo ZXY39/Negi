@@ -1,5 +1,0 @@
-apps True
-packages True
-services False
-tools False
-src True

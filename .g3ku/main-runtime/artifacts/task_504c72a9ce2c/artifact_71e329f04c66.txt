@@ -1,9 +1,0 @@
-{
-  "status": "failed",
-  "delivery_status": "blocked",
-  "summary": "unexpected goal: accept:child-ok",
-  "answer": "",
-  "evidence": [],
-  "remaining_work": [],
-  "blocking_reason": "unexpected goal: accept:child-ok"
-}

@@ -1,4 +1,5 @@
 import mimetypes
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from main.api import router as main_router
 
 mimetypes.add_type('text/css', '.css')
 mimetypes.add_type('application/javascript', '.js')
+os.environ.setdefault('G3KU_TASK_RUNTIME_ROLE', 'web')
 
 
 @asynccontextmanager

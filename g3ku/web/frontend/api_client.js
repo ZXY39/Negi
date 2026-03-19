@@ -3,6 +3,8 @@ const FALLBACK_SESSION_ID = "web:shared";
 
 class ApiClient {
     static _activeSessionId = "";
+    static _requestControllers = new Map();
+    static _requestTokens = new Map();
 
     static getActiveSessionId() {
         return String(this._activeSessionId || FALLBACK_SESSION_ID).trim() || FALLBACK_SESSION_ID;
@@ -24,33 +26,79 @@ class ApiClient {
         return url;
     }
 
-    static async _request(method, path, { params = {}, body, headers = {} } = {}) {
+    static async _request(method, path, { params = {}, body, headers = {}, requestKey = "", timeoutMs = 10000 } = {}) {
         const url = this._buildUrl(path, params);
         const requestHeaders = { ...headers };
         const isFormData = body instanceof FormData;
         if (body !== undefined && !isFormData && !requestHeaders["Content-Type"]) {
             requestHeaders["Content-Type"] = "application/json";
         }
-        const response = await fetch(url.toString(), {
-            method,
-            headers: requestHeaders,
-            body: body === undefined ? undefined : (isFormData ? body : JSON.stringify(body)),
-        });
-        if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            const detail = payload.detail !== undefined ? payload.detail : payload.message;
-            const message = typeof detail === "string"
-                ? detail
-                : (detail && typeof detail === "object" && typeof detail.message === "string" && detail.message.trim())
-                    ? detail.message.trim()
-                    : payload.message || `HTTP ${response.status}`;
-            const error = new Error(message);
-            if (detail && typeof detail === "object") error.data = detail;
-            error.status = response.status;
-            error.payload = payload;
-            throw error;
+        const normalizedKey = String(requestKey || "").trim();
+        if (normalizedKey && this._requestControllers.has(normalizedKey)) {
+            try {
+                this._requestControllers.get(normalizedKey)?.abort();
+            } catch (error) {
+                void error;
+            }
         }
-        return response.json();
+        const controller = new AbortController();
+        const token = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+        if (normalizedKey) {
+            this._requestControllers.set(normalizedKey, controller);
+            this._requestTokens.set(normalizedKey, token);
+        }
+        try {
+            const timeoutId = window.setTimeout(() => controller.abort(new DOMException("Request timeout", "AbortError")), Math.max(1000, Number(timeoutMs) || 10000));
+            let response;
+            try {
+                response = await fetch(url.toString(), {
+                    method,
+                    headers: requestHeaders,
+                    body: body === undefined ? undefined : (isFormData ? body : JSON.stringify(body)),
+                    signal: controller.signal,
+                });
+            } catch (error) {
+                if (error?.name === "AbortError") {
+                    const timeoutError = new Error("Request timeout");
+                    timeoutError.name = "AbortError";
+                    throw timeoutError;
+                }
+                throw error;
+            } finally {
+                window.clearTimeout(timeoutId);
+            }
+            if (normalizedKey && this._requestTokens.get(normalizedKey) !== token) {
+                const staleError = new Error("Stale request");
+                staleError.name = "AbortError";
+                throw staleError;
+            }
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                const detail = payload.detail !== undefined ? payload.detail : payload.message;
+                const message = typeof detail === "string"
+                    ? detail
+                    : (detail && typeof detail === "object" && typeof detail.message === "string" && detail.message.trim())
+                        ? detail.message.trim()
+                        : payload.message || `HTTP ${response.status}`;
+                const error = new Error(message);
+                if (detail && typeof detail === "object") error.data = detail;
+                error.status = response.status;
+                error.payload = payload;
+                throw error;
+            }
+            const payload = await response.json();
+            if (normalizedKey && this._requestTokens.get(normalizedKey) !== token) {
+                const staleError = new Error("Stale request");
+                staleError.name = "AbortError";
+                throw staleError;
+            }
+            return payload;
+        } finally {
+            if (normalizedKey && this._requestControllers.get(normalizedKey) === controller) {
+                this._requestControllers.delete(normalizedKey);
+                this._requestTokens.delete(normalizedKey);
+            }
+        }
     }
 
     static get(path, params = {}) {
@@ -79,7 +127,10 @@ class ApiClient {
     static getCeoWsUrl(sessionId = this.getActiveSessionId()) {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;
-        return `${protocol}//${host}/api/ws/ceo?session_id=${encodeURIComponent(sessionId)}`;
+        const normalized = String(sessionId || "").trim();
+        return normalized
+            ? `${protocol}//${host}/api/ws/ceo?session_id=${encodeURIComponent(normalized)}`
+            : `${protocol}//${host}/api/ws/ceo`;
     }
 
     static getTaskWsUrl(taskId, sessionId = this.getActiveSessionId()) {
@@ -88,8 +139,14 @@ class ApiClient {
         return `${protocol}//${host}/api/ws/tasks/${encodeURIComponent(taskId)}?session_id=${encodeURIComponent(sessionId)}`;
     }
 
+    static getTasksWsUrl(sessionId = "all") {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;
+        return `${protocol}//${host}/api/ws/tasks?session_id=${encodeURIComponent(sessionId)}`;
+    }
+
     static async listCeoSessions() {
-        return this.get("/api/ceo/sessions");
+        return this._request("GET", "/api/ceo/sessions", { requestKey: "ceo:sessions" });
     }
 
     static async createCeoSession(payload = {}) {
@@ -141,12 +198,25 @@ class ApiClient {
     }
 
     static async getTasks(scope = 1, sessionId = this.getActiveSessionId()) {
-        const data = await this.get("/api/tasks", { session_id: sessionId, scope });
-        return data.items || [];
+        const data = await this._request("GET", "/api/tasks", {
+            params: { session_id: sessionId, scope },
+            requestKey: `tasks:list:${sessionId}:${scope}`,
+        });
+        return data || { items: [] };
     }
 
     static async getTask(taskId, markRead = false) {
-        return this.get(`/api/tasks/${taskId}`, { mark_read: markRead });
+        return this._request("GET", `/api/tasks/${taskId}`, {
+            params: { mark_read: markRead },
+            requestKey: `tasks:detail:${taskId}`,
+        });
+    }
+
+    static async getTaskNodeDetail(taskId, nodeId) {
+        const data = await this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}`, {
+            requestKey: `tasks:node:${taskId}:${nodeId}`,
+        });
+        return data.item || null;
     }
 
     static async pauseTask(taskId) {
@@ -418,7 +488,10 @@ class ApiClient {
     }
 
     static async getSkills(offset = 0, limit = 200) {
-        const data = await this.get("/api/resources/skills", { offset, limit });
+        const data = await this._request("GET", "/api/resources/skills", {
+            params: { offset, limit },
+            requestKey: `resources:skills:${offset}:${limit}`,
+        });
         return data.items || [];
     }
 
@@ -457,7 +530,10 @@ class ApiClient {
     }
 
     static async getTools(offset = 0, limit = 200) {
-        const data = await this.get("/api/resources/tools", { offset, limit });
+        const data = await this._request("GET", "/api/resources/tools", {
+            params: { offset, limit },
+            requestKey: `resources:tools:${offset}:${limit}`,
+        });
         return data.items || [];
     }
 

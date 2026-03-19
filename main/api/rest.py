@@ -35,6 +35,8 @@ async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1
         'session_id': 'all' if effective_session_id is None else effective_session_id,
         'scope': int(scope),
         'items': [item.model_dump(mode='json') for item in items],
+        'worker': service.latest_worker_status(),
+        'worker_online': service.is_worker_online(),
     }
 
 
@@ -50,12 +52,29 @@ async def get_task(task_id: str, mark_read: bool = Query(False)):
     return {'ok': True, **payload}
 
 
+@router.get('/tasks/{task_id}/nodes/{node_id}')
+async def get_task_node_detail(task_id: str, node_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = service.get_node_detail_payload(task_id, node_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return payload
+
+
 @router.post('/tasks/{task_id}/pause')
 async def pause_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     task_id = service.normalize_task_id(task_id)
-    record = await service.pause_task(task_id)
+    try:
+        record = await service.pause_task(task_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 503 if detail == 'task_worker_offline' else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}
@@ -66,7 +85,12 @@ async def resume_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     task_id = service.normalize_task_id(task_id)
-    record = await service.resume_task(task_id)
+    try:
+        record = await service.resume_task(task_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 503 if detail == 'task_worker_offline' else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}
@@ -83,6 +107,8 @@ async def retry_task(task_id: str):
         detail = str(exc)
         if detail == 'task_not_failed':
             raise HTTPException(status_code=409, detail=detail) from exc
+        if detail == 'task_worker_offline':
+            raise HTTPException(status_code=503, detail=detail) from exc
         raise HTTPException(status_code=400, detail=detail) from exc
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
@@ -94,7 +120,12 @@ async def cancel_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     task_id = service.normalize_task_id(task_id)
-    record = await service.cancel_task(task_id)
+    try:
+        record = await service.cancel_task(task_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 503 if detail == 'task_worker_offline' else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}

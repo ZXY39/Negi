@@ -1,4 +1,0 @@
-browser-tool.actions.ts
-browser-tool.schema.ts
-browser-tool.test.ts
-browser-tool.ts

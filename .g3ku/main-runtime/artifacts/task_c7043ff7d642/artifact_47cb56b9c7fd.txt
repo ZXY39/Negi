@@ -1,9 +1,0 @@
-{
-  "status": "failed",
-  "delivery_status": "blocked",
-  "summary": "assert '在准备进行下一步前，立即评估是否通过派发子节点完成任务效率更高' in '你是一个以 ReAct + 工具调用模式运行的执行节点 (execution node)。\\n\\n规则：\\n- 用户消息包含 JSON 格式的节点上下文。\\n- 当工具能帮助你完成节点目标时，请使用工具。\\n- 范围窄、低复杂度、低风...excerpts.\\n- Decide per child whether acceptance is actually required instead of defaulting every child to acceptance.'",
-  "answer": "",
-  "evidence": [],
-  "remaining_work": [],
-  "blocking_reason": "assert '在准备进行下一步前，立即评估是否通过派发子节点完成任务效率更高' in '你是一个以 ReAct + 工具调用模式运行的执行节点 (execution node)。\\n\\n规则：\\n- 用户消息包含 JSON 格式的节点上下文。\\n- 当工具能帮助你完成节点目标时，请使用工具。\\n- 范围窄、低复杂度、低风...excerpts.\\n- Decide per child whether acceptance is actually required instead of defaulting every child to acceptance.'"
-}

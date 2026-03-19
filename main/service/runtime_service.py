@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,12 +23,12 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
-from main.ids import new_node_id, new_task_id
+from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import NodeRecord, TaskArtifactRecord, TaskRecord, TokenUsageSummary, normalize_final_acceptance_metadata
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.query_service import TaskQueryService
-from main.protocol import build_envelope, now_iso
+from main.protocol import now_iso
 from main.monitoring.tree_builder import TaskTreeBuilder
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.node_runner import NodeRunner
@@ -77,9 +78,16 @@ class MainRuntimeService:
         max_iterations: int = 16,
         execution_max_iterations: int | None = None,
         acceptance_max_iterations: int | None = None,
+        execution_mode: str = 'embedded',
+        worker_id: str | None = None,
     ) -> None:
         self._chat_backend = chat_backend
         self._app_config = app_config
+        normalized_mode = str(execution_mode or 'embedded').strip().lower() or 'embedded'
+        if normalized_mode not in {'embedded', 'web', 'worker'}:
+            normalized_mode = 'embedded'
+        self.execution_mode = normalized_mode
+        self.worker_id = str(worker_id or (new_worker_id() if normalized_mode == 'worker' else '')).strip()
         self.store = SQLiteTaskStore(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
         self.file_store = TaskFileStore(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
         self.artifact_store = TaskArtifactStore(artifact_dir=artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'), store=self.store)
@@ -134,6 +142,8 @@ class MainRuntimeService:
         self.task_runner = TaskRunner(store=self.store, log_service=self.log_service, node_runner=self.node_runner)
         self._started = False
         self._runtime_loop = None
+        self._command_poller_task: asyncio.Task[Any] | None = None
+        self._worker_heartbeat_task: asyncio.Task[Any] | None = None
 
     async def startup(self) -> None:
         if self._started:
@@ -146,28 +156,129 @@ class MainRuntimeService:
                 await self.memory_manager.sync_catalog(self)
             except Exception:
                 pass
-        for task in self.store.list_tasks():
-            self.log_service.bootstrap_missing_files(task.task_id)
-            if task.status != 'in_progress':
-                continue
-            runtime_state = self.log_service.read_runtime_state(task.task_id)
-            if runtime_state is None:
-                self.log_service.mark_task_failed(task.task_id, reason='runtime_state_corrupt')
-                continue
-            if bool(task.is_paused) or bool(runtime_state.get('paused')):
-                continue
-            self.task_runner.start_background(task.task_id)
+        if self.execution_mode in {'embedded', 'worker'}:
+            for task in self.store.list_tasks():
+                self.log_service.bootstrap_missing_files(task.task_id)
+                self.log_service.ensure_task_projection(task.task_id)
+                if task.status != 'in_progress':
+                    continue
+                runtime_state = self.log_service.read_runtime_state(task.task_id)
+                if runtime_state is None:
+                    self.log_service.mark_task_failed(task.task_id, reason='runtime_state_corrupt')
+                    continue
+                if bool(task.is_paused) or bool(runtime_state.get('paused')):
+                    continue
+                self.task_runner.start_background(task.task_id)
+        if self.execution_mode == 'worker':
+            self._start_worker_loops()
 
-    async def create_task(
+    def _start_worker_loops(self) -> None:
+        if self._command_poller_task is None or self._command_poller_task.done():
+            self._command_poller_task = asyncio.create_task(self._worker_command_loop(), name=f'main-runtime-command-poller:{self.worker_id or "worker"}')
+        if self._worker_heartbeat_task is None or self._worker_heartbeat_task.done():
+            self._worker_heartbeat_task = asyncio.create_task(self._worker_heartbeat_loop(), name=f'main-runtime-worker-heartbeat:{self.worker_id or "worker"}')
+
+    async def _worker_command_loop(self) -> None:
+        while True:
+            try:
+                commands = self.store.claim_pending_task_commands(
+                    worker_id=self.worker_id or 'worker',
+                    claimed_at=now_iso(),
+                    limit=20,
+                )
+                if not commands:
+                    await asyncio.sleep(0.25)
+                    continue
+                for command in commands:
+                    await self._process_worker_command(command)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(0.5)
+
+    async def _worker_heartbeat_loop(self) -> None:
+        while True:
+            try:
+                self.store.upsert_worker_status(
+                    worker_id=self.worker_id or 'worker',
+                    role='task_worker',
+                    status='running',
+                    updated_at=now_iso(),
+                    payload={
+                        'execution_mode': self.execution_mode,
+                        'active_task_count': sum(
+                            1
+                            for task in self.store.list_tasks()
+                            if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
+                            and not bool(getattr(task, 'is_paused', False))
+                        ),
+                    },
+                )
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(1.0)
+
+    async def _process_worker_command(self, command: dict[str, Any]) -> None:
+        command_id = str(command.get('command_id') or '').strip()
+        command_type = str(command.get('command_type') or '').strip()
+        task_id = self.normalize_task_id(str(command.get('task_id') or '').strip())
+        success = False
+        error_text = ''
+        try:
+            if command_type == 'create_task':
+                task = self.get_task(task_id)
+                if task is not None and not bool(task.is_paused):
+                    self.task_runner.start_background(task.task_id)
+                success = True
+            elif command_type == 'resume_task':
+                if task_id:
+                    await self.task_runner.resume(task_id)
+                success = True
+            elif command_type in {'pause_task', 'cancel_task'}:
+                success = True
+            else:
+                error_text = f'unsupported_command:{command_type}'
+        except Exception as exc:
+            error_text = str(exc)
+        finally:
+            if command_id:
+                self.store.finish_task_command(
+                    command_id,
+                    finished_at=now_iso(),
+                    success=success,
+                    error_text=error_text,
+                )
+
+    def _enqueue_task_command(
         self,
-        task: str,
         *,
-        session_id: str = 'web:shared',
-        max_depth: int | None = None,
-        title: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> TaskRecord:
-        await self.startup()
+        command_type: str,
+        task_id: str | None,
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        command_id = new_command_id()
+        self.store.enqueue_task_command(
+            command_id=command_id,
+            task_id=task_id,
+            session_id=str(session_id or 'web:shared').strip() or 'web:shared',
+            command_type=str(command_type or '').strip(),
+            created_at=now_iso(),
+            payload=dict(payload or {}),
+        )
+        return command_id
+
+    def _build_task_record(
+        self,
+        *,
+        task: str,
+        session_id: str,
+        max_depth: int | None,
+        title: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> tuple[TaskRecord, NodeRecord]:
         prompt = str(task or '').strip()
         if not prompt:
             raise ValueError('task must not be empty')
@@ -218,28 +329,99 @@ class MainRuntimeService:
             token_usage_by_model=[],
             metadata={},
         )
+        return record, root
+
+    async def create_task(
+        self,
+        task: str,
+        *,
+        session_id: str = 'web:shared',
+        max_depth: int | None = None,
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TaskRecord:
+        await self.startup()
+        if self.execution_mode == 'web':
+            self._assert_worker_available()
+        record, root = self._build_task_record(
+            task=task,
+            session_id=session_id,
+            max_depth=max_depth,
+            title=title,
+            metadata=metadata,
+        )
         record, root = self.log_service.initialize_task(record, root)
-        self.task_runner.start_background(task_id)
+        if self.execution_mode in {'embedded', 'worker'}:
+            self.task_runner.start_background(record.task_id)
+        else:
+            self._enqueue_task_command(
+                command_type='create_task',
+                task_id=record.task_id,
+                session_id=record.session_id,
+                payload={
+                    'task_id': record.task_id,
+                    'session_id': record.session_id,
+                },
+            )
         return self.store.get_task(record.task_id) or record
 
     async def cancel_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
-        await self.task_runner.cancel(task_id)
+        if self.execution_mode in {'embedded', 'worker'}:
+            await self.task_runner.cancel(task_id)
+        else:
+            self._assert_worker_available()
+            self.log_service.request_cancel(task_id)
+            task = self.get_task(task_id)
+            if task is not None:
+                self._enqueue_task_command(
+                    command_type='cancel_task',
+                    task_id=task.task_id,
+                    session_id=task.session_id,
+                    payload={'task_id': task.task_id},
+                )
         return self.get_task(task_id)
 
     async def pause_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
-        await self.task_runner.pause(task_id)
+        if self.execution_mode in {'embedded', 'worker'}:
+            await self.task_runner.pause(task_id)
+        else:
+            self._assert_worker_available()
+            self.log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+            task = self.get_task(task_id)
+            if task is not None:
+                self._enqueue_task_command(
+                    command_type='pause_task',
+                    task_id=task.task_id,
+                    session_id=task.session_id,
+                    payload={'task_id': task.task_id},
+                )
         return self.get_task(task_id)
 
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
-        await self.task_runner.resume(task_id)
+        if self.execution_mode in {'embedded', 'worker'}:
+            await self.task_runner.resume(task_id)
+        else:
+            self._assert_worker_available()
+            task = self.get_task(task_id)
+            if task is None:
+                return None
+            self.log_service.set_pause_state(task_id, pause_requested=False, is_paused=False)
+            self._enqueue_task_command(
+                command_type='resume_task',
+                task_id=task.task_id,
+                session_id=task.session_id,
+                payload={'task_id': task.task_id},
+            )
         return self.get_task(task_id)
 
     async def retry_task(self, task_id: str) -> TaskRecord | None:
         await self.startup()
         task_id = self.normalize_task_id(task_id)
+        if self.execution_mode == 'web':
+            self._assert_worker_available()
         task = self.get_task(task_id)
         if task is None:
             return None
@@ -273,6 +455,13 @@ class MainRuntimeService:
         self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
         self.file_store.delete_task_files(task_id)
         self.store.delete_task(task_id)
+        self.store.append_task_event(
+            task_id=task.task_id,
+            session_id=task.session_id,
+            event_type='task.deleted',
+            created_at=now_iso(),
+            payload={'task_id': task.task_id},
+        )
         await self.registry.forget_task(task.session_id, task_id)
         return task
 
@@ -284,6 +473,32 @@ class MainRuntimeService:
     def get_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         return self.store.get_task(task_id)
+
+    def latest_worker_status(self) -> dict[str, Any] | None:
+        items = self.store.list_worker_status(role='task_worker')
+        return items[0] if items else None
+
+    def is_worker_online(self, *, stale_after_seconds: float = 5.0) -> bool:
+        if self.execution_mode in {'embedded', 'worker'}:
+            return True
+        item = self.latest_worker_status()
+        if not item:
+            return False
+        updated_at = str(item.get('updated_at') or '').strip()
+        if not updated_at:
+            return False
+        try:
+            updated_dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+        except ValueError:
+            return False
+        if updated_dt.tzinfo is None:
+            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - updated_dt.astimezone(timezone.utc)).total_seconds())
+        return age_seconds <= float(stale_after_seconds or 5.0)
+
+    def _assert_worker_available(self) -> None:
+        if self.execution_mode == 'web' and not self.is_worker_online():
+            raise ValueError('task_worker_offline')
 
     @staticmethod
     def _normalize_session_key(session_id: str | None) -> str:
@@ -1268,16 +1483,23 @@ class MainRuntimeService:
 
     def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False) -> dict[str, Any] | None:
         task_id = self.normalize_task_id(task_id)
-        task = self.get_task(task_id)
-        if task is None:
+        self.log_service.ensure_task_projection(task_id)
+        payload = self.query_service.get_task_snapshot(task_id, mark_read=mark_read)
+        if payload is None:
             return None
-        progress = self.query_service.view_progress(task_id, mark_read=mark_read)
-        if progress is None:
+        return payload
+
+    def get_node_detail_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        self.log_service.ensure_task_projection(normalized_task_id)
+        detail = self.query_service.get_node_detail(normalized_task_id, node_id)
+        if detail is None:
             return None
-        latest = self.get_task(task_id) or task
         return {
-            'task': latest.model_dump(mode='json'),
-            'progress': progress.model_dump(mode='json'),
+            'ok': True,
+            'task_id': normalized_task_id,
+            'node_id': node_id,
+            'item': detail.model_dump(mode='json'),
         }
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
@@ -1348,24 +1570,13 @@ class MainRuntimeService:
         task = self.get_task(task_id)
         self.refresh_resource_paths([target_path], trigger='artifact-apply', session_id=(task.session_id if task is not None else 'web:shared'))
         if task is not None:
-            payload = build_envelope(
-                channel='task',
-                session_id=task.session_id,
+            self.store.append_task_event(
                 task_id=task.task_id,
-                seq=self.registry.next_global_task_seq(task.task_id),
-                type='artifact.applied',
-                data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True},
-            )
-            self.registry.publish_global_task(task.task_id, payload)
-            ceo_payload = build_envelope(
-                channel='ceo',
                 session_id=task.session_id,
-                task_id=task.task_id,
-                seq=self.registry.next_ceo_seq(task.session_id),
-                type='task.artifact.applied',
-                data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'task_id': task.task_id},
+                event_type='task.artifact.applied',
+                created_at=now_iso(),
+                payload={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True, 'task_id': task.task_id},
             )
-            self.registry.publish_global_ceo(ceo_payload)
         return {'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True}
 
     def _actor_role_for_node(self, node: NodeRecord) -> str:
@@ -1442,6 +1653,22 @@ class MainRuntimeService:
         return payload.text
 
     async def close(self) -> None:
+        for task in [self._command_poller_task, self._worker_heartbeat_task]:
+            if task is not None and not task.done():
+                task.cancel()
+        if self._command_poller_task is not None or self._worker_heartbeat_task is not None:
+            await asyncio.gather(
+                *(task for task in [self._command_poller_task, self._worker_heartbeat_task] if task is not None),
+                return_exceptions=True,
+            )
+        if self.execution_mode == 'worker' and self.worker_id:
+            self.store.upsert_worker_status(
+                worker_id=self.worker_id,
+                role='task_worker',
+                status='stopped',
+                updated_at=now_iso(),
+                payload={'execution_mode': self.execution_mode},
+            )
         await self.task_runner.close()
         await self.registry.close()
         self.governance_store.close()

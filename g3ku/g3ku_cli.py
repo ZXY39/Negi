@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import atexit
+import asyncio
 import json
 import os
+import signal
+import subprocess
+import sys
 import webbrowser
 from pathlib import Path
 
@@ -134,6 +138,43 @@ def _acquire_start_lock(root: Path, *, port: int) -> None:
     atexit.register(_release_start_lock)
 
 
+async def _run_worker_runtime() -> None:
+    from g3ku.bus.queue import MessageBus
+    from g3ku.cli.commands import _make_agent_loop, _make_provider, sync_workspace_templates
+    from g3ku.config.loader import load_config
+
+    os.environ["G3KU_TASK_RUNTIME_ROLE"] = "worker"
+    config = load_config()
+    sync_workspace_templates(config.workspace_path)
+    bus = MessageBus()
+    provider = _make_provider(config)
+    agent = _make_agent_loop(config, bus, provider, debug_mode=False)
+    service = getattr(agent, "main_task_service", None)
+    if service is None:
+        raise RuntimeError("main_task_service_unavailable")
+    try:
+        await service.startup()
+        while True:
+            await asyncio.sleep(1.0)
+    finally:
+        await agent.close_mcp()
+
+
+def _stop_worker_process(process: subprocess.Popen | None) -> None:
+    if process is None:
+        return
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
 @app.callback()
 def _main() -> None:
     """G3ku command group."""
@@ -147,6 +188,7 @@ def start(
     log_enabled: bool = typer.Option(False, "--log", "-log", help="Render main-agent user/prompt/answer logs."),
     open_browser: bool = typer.Option(False, "--open", help="Open the app URL in the default browser."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the resolved actions without starting the server."),
+    with_worker: bool = typer.Option(True, "--worker/--no-worker", help="Start the task worker alongside the web server."),
 ) -> None:
     """Start the unified G3ku web app.
 
@@ -174,7 +216,15 @@ def start(
         return
 
     _acquire_start_lock(root, port=resolved_port)
+    worker_process: subprocess.Popen | None = None
     try:
+        if with_worker and not reload:
+            worker_process = subprocess.Popen(
+                [sys.executable, "-m", "g3ku", "worker"],
+                cwd=str(root),
+            )
+        elif with_worker and reload:
+            typer.echo("[g3ku] worker auto-start is disabled when --reload is enabled; run `python -m g3ku worker` separately.")
         uvicorn.run(
             "g3ku.web.main:app",
             host=host,
@@ -182,7 +232,20 @@ def start(
             reload=reload,
         )
     finally:
+        _stop_worker_process(worker_process)
         _release_start_lock()
+
+
+@app.command()
+def worker() -> None:
+    """Start the background task worker."""
+    root = _resolve_project_root()
+    typer.echo(f"[g3ku] project root: {root}")
+    typer.echo("[g3ku] task runtime role: worker")
+    try:
+        asyncio.run(_run_worker_runtime())
+    except KeyboardInterrupt:
+        raise typer.Exit(0)
 
 
 def main() -> None:

@@ -1,9 +1,0 @@
-{
-  "status": "success",
-  "delivery_status": "final",
-  "summary": "web fetch implementation traced",
-  "answer": "Execution body with concrete findings",
-  "evidence": [],
-  "remaining_work": [],
-  "blocking_reason": ""
-}

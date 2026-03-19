@@ -23,6 +23,7 @@ class _Registry:
     def __init__(self) -> None:
         self._seq: dict[str, int] = {}
         self.published: list[tuple[str, dict[str, object]]] = []
+        self.global_published: list[dict[str, object]] = []
 
     async def subscribe_ceo(self, session_id: str):
         _ = session_id
@@ -44,6 +45,9 @@ class _Registry:
 
     def publish_ceo(self, session_id: str, envelope: dict[str, object]) -> None:
         self.published.append((str(session_id or ""), dict(envelope)))
+
+    def publish_global_ceo(self, envelope: dict[str, object]) -> None:
+        self.global_published.append(dict(envelope))
 
 
 class _TaskService:

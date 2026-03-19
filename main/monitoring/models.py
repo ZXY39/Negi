@@ -20,7 +20,7 @@ class TaskSpawnRound(Model):
     completed_children: int = 0
     running_children: int = 0
     failed_children: int = 0
-    children: list['TaskTreeNode'] = Field(default_factory=list)
+    children: list['TaskTreeNode | TaskTreeNodeSummary'] = Field(default_factory=list)
 
 
 class TaskTreeNode(Model):
@@ -113,11 +113,133 @@ class TaskListItem(Model):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
 
 
+class TaskTreeNodeSummary(Model):
+    node_id: str
+    parent_node_id: str | None = None
+    depth: int = 0
+    node_kind: str = 'execution'
+    status: NodeStatus = 'in_progress'
+    title: str = ''
+    updated_at: str = ''
+    spawn_rounds: list[TaskSpawnRound] = Field(default_factory=list)
+    default_round_id: str = ''
+    children: list['TaskTreeNodeSummary'] = Field(default_factory=list)
+
+
+class TaskRuntimeSummary(Model):
+    active_node_ids: list[str] = Field(default_factory=list)
+    runnable_node_ids: list[str] = Field(default_factory=list)
+    waiting_node_ids: list[str] = Field(default_factory=list)
+    frames: list[TaskLiveFrame] = Field(default_factory=list)
+
+
+class TaskNodeDetail(Model):
+    node_id: str
+    task_id: str
+    parent_node_id: str | None = None
+    depth: int = 0
+    node_kind: str = 'execution'
+    status: NodeStatus = 'in_progress'
+    goal: str = ''
+    prompt: str = ''
+    input: str = ''
+    input_ref: str = ''
+    output: str = ''
+    output_ref: str = ''
+    check_result: str = ''
+    check_result_ref: str = ''
+    final_output: str = ''
+    final_output_ref: str = ''
+    failure_reason: str = ''
+    updated_at: str = ''
+    execution_trace: dict[str, Any] = Field(default_factory=dict)
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
+    token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
+
+
+class TaskEventEnvelope(Model):
+    seq: int = 0
+    task_id: str = ''
+    session_id: str = ''
+    type: str = ''
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskProjectionMetaRecord(Model):
+    task_id: str
+    version: int = 1
+    updated_at: str = ''
+
+
+class TaskProjectionNodeRecord(Model):
+    node_id: str
+    task_id: str
+    parent_node_id: str | None = None
+    root_node_id: str = ''
+    depth: int = 0
+    node_kind: str = 'execution'
+    status: NodeStatus = 'in_progress'
+    title: str = ''
+    updated_at: str = ''
+    default_round_id: str = ''
+    selected_round_id: str = ''
+    round_options_count: int = 0
+    sort_key: str = ''
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskProjectionNodeDetailRecord(Model):
+    node_id: str
+    task_id: str
+    updated_at: str = ''
+    input_text: str = ''
+    input_ref: str = ''
+    output_text: str = ''
+    output_ref: str = ''
+    check_result: str = ''
+    check_result_ref: str = ''
+    final_output: str = ''
+    final_output_ref: str = ''
+    failure_reason: str = ''
+    prompt_summary: str = ''
+    execution_trace_ref: str = ''
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskProjectionRuntimeFrameRecord(Model):
+    task_id: str
+    node_id: str
+    depth: int = 0
+    node_kind: str = 'execution'
+    phase: str = ''
+    active: bool = False
+    runnable: bool = False
+    waiting: bool = False
+    updated_at: str = ''
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskProjectionRoundRecord(Model):
+    task_id: str
+    parent_node_id: str
+    round_id: str
+    round_index: int = 0
+    label: str = ''
+    is_latest: bool = False
+    created_at: str = ''
+    source: str = 'explicit'
+    total_children: int = 0
+    completed_children: int = 0
+    running_children: int = 0
+    failed_children: int = 0
+    child_node_ids: list[str] = Field(default_factory=list)
+
+
 class TaskProgressResult(Model):
     task_id: str
     task_status: TaskStatus = 'in_progress'
     tree_text: str = ''
-    root: TaskTreeNode | None = None
+    root: TaskTreeNode | TaskTreeNodeSummary | None = None
     latest_node: LatestTaskNodeOutput | None = None
     live_state: TaskLiveState | None = None
     nodes: list[dict[str, Any]] = Field(default_factory=list)
@@ -128,4 +250,5 @@ class TaskProgressResult(Model):
 
 TaskSpawnRound.model_rebuild()
 TaskTreeNode.model_rebuild()
+TaskTreeNodeSummary.model_rebuild()
 

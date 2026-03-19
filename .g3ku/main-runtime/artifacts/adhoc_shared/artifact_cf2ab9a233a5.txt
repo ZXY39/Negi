@@ -1,7 +1,0 @@
-Cloning into 'external\openclaw-skills'...
-error: invalid path 'skills/fei-moss/moss-trade-bot-factory/data_cache/binanceusdm_BTC_USDT:USDT_15m_2025-10-06_148d.csv'
-fatal: unable to checkout working tree
-warning: Clone succeeded, but checkout failed.
-You can inspect what was checked out with 'git status'
-and retry with 'git restore --source=HEAD :/'
-

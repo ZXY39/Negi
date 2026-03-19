@@ -1,2 +1,0 @@
-NO_UNIX 
-NO_WIN

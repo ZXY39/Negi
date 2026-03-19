@@ -1,3 +1,0 @@
-['name', 'version', 'description', 'keywords', 'homepage', 'bugs', 'license', 'author', 'repository', 'bin', 'directories', 'files', 'type', 'main', 'exports', 'scripts', 'dependencies', 'devDependencies', 'peerDependencies', 'peerDependenciesMeta', 'engines', 'packageManager', 'pnpm']
-workspaces None
-scripts keys ['android:assemble', 'android:bundle:release', 'android:format', 'android:install', 'android:lint', 'android:lint:android', 'android:run', 'android:test', 'android:test:integration', 'build', 'build:docker', 'build:plugin-sdk:dts', 'build:strict-smoke', 'canvas:a2ui:bundle', 'check', 'check:docs', 'check:host-env-policy:swift', 'check:loc', 'deadcode:ci', 'deadcode:knip']

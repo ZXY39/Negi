@@ -52,6 +52,20 @@ class TaskArtifactStore:
         )
         persisted = self._store.upsert_artifact(record)
         self._content_index[(task_id, content_hash)] = persisted
+        append_event = getattr(self._store, 'append_task_event', None)
+        if callable(append_event):
+            try:
+                task_record = self._store.get_task(task_id)
+                session_id = str(getattr(task_record, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+                append_event(
+                    task_id=task_id,
+                    session_id=session_id,
+                    event_type='task.artifact.added',
+                    created_at=record.created_at,
+                    payload={'artifact': persisted.model_dump(mode='json')},
+                )
+            except Exception:
+                pass
         return persisted
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:

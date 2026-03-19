@@ -457,6 +457,14 @@ def gateway(
     )
 
 
+@app.command()
+def worker():
+    """Start the background task worker."""
+    from g3ku.g3ku_cli import _run_worker_runtime
+
+    asyncio.run(_run_worker_runtime())
+
+
 
 
 # ============================================================================

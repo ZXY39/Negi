@@ -1,1 +1,0 @@
-['.agent', '.agents', '.detect-secrets.cfg', '.dockerignore', '.env.example', '.gitattributes', '.github', '.gitignore', '.jscpd.json', '.mailmap', '.markdownlint-cli2.jsonc', '.npmignore', '.npmrc', '.oxfmtrc.jsonc', '.oxlintrc.json', '.pi', '.pre-commit-config.yaml', '.secrets.baseline', '.shellcheckrc', '.swiftformat']

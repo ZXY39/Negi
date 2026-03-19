@@ -10,6 +10,7 @@ from g3ku.content import ContentNavigationService
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
 from main.models import NodeOutputEntry, NodeRecord, TaskRecord, normalize_final_acceptance_metadata
 from main.monitoring.file_store import TaskFileStore
+from main.monitoring.projection_service import TaskProjectionService
 from main.protocol import build_envelope, now_iso
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 from main.monitoring.tree_builder import TaskTreeBuilder
@@ -33,9 +34,13 @@ class TaskLogService:
         self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
         self._task_locks: dict[str, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
+        self._projection_service = TaskProjectionService(store=store, tree_builder=tree_builder)
 
     def set_snapshot_payload_builder(self, builder) -> None:
         self._snapshot_payload_builder = builder
+
+    def ensure_task_projection(self, task_id: str) -> None:
+        self._projection_service.ensure_task_projection(task_id)
 
     def add_task_terminal_listener(self, listener: Callable[[TaskRecord], None]) -> None:
         if callable(listener):
@@ -139,6 +144,13 @@ class TaskLogService:
         with self._task_lock(task_id):
             self._store.upsert_node(node)
             self.refresh_task_view(task_id, mark_unread=True)
+            task = self._store.get_task(task_id)
+            if task is not None:
+                self._append_task_event(
+                    task=task,
+                    event_type='task.node.updated',
+                    data={'task_id': task_id, 'node_id': node.node_id},
+                )
             return node
 
     def update_node_input(self, task_id: str, node_id: str, content: str) -> NodeRecord | None:
@@ -149,6 +161,13 @@ class TaskLogService:
                 lambda record: record.model_copy(update={'input': text, 'input_ref': ref, 'updated_at': now_iso()}),
             )
             self.refresh_task_view(task_id, mark_unread=True)
+            task = self._store.get_task(task_id)
+            if updated is not None and task is not None:
+                self._append_task_event(
+                    task=task,
+                    event_type='task.node.updated',
+                    data={'task_id': task_id, 'node_id': node_id},
+                )
             return updated
 
     def append_node_output(
@@ -192,6 +211,13 @@ class TaskLogService:
 
             updated = self._store.update_node(node_id, _mutate)
             self.refresh_task_view(task_id, mark_unread=True)
+            task = self._store.get_task(task_id)
+            if updated is not None and task is not None:
+                self._append_task_event(
+                    task=task,
+                    event_type='task.node.updated',
+                    data={'task_id': task_id, 'node_id': node_id},
+                )
             return updated
 
     def update_node_check_result(self, task_id: str, node_id: str, check_result: str) -> NodeRecord | None:
@@ -208,6 +234,13 @@ class TaskLogService:
                 lambda record: record.model_copy(update={'check_result': text, 'check_result_ref': ref, 'updated_at': now_iso()}),
             )
             self.refresh_task_view(task_id, mark_unread=True)
+            task = self._store.get_task(task_id)
+            if updated is not None and task is not None:
+                self._append_task_event(
+                    task=task,
+                    event_type='task.node.updated',
+                    data={'task_id': task_id, 'node_id': node_id},
+                )
             return updated
 
     def update_node_status(
@@ -248,6 +281,13 @@ class TaskLogService:
                 ),
             )
             self.refresh_task_view(task_id, mark_unread=True)
+            task = self._store.get_task(task_id)
+            if updated is not None and task is not None:
+                self._append_task_event(
+                    task=task,
+                    event_type='task.node.updated',
+                    data={'task_id': task_id, 'node_id': node_id},
+                )
             return updated
 
     def mark_task_read(self, task_id: str) -> TaskRecord | None:
@@ -360,7 +400,15 @@ class TaskLogService:
                     raise TypeError('node metadata mutator must return a dict')
                 return current.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
 
-            return self._store.update_node(node_id, _mutate)
+            updated = self._store.update_node(node_id, _mutate)
+            task = self._store.get_task(record.task_id)
+            if updated is not None and task is not None:
+                self._append_task_event(
+                    task=task,
+                    event_type='task.node.updated',
+                    data={'task_id': record.task_id, 'node_id': node_id},
+                )
+            return updated
 
     def ensure_node_output_externalized(self, task_id: str, node_id: str) -> NodeRecord | None:
         with self._task_lock(task_id):
@@ -468,7 +516,7 @@ class TaskLogService:
     def update_runtime_state(self, task_id: str, *, publish_snapshot: bool = False, **payload: Any) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
-            current = self._file_store.read_json(task.runtime_state_path) or {
+            current = self._store.get_runtime_state(task.task_id) or {
                 'task_id': task.task_id,
                 'root_node_id': task.root_node_id,
                 'updated_at': now_iso(),
@@ -487,16 +535,30 @@ class TaskLogService:
             current['paused'] = bool(current.get('paused', task.is_paused))
             current['pause_requested'] = bool(current.get('pause_requested', task.pause_requested))
             current['cancel_requested'] = bool(current.get('cancel_requested', task.cancel_requested))
-            self._file_store.write_json(task.runtime_state_path, current)
+            current = self._sanitize_runtime_state(current)
+            self._store.upsert_runtime_state(
+                task_id=task.task_id,
+                session_id=task.session_id,
+                updated_at=str(current['updated_at'] or now_iso()),
+                payload=current,
+            )
+            self._projection_service.sync_runtime_state(task.task_id, task=task, runtime_state=current)
             if publish_snapshot:
-                self._publish_snapshot(task.task_id)
+                self._append_task_event(
+                    task=task,
+                    event_type='task.runtime.updated',
+                    data={
+                        'task_id': task.task_id,
+                        'runtime_summary': self._runtime_summary_payload(task.task_id, runtime_state=current),
+                    },
+                )
             return current
 
     def read_runtime_state(self, task_id: str) -> dict[str, Any] | None:
         task = self._store.get_task(task_id)
-        if task is None or not task.runtime_state_path:
+        if task is None:
             return None
-        return self._file_store.read_json(task.runtime_state_path)
+        return self._store.get_runtime_state(task_id)
 
     def upsert_frame(self, task_id: str, frame: dict[str, Any], *, publish_snapshot: bool = False) -> dict[str, Any]:
         with self._task_lock(task_id):
@@ -599,15 +661,24 @@ class TaskLogService:
                 }
             )
             self._store.upsert_task(updated)
-            self._file_store.write_json(updated.tree_snapshot_path, {'task_id': updated.task_id, 'root': root.model_dump(mode='json') if root is not None else None})
-            self._file_store.write_text(updated.tree_text_path, tree_text)
             runtime_state = self.read_runtime_state(task_id)
             if runtime_state is not None:
                 runtime_state['updated_at'] = now_iso()
                 runtime_state['paused'] = bool(updated.is_paused)
                 runtime_state['pause_requested'] = bool(updated.pause_requested)
                 runtime_state['cancel_requested'] = bool(updated.cancel_requested)
-                self._file_store.write_json(updated.runtime_state_path, runtime_state)
+                self._store.upsert_runtime_state(
+                    task_id=updated.task_id,
+                    session_id=updated.session_id,
+                    updated_at=str(runtime_state['updated_at'] or now_iso()),
+                    payload=runtime_state,
+                )
+            self._projection_service.sync_task(
+                updated.task_id,
+                task=updated,
+                nodes=nodes,
+                runtime_state=runtime_state,
+            )
             self._publish_snapshot(updated.task_id, task=updated, nodes=nodes, root=root, tree_text=tree_text, publish_summary=True)
             self._notify_task_terminal(updated, previous_status=previous_status)
             return updated
@@ -618,7 +689,7 @@ class TaskLogService:
             if task is None:
                 return None
             self.refresh_task_view(task_id, mark_unread=False)
-            if not Path(task.runtime_state_path).exists():
+            if self._store.get_runtime_state(task.task_id) is None:
                 self.update_runtime_state(task.task_id, paused=bool(task.is_paused), active_node_ids=[], runnable_node_ids=[], waiting_node_ids=[], frames=[])
             return self._store.get_task(task_id)
 
@@ -751,59 +822,139 @@ class TaskLogService:
         tree_text: str | None = None,
         publish_summary: bool = False,
     ) -> None:
-        if self._registry is None:
-            return
         current_task = task or self._store.get_task(task_id)
         if current_task is None:
             return
-        payload = self._snapshot_payload_builder(current_task.task_id) if callable(self._snapshot_payload_builder) else None
-        if payload is None:
-            current_nodes = list(nodes or self._store.list_nodes(task_id))
-            current_root = root if root is not None else self._tree_builder.build_tree(current_task, current_nodes)
-            current_tree_text = str(tree_text if tree_text is not None else self._tree_builder.render_tree_text(current_root))
-            payload = {
-                'task': current_task.model_dump(mode='json'),
-                'progress': {
-                    'task_id': current_task.task_id,
-                    'task_status': current_task.status,
-                    'tree_text': current_tree_text,
-                    'root': current_root.model_dump(mode='json') if current_root is not None else None,
-                    'latest_node': None,
-                    'live_state': None,
-                    'nodes': [item.model_dump(mode='json') for item in current_nodes],
-                    'token_usage': current_task.token_usage.model_dump(mode='json'),
-                    'token_usage_by_model': [],
-                    'text': f'Task status: {current_task.status}',
-                },
-            }
-        self._registry.publish_global_task(
-            current_task.task_id,
-            build_envelope(
-                channel='task',
-                session_id=current_task.session_id,
-                task_id=current_task.task_id,
-                seq=self._registry.next_global_task_seq(current_task.task_id),
-                type='snapshot.task',
-                data=payload,
-            ),
+        current_nodes = list(nodes or self._store.list_nodes(task_id))
+        current_root = root if root is not None else self._tree_builder.build_tree(current_task, current_nodes)
+        self._append_task_event(
+            task=current_task,
+            event_type='task.summary.updated',
+            data={'task': self._task_summary_payload(current_task)},
         )
-        if publish_summary:
-            self._registry.publish_global_ceo(
-                build_envelope(
-                    channel='ceo',
-                    session_id=current_task.session_id,
-                    task_id=current_task.task_id,
-                    seq=self._registry.next_ceo_seq(current_task.session_id),
-                    type='task.summary.changed',
-                    data={
-                        'task_id': current_task.task_id,
-                        'status': current_task.status,
-                        'brief': current_task.brief_text,
-                        'is_unread': bool(current_task.is_unread),
-                        'token_usage': current_task.token_usage.model_dump(mode='json'),
-                    },
-                ),
+        self._append_task_event(
+            task=current_task,
+            event_type='task.tree.updated',
+            data={
+                'task_id': current_task.task_id,
+                'tree_root': self._compact_tree_payload(current_root),
+                'default_selected_node_id': self._default_selected_node_id(current_root),
+            },
+        )
+        if str(current_task.status or '').strip().lower() in {'success', 'failed'}:
+            self._append_task_event(
+                task=current_task,
+                event_type='task.terminal',
+                data={'task': self._task_summary_payload(current_task)},
             )
+        if self._registry is not None:
+            payload = self._snapshot_payload_builder(current_task.task_id) if callable(self._snapshot_payload_builder) else None
+            if payload is not None:
+                self._registry.publish_global_task(
+                    current_task.task_id,
+                    build_envelope(
+                        channel='task',
+                        session_id=current_task.session_id,
+                        task_id=current_task.task_id,
+                        seq=self._registry.next_global_task_seq(current_task.task_id),
+                        type='task.snapshot.internal',
+                        data=payload,
+                    ),
+                )
+        if publish_summary:
+            self._append_task_event(
+                task=current_task,
+                event_type='task.list.patch',
+                data={'task': self._task_summary_payload(current_task)},
+            )
+
+    def _append_task_event(self, *, task: TaskRecord, event_type: str, data: dict[str, Any]) -> None:
+        self._store.append_task_event(
+            task_id=task.task_id,
+            session_id=task.session_id,
+            event_type=event_type,
+            created_at=now_iso(),
+            payload=data,
+        )
+
+    @staticmethod
+    def _task_summary_payload(task: TaskRecord) -> dict[str, Any]:
+        return {
+            'task_id': task.task_id,
+            'session_id': task.session_id,
+            'title': task.title,
+            'brief': task.brief_text,
+            'status': task.status,
+            'is_unread': bool(task.is_unread),
+            'is_paused': bool(task.is_paused),
+            'created_at': task.created_at,
+            'updated_at': task.updated_at,
+            'max_depth': int(task.max_depth or 0),
+            'token_usage': task.token_usage.model_dump(mode='json'),
+        }
+
+    def _runtime_summary_payload(self, task_id: str, *, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
+        state = runtime_state if isinstance(runtime_state, dict) else (self.read_runtime_state(task_id) or {})
+        return {
+            'active_node_ids': [str(item) for item in list(state.get('active_node_ids') or []) if str(item or '').strip()],
+            'runnable_node_ids': [str(item) for item in list(state.get('runnable_node_ids') or []) if str(item or '').strip()],
+            'waiting_node_ids': [str(item) for item in list(state.get('waiting_node_ids') or []) if str(item or '').strip()],
+            'frames': [dict(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
+        }
+
+    def _compact_tree_payload(self, root) -> dict[str, Any] | None:
+        if root is None:
+            return None
+        return {
+            'node_id': root.node_id,
+            'parent_node_id': root.parent_node_id,
+            'depth': int(root.depth or 0),
+            'node_kind': 'execution',
+            'status': root.status,
+            'title': root.title,
+            'updated_at': root.updated_at,
+            'spawn_rounds': [
+                {
+                    'round_id': round_item.round_id,
+                    'round_index': int(round_item.round_index or 0),
+                    'label': round_item.label,
+                    'is_latest': bool(round_item.is_latest),
+                    'created_at': round_item.created_at,
+                    'child_node_ids': list(round_item.child_node_ids or []),
+                    'source': round_item.source,
+                    'total_children': int(round_item.total_children or 0),
+                    'completed_children': int(round_item.completed_children or 0),
+                    'running_children': int(round_item.running_children or 0),
+                    'failed_children': int(round_item.failed_children or 0),
+                    'children': [self._compact_tree_payload(child) for child in list(round_item.children or [])],
+                }
+                for round_item in list(root.spawn_rounds or [])
+            ],
+            'default_round_id': str(root.default_round_id or ''),
+            'children': [self._compact_tree_payload(child) for child in list(root.children or [])],
+        }
+
+    @staticmethod
+    def _default_selected_node_id(root) -> str:
+        return str(getattr(root, 'node_id', '') or '')
+
+    @classmethod
+    def _sanitize_runtime_state(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        state = dict(payload or {})
+        state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
+        return state
+
+    @staticmethod
+    def _sanitize_runtime_frame(frame: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(frame or {})
+        return {
+            'node_id': str(payload.get('node_id') or '').strip(),
+            'depth': int(payload.get('depth') or 0),
+            'node_kind': str(payload.get('node_kind') or 'execution'),
+            'phase': str(payload.get('phase') or ''),
+            'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
+            'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+        }
 
     def _notify_task_terminal(self, task: TaskRecord, *, previous_status: str) -> None:
         next_status = str(getattr(task, 'status', '') or '').strip().lower()

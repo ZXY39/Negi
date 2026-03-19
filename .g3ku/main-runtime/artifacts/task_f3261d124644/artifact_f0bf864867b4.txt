@@ -1,4 +1,0 @@
-D:\zxy\project\openclaw-2026.3.13-1\src\agents\pi-tools.before-tool-call.integration.e2e.test.ts:202:const baseTool = { name: "web_fetch", execute, description: "fetch", parameters: {} } as any;
-D:\zxy\project\openclaw-2026.3.13-1\src\agents\pi-embedded-runner\sanitize-session-history.tool-result-details.test.ts:14:content: [{ type: "toolCall", id: "call_1", name: "web_fetch", arguments: { url: "x" } }],
-D:\zxy\project\openclaw-2026.3.13-1\src\agents\pi-embedded-runner\sanitize-session-history.tool-result-details.test.ts:22:toolName: "web_fetch",
-D:\zxy\project\openclaw-2026.3.13-1\src\agents\tools\web-fetch.ts:750:name: "web_fetch",

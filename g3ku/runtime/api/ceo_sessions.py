@@ -16,6 +16,7 @@ from g3ku.runtime.web_ceo_sessions import (
     workspace_path,
 )
 from g3ku.shells.web import get_agent, get_runtime_manager, get_web_heartbeat_service
+from main.protocol import build_envelope
 
 router = APIRouter()
 
@@ -64,6 +65,25 @@ def _list_session_items(session_manager, runtime_manager, *, active_session_id: 
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
+    )
+
+
+def _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store) -> None:
+    service = getattr(agent, 'main_task_service', None)
+    registry = getattr(service, 'registry', None) if service is not None else None
+    if registry is None or not hasattr(registry, 'publish_global_ceo'):
+        return
+    active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
+    items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
+    seq_session_id = active_session_id or 'web:shared'
+    registry.publish_global_ceo(
+        build_envelope(
+            channel='ceo',
+            session_id=seq_session_id,
+            seq=registry.next_ceo_seq(seq_session_id),
+            type='ceo.sessions.snapshot',
+            data={'items': items, 'active_session_id': active_session_id},
+        )
     )
 
 
@@ -137,18 +157,19 @@ async def list_ceo_sessions():
 
 @router.post("/ceo/sessions")
 async def create_ceo_session(payload: dict | None = Body(default=None)):
-    _agent, session_manager, runtime_manager, state_store = _sessions()
+    agent, session_manager, runtime_manager, state_store = _sessions()
     ensure_active_web_ceo_session(session_manager, state_store)
     session = create_web_ceo_session(session_manager, title=str((payload or {}).get("title") or "").strip() or None)
     state_store.set_active_session_id(session.key)
     items = _list_session_items(session_manager, runtime_manager, active_session_id=session.key)
     item = next((entry for entry in items if entry["session_id"] == session.key), None)
+    _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
     return {"ok": True, "item": item, "items": items, "active_session_id": session.key}
 
 
 @router.patch("/ceo/sessions/{session_id}")
 async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
-    _agent, session_manager, runtime_manager, state_store = _sessions()
+    agent, session_manager, runtime_manager, state_store = _sessions()
     current_active = ensure_active_web_ceo_session(session_manager, state_store)
     _assert_no_running_turn(runtime_manager, current_active)
     session = _assert_known_session(session_manager, session_id)
@@ -162,6 +183,7 @@ async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
     items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
     item = next((entry for entry in items if entry["session_id"] == session.key), None)
+    _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
     return {"ok": True, "item": item, "items": items, "active_session_id": active_session_id}
 
 
@@ -199,12 +221,13 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
 
 @router.post("/ceo/sessions/{session_id}/activate")
 async def activate_ceo_session(session_id: str):
-    _agent, session_manager, runtime_manager, state_store = _sessions()
+    agent, session_manager, runtime_manager, state_store = _sessions()
     target = _assert_known_session(session_manager, session_id)
     ensure_active_web_ceo_session(session_manager, state_store)
     state_store.set_active_session_id(target.key)
     items = _list_session_items(session_manager, runtime_manager, active_session_id=target.key)
     item = next((entry for entry in items if entry["session_id"] == target.key), None)
+    _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
     return {"ok": True, "item": item, "items": items, "active_session_id": target.key}
 
 
@@ -259,6 +282,7 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
     items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
+    _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
     return {
         "ok": True,
         "deleted": True,
