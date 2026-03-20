@@ -97,13 +97,22 @@ class ExecTool(Tool):
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
 
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-            )
+            if os.name == "nt":
+                process = await asyncio.create_subprocess_exec(
+                    *self._windows_shell_argv(command),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
+            else:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
             
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -196,6 +205,27 @@ class ExecTool(Tool):
         if not working_dir:
             return self.working_dir or os.getcwd()
         return str(Path(working_dir).expanduser())
+
+    @staticmethod
+    def _windows_shell_argv(command: str) -> list[str]:
+        return [
+            ExecTool._windows_powershell_executable(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ]
+
+    @staticmethod
+    def _windows_powershell_executable() -> str:
+        system_root = str(os.environ.get("SystemRoot") or os.environ.get("WINDIR") or "").strip()
+        if system_root:
+            candidate = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            if candidate.exists():
+                return str(candidate)
+        return "powershell.exe"
 
     def _workspace_root(self) -> Path:
         return Path(self.workspace_root or self.working_dir or os.getcwd()).expanduser().resolve()

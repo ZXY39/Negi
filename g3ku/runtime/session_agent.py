@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from dataclasses import asdict
 from datetime import datetime
@@ -50,6 +51,7 @@ class RuntimeAgentSession:
         self._background_tool_targets: dict[str, dict[str, str]] = {}
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
+        self._preserved_inflight_turn: dict[str, Any] | None = None
 
     @property
     def state(self) -> AgentState:
@@ -222,7 +224,7 @@ class RuntimeAgentSession:
             execution_id,
         )
 
-    def inflight_turn_snapshot(self) -> dict[str, Any] | None:
+    def _current_inflight_turn_snapshot(self) -> dict[str, Any] | None:
         status = str(self._state.status or "").strip().lower()
         if not (self._state.is_running or status in {"paused", "error"}):
             return None
@@ -245,6 +247,17 @@ class RuntimeAgentSession:
         if not snapshot["tool_events"] and "user_message" not in snapshot and "assistant_text" not in snapshot and "last_error" not in snapshot:
             return None
         return snapshot
+
+    def inflight_turn_snapshot(self) -> dict[str, Any] | None:
+        snapshot = self._current_inflight_turn_snapshot()
+        if snapshot is not None:
+            source = str(snapshot.get("source") or "").strip().lower()
+            if source == "heartbeat" and self._preserved_inflight_turn is not None:
+                return copy.deepcopy(self._preserved_inflight_turn)
+            return snapshot
+        if self._preserved_inflight_turn is not None:
+            return copy.deepcopy(self._preserved_inflight_turn)
+        return None
 
     @staticmethod
     def _parse_progress_payload(content: Any) -> dict[str, Any] | None:
@@ -494,6 +507,14 @@ class RuntimeAgentSession:
 
         await refresh_web_agent_runtime(force=False, reason="prompt")
         user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
+        heartbeat_internal = self._is_heartbeat_internal_prompt(user_input)
+        if heartbeat_internal:
+            current_snapshot = self._current_inflight_turn_snapshot()
+            current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
+            if current_snapshot is not None and current_source != "heartbeat":
+                self._preserved_inflight_turn = copy.deepcopy(current_snapshot)
+        else:
+            self._preserved_inflight_turn = None
         cancel_token = self._loop.create_session_cancellation_token(self._state.session_key)
         self._active_cancel_token = cancel_token
         try:
@@ -660,6 +681,7 @@ class RuntimeAgentSession:
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason=reason or "用户已请求停止，正在安全停止...")
         await self._loop.cancel_session_tasks(self._state.session_key)
+        self._preserved_inflight_turn = None
         self._state.is_running = False
         self._state.paused = False
         self._state.status = "idle"

@@ -321,6 +321,88 @@ async def test_runtime_agent_session_marks_heartbeat_message_end(tmp_path: Path,
     assert message_end.payload["heartbeat_internal"] is True
 
 
+@pytest.mark.asyncio
+async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_prompt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _FakeRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = session, on_progress
+            metadata = dict(getattr(user_input, "metadata", None) or {})
+            if bool(metadata.get("heartbeat_internal")):
+                return HEARTBEAT_OK
+            return "normal reply"
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_FakeRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session._last_prompt = UserInputMessage(content="Install the weather skill")
+    session._event_log = [
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-03-18T12:00:00",
+            "payload": {
+                "tool_name": "skill-installer",
+                "text": "skill-installer started",
+                "tool_call_id": "skill-installer:1",
+            },
+        }
+    ]
+    session._state.paused = True
+    session._state.is_running = False
+    session._state.status = "paused"
+    session._state.latest_message = "Still installing dependencies..."
+
+    before = session.inflight_turn_snapshot()
+
+    assert before is not None
+    assert before["status"] == "paused"
+    assert before["user_message"]["content"] == "Install the weather skill"
+
+    await session.prompt(
+        UserInputMessage(
+            content="heartbeat",
+            metadata={"heartbeat_internal": True, "heartbeat_reason": "tool_background"},
+        ),
+        persist_transcript=False,
+    )
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert session.state.status == "completed"
+    assert snapshot is not None
+    assert snapshot["status"] == "paused"
+    assert snapshot["user_message"]["content"] == "Install the weather skill"
+    assert snapshot["assistant_text"] == "Still installing dependencies..."
+    assert [item["tool_name"] for item in snapshot["tool_events"]] == ["skill-installer"]
+
+
 def test_inflight_snapshot_skips_watchdog_progress_updates() -> None:
     loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")

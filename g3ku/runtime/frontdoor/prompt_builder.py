@@ -19,10 +19,17 @@ class CeoPromptBuilder:
         self._repo_prompt_dir = Path(__file__).resolve().parents[1] / 'prompts'
 
     def build(self, *, skills: list) -> str:
+        exec_runtime_guidance = (
+            '- `exec` on Windows always runs in PowerShell. Prefer PowerShell-compatible commands such as '
+            '`Get-ChildItem`, `Get-Location`, `Get-Content`, or aliases like `ls` / `pwd`; do not assume '
+            'Unix shell builtins such as `true`, `false`, bash heredocs, or `rg` are available.'
+        )
         base = self._read_prompt('ceo_frontdoor.md', self._default_prompt())
         base = self._normalize_frontdoor_prompt(base)
         if 'core_requirement' not in base:
             base = f'{base}\n{CORE_REQUIREMENT_GUIDANCE}'
+        if 'PowerShell-compatible commands' not in base:
+            base = f'{base}\n{exec_runtime_guidance}'
         inventory = self._skill_inventory(skills)
         if inventory:
             return f'{base}\n\n## 当前对主 Agent 可见的 Skills\n\n{inventory}'

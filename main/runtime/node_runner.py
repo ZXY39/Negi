@@ -221,10 +221,7 @@ class NodeRunner:
     @staticmethod
     def _shell_family() -> str:
         if os.name == 'nt':
-            comspec = str(os.environ.get('COMSPEC') or '').strip().lower()
-            if 'powershell' in comspec or 'pwsh' in comspec:
-                return 'powershell'
-            return 'cmd'
+            return 'powershell'
         shell = str(os.environ.get('SHELL') or '').strip().lower()
         if 'powershell' in shell or 'pwsh' in shell:
             return 'powershell'
@@ -252,7 +249,7 @@ class NodeRunner:
             'tool_guidance': {
                 'filesystem': 'Use absolute paths. Prefer filesystem.search for recursive directory searches.',
                 'content': 'Use ref navigation or absolute file paths for a single content body; do not expect directory search here.',
-                'exec': 'Exec runs in the host shell. Do not assume bash heredocs or rg are available. Pass an explicit working_dir when you need a specific directory.',
+                'exec': 'Exec runs in PowerShell on Windows and in the host shell elsewhere. Do not assume bash heredocs, rg, or Unix shell builtins such as `true` are available. Pass an explicit working_dir when you need a specific directory.',
             },
         }
 

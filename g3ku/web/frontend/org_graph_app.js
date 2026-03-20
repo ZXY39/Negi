@@ -1573,6 +1573,10 @@ function restoreCeoInflightTurn(snapshot = null) {
         turn.textEl.classList.add("markdown-content");
     }
     toolEvents.forEach((event) => appendCeoToolEvent(event));
+    if (status === "paused") {
+        finalizePausedCeoTurn(assistantText || "已暂停");
+        return;
+    }
     if (status === "error") {
         const errorMessage = String(snapshot?.last_error?.message || "").trim() || "unknown error";
         finalizeCeoTurn(`运行出错：${errorMessage}`);
