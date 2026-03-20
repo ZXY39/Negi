@@ -13,6 +13,7 @@ import json_repair
 
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
+from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.errors import TaskPausedError
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION
@@ -25,6 +26,7 @@ _COMPACT_HISTORY_CHAR_LIMIT = 60_000
 _COMPACT_HISTORY_KEEP_RECENT = 12
 _COMPACT_HISTORY_MAX_STEPS = 12
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
+_ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -85,6 +87,7 @@ class ReActToolLoop:
         attempts = 0
         last_contract_violations: list[str] = []
         message_history = list(messages or [])
+        orphan_tool_result_strikes = 0
         while attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
@@ -95,6 +98,14 @@ class ReActToolLoop:
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
             allowed_content_refs = self._collect_content_refs(model_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
+            tool_history = analyze_tool_call_history(model_messages)
+            if tool_history.has_orphan_tool_results:
+                orphan_tool_result_strikes += 1
+                if orphan_tool_result_strikes >= _ORPHAN_TOOL_RESULT_THRESHOLD:
+                    return self._orphan_tool_result_failure(
+                        call_ids=tool_history.orphan_tool_result_ids,
+                        strike_count=orphan_tool_result_strikes,
+                    )
             self._log_service.upsert_frame(
                 task.task_id,
                 {
@@ -711,15 +722,56 @@ class ReActToolLoop:
             return preserved_prefix + ([self._make_compact_history_message(self._merge_compact_payloads(existing_payloads, []))] if existing_payloads else [])
 
         keep_count = max(_COMPACT_HISTORY_KEEP_RECENT, int(preserve_non_system or 0))
-        split_index = max(0, len(regular_messages) - keep_count)
-        older_messages = regular_messages[:split_index]
-        recent_messages = regular_messages[split_index:]
+        segments = self._segment_history_for_compaction(regular_messages)
+        recent_segments: list[list[dict[str, Any]]] = []
+        recent_message_count = 0
+        for segment in reversed(segments):
+            if recent_segments and recent_message_count >= keep_count:
+                break
+            recent_segments.append(segment)
+            recent_message_count += len(segment)
+        recent_segments.reverse()
+        older_segment_count = max(0, len(segments) - len(recent_segments))
+        older_messages = [item for segment in segments[:older_segment_count] for item in segment]
+        recent_messages = [item for segment in recent_segments for item in segment]
         if not older_messages and not existing_payloads:
             return preserved_prefix + recent_messages
 
         compact_payload = self._merge_compact_payloads(existing_payloads, older_messages)
         compact_message = self._make_compact_history_message(compact_payload)
         return preserved_prefix + [compact_message] + recent_messages
+
+    @staticmethod
+    def _segment_history_for_compaction(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        segments: list[list[dict[str, Any]]] = []
+        index = 0
+        message_list = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        while index < len(message_list):
+            message = dict(message_list[index] or {})
+            role = str(message.get('role') or '').strip().lower()
+            if role == 'assistant' and list(message.get('tool_calls') or []):
+                segment = [message]
+                call_ids = {
+                    extract_call_id((tool_call or {}).get('id'))
+                    for tool_call in list(message.get('tool_calls') or [])
+                    if extract_call_id((tool_call or {}).get('id'))
+                }
+                index += 1
+                while index < len(message_list):
+                    tool_message = dict(message_list[index] or {})
+                    if str(tool_message.get('role') or '').strip().lower() != 'tool':
+                        break
+                    tool_call_id = extract_call_id(tool_message.get('tool_call_id'))
+                    if tool_call_id and tool_call_id in call_ids:
+                        segment.append(tool_message)
+                        index += 1
+                        continue
+                    break
+                segments.append(segment)
+                continue
+            segments.append([message])
+            index += 1
+        return segments
 
     def _merge_compact_payloads(self, payloads: list[dict[str, Any]], older_messages: list[dict[str, Any]]) -> dict[str, Any]:
         completed_steps: list[str] = []
@@ -951,6 +1003,26 @@ class ReActToolLoop:
                         return self._truncate_compact_text(summary_value)
         summary, _ref = content_summary_and_ref(content)
         return self._truncate_compact_text(summary)
+
+    @staticmethod
+    def _orphan_tool_result_failure(*, call_ids: list[str], strike_count: int) -> NodeFinalResult:
+        recent_ids = [str(item or '').strip() for item in list(call_ids or []) if str(item or '').strip()]
+        recent_text = ', '.join(recent_ids[:8]) if recent_ids else '<missing>'
+        summary = 'orphan tool result circuit breaker triggered'
+        blocking_reason = (
+            f'Detected orphan tool results {int(strike_count or 0)} times during the same node run. '
+            f'Recent orphan call IDs: {recent_text}. '
+            'Possible history compaction split or tool replay corruption.'
+        )
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary=summary,
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=blocking_reason,
+        )
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
         store = getattr(self._log_service, '_content_store', None)

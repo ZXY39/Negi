@@ -14,6 +14,7 @@ from loguru import logger
 from oauth_cli_kit import get_token as get_codex_token
 
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
+from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_ORIGINATOR = "g3ku"
@@ -227,21 +228,9 @@ def _sanitize_tool_call_history(messages: list[dict[str, Any]]) -> list[dict[str
     Responses API rejects such history. Preserve assistant text, but strip dangling
     tool calls so subsequent turns can continue.
     """
-    completed_call_ids: set[str] = set()
-    declared_call_ids: set[str] = set()
-
-    for msg in messages:
-        role = msg.get("role")
-        if role == "assistant":
-            for tool_call in msg.get("tool_calls", []) or []:
-                call_id, _ = _split_tool_call_id(tool_call.get("id"))
-                if call_id:
-                    declared_call_ids.add(call_id)
-            continue
-        if role == "tool":
-            call_id, _ = _split_tool_call_id(msg.get("tool_call_id"))
-            if call_id:
-                completed_call_ids.add(call_id)
+    analysis = analyze_tool_call_history(messages)
+    completed_call_ids = set(analysis.completed_call_ids)
+    declared_call_ids = set(analysis.declared_call_ids)
 
     sanitized: list[dict[str, Any]] = []
     dropped_assistant_call_ids: list[str] = []
@@ -275,7 +264,7 @@ def _sanitize_tool_call_history(messages: list[dict[str, Any]]) -> list[dict[str
             continue
 
         if role == "tool":
-            call_id, _ = _split_tool_call_id(msg.get("tool_call_id"))
+            call_id = extract_call_id(msg.get("tool_call_id"))
             if call_id and call_id in declared_call_ids:
                 sanitized.append(msg)
             else:

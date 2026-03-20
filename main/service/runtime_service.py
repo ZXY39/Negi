@@ -1890,12 +1890,26 @@ class MainRuntimeService:
         memory_scope = self._task_memory_scope(task)
         channel = str(memory_scope.get('channel') or 'unknown')
         chat_id = str(memory_scope.get('chat_id') or 'unknown')
+        actor_role = self._actor_role_for_node(node)
+        allowed_resource_record_ids = [
+            f"tool:{str(getattr(item, 'tool_id', '') or '').strip()}"
+            for item in list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
+            if str(getattr(item, 'tool_id', '') or '').strip()
+        ]
+        allowed_skill_record_ids = [
+            f"skill:{str(getattr(item, 'skill_id', '') or '').strip()}"
+            for item in list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
+            if str(getattr(item, 'skill_id', '') or '').strip()
+        ]
         try:
             block = await manager.retrieve_block(
                 query=query_text,
                 session_key=session_key,
                 channel=channel,
                 chat_id=chat_id,
+                allowed_context_types=['memory', 'resource', 'skill'],
+                allowed_resource_record_ids=allowed_resource_record_ids,
+                allowed_skill_record_ids=allowed_skill_record_ids,
             )
         except Exception:
             return messages

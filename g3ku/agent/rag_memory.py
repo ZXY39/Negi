@@ -2288,6 +2288,9 @@ class MemoryManager:
         channel: str | None,
         chat_id: str | None,
         session_key: str | None = None,
+        allowed_context_types: Iterable[str] | None = None,
+        allowed_resource_record_ids: Iterable[str] | None = None,
+        allowed_skill_record_ids: Iterable[str] | None = None,
     ) -> str:
         raw_query = str(query or "").strip()
         if not raw_query:
@@ -2368,6 +2371,35 @@ class MemoryManager:
             fused, rerank_trace = self._rerank_context_records(query=raw_query, records=fused, top_n=limit)
         else:
             fused = fused[:limit]
+        fused = self._filter_retrieved_records(
+            fused,
+            allowed_context_types=allowed_context_types,
+            allowed_resource_record_ids=allowed_resource_record_ids,
+            allowed_skill_record_ids=allowed_skill_record_ids,
+        )
+        if not fused:
+            empty_trace = RetrievalTrace(
+                plan=plan_trace,
+                candidates=[],
+                rerank=rerank_trace,
+                injected_blocks=[],
+                token_budget_used=0,
+            )
+            await self._write_retrieval_trace(
+                session_key=session_key,
+                channel=channel,
+                chat_id=chat_id,
+                query=raw_query,
+                trace=empty_trace,
+            )
+            await self._bump_cost_metrics(
+                retrieval_calls=1,
+                planner_calls=1 if use_planner else 0,
+                rerank_calls=1 if rerank_triggered else 0,
+                token_in=self._estimate_tokens(raw_query),
+                token_out=0,
+            )
+            return ""
 
         layered_enabled = self._feature_enabled("layered_loading")
         if layered_enabled:
@@ -2422,6 +2454,49 @@ class MemoryManager:
         )
 
         return block
+
+    @staticmethod
+    def _filter_retrieved_records(
+        records: list[ContextRecordV2],
+        *,
+        allowed_context_types: Iterable[str] | None = None,
+        allowed_resource_record_ids: Iterable[str] | None = None,
+        allowed_skill_record_ids: Iterable[str] | None = None,
+    ) -> list[ContextRecordV2]:
+        types_filter_enabled = allowed_context_types is not None
+        resource_filter_enabled = allowed_resource_record_ids is not None
+        skill_filter_enabled = allowed_skill_record_ids is not None
+        allowed_types = {
+            str(item or "").strip().lower()
+            for item in list(allowed_context_types or [])
+            if str(item or "").strip()
+        }
+        allowed_resources = {
+            str(item or "").strip()
+            for item in list(allowed_resource_record_ids or [])
+            if str(item or "").strip()
+        }
+        allowed_skills = {
+            str(item or "").strip()
+            for item in list(allowed_skill_record_ids or [])
+            if str(item or "").strip()
+        }
+
+        if not types_filter_enabled and not resource_filter_enabled and not skill_filter_enabled:
+            return list(records or [])
+
+        filtered: list[ContextRecordV2] = []
+        for record in list(records or []):
+            context_type = str(getattr(record, "context_type", "") or "").strip().lower()
+            record_id = str(getattr(record, "record_id", "") or "").strip()
+            if types_filter_enabled and context_type not in allowed_types:
+                continue
+            if context_type == "resource" and resource_filter_enabled and record_id not in allowed_resources:
+                continue
+            if context_type == "skill" and skill_filter_enabled and record_id not in allowed_skills:
+                continue
+            filtered.append(record)
+        return filtered
 
     def _score_fact_confidence(self, text: str) -> float:
         normalized = " ".join(str(text or "").split())
