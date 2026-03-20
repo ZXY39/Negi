@@ -44,14 +44,24 @@ class ContentEnvelope:
     handle: ContentHandle | None = None
     next_actions: list[str] = field(default_factory=lambda: ["content.search", "content.open"])
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(
+        self,
+        *,
+        include_handle: bool = True,
+        summary_override: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
             "type": self.type,
-            "summary": self.summary,
+            "summary": self.summary if summary_override is None else str(summary_override or ""),
             "ref": self.ref,
-            "handle": self.handle.to_dict() if self.handle is not None else None,
             "next_actions": list(self.next_actions or []),
         }
+        if include_handle:
+            payload["handle"] = self.handle.to_dict() if self.handle is not None else None
+        return payload
+
+    def to_model_dict(self, *, summary_override: str | None = None) -> dict[str, Any]:
+        return self.to_dict(include_handle=False, summary_override=summary_override)
 
 
 @dataclass(slots=True)

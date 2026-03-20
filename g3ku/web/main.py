@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 
 from g3ku.shells.web import ensure_web_runtime_services, get_agent, shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
+from g3ku.web.windows_asyncio import install_windows_connection_reset_filter
 from main.api import router as main_router
 
 mimetypes.add_type('text/css', '.css')
@@ -18,12 +19,14 @@ os.environ.setdefault('G3KU_TASK_RUNTIME_ROLE', 'web')
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    restore_asyncio_filter = install_windows_connection_reset_filter()
     try:
         agent = get_agent()
         await ensure_web_runtime_services(agent)
         yield
     finally:
         await shutdown_web_runtime()
+        restore_asyncio_filter()
 
 
 app = FastAPI(title='G3ku Web GUI', lifespan=lifespan)

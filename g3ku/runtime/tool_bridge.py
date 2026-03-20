@@ -578,6 +578,7 @@ class ToolExecutionBridge:
             runtime=runtime_payload,
             display_name=f'tool:{tool_name}',
             source_kind=f'tool_result:{tool_name}',
+            compact=True,
         )
         if isinstance(result, (dict, list)):
             return json.dumps(result, ensure_ascii=False)

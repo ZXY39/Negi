@@ -235,9 +235,6 @@ class ExecTool(Tool):
             "stdout_ref": self._persist_ref(stdout_text, runtime=runtime, display_name="exec stdout", source_kind="exec_stdout"),
             "stderr_ref": self._persist_ref(stderr_text, runtime=runtime, display_name="exec stderr", source_kind="exec_stderr"),
             "head_preview": self._preview(combined, from_tail=False),
-            "tail_preview": self._preview(combined, from_tail=True),
-            "line_count": len(combined.splitlines()) if combined else 0,
-            "next_actions": ["content.search", "content.open"],
         }
         if error:
             payload["error"] = error

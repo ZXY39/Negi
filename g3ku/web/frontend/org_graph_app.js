@@ -11,6 +11,8 @@ const TREE_SCALE_MIN = 0.12;
 const TREE_SCALE_MAX = 3.5;
 const TREE_SCALE_FACTOR = 1.12;
 const RESOURCE_PAGE_SIZES = [20, 50, 100];
+const CEO_TOOL_OUTPUT_PREVIEW_LINES = 2;
+const CEO_TOOL_OUTPUT_PREVIEW_MAX_CHARS = 240;
 const CEO_TOOL_PROGRESS_MAX_LINES = 4;
 const CEO_TOOL_STEP_MAX = 5;
 const TASK_DETAIL_SESSION_KEY = "g3ku.task-detail.session.v1";
@@ -315,6 +317,27 @@ function formatSessionTime(value) {
     return parsed.toLocaleString();
 }
 
+function formatCompactTime(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    const now = new Date();
+    const sameDay = parsed.getFullYear() === now.getFullYear()
+        && parsed.getMonth() === now.getMonth()
+        && parsed.getDate() === now.getDate();
+    return sameDay
+        ? parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+        : parsed.toLocaleString([], {
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        });
+}
+
 function ceoSessionDisplayTime(session) {
     const item = session && typeof session === "object" ? session : {};
     return String(item.last_llm_output_at || item.updated_at || item.created_at || "").trim();
@@ -407,6 +430,31 @@ function setElementScrollTop(element, value) {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) return;
     element.scrollTop = Math.max(0, numericValue);
+}
+
+async function copyTextToClipboard(text) {
+    const value = String(text || "");
+    if (!value) return false;
+    if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return true;
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "readonly");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    let copied = false;
+    try {
+        copied = document.execCommand("copy");
+    } finally {
+        textarea.remove();
+    }
+    return copied;
 }
 
 function readSessionJson(key) {
@@ -598,18 +646,30 @@ function applyTaskTraceItemViewState(traceList, traceItems) {
     });
 }
 
-function restoreTaskDetailViewState(state) {
+function restoreTaskDetailViewState(
+    state,
+    {
+        detail = true,
+        trace = true,
+        traceItems = true,
+        artifactList = true,
+        artifactContent = true,
+    } = {},
+) {
     if (!state || typeof state !== "object") return;
     const traceList = U.adFlow?.querySelector(".task-trace-list");
-    applyTaskTraceItemViewState(traceList, state.traceItems);
+    if (trace && traceItems) applyTaskTraceItemViewState(traceList, state.traceItems);
     const applyScrollPositions = () => {
-        setElementScrollTop(U.detail, state.detailScrollTop);
-        setElementScrollTop(traceList, state.traceScrollTop);
-        setElementScrollTop(U.artifactList, state.artifactListScrollTop);
-        setElementScrollTop(U.artifactContent, state.artifactContentScrollTop);
+        if (detail) setElementScrollTop(U.detail, state.detailScrollTop);
+        if (trace) setElementScrollTop(traceList, state.traceScrollTop);
+        if (artifactList) setElementScrollTop(U.artifactList, state.artifactListScrollTop);
+        if (artifactContent) setElementScrollTop(U.artifactContent, state.artifactContentScrollTop);
     };
     applyScrollPositions();
-    window.requestAnimationFrame(applyScrollPositions);
+    window.requestAnimationFrame(() => {
+        applyScrollPositions();
+        window.requestAnimationFrame(applyScrollPositions);
+    });
 }
 
 function renderTaskSectionHeading(heading, { icon, label, count = 0 } = {}) {
@@ -1649,14 +1709,12 @@ function clearCeoBackgroundDetailState(item) {
 
 function updateCeoBackgroundDetail(item) {
     if (!(item instanceof HTMLElement) || item.dataset.backgroundRunning !== "true") return;
-    const detailEl = item.querySelector(".interaction-step-detail");
-    if (!(detailEl instanceof HTMLElement)) return;
     const toolName = String(item.dataset.toolName || "tool").trim() || "tool";
     const kind = String(item.dataset.progressKind || "").trim();
     const snapshotSummary = String(item.dataset.backgroundSummary || "").trim();
     const waitSeconds = Number.parseFloat(String(item.dataset.backgroundWaitSeconds || ""));
     const elapsedSeconds = resolveRuntimeSeconds(item);
-    detailEl.textContent = ceoFriendlyToolDetail(
+    setCeoToolStepOutput(item, ceoFriendlyToolDetail(
         toolName,
         JSON.stringify(
             buildCeoBackgroundPayload({
@@ -1667,7 +1725,7 @@ function updateCeoBackgroundDetail(item) {
         ),
         "running",
         kind
-    );
+    ));
 }
 
 function syncCeoBackgroundDetailState(item, { rawDetail = "" } = {}) {
@@ -1775,22 +1833,67 @@ function renderCeoToolIcon(iconWrap, iconName = "loader-circle") {
     iconWrap.innerHTML = `<i data-lucide="${esc(nextIcon)}"></i>`;
 }
 
-function trimInteractionLines(text = "", maxLines = CEO_TOOL_PROGRESS_MAX_LINES) {
-    const lines = String(text || "")
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-    return lines.slice(-maxLines);
+function normalizeInteractionDetailText(text = "") {
+    return String(text || "").replace(/\r\n?/g, "\n").trim();
 }
 
-function mergeInteractionDetail(existing = "", next = "", maxLines = CEO_TOOL_PROGRESS_MAX_LINES) {
-    const current = trimInteractionLines(existing, maxLines);
-    const incoming = trimInteractionLines(next, maxLines);
-    const merged = [...current];
-    incoming.forEach((line) => {
-        if (!merged.includes(line)) merged.push(line);
-    });
-    return merged.slice(-maxLines).join("\n");
+function buildInteractionPreviewText(text = "", maxLines = CEO_TOOL_OUTPUT_PREVIEW_LINES) {
+    const normalized = normalizeInteractionDetailText(text);
+    if (!normalized) return "";
+    return normalized
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .slice(-maxLines)
+        .join("\n");
+}
+
+function isInteractionDetailCollapsible(text = "") {
+    const normalized = normalizeInteractionDetailText(text);
+    if (!normalized) return false;
+    return normalized.split("\n").length > CEO_TOOL_OUTPUT_PREVIEW_LINES
+        || normalized.length > CEO_TOOL_OUTPUT_PREVIEW_MAX_CHARS;
+}
+
+function syncCeoToolStepOutput(item) {
+    if (!(item instanceof HTMLElement)) return;
+    const previewEl = item.querySelector(".interaction-step-preview");
+    const detailEl = item.querySelector(".interaction-step-detail");
+    const disclosureEl = item.querySelector(".interaction-step-disclosure");
+    const detailText = normalizeInteractionDetailText(item.dataset.detailText || "");
+    const previewText = buildInteractionPreviewText(detailText) || detailText;
+    const collapsible = isInteractionDetailCollapsible(detailText);
+    const expanded = collapsible && item.dataset.outputExpanded === "true";
+    if (!collapsible) item.dataset.outputExpanded = "false";
+    if (previewEl instanceof HTMLElement) {
+        previewEl.textContent = previewText;
+        previewEl.hidden = expanded || !previewText;
+        previewEl.title = collapsible ? detailText : "";
+    }
+    if (detailEl instanceof HTMLElement) {
+        detailEl.textContent = detailText;
+        detailEl.hidden = !expanded || !collapsible;
+    }
+    item.classList.toggle("is-output-collapsible", collapsible);
+    item.classList.toggle("is-output-expanded", expanded);
+    if (disclosureEl instanceof HTMLButtonElement) {
+        disclosureEl.hidden = !collapsible;
+        disclosureEl.setAttribute("aria-expanded", expanded ? "true" : "false");
+        disclosureEl.setAttribute("aria-label", expanded ? "Collapse tool output" : "Expand tool output");
+        disclosureEl.title = expanded ? "Collapse output" : "Expand output";
+    }
+}
+
+function setCeoToolStepOutput(item, detail = "") {
+    if (!(item instanceof HTMLElement)) return;
+    item.dataset.detailText = normalizeInteractionDetailText(detail);
+    syncCeoToolStepOutput(item);
+}
+
+function toggleCeoToolStepOutput(item) {
+    if (!(item instanceof HTMLElement)) return;
+    if (!isInteractionDetailCollapsible(item.dataset.detailText || "")) return;
+    item.dataset.outputExpanded = item.dataset.outputExpanded === "true" ? "false" : "true";
+    syncCeoToolStepOutput(item);
 }
 
 function trimCeoToolSteps(turn) {
@@ -1839,12 +1942,19 @@ function applyCeoToolStepState(item, { status = "running", toolName = "tool", de
     if (toolCallId) item.dataset.toolCallId = toolCallId;
     item.dataset.progressKind = String(kind || "").trim();
     const titleEl = item.querySelector(".interaction-step-title");
+    const startedEl = item.querySelector(".interaction-step-started");
     const statusEl = item.querySelector(".interaction-step-status");
-    const detailEl = item.querySelector(".interaction-step-detail");
     const iconWrap = item.querySelector(".interaction-step-icon");
     if (titleEl) titleEl.textContent = ceoFriendlyToolName(toolName);
+    if (startedEl instanceof HTMLElement) {
+        const startedLabel = formatCompactTime(item.dataset.startedAt || "");
+        startedEl.hidden = !startedLabel;
+        startedEl.textContent = startedLabel ? `Started ${startedLabel}` : "";
+        if (startedLabel) startedEl.title = formatSessionTime(item.dataset.startedAt || "");
+        else startedEl.removeAttribute("title");
+    }
     if (statusEl) statusEl.textContent = statusLabel;
-    if (detailEl) detailEl.textContent = detail || `${ceoFriendlyToolName(toolName)}${statusLabel}`;
+    setCeoToolStepOutput(item, detail || `${ceoFriendlyToolName(toolName)}${statusLabel}`);
     if (iconWrap) {
         iconWrap.classList.toggle("is-spinning", !!resolvedStage.spinning);
         renderCeoToolIcon(iconWrap, resolvedStage.icon === "loader" ? "loader-circle" : resolvedStage.icon);
@@ -1944,12 +2054,23 @@ function appendCeoToolEvent(event = {}) {
                         <span class="interaction-step-title"></span>
                     </span>
                     <span class="interaction-step-side">
+                        <time class="interaction-step-started" hidden></time>
                         <span class="interaction-step-runtime" hidden></span>
                         <span class="interaction-step-status"></span>
+                        <button type="button" class="interaction-step-disclosure" hidden aria-expanded="false" aria-label="Expand tool output"></button>
                     </span>
                 </div>
-                <div class="interaction-step-detail"></div>
+                <div class="interaction-step-preview" hidden></div>
+                <div class="interaction-step-detail" hidden></div>
             `;
+            item.dataset.outputExpanded = "false";
+            item.querySelector(".interaction-step-disclosure")?.addEventListener("click", (interactionEvent) => {
+                interactionEvent.preventDefault();
+                interactionEvent.stopPropagation();
+                mutateCeoFeed(() => {
+                    toggleCeoToolStepOutput(item);
+                }, { scrollMode: "preserve" });
+            });
             turn.listEl.appendChild(item);
         }
         const eventTimestamp = String(event.timestamp || "").trim();
@@ -4283,6 +4404,24 @@ function taskMetaText(task) {
     if (task.created_at) parts.push(`Created ${formatSessionTime(task.created_at)}`);
     return parts.join(" · ") || "No timestamp";
 }
+
+async function copyTaskId(taskId) {
+    const value = String(taskId || "").trim();
+    if (!value) return;
+    try {
+        const copied = await copyTextToClipboard(value);
+        if (!copied) throw new Error("Clipboard unavailable");
+        showToast({ title: "\u590d\u5236\u6210\u529f", text: value, kind: "success", durationMs: 1800 });
+    } catch (error) {
+        showToast({
+            title: "\u590d\u5236\u5931\u8d25",
+            text: String(error?.message || "Clipboard unavailable"),
+            kind: "error",
+            durationMs: 2200,
+        });
+    }
+}
+
 function taskGridRenderSignature(meta) {
     const visibleItems = Array.isArray(meta?.items) ? meta.items : [];
     const sessionLabels = (S.ceoSessions || []).map((session) => ({
@@ -4358,9 +4497,18 @@ function renderTasks() {
         el.innerHTML = `
             <div class="pc-topbar">
                 <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
-                <span class="status-badge" data-status="${esc(statusKey)}">${esc(taskStatusLabel(task))}</span>
+                <div class="pc-topbar-meta">
+                    <span class="status-badge" data-status="${esc(statusKey)}">${esc(taskStatusLabel(task))}</span>
+                    <span class="pc-task-id-chip">
+                        <span class="pc-task-id-label">\u4efb\u52a1</span>
+                        <span class="pc-task-id-value">${esc(task.task_id)}</span>
+                    </span>
+                    <button class="icon-btn pc-copy-btn" type="button" title="\u590d\u5236\u4efb\u52a1 ID" aria-label="\u590d\u5236\u4efb\u52a1 ID">
+                        <i data-lucide="copy"></i>
+                    </button>
+                </div>
             </div>
-            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title">${esc(task.title || task.task_id)}</h3><span class="pc-id">${esc(task.task_id)}</span></div></div>
+            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title">${esc(task.title || task.task_id)}</h3></div></div>
             <div class="pc-summary">${esc(task.brief || "No summary")}</div>
             <div class="pc-stats">${esc(taskMetaText(task))}</div>
             <div class="pc-token-stats">${esc(taskTokenSummaryLine(task.token_usage))}</div>
@@ -4381,6 +4529,10 @@ function renderTasks() {
             if (e.target.checked) S.selectedTaskIds.add(task.task_id);
             else S.selectedTaskIds.delete(task.task_id);
             renderTasks();
+        });
+        el.querySelector(".pc-copy-btn")?.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            await copyTaskId(task.task_id);
         });
         el.querySelectorAll(".project-action-btn").forEach((btn) => btn.addEventListener("click", async (e) => {
             e.stopPropagation();

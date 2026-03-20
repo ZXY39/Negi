@@ -6,6 +6,7 @@ from typing import Any
 
 from g3ku.content import content_summary_and_ref
 from main.models import ModelTokenUsageRecord, NodeRecord, TokenUsageSummary
+from main.token_usage import aggregate_node_token_usage
 from main.monitoring.models import (
     LatestTaskNodeOutput,
     TaskListItem,
@@ -81,7 +82,11 @@ class TaskQueryService:
         root = self._projection_root(task)
         tree_text = self._render_projection_tree_text(root)
         token_usage = task.token_usage
-        token_usage_by_model = []
+        runtime_nodes = self._store.list_nodes(task.task_id)
+        _runtime_token_usage, token_usage_by_model = aggregate_node_token_usage(
+            runtime_nodes,
+            tracked=bool(getattr(token_usage, 'tracked', False)),
+        )
         latest_node = self._latest_projection_node(task_id)
         live_state = self._projection_live_state(task_id)
         text = f'Task status: {task.status}'
@@ -100,7 +105,7 @@ class TaskQueryService:
             root=root,
             latest_node=latest_node,
             live_state=live_state,
-            nodes=[],
+            nodes=[self._serialize_node(node) for node in runtime_nodes],
             token_usage=token_usage,
             token_usage_by_model=token_usage_by_model,
             text=text,
@@ -132,7 +137,7 @@ class TaskQueryService:
                 'root': root,
                 'latest_node': progress.latest_node.model_dump(mode='json') if progress.latest_node is not None else None,
                 'live_state': runtime_summary,
-                'nodes': [],
+                'nodes': list(progress.nodes or []),
                 'token_usage': progress.token_usage.model_dump(mode='json'),
                 'token_usage_by_model': [item.model_dump(mode='json') for item in list(progress.token_usage_by_model or [])],
                 'text': progress.text,

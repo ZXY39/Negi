@@ -24,6 +24,12 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from g3ku.shells.web import ensure_web_runtime_services, get_agent, get_runtime_manager
 from g3ku.utils.helpers import safe_filename
+from main.api.websocket_utils import (
+    WebSocketChannelClosed,
+    websocket_close,
+    websocket_receive_json,
+    websocket_send_json,
+)
 from main.protocol import build_envelope
 
 router = APIRouter()
@@ -443,8 +449,14 @@ async def ceo_websocket(websocket: WebSocket):
     runtime_manager = get_runtime_manager(agent)
     transcript_store = getattr(agent, 'sessions', None)
     if transcript_store is None:
-        await websocket.send_json(build_envelope(channel='ceo', session_id='web:shared', type='error', data={'code': 'session_manager_unavailable'}))
-        await websocket.close(code=4503)
+        try:
+            await websocket_send_json(
+                websocket,
+                build_envelope(channel='ceo', session_id='web:shared', type='error', data={'code': 'session_manager_unavailable'}),
+            )
+            await websocket_close(websocket, code=4503)
+        except WebSocketChannelClosed:
+            return
         return
     state_store = WebCeoStateStore(workspace_path())
     requested_session_id = str(websocket.query_params.get('session_id') or '').strip()
@@ -461,8 +473,14 @@ async def ceo_websocket(websocket: WebSocket):
     memory_scope = dict((persisted_session.metadata or {}).get('memory_scope') or {})
     service = getattr(agent, 'main_task_service', None)
     if service is None:
-        await websocket.send_json(build_envelope(channel='ceo', session_id=session_id, type='error', data={'code': 'task_service_unavailable'}))
-        await websocket.close(code=4503)
+        try:
+            await websocket_send_json(
+                websocket,
+                build_envelope(channel='ceo', session_id=session_id, type='error', data={'code': 'task_service_unavailable'}),
+            )
+            await websocket_close(websocket, code=4503)
+        except WebSocketChannelClosed:
+            return
         return
     await ensure_web_runtime_services(agent)
     await service.startup()
@@ -483,9 +501,14 @@ async def ceo_websocket(websocket: WebSocket):
     )
     persisted_messages = _build_ceo_snapshot(getattr(persisted_session, 'messages', []))
     current_turn_task: asyncio.Task[Any] | None = None
+    closed = asyncio.Event()
 
     async def _safe_send(payload: dict[str, Any]) -> None:
-        await websocket.send_json(payload)
+        try:
+            await websocket_send_json(websocket, payload)
+        except WebSocketChannelClosed:
+            closed.set()
+            raise
 
     async def _push_stream_event(event_type: str, data: dict[str, Any] | None = None) -> None:
         try:
@@ -609,7 +632,9 @@ async def ceo_websocket(websocket: WebSocket):
             )
         )
         while True:
-            data = await websocket.receive_json()
+            if closed.is_set():
+                break
+            data = await websocket_receive_json(websocket)
             message_type = str(data.get('type') or '')
             if message_type == 'client.pause_turn':
                 if _current_session_is_running():
@@ -659,7 +684,7 @@ async def ceo_websocket(websocket: WebSocket):
             current_turn_task = asyncio.create_task(_run_user_turn(user_message))
             _register_turn_task(current_turn_task)
             current_turn_task.add_done_callback(_clear_turn_task)
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, WebSocketChannelClosed):
         pass
     finally:
         unsubscribe()

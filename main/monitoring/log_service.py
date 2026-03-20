@@ -178,13 +178,22 @@ class TaskLogService:
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
         usage_attempts: list[Any] | None = None,
+        model_messages: list[dict[str, Any]] | None = None,
     ) -> NodeRecord | None:
         with self._task_lock(task_id):
+            current = self._store.get_node(node_id)
+            call_index = len(list(getattr(current, 'output', []) or [])) + 1 if current is not None else 1
+            tracked_usage = bool(getattr(getattr(current, 'token_usage', None), 'tracked', False))
+            delta_usage = None
+            delta_usage_by_model: list[Any] = []
+            if usage_attempts is not None and tracked_usage:
+                delta_usage, delta_usage_by_model = build_token_usage_from_attempts(usage_attempts, tracked=True)
+
             text, ref = self._summarize_content(
                 content,
                 task_id=task_id,
                 node_id=node_id,
-                display_name=f'node-output:{node_id}:{self._next_output_seq(node_id)}',
+                display_name=f'node-output:{node_id}:{call_index}',
                 source_kind='node_output',
             )
 
@@ -200,8 +209,7 @@ class TaskLogService:
                     )
                 )
                 update: dict[str, Any] = {'output': output, 'updated_at': now_iso()}
-                if usage_attempts and bool(getattr(record.token_usage, 'tracked', False)):
-                    delta_usage, delta_usage_by_model = build_token_usage_from_attempts(usage_attempts, tracked=True)
+                if delta_usage is not None and bool(getattr(record.token_usage, 'tracked', False)):
                     update['token_usage'] = merge_token_usage_records([record.token_usage, delta_usage], tracked=True)
                     update['token_usage_by_model'] = merge_token_usage_by_model(
                         [*list(record.token_usage_by_model or []), *delta_usage_by_model],
@@ -218,6 +226,20 @@ class TaskLogService:
                     event_type='task.node.updated',
                     data={'task_id': task_id, 'node_id': node_id},
                 )
+                if delta_usage is not None:
+                    self._append_task_event(
+                        task=task,
+                        event_type='task.model.call',
+                        data=self._model_call_payload(
+                            task_id=task_id,
+                            node_id=node_id,
+                            call_index=call_index,
+                            model_messages=model_messages,
+                            tool_calls=tool_calls,
+                            delta_usage=delta_usage,
+                            delta_usage_by_model=delta_usage_by_model,
+                        ),
+                    )
             return updated
 
     def update_node_check_result(self, task_id: str, node_id: str, check_result: str) -> NodeRecord | None:
@@ -379,6 +401,33 @@ class TaskLogService:
             display_name=f'node-input:{node_id}',
             source_kind='node_input',
         )
+
+    @staticmethod
+    def _model_call_payload(
+        *,
+        task_id: str,
+        node_id: str,
+        call_index: int,
+        model_messages: list[dict[str, Any]] | None,
+        tool_calls: list[dict[str, Any]] | None,
+        delta_usage,
+        delta_usage_by_model: list[Any],
+    ) -> dict[str, Any]:
+        message_list = list(model_messages or [])
+        try:
+            prepared_payload = json.dumps(message_list, ensure_ascii=False, default=str)
+        except Exception:
+            prepared_payload = str(message_list)
+        return {
+            'task_id': task_id,
+            'node_id': node_id,
+            'call_index': int(call_index or 0),
+            'prepared_message_count': len(message_list),
+            'prepared_message_chars': len(prepared_payload),
+            'response_tool_call_count': len(list(tool_calls or [])),
+            'delta_usage': delta_usage.model_dump(mode='json'),
+            'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
+        }
 
     def _next_output_seq(self, node_id: str) -> int:
         record = self._store.get_node(node_id)

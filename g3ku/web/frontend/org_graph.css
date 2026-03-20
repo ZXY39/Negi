@@ -1834,6 +1834,8 @@ textarea {
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
 }
 
 .interaction-step-icon {
@@ -1897,6 +1899,7 @@ textarea {
     white-space: nowrap;
 }
 
+.interaction-step-started,
 .interaction-step-runtime,
 .task-trace-runtime {
     display: inline-flex;
@@ -1911,6 +1914,13 @@ textarea {
     white-space: nowrap;
 }
 
+.interaction-step-started {
+    max-width: 148px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.interaction-step-started[hidden],
 .interaction-step-runtime[hidden],
 .task-trace-runtime[hidden] {
     display: none !important;
@@ -1931,12 +1941,69 @@ textarea {
     color: var(--status-failed-text);
 }
 
+.interaction-step-preview,
 .interaction-step-detail {
     color: var(--text-secondary);
     font-size: 0.8rem;
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-word;
+}
+
+.interaction-step-preview {
+    display: -webkit-box;
+    margin-top: 2px;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+}
+
+.interaction-step-detail {
+    margin-top: 2px;
+}
+
+.interaction-step-disclosure {
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast), transform var(--transition-fast);
+}
+
+.interaction-step-disclosure::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: translateY(-1px) rotate(45deg);
+    transition: transform var(--transition-fast);
+}
+
+.interaction-step-disclosure:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-app));
+}
+
+.interaction-step-disclosure:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 72%, transparent);
+    outline-offset: 2px;
+}
+
+.interaction-step-disclosure[aria-expanded="true"]::before {
+    transform: translateY(1px) rotate(-135deg);
+}
+
+.interaction-step-disclosure[hidden] {
+    display: none !important;
 }
 
 @keyframes interaction-step-icon-spin {
@@ -4355,6 +4422,66 @@ textarea {
     border-color: var(--brand-primary);
 }
 
+.pc-topbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
+}
+
+.pc-topbar-meta {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.pc-task-id-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%);
+    color: var(--text-secondary);
+}
+
+.pc-task-id-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.pc-task-id-value {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.78rem;
+    color: var(--text-primary);
+}
+
+.pc-copy-btn {
+    width: 30px;
+    height: 30px;
+    flex-shrink: 0;
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%);
+}
+
+.pc-copy-btn:hover {
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-app));
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+}
+
 .pc-header {
     display: flex;
     justify-content: space-between;
@@ -4373,20 +4500,11 @@ textarea {
     font-size: 1.125rem;
     font-weight: 600;
     color: var(--text-primary);
-    margin-bottom: var(--space-1);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     width: 100%;
     display: block;
-}
-
-.pc-id {
-    display: block;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    font-family: monospace;
-    opacity: 0.8;
 }
 
 .pc-summary {

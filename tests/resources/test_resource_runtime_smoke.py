@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
-from g3ku.content import ContentNavigationService
+from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
@@ -767,7 +767,10 @@ async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
         payload = json.loads(await exec_tool.execute(command=command, __g3ku_runtime={'session_key': 'cli:test'}))
         assert payload['status'] == 'success'
         assert payload['stdout_ref'].startswith('artifact:')
-        assert payload['line_count'] >= 90
+        assert 'line_count' not in payload
+        assert 'tail_preview' not in payload
+        assert 'next_actions' not in payload
+        assert 'line-000' in payload['head_preview']
 
         hits = json.loads(await content_tool.execute(action='search', ref=payload['stdout_ref'], query='line-044', limit=1))
         excerpt = json.loads(
@@ -1116,6 +1119,51 @@ def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp
     assert wrapped is not None
     assert wrapped.handle is not None
     assert wrapped.handle.origin_ref == first.ref
+
+    store.close()
+
+
+def test_prepare_messages_for_model_uses_compact_content_refs(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+
+    prepared = navigator.prepare_messages_for_model(
+        [
+            {
+                'role': 'user',
+                'content': json.dumps(
+                    {
+                        'task_id': 'task:test',
+                        'node_id': 'node:test',
+                        'node_kind': 'execution',
+                        'goal': 'inspect',
+                        'prompt': 'inspect',
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+            {
+                'role': 'tool',
+                'content': 'line-001\n' * 400,
+            },
+        ],
+        runtime={'task_id': 'task:test', 'node_id': 'node:test', 'node_kind': 'execution'},
+        source_prefix='react',
+    )
+
+    assert prepared[0]['content']
+    raw_payload = json.loads(prepared[1]['content'])
+    assert set(raw_payload.keys()) == {'type', 'summary', 'ref', 'next_actions'}
+    assert 'Head preview:' not in raw_payload['summary']
+    assert raw_payload['ref'].startswith('artifact:')
+    parsed = parse_content_envelope(prepared[1]['content'])
+    assert parsed is not None
+    assert parsed.handle is None
 
     store.close()
 

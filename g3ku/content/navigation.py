@@ -69,7 +69,7 @@ def _runtime_node_id(runtime: dict[str, Any] | None) -> str | None:
     return node_id or None
 
 
-def _content_summary(handle: ContentHandle) -> str:
+def _content_summary(handle: ContentHandle, *, include_preview: bool = True) -> str:
     label = handle.display_name or handle.source_kind or "content"
     summary = (
         f"Externalized {label} "
@@ -78,9 +78,17 @@ def _content_summary(handle: ContentHandle) -> str:
     )
     if handle.origin_ref and handle.origin_ref != handle.ref:
         summary = f"{summary}\nOrigin ref: {handle.origin_ref}"
-    if handle.head_preview:
+    if include_preview and handle.head_preview:
         return f"{summary}\nHead preview:\n{handle.head_preview}"
     return summary
+
+
+def _compact_summary_text(summary: str) -> str:
+    text = str(summary or "").strip()
+    marker = "\nHead preview:\n"
+    if marker in text:
+        text = text.split(marker, 1)[0].rstrip()
+    return text
 
 
 _ARTIFACT_REF_PATTERN = re.compile(r"artifact:artifact:[A-Za-z0-9_-]+")
@@ -272,6 +280,7 @@ class ContentNavigationService:
         display_name: str = "",
         source_kind: str = "message",
         force: bool = False,
+        compact: bool = False,
     ) -> Any:
         envelope = self.maybe_externalize_text(
             value,
@@ -282,6 +291,11 @@ class ContentNavigationService:
         )
         if envelope is None:
             return value
+        if compact:
+            summary = _compact_summary_text(envelope.summary)
+            if envelope.handle is not None:
+                summary = _content_summary(envelope.handle, include_preview=False)
+            return _json_dumps(envelope.to_model_dict(summary_override=summary))
         return _json_dumps(envelope.to_dict())
 
     def summarize_for_storage(
@@ -337,6 +351,7 @@ class ContentNavigationService:
                         runtime=runtime,
                         display_name=f"{source_prefix}-{role}-{index + 1}",
                         source_kind=f"{source_prefix}_{role}",
+                        compact=True,
                     )
             prepared.append(updated)
         return prepared

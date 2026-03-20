@@ -1,0 +1,87 @@
+schema_version: 1
+kind: tool
+name: web_fetch
+display_name: Web Fetch
+description: Lightweight HTTP fetch for reading public web pages and extracting readable text without a browser runtime.
+source:
+  type: local_adapted
+  url: file:///D:/zxy/project/openclaw-2026.3.13-1/src/agents/tools/web-fetch.ts
+  ref: openclaw-2026.3.13-1
+current_version:
+  number: 0.1.0
+  summary: 首个 G3KU 适配版；参考 OpenClaw web_fetch 的轻量抓取、正文提取、缓存与安全边界思路，以 Python 内置解析实现最小可用能力。
+  compare_rule: 以 main/ 实现、参数契约、安全策略、缓存行为或返回结构变化为准；仅修改 toolskills 文案不单独视为版本升级。
+protocol:
+  transport: inprocess
+  runtime: python
+mcp:
+  enabled: false
+requires: []
+permissions:
+  network:
+    outbound: true
+    notes: 仅允许访问公开 http(s) 目标；默认阻断私网、回环、链路本地与 localhost。
+  filesystem:
+    read:
+    - .g3ku/cache/web_fetch
+    write:
+    - .g3ku/cache/web_fetch
+settings:
+  timeout_seconds:
+    type: number
+    default: 12
+    minimum: 1
+    maximum: 30
+  max_chars:
+    type: integer
+    default: 12000
+    minimum: 500
+    maximum: 20000
+  cache_ttl_seconds:
+    type: integer
+    default: 300
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    url:
+      type: string
+      description: 目标页面 URL，仅允许 http/https。
+    max_chars:
+      type: integer
+      description: 返回正文最大字符数，默认 12000，上限 20000。
+      minimum: 500
+      maximum: 20000
+    extract_main_content:
+      type: boolean
+      description: 是否优先返回提取后的可读正文，默认 true。
+    include_raw_html:
+      type: boolean
+      description: 是否附带截断后的原始 HTML，同样会按不可信内容包装。
+    use_cache:
+      type: boolean
+      description: 是否启用内存+磁盘短 TTL 缓存，默认 true。
+    timeout_seconds:
+      type: number
+      description: 单次请求超时时间，默认 12 秒。
+      minimum: 1
+      maximum: 30
+  required:
+  - url
+governance:
+  owner: ceo
+  review_cadence: monthly
+  tags:
+  - web
+  - fetch
+  - extraction
+  - security
+  usage_notes:
+  - 用于轻量 HTTP 抓取与正文提取，不执行 JavaScript，也不替代 browser。
+  - 返回的 text/raw_html 均视为不可信外部内容，调用方不得直接执行或无过滤渲染。
+  - 当页面依赖登录、复杂交互或脚本渲染时，应改用 browser 或人工确认。
+exposure:
+  agent: true
+  org_graph: true
+toolskill:
+  enabled: true

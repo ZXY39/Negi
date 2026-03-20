@@ -118,6 +118,7 @@ class ReActToolLoop:
                 content=str(response.content or ''),
                 tool_calls=tool_calls,
                 usage_attempts=list(response.attempts or []),
+                model_messages=model_messages,
             )
             if response.tool_calls:
                 control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response.tool_calls)
@@ -677,4 +678,5 @@ class ReActToolLoop:
             runtime=runtime_context,
             display_name=display_name,
             source_kind=source_kind,
+            compact=True,
         )
