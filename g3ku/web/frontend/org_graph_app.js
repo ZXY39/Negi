@@ -69,6 +69,7 @@ const S = {
     currentTaskTreeRoot: null,
     currentTaskRuntimeSummary: null,
     currentNodeDetail: null,
+    taskDetailRenderToken: 0,
     taskNodeDetails: {},
     taskDetailViewStates: {},
     pendingTaskDetailRestore: null,
@@ -228,8 +229,10 @@ const U = {
     adStatus: document.getElementById("ad-status"),
     adRoundSummary: document.getElementById("ad-round-summary"),
     adFlow: document.getElementById("ad-input"),
+    adOutput: document.getElementById("ad-output"),
     adAcceptance: document.getElementById("ad-check"),
     adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
+    adOutputHeading: document.getElementById("ad-output")?.closest(".agent-detail-section")?.querySelector("h4"),
     adAcceptanceHeading: document.getElementById("ad-check")?.closest(".agent-detail-section")?.querySelector("h4"),
     artifactHeading: document.getElementById("artifact-list")?.closest(".agent-detail-section")?.querySelector("h4"),
     adOutputSection: document.getElementById("ad-output")?.closest(".agent-detail-section"),
@@ -418,11 +421,90 @@ function shouldDecodeArtifactContent(artifact, content) {
     return !!decodeJsonStringLiteral(raw) || countMatches(raw, /\\r\\n|\\n|\\r/g) >= 2;
 }
 
+function tryParseJsonText(text) {
+    const raw = String(text ?? "").trim();
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+}
+
+function hasMeaningfulArtifactValue(value) {
+    if (value === null || value === undefined) return false;
+    if (typeof value === "string") return !!value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return true;
+    if (Array.isArray(value)) return value.some((item) => hasMeaningfulArtifactValue(item));
+    if (typeof value === "object") return Object.values(value).some((item) => hasMeaningfulArtifactValue(item));
+    return false;
+}
+
+function extractPrimaryArtifactText(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    const keys = Object.keys(value);
+    if (!keys.length || keys.length > 4) return "";
+    const preferredFields = [
+        "content",
+        "text",
+        "output",
+        "result",
+        "stdout",
+        "stderr",
+        "body",
+        "message",
+        "final_output",
+        "answer",
+        "summary",
+    ];
+    const matchedField = preferredFields.find((field) => typeof value[field] === "string" && String(value[field] || "").trim());
+    if (!matchedField) return "";
+    const remainingKeys = keys.filter((field) => field !== matchedField && hasMeaningfulArtifactValue(value[field]));
+    if (remainingKeys.length > 1) return "";
+    return String(value[matchedField] || "");
+}
+
+function formatArtifactDisplayValue(value, { depth = 0 } = {}) {
+    if (depth > 3) return String(value ?? "");
+    if (typeof value === "string") {
+        const decoded = decodeEscapedDisplayText(value);
+        const parsed = tryParseJsonText(decoded);
+        if (parsed === null) return decoded;
+        if (typeof parsed === "string") {
+            return formatArtifactDisplayValue(parsed, { depth: depth + 1 });
+        }
+        const extractedText = extractPrimaryArtifactText(parsed);
+        if (extractedText) {
+            return formatArtifactDisplayValue(extractedText, { depth: depth + 1 });
+        }
+        try {
+            return JSON.stringify(parsed, null, 2);
+        } catch {
+            return decoded;
+        }
+    }
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value) || (value && typeof value === "object")) {
+        const extractedText = extractPrimaryArtifactText(value);
+        if (extractedText) {
+            return formatArtifactDisplayValue(extractedText, { depth: depth + 1 });
+        }
+        try {
+            return JSON.stringify(value, null, 2);
+        } catch {
+            return String(value);
+        }
+    }
+    return String(value ?? "");
+}
+
 function artifactDisplayText(artifact, content) {
-    return readableText(content, {
-        decodeEscapes: shouldDecodeArtifactContent(artifact, content),
-        emptyText: "Select an artifact to view details.",
-    });
+    const raw = String(content ?? "");
+    if (!raw.trim()) return "Select an artifact to view details.";
+    const kind = String(artifact?.kind || "").trim().toLowerCase();
+    if (kind === "patch") return raw;
+    if (!shouldDecodeArtifactContent(artifact, content)) return formatArtifactDisplayValue(raw);
+    return formatArtifactDisplayValue(decodeEscapedDisplayText(raw));
 }
 
 function setElementScrollTop(element, value) {
@@ -657,14 +739,17 @@ function restoreTaskDetailViewState(
     } = {},
 ) {
     if (!state || typeof state !== "object") return;
-    const traceList = U.adFlow?.querySelector(".task-trace-list");
-    if (trace && traceItems) applyTaskTraceItemViewState(traceList, state.traceItems);
+    const getTraceList = () => U.adFlow?.querySelector(".task-trace-list");
+    const getArtifactList = () => U.artifactList;
+    const getArtifactContent = () => U.artifactContent;
     const applyScrollPositions = () => {
+        const traceList = getTraceList();
         if (detail) setElementScrollTop(U.detail, state.detailScrollTop);
         if (trace) setElementScrollTop(traceList, state.traceScrollTop);
-        if (artifactList) setElementScrollTop(U.artifactList, state.artifactListScrollTop);
-        if (artifactContent) setElementScrollTop(U.artifactContent, state.artifactContentScrollTop);
+        if (artifactList) setElementScrollTop(getArtifactList(), state.artifactListScrollTop);
+        if (artifactContent) setElementScrollTop(getArtifactContent(), state.artifactContentScrollTop);
     };
+    if (trace && traceItems) applyTaskTraceItemViewState(getTraceList(), state.traceItems);
     applyScrollPositions();
     window.requestAnimationFrame(() => {
         applyScrollPositions();
@@ -2264,14 +2349,16 @@ function resourceDeleteErrorText(error) {
 function configureTaskDetailSections() {
     renderFlowHeading(0);
     renderArtifactHeading(0);
+    if (U.adOutputHeading) U.adOutputHeading.innerHTML = '<i data-lucide="arrow-up-from-line"></i> 最终输出';
+    if (U.adOutput) U.adOutput.classList.add("task-trace-output");
     if (U.adAcceptanceHeading) U.adAcceptanceHeading.innerHTML = '<i data-lucide="shield-check"></i> 验收结果';
     if (U.adFlow) {
         U.adFlow.classList.remove("code-block");
         U.adFlow.classList.add("task-trace-host");
     }
     if (U.adAcceptance) U.adAcceptance.classList.add("task-trace-acceptance");
-    if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、验收结果和工件。";
-    if (U.adOutputSection) U.adOutputSection.hidden = true;
+    if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、最终输出、验收结果和工件。";
+    if (U.adOutputSection) U.adOutputSection.hidden = false;
     if (U.adLogsSection) U.adLogsSection.hidden = true;
     icons();
 }
@@ -3583,7 +3670,7 @@ function renderCeoSessions() {
     U.ceoSessionCurrent.innerHTML = current
         ? `
             <div class="ceo-session-current-title">${esc(String(current.title || current.session_id || "Session"))}</div>
-            <div class="ceo-session-current-meta">当前会话 · ${esc(formatSessionTime(ceoSessionDisplayTime(current)))}</div>
+            <div class="ceo-session-current-meta">当前会话 · ${esc(shortSessionIdLabel(current.session_id))} · ${esc(formatSessionTime(ceoSessionDisplayTime(current)))}</div>
         `
         : `
             <div class="ceo-session-current-title">正在准备会话</div>
@@ -3605,6 +3692,7 @@ function renderCeoSessions() {
         const unreadCount = isActive ? 0 : sessionUnreadCount(sessionId);
         const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
         const displayTime = ceoSessionDisplayTime(item);
+        const shortId = shortSessionIdLabel(sessionId);
         return `
             <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}" role="listitem">
                 <button
@@ -3618,6 +3706,7 @@ function renderCeoSessions() {
                         <div class="ceo-session-title">${esc(title)}</div>
                         ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
                     </div>
+                    <div class="ceo-session-id">${esc(shortId)}</div>
                     <div class="ceo-session-preview">${esc(preview)}</div>
                     <div class="ceo-session-meta">${esc(formatSessionTime(displayTime))}</div>
                 </button>
@@ -3806,11 +3895,23 @@ function formatSessionDeleteBlockedText(payload = {}) {
     if (!tasks.length) return message || "会话仍有未完成任务，无法删除。";
     const names = tasks
         .slice(0, 3)
-        .map((item) => String(item?.title || item?.task_id || "").trim())
+        .map((item) => {
+            const title = String(item?.title || item?.task_id || "").trim();
+            const taskId = String(item?.task_id || "").trim();
+            return taskId && taskId !== title ? `${title} (${taskId})` : title;
+        })
         .filter(Boolean);
     const suffix = tasks.length > 3 ? ` 等 ${tasks.length} 个任务` : "";
     if (!names.length) return message || "会话仍有未完成任务，无法删除。";
     return `${message || "会话仍有未完成任务，无法删除。"} ${names.join("、")}${suffix}`;
+}
+
+function shortSessionIdLabel(sessionId) {
+    const raw = String(sessionId || "").trim();
+    if (!raw) return "";
+    const normalized = raw.replace(/^web:ceo-/, "");
+    if (normalized.length <= 12) return normalized;
+    return `${normalized.slice(0, 6)}...${normalized.slice(-4)}`;
 }
 
 async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } = {}) {
@@ -3881,7 +3982,7 @@ async function requestDeleteCeoSession(sessionId) {
     }
     openConfirm({
         title: "删除会话",
-        text: `将删除会话“${current.title || current.session_id}”的聊天记录与附件。${formatSessionDeleteHint(deleteCheck)}`,
+        text: `将删除会话“${current.title || current.session_id}”（${shortSessionIdLabel(current.session_id)}）的聊天记录与附件。${formatSessionDeleteHint(deleteCheck)}`,
         confirmLabel: "删除",
         confirmKind: "danger",
         returnFocus: U.ceoNewSession,
@@ -4022,6 +4123,33 @@ function normalizeModelTokenUsage(raw) {
         provider_id: String(raw?.provider_id || "").trim(),
         provider_model: String(raw?.provider_model || "").trim(),
     };
+}
+
+function normalizeTaskModelCall(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const toInt = (value) => {
+        const num = Number(value);
+        return Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0;
+    };
+    return {
+        call_index: toInt(source.call_index),
+        created_at: String(source.created_at || "").trim(),
+        prepared_message_count: toInt(source.prepared_message_count),
+        prepared_message_chars: toInt(source.prepared_message_chars),
+        response_tool_call_count: toInt(source.response_tool_call_count),
+        delta_usage: normalizeTokenUsage(source.delta_usage),
+        delta_usage_by_model: Array.isArray(source.delta_usage_by_model)
+            ? source.delta_usage_by_model.map(normalizeModelTokenUsage)
+            : [],
+    };
+}
+
+function modelCallHitRate(call) {
+    const data = normalizeTaskModelCall(call);
+    const inputTokens = Number(data.delta_usage.input_tokens || 0);
+    const cacheHitTokens = Number(data.delta_usage.cache_hit_tokens || 0);
+    if (!inputTokens) return 0;
+    return cacheHitTokens / inputTokens;
 }
 
 function formatTokenCount(value) {
@@ -4906,6 +5034,7 @@ function resetTaskView() {
         U.taskTreeRoundHint.textContent = "轮次信息加载中...";
     }
     U.feedTitle.textContent = "Node Details";
+    if (U.adOutput) U.adOutput.textContent = "暂无最终输出";
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">选择任务树中的节点后，这里会显示执行流程。</div>';
     if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
     if (U.adRoundSummary) U.adRoundSummary.textContent = "默认显示：最新树";
@@ -4954,6 +5083,9 @@ function renderTaskTokenStats() {
             return String(a.model_key || "").localeCompare(String(b.model_key || ""));
         })
         : [];
+    const recentModelCalls = Array.isArray(S.currentTaskProgress?.model_calls)
+        ? S.currentTaskProgress.model_calls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
+        : [];
     const partialNote = summary.is_partial
         ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
         : '<span class="task-token-badge success">统计完整</span>';
@@ -5000,7 +5132,56 @@ function renderTaskTokenStats() {
             `;
         }).join("")
         : '<div class="empty-state task-token-empty">当前只有任务级统计，尚无按模型明细。</div>';
-    U.taskTokenContent.innerHTML = `${topline}<div class="task-token-model-list">${rowsMarkup}</div>`;
+    const recentCallMarkup = recentModelCalls.length
+        ? `
+            <div class="task-token-call-card">
+                <div class="task-token-call-head">
+                    <h3>Recent model calls</h3>
+                    <p>Showing the latest ${esc(formatTokenCount(recentModelCalls.length))} calls</p>
+                </div>
+                <div class="task-token-call-table-wrap">
+                    <table class="task-token-call-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>prepared chars</th>
+                                <th>msgs</th>
+                                <th>delta input</th>
+                                <th>delta cache</th>
+                                <th>hit %</th>
+                                <th>tool calls</th>
+                                <th>models</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${recentModelCalls.map((item) => {
+                                const modelNames = item.delta_usage_by_model.length
+                                    ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
+                                    : "n/a";
+                                return `
+                                    <tr>
+                                        <td>${esc(formatTokenCount(item.call_index))}</td>
+                                        <td>${esc(formatTokenCount(item.prepared_message_chars))}</td>
+                                        <td>${esc(formatTokenCount(item.prepared_message_count))}</td>
+                                        <td>${esc(formatTokenCount(item.delta_usage.input_tokens))}</td>
+                                        <td>${esc(formatTokenCount(item.delta_usage.cache_hit_tokens))}</td>
+                                        <td>${esc((modelCallHitRate(item) * 100).toFixed(1))}%</td>
+                                        <td>${esc(formatTokenCount(item.response_tool_call_count))}</td>
+                                        <td>${esc(modelNames)}</td>
+                                    </tr>
+                                `;
+                            }).join("")}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `
+        : '<div class="empty-state task-token-empty">No per-call telemetry yet.</div>';
+    U.taskTokenContent.innerHTML = `
+        ${topline}
+        <div class="task-token-model-list">${rowsMarkup}</div>
+        ${recentCallMarkup}
+    `;
 }
 
 function setTaskSelectionEmptyVisible(visible) {
@@ -5404,7 +5585,7 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
         })),
         live_tool_calls: normalizeLiveToolCalls(liveFrame),
         live_child_pipelines: normalizeLiveChildPipelines(liveFrame),
-        final_output: String(source.final_output ?? detail?.final_output ?? nodeOutputText(detail) ?? nodeOutputText(node) ?? ""),
+        final_output: String(source.final_output ?? detail?.final_output ?? node?.final_output ?? ""),
         acceptance_result: String(source.acceptance_result ?? detail?.check_result ?? node?.check_result ?? ""),
     };
 }
@@ -5506,13 +5687,6 @@ function buildExecutionTraceSteps(trace, node) {
             open: true,
             bodyHtml: renderLiveChildFields(trace.live_child_pipelines),
         }] : []),
-        {
-            traceKey: "final_output",
-            title: "Final Output",
-            status: nodeFinalTraceStatus(node),
-            open: true,
-            bodyHtml: renderTraceField("Content", trace.final_output, "No final output", { decodeEscapes: true }),
-        },
     ];
 }
 
@@ -5731,17 +5905,26 @@ function renderLiveChildFields(childPipelines) {
 
 function renderExecutionTrace(node, { viewState = null } = {}) {
     if (!U.adFlow) return;
+    const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
+    const preservedTraceScrollTop = Number(effectiveViewState?.traceScrollTop || 0);
     const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
     const fallbackLiveFrame = liveFrameMap.get(String(node?.node_id || "").trim()) || null;
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node, fallbackLiveFrame);
     const stepDescriptors = buildExecutionTraceSteps(trace, node);
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
-        open: resolveTraceStepOpenState(step, viewState, index),
+        open: resolveTraceStepOpenState(step, effectiveViewState, index),
     }));
-    U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
+    let traceList = U.adFlow.querySelector(".task-trace-list");
+    if (!(traceList instanceof HTMLElement)) {
+        traceList = document.createElement("div");
+        traceList.className = "task-trace-list";
+        U.adFlow.innerHTML = "";
+        U.adFlow.appendChild(traceList);
+    }
+    traceList.innerHTML = steps.join("");
     renderFlowHeading(stepDescriptors.length);
-    const traceItems = Array.from(U.adFlow.querySelectorAll(".task-trace-step"));
+    const traceItems = Array.from(traceList.querySelectorAll(".task-trace-step"));
     trace.tool_steps.forEach((step, index) => {
         const item = traceItems[index + 1];
         if (!(item instanceof HTMLElement)) return;
@@ -5753,12 +5936,29 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     });
     refreshTaskDetailScrollRegions();
+    if (effectiveViewState) {
+        const restoreTraceScroll = () => {
+            const currentTraceList = U.adFlow?.querySelector(".task-trace-list");
+            if (!(currentTraceList instanceof HTMLElement)) return;
+            setElementScrollTop(currentTraceList, preservedTraceScrollTop);
+        };
+        restoreTraceScroll();
+        window.requestAnimationFrame(() => {
+            restoreTraceScroll();
+            window.requestAnimationFrame(restoreTraceScroll);
+        });
+    }
     refreshLiveDurationBadges();
+}
+
+function renderFinalOutput(text) {
+    if (!U.adOutput) return;
+    U.adOutput.textContent = readableText(text, { decodeEscapes: true, emptyText: "暂无最终输出" });
 }
 
 function renderAcceptanceResult(text) {
     if (!U.adAcceptance) return;
-    U.adAcceptance.textContent = readableText(text, { decodeEscapes: true, emptyText: "No acceptance result" });
+    U.adAcceptance.textContent = readableText(text, { decodeEscapes: true, emptyText: "暂无验收结果" });
 }
 
 function buildNodeRoundState(node) {
@@ -5926,7 +6126,9 @@ function renderTree() {
         const selected = findTreeNode(S.treeView, S.selectedNodeId);
         if (selected) {
             setTaskSelectionEmptyVisible(false);
-            void showAgent(selected);
+            const selectedNodeId = String(selected.node_id || "").trim();
+            const currentDetailNodeId = String(S.currentNodeDetail?.node_id || "").trim();
+            void showAgent(selected, { preserveViewState: selectedNodeId !== "" && selectedNodeId === currentDetailNodeId });
         }
         else {
             S.selectedNodeId = null;
@@ -6065,15 +6267,20 @@ async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
 async function showAgent(node, { preserveViewState = true } = {}) {
     const nodeId = String(node?.node_id || "").trim();
     if (!nodeId) return;
+    const renderToken = (Number(S.taskDetailRenderToken || 0) || 0) + 1;
+    S.taskDetailRenderToken = renderToken;
     const viewState = consumePendingTaskDetailRestore(nodeId)
         || (preserveViewState ? captureTaskDetailViewState() : getStoredTaskDetailViewState(S.currentTaskId, nodeId));
     const detail = await ensureTaskNodeDetail(nodeId);
+    if (renderToken !== S.taskDetailRenderToken) return;
+    if (String(S.selectedNodeId || "").trim() !== nodeId) return;
     const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
     const mergedNode = {
         ...node,
         ...(detail || {}),
         executionTrace: buildNodeExecutionTrace(node, detail || {}, liveFrameMap.get(nodeId) || null),
     };
+    S.currentNodeDetail = mergedNode;
     const compactHeading = compactNodeHeading(mergedNode);
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
@@ -6084,6 +6291,7 @@ async function showAgent(node, { preserveViewState = true } = {}) {
     U.adStatus.dataset.status = mergedNode.state || mergedNode.status || node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
     renderExecutionTrace(mergedNode, { viewState });
+    renderFinalOutput(mergedNode.executionTrace?.final_output || "");
     renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
     U.feedTitle.textContent = `Node: ${compactHeading}`;
     U.feedTitle.title = compactHeading;
@@ -6110,7 +6318,8 @@ function applyTaskPayload(payload) {
         ...(payload.progress || {}),
         root: treeRoot,
         live_state: runtimeSummary,
-        nodes: [],
+        nodes: Array.isArray(payload.progress?.nodes) ? payload.progress.nodes : [],
+        model_calls: Array.isArray(payload.progress?.model_calls) ? payload.progress.model_calls : [],
     };
     S.tree = treeRoot;
     S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
@@ -6195,6 +6404,17 @@ function handleTaskEvent(payload) {
         renderTaskTokenStats();
         return;
     }
+    if (payload.type === "task.model.call") {
+        const nextCall = normalizeTaskModelCall(payload.data || {});
+        const existing = Array.isArray(S.currentTaskProgress?.model_calls) ? S.currentTaskProgress.model_calls : [];
+        const withoutSame = existing.filter((item) => Number(item?.call_index || 0) !== Number(nextCall.call_index || 0));
+        const merged = [...withoutSame, nextCall]
+            .sort((a, b) => Number(a?.call_index || 0) - Number(b?.call_index || 0))
+            .slice(-50);
+        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), model_calls: merged };
+        renderTaskTokenStats();
+        return;
+    }
     if (payload.type === "task.tree.updated") {
         S.tree = payload.data?.tree_root || null;
         S.currentTaskTreeRoot = S.tree;
@@ -6239,11 +6459,16 @@ function isAbortLike(error) {
 function applyTaskListResponse(payload = {}) {
     const items = Array.isArray(payload?.items) ? payload.items : [];
     S.tasks = items;
-    S.tasksWorkerOnline = payload?.worker_online !== false;
-    S.tasksWorker = payload?.worker || null;
+    applyTaskWorkerStatus(payload || {}, { render: false });
     syncTaskSelection();
     renderTaskSessionScope();
     renderTasks();
+}
+
+function applyTaskWorkerStatus(payload = {}, { render = true } = {}) {
+    S.tasksWorkerOnline = payload?.worker_online !== false;
+    S.tasksWorker = payload?.worker || null;
+    if (render) renderTasks();
 }
 
 function patchTaskListItem(task) {
@@ -6284,6 +6509,10 @@ function initTasksWs() {
         const payload = JSON.parse(event.data || "{}");
         if (payload.type === "task.list.snapshot") {
             applyTaskListResponse(payload.data || {});
+            return;
+        }
+        if (payload.type === "task.worker.status") {
+            applyTaskWorkerStatus(payload.data || {});
             return;
         }
         if (payload.type === "task.list.patch") {

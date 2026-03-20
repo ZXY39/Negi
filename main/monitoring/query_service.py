@@ -14,6 +14,7 @@ from main.monitoring.models import (
     TaskLiveFrame,
     TaskLiveState,
     TaskLiveToolCall,
+    TaskModelCallRecord,
     TaskNodeDetail,
     TaskProgressResult,
     TaskSpawnRound,
@@ -89,6 +90,12 @@ class TaskQueryService:
         )
         latest_node = self._latest_projection_node(task_id)
         live_state = self._projection_live_state(task_id)
+        latest_node = self._with_display_fallback_for_latest_node(
+            task_id,
+            latest_node=latest_node,
+            live_state=live_state,
+        )
+        model_calls = self._recent_model_calls(task_id)
         text = f'Task status: {task.status}'
         if tree_text:
             text = f'{text}\n{tree_text}'
@@ -108,6 +115,7 @@ class TaskQueryService:
             nodes=[self._serialize_node(node) for node in runtime_nodes],
             token_usage=token_usage,
             token_usage_by_model=token_usage_by_model,
+            model_calls=model_calls,
             text=text,
         )
 
@@ -140,6 +148,7 @@ class TaskQueryService:
                 'nodes': list(progress.nodes or []),
                 'token_usage': progress.token_usage.model_dump(mode='json'),
                 'token_usage_by_model': [item.model_dump(mode='json') for item in list(progress.token_usage_by_model or [])],
+                'model_calls': [item.model_dump(mode='json') for item in list(progress.model_calls or [])],
                 'text': progress.text,
             },
         }
@@ -261,7 +270,15 @@ class TaskQueryService:
             ]
             spawn_rounds: list[TaskSpawnRound] = []
             for round_item in parent_rounds:
-                round_children = [child for child in (_build(child_id) for child_id in _sort_node_ids(list(round_item.child_node_ids or []))) if child is not None]
+                round_children = [
+                    child
+                    for child in (
+                        _build(str(child_id or '').strip())
+                        for child_id in list(round_item.child_node_ids or [])
+                        if str(child_id or '').strip() in node_map
+                    )
+                    if child is not None
+                ]
                 spawn_rounds.append(
                     TaskSpawnRound(
                         round_id=str(round_item.round_id or ''),
@@ -301,6 +318,31 @@ class TaskQueryService:
             )
 
         return _build(task.root_node_id)
+
+    def _recent_model_calls(self, task_id: str, *, limit: int = 50) -> list[TaskModelCallRecord]:
+        events = self._store.list_task_events(after_seq=0, task_id=task_id, limit=1000)
+        records: list[TaskModelCallRecord] = []
+        for event in list(events or []):
+            if str(event.get('event_type') or '') != 'task.model.call':
+                continue
+            payload = dict(event.get('payload') or {})
+            records.append(
+                TaskModelCallRecord(
+                    call_index=int(payload.get('call_index') or 0),
+                    created_at=str(event.get('created_at') or ''),
+                    prepared_message_count=int(payload.get('prepared_message_count') or 0),
+                    prepared_message_chars=int(payload.get('prepared_message_chars') or 0),
+                    response_tool_call_count=int(payload.get('response_tool_call_count') or 0),
+                    delta_usage=TokenUsageSummary.model_validate(payload.get('delta_usage') or {}),
+                    delta_usage_by_model=[
+                        ModelTokenUsageRecord.model_validate(item)
+                        for item in list(payload.get('delta_usage_by_model') or [])
+                        if isinstance(item, dict)
+                    ],
+                )
+            )
+        records.sort(key=lambda item: int(item.call_index or 0))
+        return records[-max(1, int(limit or 1)) :]
 
     def _projection_live_state(self, task_id: str) -> TaskLiveState | None:
         frames = self._store.list_task_runtime_frames(task_id)
@@ -386,6 +428,84 @@ class TaskQueryService:
             output=effective_output,
             output_ref=str(getattr(detail, 'output_ref', '') or getattr(detail, 'final_output_ref', '') or ''),
         )
+
+    def _with_display_fallback_for_latest_node(
+        self,
+        task_id: str,
+        *,
+        latest_node: LatestTaskNodeOutput | None,
+        live_state: TaskLiveState | None,
+    ) -> LatestTaskNodeOutput | None:
+        if latest_node is None:
+            return None
+        if str(latest_node.output or '').strip():
+            return latest_node
+        projection_output, projection_ref = self._latest_projection_plain_output(task_id)
+        if projection_output:
+            return latest_node.model_copy(
+                update={
+                    'output': projection_output,
+                    'output_ref': projection_ref or latest_node.output_ref,
+                }
+            )
+        live_output = self._live_phase_tool_call_summary(live_state, preferred_node_id=latest_node.node_id)
+        if not live_output:
+            return latest_node
+        return latest_node.model_copy(update={'output': live_output})
+
+    def _latest_projection_plain_output(self, task_id: str) -> tuple[str, str]:
+        details = self._store.list_task_node_details(task_id)
+        scored: list[tuple[str, str, str, str]] = []
+        for detail in details:
+            payload = dict(detail.payload or {})
+            output = str(payload.get('output_text') or detail.output_text or '').strip()
+            if not output:
+                continue
+            output_ref = str(payload.get('output_ref') or detail.output_ref or '').strip()
+            scored.append((str(detail.updated_at or ''), str(detail.node_id or ''), output, output_ref))
+        if not scored:
+            return '', ''
+        _updated_at, _node_id, output, output_ref = max(scored, key=lambda item: (item[0], item[1]))
+        return output, output_ref
+
+    @staticmethod
+    def _live_phase_tool_call_summary(
+        live_state: TaskLiveState | None,
+        *,
+        preferred_node_id: str = '',
+        limit: int = 5,
+    ) -> str:
+        if live_state is None or not list(live_state.frames or []):
+            return ''
+        frames = list(live_state.frames or [])
+        selected = None
+        preferred = str(preferred_node_id or '').strip()
+        if preferred:
+            selected = next((frame for frame in frames if str(frame.node_id or '').strip() == preferred), None)
+        if selected is None:
+            frames_by_node_id = {str(frame.node_id or '').strip(): frame for frame in frames if str(frame.node_id or '').strip()}
+            for node_id in [
+                *list(live_state.active_node_ids or []),
+                *list(live_state.runnable_node_ids or []),
+                *list(live_state.waiting_node_ids or []),
+            ]:
+                selected = frames_by_node_id.get(str(node_id or '').strip())
+                if selected is not None:
+                    break
+        if selected is None:
+            selected = frames[0]
+        lines: list[str] = []
+        phase = str(selected.phase or '').strip()
+        if phase:
+            lines.append(f'Current phase: {phase}')
+        tool_calls = [item for item in list(selected.tool_calls or []) if str(item.tool_name or '').strip()]
+        if tool_calls:
+            lines.append('Recent tool calls:')
+            for item in tool_calls[-max(1, int(limit or 1)) :]:
+                tool_name = str(item.tool_name or 'tool').strip() or 'tool'
+                status = str(item.status or 'queued').strip() or 'queued'
+                lines.append(f'- {tool_name} [{status}]')
+        return '\n'.join(lines)
 
     @staticmethod
     def _render_projection_tree_text(root: TaskTreeNodeSummary | None) -> str:
@@ -511,8 +631,8 @@ class TaskQueryService:
         return {
             'initial_prompt': str(node.prompt or node.goal or ''),
             'tool_steps': tool_steps,
-            'final_output': self._node_output_text(node),
-            'final_output_ref': self._node_output_ref(node),
+            'final_output': str(node.final_output or ''),
+            'final_output_ref': str(getattr(node, 'final_output_ref', '') or ''),
             'acceptance_result': str(node.check_result or ''),
             'acceptance_result_ref': str(getattr(node, 'check_result_ref', '') or ''),
         }

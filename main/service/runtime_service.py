@@ -54,6 +54,9 @@ from main.service.task_terminal_callback import (
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
+_WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
+_WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
+
 
 class ResourceDeleteBlockedError(ValueError):
     def __init__(
@@ -529,11 +532,32 @@ class MainRuntimeService:
         items = self.store.list_worker_status(role='task_worker')
         return items[0] if items else None
 
-    def is_worker_online(self, *, stale_after_seconds: float = 5.0) -> bool:
+    def _worker_status_stale_after_seconds(
+        self,
+        item: dict[str, Any] | None,
+        *,
+        override_seconds: float | None = None,
+    ) -> float:
+        if override_seconds is not None:
+            return max(0.0, float(override_seconds))
+        payload = item.get('payload') if isinstance(item, dict) else {}
+        raw_active_task_count = payload.get('active_task_count') if isinstance(payload, dict) else 0
+        try:
+            active_task_count = max(0, int(raw_active_task_count or 0))
+        except (TypeError, ValueError):
+            active_task_count = 0
+        if active_task_count > 0:
+            return _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS
+        return _WORKER_STATUS_STALE_AFTER_SECONDS
+
+    def is_worker_online(self, *, stale_after_seconds: float | None = None) -> bool:
         if self.execution_mode in {'embedded', 'worker'}:
             return True
         item = self.latest_worker_status()
         if not item:
+            return False
+        status = str(item.get('status') or item.get('state') or '').strip().lower()
+        if status in {'stopped', 'offline', 'dead'}:
             return False
         updated_at = str(item.get('updated_at') or '').strip()
         if not updated_at:
@@ -545,7 +569,8 @@ class MainRuntimeService:
         if updated_dt.tzinfo is None:
             updated_dt = updated_dt.replace(tzinfo=timezone.utc)
         age_seconds = max(0.0, (datetime.now(timezone.utc) - updated_dt.astimezone(timezone.utc)).total_seconds())
-        return age_seconds <= float(stale_after_seconds or 5.0)
+        stale_window_seconds = self._worker_status_stale_after_seconds(item, override_seconds=stale_after_seconds)
+        return age_seconds <= stale_window_seconds
 
     def _assert_worker_available(self) -> None:
         if self.execution_mode == 'web' and not self.is_worker_online():

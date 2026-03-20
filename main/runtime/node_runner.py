@@ -77,11 +77,11 @@ class NodeRunner:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         try:
             tools = self._build_tools(task=task, node=node)
-            messages = await self._resume_messages(task=task, node=node)
+            react_state = await self._resume_react_state(task=task, node=node)
             result = await self._react_loop.run(
                 task=task,
                 node=node,
-                messages=messages,
+                messages=list(react_state.get('messages') or []),
                 tools=tools,
                 model_refs=self._model_refs_for(node),
                 runtime_context=self._runtime_context(task=task, node=node),
@@ -97,12 +97,18 @@ class NodeRunner:
         except Exception as exc:
             return self._mark_failed(task_id, node.node_id, reason=str(exc))
 
-    async def _resume_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
+    async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
         state = self._log_service.read_runtime_state(task.task_id) or {}
         for frame in list(state.get('frames') or []):
-            if str(frame.get('node_id') or '') == node.node_id and isinstance(frame.get('messages'), list) and frame.get('messages'):
-                return list(frame['messages'])
-        return await self._build_messages(task=task, node=node)
+            if str(frame.get('node_id') or '') != node.node_id:
+                continue
+            if isinstance(frame.get('messages'), list) and frame.get('messages'):
+                return {
+                    'messages': list(frame.get('messages') or []),
+                }
+        return {
+            'messages': await self._build_messages(task=task, node=node),
+        }
 
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})

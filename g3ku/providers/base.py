@@ -45,6 +45,8 @@ class LLMResponse:
     attempts: list[LLMModelAttempt] = field(default_factory=list)
     reasoning_content: str | None = None
     thinking_blocks: list[dict] | None = None
+    request_message_count: int | None = None
+    request_message_chars: int | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -131,6 +133,42 @@ class LLMProvider(ABC):
             result.append(msg)
         return result
 
+    @abstractmethod
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
+        prompt_cache_key: str | None = None,
+    ) -> LLMResponse:
+        """
+        Send a chat completion request.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'.
+            tools: Optional list of tool definitions.
+            model: Model identifier (provider-specific).
+            max_tokens: Maximum tokens in response.
+            temperature: Sampling temperature.
+            tool_choice: Optional tool-choice policy (e.g. "auto", "required", or explicit tool).
+            parallel_tool_calls: Optional provider hint to enable/disable parallel tool execution.
+            prompt_cache_key: Optional stable prompt-cache key for providers that support it.
+
+        Returns:
+            LLMResponse with content and/or tool calls.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_default_model(self) -> str:
+        """Get the default model for this provider."""
+        raise NotImplementedError
+
 
 def _usage_lookup(value: Any, *path: str) -> tuple[bool, Any]:
     current = value
@@ -186,37 +224,3 @@ def normalize_usage_payload(raw_usage: Any) -> dict[str, int]:
             payload[target] = _coerce_usage_int(value)
             break
     return payload
-
-    @abstractmethod
-    async def chat(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
-        reasoning_effort: str | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
-        parallel_tool_calls: bool | None = None,
-    ) -> LLMResponse:
-        """
-        Send a chat completion request.
-
-        Args:
-            messages: List of message dicts with 'role' and 'content'.
-            tools: Optional list of tool definitions.
-            model: Model identifier (provider-specific).
-            max_tokens: Maximum tokens in response.
-            temperature: Sampling temperature.
-            tool_choice: Optional tool-choice policy (e.g. "auto", "required", or explicit tool).
-            parallel_tool_calls: Optional provider hint to enable/disable parallel tool execution.
-
-        Returns:
-            LLMResponse with content and/or tool calls.
-        """
-        pass
-
-    @abstractmethod
-    def get_default_model(self) -> str:
-        """Get the default model for this provider."""
-        pass

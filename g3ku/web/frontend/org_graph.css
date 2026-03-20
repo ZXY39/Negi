@@ -1363,6 +1363,12 @@ textarea {
     white-space: nowrap;
 }
 
+.ceo-session-id {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+}
+
 .ceo-session-unread {
     flex-shrink: 0;
     min-width: 22px;
@@ -2094,6 +2100,10 @@ textarea {
     min-height: 56px;
     font-size: 0.85rem;
     background: color-mix(in srgb, var(--bg-panel) 62%, var(--bg-app));
+}
+
+.task-trace-output {
+    min-height: 72px;
 }
 
 .task-trace-acceptance {
@@ -5376,6 +5386,64 @@ textarea {
     padding: 24px 16px;
 }
 
+.task-token-call-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--bg-panel) 92%, var(--brand-primary) 4%);
+}
+
+.task-token-call-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--space-3);
+}
+
+.task-token-call-head h3 {
+    margin: 0;
+    font-size: 0.98rem;
+    color: var(--text-primary);
+}
+
+.task-token-call-head p {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.task-token-call-table-wrap {
+    overflow-x: auto;
+}
+
+.task-token-call-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 760px;
+}
+
+.task-token-call-table th,
+.task-token-call-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    text-align: left;
+    font-size: 0.84rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.task-token-call-table th {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.task-token-call-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
 @media (max-width: 900px) {
     .task-token-topline {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5398,6 +5466,11 @@ textarea {
 
     .task-token-model-badges {
         justify-content: flex-start;
+    }
+
+    .task-token-call-head {
+        flex-direction: column;
+        align-items: flex-start;
     }
 }
 

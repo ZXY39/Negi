@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
 from main.models import TaskRecord
+from main.monitoring.models import TaskProjectionMetaRecord
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 from main.service.task_terminal_callback import (
@@ -47,13 +49,13 @@ class _HeartbeatRecorder:
         return True
 
 
-def _mark_worker_online(service: MainRuntimeService) -> None:
+def _mark_worker_online(service: MainRuntimeService, *, active_task_count: int = 0) -> None:
     service.store.upsert_worker_status(
         worker_id="worker:test",
         role="task_worker",
         status="running",
         updated_at=now_iso(),
-        payload={"execution_mode": "worker"},
+        payload={"execution_mode": "worker", "active_task_count": int(active_task_count)},
     )
 
 
@@ -67,6 +69,22 @@ def _receive_until_type(ws, expected_type: str) -> dict[str, object]:
 async def _create_web_task(service: MainRuntimeService):
     _mark_worker_online(service)
     return await service.create_task("test task", session_id="web:shared")
+
+
+def _mark_worker_at(
+    service: MainRuntimeService,
+    updated_at: str,
+    *,
+    status: str = "running",
+    active_task_count: int = 0,
+) -> None:
+    service.store.upsert_worker_status(
+        worker_id="worker:test",
+        role="task_worker",
+        status=status,
+        updated_at=updated_at,
+        payload={"execution_mode": "worker", "active_task_count": int(active_task_count)},
+    )
 
 
 def test_internal_task_terminal_callback_marks_outbox_delivered_and_dedupes(tmp_path: Path, monkeypatch):
@@ -266,6 +284,87 @@ def test_global_tasks_websocket_reads_sqlite_events(tmp_path: Path, monkeypatch)
         assert patch_event["data"]["task"]["brief"] == "patched"
 
 
+def test_global_tasks_websocket_pushes_worker_status_recovery(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=30)).replace(microsecond=0).isoformat()
+    _mark_worker_at(service, stale)
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect("/api/ws/tasks?session_id=all&after_seq=0") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        snapshot = ws.receive_json()
+        assert snapshot["type"] == "task.list.snapshot"
+        assert snapshot["data"]["worker_online"] is False
+
+        _mark_worker_online(service)
+
+        worker_event = _receive_until_type(ws, "task.worker.status")
+        assert worker_event["type"] == "task.worker.status"
+        assert worker_event["data"]["worker_online"] is True
+        assert worker_event["data"]["worker"]["worker_id"] == "worker:test"
+
+
+def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    recent_but_not_tiny = (datetime.now(timezone.utc) - timedelta(seconds=10)).replace(microsecond=0).isoformat()
+    definitely_stale = (datetime.now(timezone.utc) - timedelta(seconds=20)).replace(microsecond=0).isoformat()
+
+    _mark_worker_at(service, recent_but_not_tiny)
+    assert service.is_worker_online() is True
+
+    _mark_worker_at(service, definitely_stale)
+    assert service.is_worker_online() is False
+
+
+def test_web_mode_worker_online_extends_stale_window_for_active_tasks(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    active_but_still_recent = (datetime.now(timezone.utc) - timedelta(seconds=45)).replace(microsecond=0).isoformat()
+    definitely_stale_even_with_grace = (datetime.now(timezone.utc) - timedelta(seconds=75)).replace(microsecond=0).isoformat()
+
+    _mark_worker_at(service, active_but_still_recent, active_task_count=1)
+    assert service.is_worker_online() is True
+
+    _mark_worker_at(service, definitely_stale_even_with_grace, active_task_count=1)
+    assert service.is_worker_online() is False
+
+
+def test_web_mode_worker_online_treats_stopped_status_as_offline(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    _mark_worker_at(service, now_iso(), status="stopped")
+    assert service.is_worker_online() is False
+
+
 def test_global_tasks_websocket_does_not_replay_historical_patches_after_snapshot(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -386,6 +485,88 @@ def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_
         assert runtime_event["data"]["runtime_summary"]["active_node_ids"] == [record.root_node_id]
 
 
+def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    service.store.append_task_event(
+        task_id=record.task_id,
+        session_id=record.session_id,
+        event_type="task.model.call",
+        created_at=now_iso(),
+        payload={
+            "task_id": record.task_id,
+            "node_id": record.root_node_id,
+            "call_index": 3,
+            "prepared_message_count": 9,
+            "prepared_message_chars": 1234,
+            "response_tool_call_count": 2,
+            "delta_usage": {
+                "tracked": True,
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_hit_tokens": 40,
+                "call_count": 1,
+                "calls_with_usage": 1,
+                "calls_without_usage": 0,
+                "is_partial": False,
+            },
+            "delta_usage_by_model": [],
+        },
+    )
+    payload = service.get_task_detail_payload(record.task_id, mark_read=False)
+
+    assert payload is not None
+    assert payload["progress"]["model_calls"][0]["call_index"] == 3
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        snapshot = ws.receive_json()
+        assert snapshot["type"] == "task.snapshot"
+        assert snapshot["data"]["progress"]["model_calls"][0]["call_index"] == 3
+
+        service.store.append_task_event(
+            task_id=record.task_id,
+            session_id=record.session_id,
+            event_type="task.model.call",
+            created_at=now_iso(),
+            payload={
+                "task_id": record.task_id,
+                "node_id": record.root_node_id,
+                "call_index": 4,
+                "prepared_message_count": 10,
+                "prepared_message_chars": 1400,
+                "response_tool_call_count": 0,
+                "delta_usage": {
+                    "tracked": True,
+                    "input_tokens": 50,
+                    "output_tokens": 5,
+                    "cache_hit_tokens": 25,
+                    "call_count": 1,
+                    "calls_with_usage": 1,
+                    "calls_without_usage": 0,
+                    "is_partial": False,
+                },
+                "delta_usage_by_model": [],
+            },
+        )
+
+        event = _receive_until_type(ws, "task.model.call")
+        assert event["data"]["call_index"] == 4
+
+
 def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -418,6 +599,82 @@ def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path:
 
     assert node_payload is not None
     assert node_payload["item"]["output"] == "projection-output"
+
+
+def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content="still working on the task",
+    )
+
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    node_payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert snapshot is not None
+    assert node_payload is not None
+    assert node_payload["item"]["output"] == "still working on the task"
+    assert node_payload["item"]["final_output"] == ""
+    assert node_payload["item"]["execution_trace"]["final_output"] == ""
+
+    root_progress_node = next(
+        item for item in snapshot["progress"]["nodes"] if item["node_id"] == record.root_node_id
+    )
+    assert root_progress_node["execution_trace"]["final_output"] == ""
+
+
+def test_task_projection_backfills_when_projection_version_is_stale(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    initial = service.get_task_detail_payload(record.task_id, mark_read=False)
+    assert initial is not None
+
+    detail_record = service.store.get_task_node_detail(record.root_node_id)
+    assert detail_record is not None
+    payload = dict(detail_record.payload or {})
+    payload["execution_trace"] = {"final_output": "stale-final-output", "tool_steps": []}
+    stale_detail = detail_record.model_copy(
+        update={
+            "final_output": "stale-final-output",
+            "payload": payload,
+        }
+    )
+    service.store.replace_task_node_details(record.task_id, [stale_detail])
+    service.store.upsert_task_projection_meta(
+        TaskProjectionMetaRecord(
+            task_id=record.task_id,
+            version=0,
+            updated_at=now_iso(),
+        )
+    )
+
+    restored = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert restored is not None
+    assert restored["item"]["final_output"] == ""
+    assert restored["item"]["execution_trace"]["final_output"] == ""
 
 
 def test_task_projection_backfills_when_rows_are_missing(tmp_path: Path):

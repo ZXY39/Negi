@@ -37,6 +37,7 @@ class ResponsesProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
+        prompt_cache_key: str | None = None,
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -66,7 +67,7 @@ class ResponsesProvider(LLMProvider):
             "input": input_items,
             "text": {"verbosity": "high" if reasoning_effort == "high" else "medium"},
             "include": ["reasoning.encrypted_content"],
-            "prompt_cache_key": _prompt_cache_key(messages),
+            "prompt_cache_key": str(prompt_cache_key or _prompt_cache_key(messages)),
         }
 
         if tools:

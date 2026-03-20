@@ -369,10 +369,13 @@ def summarize_runtime_snapshot(
         progress = payload["progress"]
         latest_node = progress.get("latest_node") if isinstance(progress.get("latest_node"), dict) else {}
         root = progress.get("root") if isinstance(progress.get("root"), dict) else {}
+        live_state = progress.get("live_state") if isinstance(progress.get("live_state"), dict) else payload.get("runtime_summary")
         tool_steps = []
         execution_trace = latest_node.get("execution_trace") if isinstance(latest_node, dict) else None
         if isinstance(execution_trace, dict):
             tool_steps = list(execution_trace.get("tool_steps") or [])
+        if not tool_steps:
+            tool_steps = _runtime_summary_tool_steps(live_state)
         recent_tools = [
             {
                 "tool_name": str(item.get("tool_name") or "tool"),
@@ -382,8 +385,15 @@ def summarize_runtime_snapshot(
             for item in tool_steps[-list_limit:]
             if isinstance(item, dict)
         ]
+        latest_summary_source = (
+            latest_node.get("output")
+            or _runtime_summary_phase_and_tools(live_state, preferred_node_id=latest_node.get("node_id"), limit=list_limit)
+            or progress.get("text")
+            or root.get("goal")
+            or ""
+        )
         latest_summary = _clip_text(
-            latest_node.get("output") or progress.get("text") or root.get("goal") or "",
+            latest_summary_source,
             limit=text_char_limit,
         )
         node_title = str(latest_node.get("title") or root.get("goal") or latest_node.get("node_id") or "当前节点")
@@ -459,6 +469,67 @@ def summarize_runtime_snapshot(
         "snapshot_type": "scalar",
         "summary_text": _clip_text(payload, limit=text_char_limit),
     }
+
+
+def _runtime_summary_tool_steps(runtime_summary: Any) -> list[dict[str, Any]]:
+    if not isinstance(runtime_summary, dict):
+        return []
+    collected: list[dict[str, Any]] = []
+    for frame in list(runtime_summary.get("frames") or []):
+        if not isinstance(frame, dict):
+            continue
+        for item in list(frame.get("tool_calls") or []):
+            if not isinstance(item, dict):
+                continue
+            collected.append(
+                {
+                    "tool_name": str(item.get("tool_name") or "tool"),
+                    "status": str(item.get("status") or "unknown"),
+                    "output_text": "",
+                }
+            )
+    return collected
+
+
+def _runtime_summary_phase_and_tools(
+    runtime_summary: Any,
+    *,
+    preferred_node_id: Any = "",
+    limit: int = 3,
+) -> str:
+    if not isinstance(runtime_summary, dict):
+        return ""
+    frames = [item for item in list(runtime_summary.get("frames") or []) if isinstance(item, dict)]
+    if not frames:
+        return ""
+    selected = None
+    preferred = str(preferred_node_id or "").strip()
+    if preferred:
+        selected = next((frame for frame in frames if str(frame.get("node_id") or "").strip() == preferred), None)
+    if selected is None:
+        frames_by_node = {str(frame.get("node_id") or "").strip(): frame for frame in frames if str(frame.get("node_id") or "").strip()}
+        for node_id in [
+            *list(runtime_summary.get("active_node_ids") or []),
+            *list(runtime_summary.get("runnable_node_ids") or []),
+            *list(runtime_summary.get("waiting_node_ids") or []),
+        ]:
+            selected = frames_by_node.get(str(node_id or "").strip())
+            if selected is not None:
+                break
+    if selected is None:
+        selected = frames[0]
+    lines: list[str] = []
+    phase = str(selected.get("phase") or "").strip()
+    if phase:
+        lines.append(f"Current phase: {phase}")
+    tool_calls = [item for item in list(selected.get("tool_calls") or []) if isinstance(item, dict) and str(item.get("tool_name") or "").strip()]
+    if tool_calls:
+        lines.append("Recent tool calls:")
+        for item in tool_calls[-max(1, int(limit or 1)) :]:
+            tool_name = str(item.get("tool_name") or "tool").strip() or "tool"
+            status = str(item.get("status") or "queued").strip() or "queued"
+            lines.append(f"- {tool_name} [{status}]")
+    return "\n".join(lines)
 
 
 async def run_tool_with_watchdog(

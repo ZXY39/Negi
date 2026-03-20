@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import re
@@ -11,13 +12,19 @@ from typing import Any
 import json_repair
 
 from g3ku.agent.tools.base import Tool
-from g3ku.content import parse_content_envelope
+from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.errors import TaskPausedError
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION
 from main.protocol import now_iso
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:artifact:[A-Za-z0-9_-]+')
+_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
+_COMPACT_HISTORY_MESSAGE_LIMIT = 30
+_COMPACT_HISTORY_CHAR_LIMIT = 60_000
+_COMPACT_HISTORY_KEEP_RECENT = 12
+_COMPACT_HISTORY_MAX_STEPS = 12
+_COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -77,10 +84,15 @@ class ReActToolLoop:
         limit = max(2, int(max_iterations or self._max_iterations))
         attempts = 0
         last_contract_violations: list[str] = []
+        message_history = list(messages or [])
         while attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
-            model_messages = self._prepare_messages(messages, runtime_context=runtime_context)
+            message_history = self._compact_history(
+                message_history,
+                preserve_non_system=_COMPACT_HISTORY_KEEP_RECENT,
+            )
+            model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
             allowed_content_refs = self._collect_content_refs(model_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
             self._log_service.upsert_frame(
@@ -90,7 +102,7 @@ class ReActToolLoop:
                     'depth': node.depth,
                     'node_kind': node.node_kind,
                     'phase': 'before_model',
-                    'messages': model_messages,
+                    'messages': message_history,
                     'pending_tool_calls': [],
                     'pending_child_specs': [],
                     'partial_child_results': [],
@@ -100,13 +112,14 @@ class ReActToolLoop:
                 },
                 publish_snapshot=True,
             )
-            response = await self._chat_backend.chat(
+            response = await self._chat_with_optional_extensions(
                 messages=model_messages,
                 tools=tool_schemas or None,
                 model_refs=model_refs,
                 max_tokens=1200,
                 temperature=0.2,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
+                prompt_cache_key=None,
             )
             tool_calls = [
                 {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
@@ -119,6 +132,8 @@ class ReActToolLoop:
                 tool_calls=tool_calls,
                 usage_attempts=list(response.attempts or []),
                 model_messages=model_messages,
+                request_message_count=getattr(response, 'request_message_count', None),
+                request_message_chars=getattr(response, 'request_message_chars', None),
             )
             if response.tool_calls:
                 control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response.tool_calls)
@@ -143,7 +158,7 @@ class ReActToolLoop:
                         'depth': node.depth,
                         'node_kind': node.node_kind,
                         'phase': 'waiting_tool_results',
-                        'messages': model_messages,
+                        'messages': message_history,
                         'pending_tool_calls': tool_calls,
                         'tool_calls': live_tool_calls,
                         'last_error': '',
@@ -158,21 +173,22 @@ class ReActToolLoop:
                     allowed_content_refs=allowed_content_refs,
                     runtime_context=runtime_context,
                 )
-                tool_messages = [item['tool_message'] for item in results]
-                messages.append(
-                    {
-                        'role': 'assistant',
-                        'content': self._externalize_message_content(
-                            response.content,
-                            runtime_context=runtime_context,
-                            display_name=f'assistant:{node.node_id}',
-                            source_kind='assistant_message',
-                        ),
-                        'tool_calls': assistant_tool_calls,
-                    }
+                assistant_message = {
+                    'role': 'assistant',
+                    'content': self._externalize_message_content(
+                        response.content,
+                        runtime_context=runtime_context,
+                        display_name=f'assistant:{node.node_id}',
+                        source_kind='assistant_message',
+                    ),
+                    'tool_calls': assistant_tool_calls,
+                }
+                message_history.append(assistant_message)
+                tool_messages = self._dedupe_tool_messages(
+                    [item['tool_message'] for item in results],
+                    existing_messages=message_history,
                 )
-                messages.extend(tool_messages)
-                waiting_messages = self._prepare_messages(messages, runtime_context=runtime_context)
+                message_history.extend(tool_messages)
                 self._log_service.update_frame(
                     task.task_id,
                     node.node_id,
@@ -181,7 +197,7 @@ class ReActToolLoop:
                         'depth': node.depth,
                         'node_kind': node.node_kind,
                         'phase': 'waiting_tool_results',
-                        'messages': waiting_messages,
+                        'messages': message_history,
                         'pending_tool_calls': [],
                         'tool_calls': [item['live_state'] for item in results],
                         'last_error': '',
@@ -198,20 +214,22 @@ class ReActToolLoop:
                 contract_violations = self._validate_final_result(
                     result=result,
                     raw_payload=raw_payload,
-                    has_tool_results=self._has_tool_results(messages),
+                    has_tool_results=self._has_tool_results(message_history),
                 )
                 if not contract_violations:
                     self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
                     return result
                 last_contract_violations = list(contract_violations)
-                messages.append({'role': 'user', 'content': self._result_contract_violation_message(contract_violations)})
+                violation_message = {'role': 'user', 'content': self._result_contract_violation_message(contract_violations)}
+                message_history.append(violation_message)
                 continue
 
             if str(response.finish_reason or '').strip().lower() == 'error':
                 error_text = str(getattr(response, 'error_text', None) or response.content or 'model response failed').strip() or 'model response failed'
                 raise RuntimeError(error_text)
 
-            messages.append({'role': 'user', 'content': self._result_protocol_message()})
+            protocol_message = {'role': 'user', 'content': self._result_protocol_message()}
+            message_history.append(protocol_message)
 
         if last_contract_violations:
             raise RuntimeError('result contract violation: ' + '; '.join(last_contract_violations))
@@ -651,6 +669,288 @@ class ReActToolLoop:
             return json.dumps(result, ensure_ascii=False)
         except TypeError:
             return str(result)
+
+    async def _chat_with_optional_extensions(self, **kwargs) -> Any:
+        chat = getattr(self._chat_backend, 'chat')
+        signature = inspect.signature(chat)
+        accepts_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+        if accepts_kwargs:
+            return await chat(**kwargs)
+        filtered = {key: value for key, value in kwargs.items() if key in signature.parameters}
+        return await chat(**filtered)
+
+    def _compact_history(self, messages: list[dict[str, Any]], *, preserve_non_system: int) -> list[dict[str, Any]]:
+        message_list = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        existing_compact_count = sum(1 for item in message_list if self._is_compact_history_message(item))
+        try:
+            serialized = json.dumps(message_list, ensure_ascii=False, default=str)
+        except Exception:
+            serialized = str(message_list)
+        should_compact = (
+            len(message_list) > _COMPACT_HISTORY_MESSAGE_LIMIT
+            or len(serialized) > _COMPACT_HISTORY_CHAR_LIMIT
+            or existing_compact_count > 1
+        )
+        if not should_compact:
+            return message_list
+
+        preserved_prefix: list[dict[str, Any]] = []
+        remainder = list(message_list)
+        if remainder and str(remainder[0].get('role') or '').strip().lower() == 'system':
+            preserved_prefix.append(remainder.pop(0))
+        if remainder and str(remainder[0].get('role') or '').strip().lower() == 'user':
+            preserved_prefix.append(remainder.pop(0))
+
+        existing_payloads = [
+            payload
+            for payload in (self._parse_compact_history_payload(item) for item in remainder)
+            if payload is not None
+        ]
+        regular_messages = [item for item in remainder if not self._is_compact_history_message(item)]
+        if not regular_messages:
+            return preserved_prefix + ([self._make_compact_history_message(self._merge_compact_payloads(existing_payloads, []))] if existing_payloads else [])
+
+        keep_count = max(_COMPACT_HISTORY_KEEP_RECENT, int(preserve_non_system or 0))
+        split_index = max(0, len(regular_messages) - keep_count)
+        older_messages = regular_messages[:split_index]
+        recent_messages = regular_messages[split_index:]
+        if not older_messages and not existing_payloads:
+            return preserved_prefix + recent_messages
+
+        compact_payload = self._merge_compact_payloads(existing_payloads, older_messages)
+        compact_message = self._make_compact_history_message(compact_payload)
+        return preserved_prefix + [compact_message] + recent_messages
+
+    def _merge_compact_payloads(self, payloads: list[dict[str, Any]], older_messages: list[dict[str, Any]]) -> dict[str, Any]:
+        completed_steps: list[str] = []
+        durable_refs: set[str] = set()
+        open_threads: list[str] = []
+        repair_prompt_count = 0
+
+        for payload in list(payloads or []):
+            completed_steps.extend([
+                self._truncate_compact_text(item)
+                for item in list(payload.get('completed_steps') or [])
+                if self._truncate_compact_text(item)
+            ])
+            durable_refs.update(str(item or '').strip() for item in list(payload.get('durable_refs') or []) if str(item or '').strip())
+            open_threads.extend([
+                self._truncate_compact_text(item)
+                for item in list(payload.get('open_threads') or [])
+                if self._truncate_compact_text(item)
+            ])
+            contract_state = payload.get('result_contract_state') if isinstance(payload.get('result_contract_state'), dict) else {}
+            repair_prompt_count += int(contract_state.get('repair_prompt_count') or 0)
+
+        for message in list(older_messages or []):
+            step = self._compact_step_from_message(message)
+            if step:
+                completed_steps.append(step)
+            durable_refs.update(self._message_refs(message))
+            open_thread = self._open_thread_from_message(message)
+            if open_thread:
+                open_threads.append(open_thread)
+            if self._is_result_contract_prompt(message):
+                repair_prompt_count += 1
+
+        return {
+            'completed_steps': self._unique_compact_items(completed_steps, limit=_COMPACT_HISTORY_MAX_STEPS),
+            'durable_refs': sorted(durable_refs),
+            'open_threads': self._unique_compact_items(open_threads, limit=_COMPACT_HISTORY_MAX_STEPS),
+            'result_contract_state': {
+                'entered': bool(repair_prompt_count > 0),
+                'repair_prompt_count': repair_prompt_count,
+            },
+        }
+
+    @staticmethod
+    def _truncate_compact_text(value: Any) -> str:
+        text = ' '.join(str(value or '').split())
+        if not text:
+            return ''
+        if len(text) <= _COMPACT_HISTORY_STEP_MAX_CHARS:
+            return text
+        return text[: _COMPACT_HISTORY_STEP_MAX_CHARS - 3].rstrip() + '...'
+
+    @staticmethod
+    def _unique_compact_items(items: list[str], *, limit: int) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in list(items or []):
+            text = str(item or '').strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+            if len(result) >= max(1, int(limit or 1)):
+                break
+        return result
+
+    @classmethod
+    def _is_compact_history_message(cls, message: dict[str, Any]) -> bool:
+        return (
+            str((message or {}).get('role') or '').strip().lower() == 'assistant'
+            and str((message or {}).get('content') or '').startswith(_COMPACT_HISTORY_PREFIX)
+        )
+
+    @classmethod
+    def _parse_compact_history_payload(cls, message: dict[str, Any]) -> dict[str, Any] | None:
+        if not cls._is_compact_history_message(message):
+            return None
+        text = str((message or {}).get('content') or '')[len(_COMPACT_HISTORY_PREFIX) :].strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _make_compact_history_message(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            'role': 'assistant',
+            'content': f'{_COMPACT_HISTORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}',
+        }
+
+    def _compact_step_from_message(self, message: dict[str, Any]) -> str:
+        role = str((message or {}).get('role') or '').strip().lower()
+        if role == 'assistant':
+            tool_calls = list((message or {}).get('tool_calls') or [])
+            if tool_calls:
+                names = ', '.join(
+                    str(((item or {}).get('function') or {}).get('name') or (item or {}).get('name') or '').strip()
+                    for item in tool_calls
+                    if str(((item or {}).get('function') or {}).get('name') or (item or {}).get('name') or '').strip()
+                )
+                if names:
+                    return self._truncate_compact_text(f'Assistant requested tools: {names}')
+            summary, _ref = content_summary_and_ref((message or {}).get('content'))
+            if summary:
+                return self._truncate_compact_text(f'Assistant: {summary}')
+            return ''
+        if role == 'tool':
+            tool_name = str((message or {}).get('name') or 'tool').strip() or 'tool'
+            summary, _ref = content_summary_and_ref((message or {}).get('content'))
+            return self._truncate_compact_text(f'{tool_name}: {summary}') if summary else ''
+        if role == 'user':
+            summary, _ref = content_summary_and_ref((message or {}).get('content'))
+            if summary and not self._is_result_contract_prompt(message):
+                return self._truncate_compact_text(f'User follow-up: {summary}')
+        return ''
+
+    def _open_thread_from_message(self, message: dict[str, Any]) -> str:
+        role = str((message or {}).get('role') or '').strip().lower()
+        if role == 'tool':
+            summary, _ref = content_summary_and_ref((message or {}).get('content'))
+            lowered = summary.lower()
+            if lowered.startswith('error') or '"status":"error"' in lowered or '"status": "error"' in lowered:
+                tool_name = str((message or {}).get('name') or 'tool').strip() or 'tool'
+                return self._truncate_compact_text(f'Investigate failed tool result: {tool_name}')
+        if role == 'user' and self._is_result_contract_prompt(message):
+            return 'Return valid result-schema JSON once implementation is complete'
+        return ''
+
+    @staticmethod
+    def _message_refs(message: dict[str, Any]) -> set[str]:
+        refs = set(ReActToolLoop._collect_content_refs(message))
+        return {str(item or '').strip() for item in refs if str(item or '').strip()}
+
+    @classmethod
+    def _is_result_contract_prompt(cls, message: dict[str, Any]) -> bool:
+        if str((message or {}).get('role') or '').strip().lower() != 'user':
+            return False
+        content = str((message or {}).get('content') or '').strip()
+        return (
+            content.startswith('Your previous reply was not valid result JSON for schema v')
+            or content.startswith('Your previous reply produced parseable JSON but violated result schema v')
+        )
+
+    def _dedupe_tool_messages(self, tool_messages: list[dict[str, Any]], *, existing_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen_signatures: dict[str, dict[str, str]] = {}
+        for message in list(existing_messages or []):
+            if str(message.get('role') or '').strip().lower() != 'tool':
+                continue
+            signature = self._tool_result_signature(message.get('content'))
+            if not signature:
+                continue
+            seen_signatures.setdefault(
+                signature,
+                {
+                    'tool_call_id': str(message.get('tool_call_id') or '').strip(),
+                    'ref': self._best_tool_ref(message.get('content')),
+                    'summary': self._tool_summary(message.get('content')),
+                },
+            )
+
+        deduped: list[dict[str, Any]] = []
+        for message in list(tool_messages or []):
+            payload = dict(message or {})
+            signature = self._tool_result_signature(payload.get('content'))
+            if not signature:
+                deduped.append(payload)
+                continue
+            prior = seen_signatures.get(signature)
+            if prior is None:
+                seen_signatures[signature] = {
+                    'tool_call_id': str(payload.get('tool_call_id') or '').strip(),
+                    'ref': self._best_tool_ref(payload.get('content')),
+                    'summary': self._tool_summary(payload.get('content')),
+                }
+                deduped.append(payload)
+                continue
+            payload['content'] = json.dumps(
+                {
+                    'status': 'reused',
+                    'same_as': prior.get('tool_call_id') or '',
+                    'ref': prior.get('ref') or '',
+                    'summary': prior.get('summary') or '',
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            deduped.append(payload)
+        return deduped
+
+    @staticmethod
+    def _tool_result_signature(content: Any) -> str:
+        if content is None:
+            return ''
+        if isinstance(content, str):
+            text = content.strip()
+            if not text:
+                return ''
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = text
+        else:
+            parsed = content
+        try:
+            normalized = json.dumps(parsed, ensure_ascii=True, sort_keys=True, default=str)
+        except Exception:
+            normalized = str(parsed)
+        return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _best_tool_ref(content: Any) -> str:
+        refs = ReActToolLoop._collect_content_refs(content)
+        return refs[0] if refs else ''
+
+    def _tool_summary(self, content: Any) -> str:
+        if isinstance(content, str):
+            text = content.strip()
+            if text.startswith('{') or text.startswith('['):
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    summary_value = parsed.get('summary')
+                    if str(summary_value or '').strip():
+                        return self._truncate_compact_text(summary_value)
+        summary, _ref = content_summary_and_ref(content)
+        return self._truncate_compact_text(summary)
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
         store = getattr(self._log_service, '_content_store', None)

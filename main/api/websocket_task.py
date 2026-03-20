@@ -21,6 +21,20 @@ def _service():
     return service
 
 
+def _worker_status_payload(service) -> dict[str, object]:
+    return {
+        'worker': service.latest_worker_status(),
+        'worker_online': service.is_worker_online(),
+    }
+
+
+def _worker_status_signature(payload: dict[str, object]) -> tuple[str, str, bool]:
+    worker = payload.get('worker') if isinstance(payload, dict) else None
+    worker_id = str((worker or {}).get('worker_id') or '').strip() if isinstance(worker, dict) else ''
+    worker_state = str((worker or {}).get('status') or (worker or {}).get('state') or '').strip() if isinstance(worker, dict) else ''
+    return worker_id, worker_state, payload.get('worker_online') is not False
+
+
 @router.websocket('/ws/tasks')
 async def tasks_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -45,6 +59,8 @@ async def tasks_websocket(websocket: WebSocket):
         effective_session_id = None if requested_session_id.lower() == 'all' else requested_session_id
         current_seq = max(after_seq, service.store.latest_task_event_seq(session_id=effective_session_id))
         snapshot = [item.model_dump(mode='json') for item in service.query_service.get_tasks(effective_session_id, 1)]
+        worker_payload = _worker_status_payload(service)
+        worker_signature = _worker_status_signature(worker_payload)
         await websocket_send_json(
             websocket,
             build_envelope(
@@ -64,8 +80,7 @@ async def tasks_websocket(websocket: WebSocket):
                 type='task.list.snapshot',
                 data={
                     'items': snapshot,
-                    'worker': service.latest_worker_status(),
-                    'worker_online': service.is_worker_online(),
+                    **worker_payload,
                 },
             ),
         )
@@ -91,6 +106,20 @@ async def tasks_websocket(websocket: WebSocket):
                         type=event_type,
                         data=dict(event.get('payload') or {}),
                     )
+                )
+            next_worker_payload = _worker_status_payload(service)
+            next_worker_signature = _worker_status_signature(next_worker_payload)
+            if next_worker_signature != worker_signature:
+                worker_signature = next_worker_signature
+                await websocket_send_json(
+                    websocket,
+                    build_envelope(
+                        channel='task',
+                        session_id=requested_session_id,
+                        seq=current_seq,
+                        type='task.worker.status',
+                        data=next_worker_payload,
+                    ),
                 )
     except (WebSocketDisconnect, WebSocketChannelClosed):
         logger.debug(

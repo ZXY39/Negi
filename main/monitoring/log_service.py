@@ -179,6 +179,8 @@ class TaskLogService:
         tool_calls: list[dict[str, Any]] | None = None,
         usage_attempts: list[Any] | None = None,
         model_messages: list[dict[str, Any]] | None = None,
+        request_message_count: int | None = None,
+        request_message_chars: int | None = None,
     ) -> NodeRecord | None:
         with self._task_lock(task_id):
             current = self._store.get_node(node_id)
@@ -238,6 +240,8 @@ class TaskLogService:
                             tool_calls=tool_calls,
                             delta_usage=delta_usage,
                             delta_usage_by_model=delta_usage_by_model,
+                            request_message_count=request_message_count,
+                            request_message_chars=request_message_chars,
                         ),
                     )
             return updated
@@ -412,18 +416,26 @@ class TaskLogService:
         tool_calls: list[dict[str, Any]] | None,
         delta_usage,
         delta_usage_by_model: list[Any],
+        request_message_count: int | None,
+        request_message_chars: int | None,
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
-        try:
-            prepared_payload = json.dumps(message_list, ensure_ascii=False, default=str)
-        except Exception:
-            prepared_payload = str(message_list)
+        if request_message_count is None or request_message_chars is None:
+            try:
+                prepared_payload = json.dumps(message_list, ensure_ascii=False, default=str)
+            except Exception:
+                prepared_payload = str(message_list)
+            prepared_message_count = len(message_list)
+            prepared_message_chars = len(prepared_payload)
+        else:
+            prepared_message_count = max(0, int(request_message_count or 0))
+            prepared_message_chars = max(0, int(request_message_chars or 0))
         return {
             'task_id': task_id,
             'node_id': node_id,
             'call_index': int(call_index or 0),
-            'prepared_message_count': len(message_list),
-            'prepared_message_chars': len(prepared_payload),
+            'prepared_message_count': prepared_message_count,
+            'prepared_message_chars': prepared_message_chars,
             'response_tool_call_count': len(list(tool_calls or [])),
             'delta_usage': delta_usage.model_dump(mode='json'),
             'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
@@ -591,6 +603,8 @@ class TaskLogService:
                 updated_at=str(current['updated_at'] or now_iso()),
                 payload=current,
             )
+            if str(getattr(task, 'runtime_state_path', '') or '').strip():
+                self._file_store.write_json(task.runtime_state_path, current)
             self._projection_service.sync_runtime_state(task.task_id, task=task, runtime_state=current)
             if publish_snapshot:
                 self._append_task_event(
@@ -876,6 +890,11 @@ class TaskLogService:
             return
         current_nodes = list(nodes or self._store.list_nodes(task_id))
         current_root = root if root is not None else self._tree_builder.build_tree(current_task, current_nodes)
+        tree_payload = self._compact_tree_payload(current_root)
+        if str(getattr(current_task, 'tree_snapshot_path', '') or '').strip():
+            self._file_store.write_json(current_task.tree_snapshot_path, {'task_id': current_task.task_id, 'tree_root': tree_payload})
+        if str(getattr(current_task, 'tree_text_path', '') or '').strip():
+            self._file_store.write_text(current_task.tree_text_path, str(tree_text or ''))
         self._append_task_event(
             task=current_task,
             event_type='task.summary.updated',
@@ -886,7 +905,7 @@ class TaskLogService:
             event_type='task.tree.updated',
             data={
                 'task_id': current_task.task_id,
-                'tree_root': self._compact_tree_payload(current_root),
+                'tree_root': tree_payload,
                 'default_selected_node_id': self._default_selected_node_id(current_root),
             },
         )
@@ -948,7 +967,7 @@ class TaskLogService:
             'active_node_ids': [str(item) for item in list(state.get('active_node_ids') or []) if str(item or '').strip()],
             'runnable_node_ids': [str(item) for item in list(state.get('runnable_node_ids') or []) if str(item or '').strip()],
             'waiting_node_ids': [str(item) for item in list(state.get('waiting_node_ids') or []) if str(item or '').strip()],
-            'frames': [dict(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
+            'frames': [self._public_runtime_frame(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
         }
 
     def _compact_tree_payload(self, root) -> dict[str, Any] | None:
@@ -995,6 +1014,23 @@ class TaskLogService:
 
     @staticmethod
     def _sanitize_runtime_frame(frame: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(frame or {})
+        return {
+            'node_id': str(payload.get('node_id') or '').strip(),
+            'depth': int(payload.get('depth') or 0),
+            'node_kind': str(payload.get('node_kind') or 'execution'),
+            'phase': str(payload.get('phase') or ''),
+            'messages': [dict(item) for item in list(payload.get('messages') or []) if isinstance(item, dict)],
+            'pending_tool_calls': [dict(item) for item in list(payload.get('pending_tool_calls') or []) if isinstance(item, dict)],
+            'pending_child_specs': [dict(item) for item in list(payload.get('pending_child_specs') or []) if isinstance(item, dict)],
+            'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
+            'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
+            'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            'last_error': str(payload.get('last_error') or ''),
+        }
+
+    @staticmethod
+    def _public_runtime_frame(frame: dict[str, Any]) -> dict[str, Any]:
         payload = dict(frame or {})
         return {
             'node_id': str(payload.get('node_id') or '').strip(),

@@ -230,6 +230,8 @@ def _write_demo_skill(root: Path, *, name: str = 'demo_skill', guide: str = 'Dem
 
 
 def _load_agent_browser_handler(workspace: Path):
+    if not (REPO_ROOT / 'tools' / 'agent_browser' / 'resource.yaml').exists():
+        pytest.skip('agent_browser tool resource is not present in this workspace')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
 

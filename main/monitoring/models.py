@@ -219,6 +219,16 @@ class TaskProjectionRuntimeFrameRecord(Model):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class TaskModelCallRecord(Model):
+    call_index: int = 0
+    created_at: str = ''
+    prepared_message_count: int = 0
+    prepared_message_chars: int = 0
+    response_tool_call_count: int = 0
+    delta_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
+    delta_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
+
+
 class TaskProjectionRoundRecord(Model):
     task_id: str
     parent_node_id: str
@@ -245,6 +255,7 @@ class TaskProgressResult(Model):
     nodes: list[dict[str, Any]] = Field(default_factory=list)
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
+    model_calls: list[TaskModelCallRecord] = Field(default_factory=list)
     text: str = ''
 
 

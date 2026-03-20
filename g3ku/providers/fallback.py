@@ -121,7 +121,9 @@ class FallbackProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
+        prompt_cache_key: str | None = None,
     ) -> LLMResponse:
+        del prompt_cache_key
         from g3ku.providers.provider_factory import build_provider_from_model_key
 
         requested = str(model or "").strip()

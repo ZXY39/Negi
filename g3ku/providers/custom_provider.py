@@ -21,7 +21,9 @@ class CustomProvider(LLMProvider):
                    model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7,
                    reasoning_effort: str | None = None,
                    tool_choice: str | dict[str, Any] | None = None,
-                   parallel_tool_calls: bool | None = None) -> LLMResponse:
+                   parallel_tool_calls: bool | None = None,
+                   prompt_cache_key: str | None = None) -> LLMResponse:
+        del prompt_cache_key
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
             "messages": self._sanitize_empty_content(messages),

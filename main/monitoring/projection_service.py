@@ -14,7 +14,7 @@ from main.monitoring.models import (
 )
 from main.protocol import now_iso
 
-PROJECTION_VERSION = 1
+PROJECTION_VERSION = 2
 
 
 def _single_line_text(value: Any, *, max_chars: int = 240) -> str:
@@ -318,7 +318,7 @@ class TaskProjectionService:
             'tool_steps': tool_steps,
             'live_tool_calls': [],
             'live_child_pipelines': [],
-            'final_output': self._node_output_text(node),
+            'final_output': str(node.final_output or ''),
             'acceptance_result': str(node.check_result or ''),
         }
 

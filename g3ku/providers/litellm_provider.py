@@ -195,6 +195,7 @@ class LiteLLMProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
+        prompt_cache_key: str | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -209,6 +210,7 @@ class LiteLLMProvider(LLMProvider):
         Returns:
             LLMResponse with content and/or tool calls.
         """
+        del prompt_cache_key
         original_model = model or self.default_model
         model = self._resolve_model(original_model)
         extra_msg_keys = self._extra_msg_keys(original_model, model)
