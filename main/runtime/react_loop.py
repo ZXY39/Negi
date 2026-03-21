@@ -13,6 +13,9 @@ import json_repair
 
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
+from g3ku.runtime.ceo_async_task_guard import (
+    maybe_build_execution_overlay,
+)
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.errors import TaskPausedError
@@ -96,9 +99,16 @@ class ReActToolLoop:
                 preserve_non_system=_COMPACT_HISTORY_KEEP_RECENT,
             )
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
-            allowed_content_refs = self._collect_content_refs(model_messages)
+            request_messages = self._apply_temporary_system_overlay(
+                model_messages,
+                overlay_text=maybe_build_execution_overlay(
+                    iteration=attempts,
+                    can_spawn_children=bool(runtime_context.get('can_spawn_children', False)),
+                ),
+            )
+            allowed_content_refs = self._collect_content_refs(request_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
-            tool_history = analyze_tool_call_history(model_messages)
+            tool_history = analyze_tool_call_history(request_messages)
             if tool_history.has_orphan_tool_results:
                 orphan_tool_result_strikes += 1
                 if orphan_tool_result_strikes >= _ORPHAN_TOOL_RESULT_THRESHOLD:
@@ -124,7 +134,7 @@ class ReActToolLoop:
                 publish_snapshot=True,
             )
             response = await self._chat_with_optional_extensions(
-                messages=model_messages,
+                messages=request_messages,
                 tools=tool_schemas or None,
                 model_refs=model_refs,
                 max_tokens=1200,
@@ -183,6 +193,7 @@ class ReActToolLoop:
                     tools=tools,
                     allowed_content_refs=allowed_content_refs,
                     runtime_context=runtime_context,
+                    prior_overflow_signatures=self._overflowed_search_signatures(message_history),
                 )
                 assistant_message = {
                     'role': 'assistant',
@@ -255,6 +266,7 @@ class ReActToolLoop:
         tools: dict[str, Tool],
         allowed_content_refs: list[str],
         runtime_context: dict[str, Any],
+        prior_overflow_signatures: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         semaphore = asyncio.Semaphore(self._max_parallel_tool_calls if self._parallel_tool_calls_enabled else 1)
 
@@ -282,6 +294,7 @@ class ReActToolLoop:
                             'current_tool_call_id': call.id,
                             'allowed_content_refs': allowed_content_refs,
                             'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
+                            'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
                         },
                     )
                 except TaskPausedError:
@@ -390,6 +403,14 @@ class ReActToolLoop:
         tool = tools.get(tool_name)
         if tool is None:
             return f'Error: tool not available: {tool_name}'
+        search_signature = self._search_overflow_signature_for_call(tool_name=tool_name, arguments=arguments)
+        prior_overflow_signatures = {
+            str(item or '').strip()
+            for item in list(runtime_context.get('prior_overflow_signatures') or [])
+            if str(item or '').strip()
+        }
+        if search_signature and search_signature in prior_overflow_signatures:
+            return 'Error: previous search overflowed; refine query before retrying'
         errors = tool.validate_params(arguments)
         if errors:
             return 'Error: ' + '; '.join(errors)
@@ -415,6 +436,57 @@ class ReActToolLoop:
             display_name=f'tool:{tool_name}',
             source_kind=f'tool_result:{tool_name}',
         )
+
+    @classmethod
+    def _overflowed_search_signatures(cls, messages: list[dict[str, Any]]) -> set[str]:
+        signatures: set[str] = set()
+        for message in list(messages or []):
+            if str(message.get('role') or '').strip().lower() != 'tool':
+                continue
+            signature = cls._search_overflow_signature_from_tool_message(message)
+            if signature:
+                signatures.add(signature)
+        return signatures
+
+    @classmethod
+    def _search_overflow_signature_from_tool_message(cls, message: dict[str, Any]) -> str:
+        tool_name = str(message.get('name') or '').strip()
+        if tool_name not in {'filesystem', 'content'}:
+            return ''
+        content = message.get('content')
+        if isinstance(content, str):
+            text = content.strip()
+            if not text.startswith('{'):
+                return ''
+            try:
+                payload = json.loads(text)
+            except Exception:
+                return ''
+        elif isinstance(content, dict):
+            payload = content
+        else:
+            return ''
+        if not isinstance(payload, dict) or not bool(payload.get('overflow')):
+            return ''
+        query = str(payload.get('query') or '').strip()
+        scope = str(payload.get('path') or '').strip() or str(payload.get('ref') or '').strip()
+        if not query or not scope:
+            return ''
+        return f'{tool_name}|{scope}|{query}'
+
+    @staticmethod
+    def _search_overflow_signature_for_call(*, tool_name: str, arguments: dict[str, Any]) -> str:
+        normalized_tool = str(tool_name or '').strip()
+        if normalized_tool not in {'filesystem', 'content'}:
+            return ''
+        payload = dict(arguments or {})
+        if str(payload.get('action') or '').strip().lower() != 'search':
+            return ''
+        query = str(payload.get('query') or '').strip()
+        scope = str(payload.get('path') or '').strip() or str(payload.get('ref') or '').strip()
+        if not query or not scope:
+            return ''
+        return f'{normalized_tool}|{scope}|{query}'
 
     async def _on_tool_watchdog_poll(self, runtime_context: dict[str, Any]) -> None:
         task_id = str(runtime_context.get('task_id') or '').strip()
@@ -1033,6 +1105,14 @@ class ReActToolLoop:
             runtime=runtime_context,
             source_prefix='react',
         )
+
+    @staticmethod
+    def _apply_temporary_system_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:
+        base_messages = list(messages or [])
+        text = str(overlay_text or '').strip()
+        if not text:
+            return base_messages
+        return [{'role': 'system', 'content': text}, *base_messages]
 
     def _externalize_message_content(
         self,

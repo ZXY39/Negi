@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import os
+import asyncio
+import subprocess
+import sys
 from typing import Optional
 
 from loguru import logger
 
 from g3ku.agent.loop import AgentLoop
 from g3ku.bus.queue import MessageBus
+from g3ku.china_bridge import ChinaBridgeSupervisor, ChinaBridgeTransport
 from g3ku.cli.commands import _make_provider
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.runtime import SessionRuntimeBridge
 from g3ku.runtime import SessionRuntimeManager
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from main.protocol import now_iso
@@ -19,6 +24,83 @@ _global_agent: Optional[AgentLoop] = None
 _global_bus: Optional[MessageBus] = None
 _global_runtime_manager: Optional[SessionRuntimeManager] = None
 _global_web_heartbeat = None
+_global_china_transport: Optional[ChinaBridgeTransport] = None
+_global_china_supervisor: Optional[ChinaBridgeSupervisor] = None
+_global_china_outbound_task: Optional[asyncio.Task] = None
+_global_china_start_task: Optional[asyncio.Task] = None
+
+
+def _listen_port_owners(port: int) -> set[int] | None:
+    owners: set[int] = set()
+    try:
+        if os.name == 'nt':
+            result = subprocess.run(
+                ['netstat', '-ano', '-p', 'tcp'],
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            if result.returncode != 0:
+                return None
+            needle = f':{int(port)}'
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                local_addr = parts[1]
+                state = parts[3].upper()
+                owning_pid = parts[4]
+                if not local_addr.endswith(needle):
+                    continue
+                if state != 'LISTENING':
+                    continue
+                try:
+                    owners.add(int(owning_pid))
+                except Exception:
+                    continue
+            return owners
+
+        commands = [
+            ['ss', '-ltnp'],
+            ['lsof', '-nP', f'-iTCP:{int(port)}', '-sTCP:LISTEN'],
+        ]
+        for command in commands:
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+            except FileNotFoundError:
+                continue
+            if result.returncode != 0:
+                continue
+            output = result.stdout
+            if os.path.basename(command[0]) == 'ss':
+                for line in output.splitlines():
+                    if f':{int(port)}' not in line:
+                        continue
+                    for segment in line.split('pid=')[1:]:
+                        pid_part = ''.join(ch for ch in segment if ch.isdigit())
+                        if not pid_part:
+                            continue
+                        owners.add(int(pid_part))
+                return owners
+            for line in output.splitlines():
+                if f':{int(port)}' not in line:
+                    continue
+                parts = line.split()
+                for value in parts:
+                    if value.isdigit():
+                        owners.add(int(value))
+                return owners
+    except Exception:
+        return None
+    return None
+
+
+def _process_owns_listen_port(port: int, *, pid: int | None = None) -> bool | None:
+    owners = _listen_port_owners(port)
+    if owners is None:
+        return None
+    return int(pid or os.getpid()) in owners
 
 
 def debug_trace_enabled() -> bool:
@@ -94,6 +176,79 @@ def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager
     return _global_runtime_manager
 
 
+def _get_china_transport(agent: AgentLoop | None = None) -> ChinaBridgeTransport:
+    runtime_agent = agent or get_agent()
+    runtime_manager = get_runtime_manager(runtime_agent)
+    global _global_china_transport
+    if _global_china_transport is None:
+        task_registrar = getattr(runtime_agent, '_register_active_task', None)
+        _global_china_transport = ChinaBridgeTransport(
+            runtime_bridge=SessionRuntimeBridge(runtime_manager),
+            app_config=get_runtime_config(force=False)[0],
+            register_task=task_registrar if callable(task_registrar) else None,
+        )
+    return _global_china_transport
+
+
+async def _start_china_bridge_services_now(runtime_agent: AgentLoop, config) -> None:
+    bus = _global_bus
+    if bus is None:
+        return
+    transport = _get_china_transport(runtime_agent)
+    global _global_china_supervisor, _global_china_outbound_task
+    if _global_china_supervisor is None:
+        _global_china_supervisor = ChinaBridgeSupervisor(
+            app_config=config,
+            workspace=config.workspace_path,
+            transport=transport,
+        )
+    await _global_china_supervisor.start()
+    if _global_china_outbound_task is None or _global_china_outbound_task.done():
+        async def _drain_outbound() -> None:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                    if msg.channel in {"qqbot", "dingtalk", "wecom", "wecom-app", "feishu-china"}:
+                        await transport.send_outbound(msg)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+
+        _global_china_outbound_task = asyncio.create_task(_drain_outbound())
+
+
+async def _await_current_web_process_then_start_china_bridge(runtime_agent: AgentLoop, config, web_port: int) -> None:
+    current_pid = os.getpid()
+    while True:
+        owners = _listen_port_owners(web_port)
+        if owners is None or current_pid in owners:
+            await _start_china_bridge_services_now(runtime_agent, config)
+            return
+        if owners and current_pid not in owners:
+            logger.debug(
+                'Skipping china bridge startup in pid={} because web port {} is owned by pid(s) {}',
+                current_pid,
+                web_port,
+                ','.join(str(pid) for pid in sorted(owners)),
+            )
+            return
+        await asyncio.sleep(0.25)
+
+
+async def _ensure_china_bridge_services(agent: AgentLoop | None = None) -> None:
+    runtime_agent = agent or get_agent()
+    config = get_runtime_config(force=False)[0]
+    if not bool(getattr(config, 'china_bridge', None) and config.china_bridge.enabled and config.china_bridge.auto_start):
+        return
+    web_port = int(getattr(getattr(config, 'gateway', None), 'port', 18790) or 18790)
+    global _global_china_start_task
+    if _global_china_start_task is None or _global_china_start_task.done():
+        _global_china_start_task = asyncio.create_task(
+            _await_current_web_process_then_start_china_bridge(runtime_agent, config, web_port)
+        )
+
+
 def _build_web_heartbeat(agent: AgentLoop, runtime_manager: SessionRuntimeManager):
     from g3ku.heartbeat import WebSessionHeartbeatService
 
@@ -142,19 +297,28 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
                     continue
                 if heartbeat.enqueue_task_terminal_payload(payload):
                     main_task_service.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
+    await _ensure_china_bridge_services(runtime_agent)
 
 
 async def shutdown_web_runtime() -> None:
     global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
+    global _global_china_transport, _global_china_supervisor, _global_china_outbound_task, _global_china_start_task
 
     agent = _global_agent
     runtime_manager = _global_runtime_manager
     heartbeat = _global_web_heartbeat
+    china_supervisor = _global_china_supervisor
+    china_outbound_task = _global_china_outbound_task
+    china_start_task = _global_china_start_task
 
     _global_agent = None
     _global_bus = None
     _global_runtime_manager = None
     _global_web_heartbeat = None
+    _global_china_transport = None
+    _global_china_supervisor = None
+    _global_china_outbound_task = None
+    _global_china_start_task = None
 
     if agent is None:
         return
@@ -164,6 +328,20 @@ async def shutdown_web_runtime() -> None:
             await heartbeat.stop()
         except Exception:
             logger.debug('web heartbeat stop skipped during shutdown')
+
+    if china_outbound_task is not None:
+        china_outbound_task.cancel()
+        await asyncio.gather(china_outbound_task, return_exceptions=True)
+
+    if china_start_task is not None:
+        china_start_task.cancel()
+        await asyncio.gather(china_start_task, return_exceptions=True)
+
+    if china_supervisor is not None:
+        try:
+            await china_supervisor.stop()
+        except Exception:
+            logger.debug('china bridge supervisor stop skipped during shutdown')
 
     session_keys: set[str] = set()
     if runtime_manager is not None:

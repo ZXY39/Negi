@@ -49,13 +49,30 @@ class SessionRuntimeBridge:
         session_key: str,
         channel: str,
         chat_id: str,
+        runtime_channel: str | None = None,
+        runtime_chat_id: str | None = None,
+        runtime_memory_channel: str | None = None,
+        runtime_memory_chat_id: str | None = None,
         listeners: Iterable[EventListener] | None = None,
         register_task: TaskRegistrar | None = None,
         persist_transcript: bool = True,
     ) -> RunResult:
         session = self.get_session(session_key=session_key, channel=channel, chat_id=chat_id)
         unsubscribers = self._subscribe_many(session, listeners)
-        task = asyncio.create_task(session.prompt(message, persist_transcript=persist_transcript))
+        live_context = self._manager.bind_live_context(
+            session,
+            channel=runtime_channel or channel,
+            chat_id=runtime_chat_id or chat_id,
+            memory_channel=runtime_memory_channel or runtime_channel or channel,
+            memory_chat_id=runtime_memory_chat_id or runtime_chat_id or chat_id,
+        )
+        task = asyncio.create_task(
+            session.prompt(
+                message,
+                persist_transcript=persist_transcript,
+                live_context=live_context,
+            )
+        )
         if register_task is not None:
             active_session_key = getattr(getattr(session, "state", None), "session_key", None) or str(session_key or "").strip()
             register_task(active_session_key, task)
@@ -70,12 +87,23 @@ class SessionRuntimeBridge:
         session_key: str,
         channel: str,
         chat_id: str,
+        runtime_channel: str | None = None,
+        runtime_chat_id: str | None = None,
+        runtime_memory_channel: str | None = None,
+        runtime_memory_chat_id: str | None = None,
         listeners: Iterable[EventListener] | None = None,
         register_task: TaskRegistrar | None = None,
     ) -> RunResult:
         session = self.get_session(session_key=session_key, channel=channel, chat_id=chat_id)
         unsubscribers = self._subscribe_many(session, listeners)
-        task = asyncio.create_task(session.continue_())
+        live_context = self._manager.bind_live_context(
+            session,
+            channel=runtime_channel or channel,
+            chat_id=runtime_chat_id or chat_id,
+            memory_channel=runtime_memory_channel or runtime_channel or channel,
+            memory_chat_id=runtime_memory_chat_id or runtime_chat_id or chat_id,
+        )
+        task = asyncio.create_task(session.continue_(live_context=live_context))
         if register_task is not None:
             active_session_key = getattr(getattr(session, "state", None), "session_key", None) or str(session_key or "").strip()
             register_task(active_session_key, task)

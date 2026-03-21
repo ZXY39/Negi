@@ -70,6 +70,7 @@ def _load_built_tool(tool_dir: Path):
 
 def test_tool_manifests_match_explicit_parameter_contracts():
     for tool_name in [
+        'agent_browser',
         'create_async_task_cn',
         'cron',
         'load_skill_context',
@@ -105,4 +106,3 @@ def test_skill_installer_method_description_matches_runtime_strategy():
     method_description = manifest['parameters']['properties']['method']['description']
     assert 'auto_prefer' in method_description
     assert 'git sparse checkout' in method_description
-

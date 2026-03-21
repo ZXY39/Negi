@@ -14,12 +14,15 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
+    build_ceo_session_catalog,
     build_session_summary,
     read_inflight_turn_snapshot,
     create_web_ceo_session,
     ensure_active_web_ceo_session,
     ensure_ceo_session_metadata,
+    find_ceo_session_catalog_item,
     list_web_ceo_sessions,
+    resolve_active_ceo_session_id,
     upload_dir_for_session,
     workspace_path,
 )
@@ -56,12 +59,16 @@ def _session_is_running(runtime_manager, session_id: str) -> bool:
     return bool(getattr(state, 'is_running', False)) or status == 'running'
 
 
+def _is_channel_session_id(session_id: str) -> bool:
+    return str(session_id or '').strip().startswith('china:')
+
+
 def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, state_store) -> None:
     registry = _registry(agent)
     if registry is None or transcript_store is None:
         return
-    active_session_id = ensure_active_web_ceo_session(transcript_store, state_store)
-    items = list_web_ceo_sessions(
+    active_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
+    catalog = build_ceo_session_catalog(
         transcript_store,
         active_session_id=active_session_id,
         is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
@@ -72,7 +79,12 @@ def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, 
             session_id=active_session_id or 'web:shared',
             seq=registry.next_ceo_seq(active_session_id or 'web:shared'),
             type='ceo.sessions.snapshot',
-            data={'items': items, 'active_session_id': active_session_id},
+            data={
+                'items': catalog.get('items') or [],
+                'channel_groups': catalog.get('channel_groups') or [],
+                'active_session_id': active_session_id,
+                'active_session_family': catalog.get('active_session_family') or 'local',
+            },
         )
     )
 
@@ -95,12 +107,19 @@ def _publish_ceo_session_patch(
     if not key:
         return
     session = transcript_store.get_or_create(key)
-    active_session_id = ensure_active_web_ceo_session(transcript_store, state_store)
-    item = build_session_summary(
-        session,
-        is_active=key == active_session_id,
-        is_running=_session_is_running(runtime_manager, key) if is_running is None else bool(is_running),
+    active_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
+    catalog = build_ceo_session_catalog(
+        transcript_store,
+        active_session_id=active_session_id,
+        is_running_resolver=lambda session_key: _session_is_running(runtime_manager, session_key),
     )
+    item = find_ceo_session_catalog_item(catalog, key)
+    if item is None:
+        item = build_session_summary(
+            session,
+            is_active=key == active_session_id,
+            is_running=_session_is_running(runtime_manager, key) if is_running is None else bool(is_running),
+        )
     if preview_text is not None:
         item['preview_text'] = str(preview_text or '').strip()
     if message_count is not None:
@@ -111,7 +130,11 @@ def _publish_ceo_session_patch(
             session_id=key,
             seq=registry.next_ceo_seq(key),
             type='ceo.sessions.patch',
-            data={'item': item, 'active_session_id': active_session_id},
+            data={
+                'item': item,
+                'active_session_id': active_session_id,
+                'active_session_family': catalog.get('active_session_family') or 'local',
+            },
         )
     )
 
@@ -463,17 +486,37 @@ async def ceo_websocket(websocket: WebSocket):
         return
     state_store = WebCeoStateStore(workspace_path())
     requested_session_id = str(websocket.query_params.get('session_id') or '').strip()
-    session_id = requested_session_id or ensure_active_web_ceo_session(transcript_store, state_store)
-    session_path = transcript_store.get_path(session_id)
-    persisted_session = (
-        create_web_ceo_session(transcript_store, session_id=session_id)
-        if not session_path.exists()
-        else transcript_store.get_or_create(session_id)
+    fallback_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
+    requested_catalog = build_ceo_session_catalog(
+        transcript_store,
+        active_session_id=requested_session_id or fallback_session_id,
+        is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
     )
-    if ensure_ceo_session_metadata(persisted_session):
-        transcript_store.save(persisted_session)
+    if requested_session_id and find_ceo_session_catalog_item(requested_catalog, requested_session_id) is None:
+        try:
+            await websocket_send_json(
+                websocket,
+                build_envelope(channel='ceo', session_id=requested_session_id, type='error', data={'code': 'session_not_found'}),
+            )
+            await websocket_close(websocket, code=4404)
+        except WebSocketChannelClosed:
+            return
+        return
+    session_id = requested_session_id or fallback_session_id
+    session_path = transcript_store.get_path(session_id)
+    is_channel_session = _is_channel_session_id(session_id)
+    if is_channel_session:
+        persisted_session = transcript_store.get_or_create(session_id) if session_path.exists() else None
+    else:
+        persisted_session = (
+            create_web_ceo_session(transcript_store, session_id=session_id)
+            if not session_path.exists()
+            else transcript_store.get_or_create(session_id)
+        )
+        if ensure_ceo_session_metadata(persisted_session):
+            transcript_store.save(persisted_session)
     state_store.set_active_session_id(session_id)
-    memory_scope = dict((persisted_session.metadata or {}).get('memory_scope') or {})
+    memory_scope = dict(((getattr(persisted_session, 'metadata', None) or {}).get('memory_scope') or {}))
     service = getattr(agent, 'main_task_service', None)
     if service is None:
         try:
@@ -499,8 +542,8 @@ async def ceo_websocket(websocket: WebSocket):
         session_key=session_id,
         channel=default_channel or 'web',
         chat_id=default_chat_id or 'shared',
-        memory_channel=str(memory_scope.get('channel') or 'web'),
-        memory_chat_id=str(memory_scope.get('chat_id') or 'shared'),
+        memory_channel=(str(memory_scope.get('channel') or 'web') if not is_channel_session else None),
+        memory_chat_id=(str(memory_scope.get('chat_id') or 'shared') if not is_channel_session else None),
     )
     persisted_messages = _build_ceo_snapshot(getattr(persisted_session, 'messages', []))
     current_turn_task: asyncio.Task[Any] | None = None
@@ -619,18 +662,21 @@ async def ceo_websocket(websocket: WebSocket):
             )
         )
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='ceo.state', data={'state': session.state_dict()}))
+        initial_catalog = build_ceo_session_catalog(
+            transcript_store,
+            active_session_id=resolve_active_ceo_session_id(transcript_store, state_store),
+            is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
+        )
         await _safe_send(
             build_envelope(
                 channel='ceo',
                 session_id=session_id,
                 type='ceo.sessions.snapshot',
                 data={
-                    'items': list_web_ceo_sessions(
-                        transcript_store,
-                        active_session_id=ensure_active_web_ceo_session(transcript_store, state_store),
-                        is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
-                    ),
-                    'active_session_id': ensure_active_web_ceo_session(transcript_store, state_store),
+                    'items': initial_catalog.get('items', []),
+                    'channel_groups': initial_catalog.get('channel_groups', []),
+                    'active_session_id': initial_catalog.get('active_session_id') or session_id,
+                    'active_session_family': initial_catalog.get('active_session_family') or ('channel' if is_channel_session else 'local'),
                 },
             )
         )
@@ -646,6 +692,19 @@ async def ceo_websocket(websocket: WebSocket):
                     await _push_stream_event('ceo.control_ack', {'action': 'pause', 'accepted': False, 'reason': 'no_active_turn'})
                 continue
             if message_type != 'client.user_message':
+                continue
+            if is_channel_session:
+                await _safe_send(
+                    build_envelope(
+                        channel='ceo',
+                        session_id=session_id,
+                        type='error',
+                        data={
+                            'code': 'channel_session_readonly',
+                            'message': '渠道会话为只读，仅供查看渠道历史消息。',
+                        },
+                    )
+                )
                 continue
             text = str(data.get('text') or '')
             try:

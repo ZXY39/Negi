@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ class ChinaBridgeSupervisor:
         transport,
     ):
         self._app_config = app_config
-        self._workspace = Path(workspace)
+        self._workspace = Path(workspace).resolve()
         self._transport = transport
         state_root = self._workspace / str(app_config.china_bridge.state_dir or ".g3ku/china-bridge")
         self._state_root = state_root
@@ -33,6 +34,8 @@ class ChinaBridgeSupervisor:
         self._runner_task: asyncio.Task | None = None
         self._client_task: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
+        self._host_stdout_handle = None
+        self._host_stderr_handle = None
         self._stop = asyncio.Event()
         self._next_build_attempt_at = 0.0
         self._state = ChinaBridgeState(
@@ -69,13 +72,20 @@ class ChinaBridgeSupervisor:
             await asyncio.gather(self._client_task, return_exceptions=True)
             self._client_task = None
         if self._process is not None:
-            self._process.terminate()
+            try:
+                self._process.terminate()
+            except ProcessLookupError:
+                pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                self._process.kill()
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
                 await self._process.wait()
             self._process = None
+        self._close_host_log_handles()
         if self._runner_task is not None:
             self._runner_task.cancel()
             await asyncio.gather(self._runner_task, return_exceptions=True)
@@ -83,7 +93,7 @@ class ChinaBridgeSupervisor:
         self._write_state(running=False, connected=False, pid=None)
 
     def status_payload(self) -> dict[str, Any]:
-        return self._state.__dict__.copy()
+        return asdict(self._state)
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
@@ -102,6 +112,7 @@ class ChinaBridgeSupervisor:
                 await self._process.wait()
                 await asyncio.gather(self._client_task, return_exceptions=True)
                 self._client_task = None
+                self._close_host_log_handles()
                 if self._stop.is_set():
                     break
                 self._write_state(running=False, connected=False, pid=None, last_error="china bridge host exited")
@@ -111,6 +122,7 @@ class ChinaBridgeSupervisor:
             except _BuildRetryPending:
                 continue
             except Exception as exc:
+                self._close_host_log_handles()
                 self._write_state(running=False, connected=False, pid=None, last_error=str(exc))
                 await asyncio.sleep(1.0)
 
@@ -177,6 +189,54 @@ class ChinaBridgeSupervisor:
             return combined
         return combined[-2000:]
 
+    def _build_stdout_log_path(self) -> Path:
+        return self._state_root / "build.out.log"
+
+    def _build_stderr_log_path(self) -> Path:
+        return self._state_root / "build.err.log"
+
+    def _host_stdout_log_path(self) -> Path:
+        return self._state_root / "host.out.log"
+
+    def _host_stderr_log_path(self) -> Path:
+        return self._state_root / "host.err.log"
+
+    def _append_process_logs(self, *, args: tuple[str, ...], stdout: bytes, stderr: bytes) -> None:
+        self._state_root.mkdir(parents=True, exist_ok=True)
+        banner = f"\n\n=== {' '.join(args)} @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        if stdout_text:
+            with self._build_stdout_log_path().open("a", encoding="utf-8") as handle:
+                handle.write(banner)
+                handle.write(stdout_text)
+                if not stdout_text.endswith("\n"):
+                    handle.write("\n")
+        if stderr_text:
+            with self._build_stderr_log_path().open("a", encoding="utf-8") as handle:
+                handle.write(banner)
+                handle.write(stderr_text)
+                if not stderr_text.endswith("\n"):
+                    handle.write("\n")
+
+    def _open_host_log_handles(self) -> tuple[Any, Any]:
+        self._state_root.mkdir(parents=True, exist_ok=True)
+        self._close_host_log_handles()
+        self._host_stdout_handle = self._host_stdout_log_path().open("ab")
+        self._host_stderr_handle = self._host_stderr_log_path().open("ab")
+        return self._host_stdout_handle, self._host_stderr_handle
+
+    def _close_host_log_handles(self) -> None:
+        for attr in ("_host_stdout_handle", "_host_stderr_handle"):
+            handle = getattr(self, attr, None)
+            if handle is None:
+                continue
+            try:
+                handle.close()
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
     async def _run_host_command(self, *args: str) -> None:
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -186,6 +246,7 @@ class ChinaBridgeSupervisor:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
+        self._append_process_logs(args=args, stdout=stdout, stderr=stderr)
         if process.returncode == 0:
             return
         tail = self._trim_process_output(stdout, stderr)
@@ -244,8 +305,10 @@ class ChinaBridgeSupervisor:
         return dist_entry
 
     async def _spawn_process(self, dist_entry: Path) -> None:
-        config_path = self._workspace / ".g3ku" / "config.json"
+        dist_entry = Path(dist_entry).resolve()
+        config_path = (self._workspace / ".g3ku" / "config.json").resolve()
         env = os.environ.copy()
+        stdout_handle, stderr_handle = self._open_host_log_handles()
         self._process = await asyncio.create_subprocess_exec(
             str(self._app_config.china_bridge.node_bin or "node"),
             str(dist_entry),
@@ -253,8 +316,8 @@ class ChinaBridgeSupervisor:
             str(config_path),
             cwd=str(dist_entry.parent.parent),
             env=env,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
         )
         self._write_state(running=True, built=True, pid=int(self._process.pid or 0))
 

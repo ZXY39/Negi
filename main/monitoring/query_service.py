@@ -449,9 +449,12 @@ class TaskQueryService:
                 }
             )
         live_output = self._live_tool_call_summary(live_state, preferred_node_id=latest_node.node_id)
-        if not live_output:
+        if live_output:
+            return latest_node.model_copy(update={'output': live_output})
+        historical_output = self._historical_tool_call_summary(task_id, preferred_node_id=latest_node.node_id)
+        if not historical_output:
             return latest_node
-        return latest_node.model_copy(update={'output': live_output})
+        return latest_node.model_copy(update={'output': historical_output})
 
     def _latest_projection_plain_output(self, task_id: str) -> tuple[str, str]:
         details = self._store.list_task_node_details(task_id)
@@ -502,6 +505,58 @@ class TaskQueryService:
                 tool_name = str(item.tool_name or 'tool').strip() or 'tool'
                 status = str(item.status or 'queued').strip() or 'queued'
                 lines.append(f'- {tool_name} [{status}]')
+        return '\n'.join(lines)
+
+
+    def _historical_tool_call_summary(
+        self,
+        task_id: str,
+        *,
+        preferred_node_id: str = '',
+        limit: int = 5,
+    ) -> str:
+        tool_steps = self._historical_tool_steps(task_id, preferred_node_id=preferred_node_id)
+        return self._tool_steps_summary(tool_steps, limit=limit)
+
+    def _historical_tool_steps(
+        self,
+        task_id: str,
+        *,
+        preferred_node_id: str = '',
+    ) -> list[dict[str, Any]]:
+        details = list(self._store.list_task_node_details(task_id) or [])
+        selected_detail = None
+        preferred = str(preferred_node_id or '').strip()
+        if preferred:
+            selected_detail = next((item for item in details if str(item.node_id or '').strip() == preferred), None)
+        if selected_detail is None and details:
+            selected_detail = max(details, key=lambda item: (str(item.updated_at or ''), str(item.node_id or '')))
+        if selected_detail is not None:
+            payload = dict(selected_detail.payload or {})
+            execution_trace = payload.get('execution_trace') if isinstance(payload.get('execution_trace'), dict) else None
+            if isinstance(execution_trace, dict):
+                tool_steps = [item for item in list(execution_trace.get('tool_steps') or []) if isinstance(item, dict)]
+                if tool_steps:
+                    return tool_steps
+        node_id = preferred or str(getattr(selected_detail, 'node_id', '') or '').strip()
+        if not node_id:
+            return []
+        node = self._store.get_node(node_id)
+        if node is None:
+            return []
+        execution_trace = self._execution_trace(node)
+        return [item for item in list(execution_trace.get('tool_steps') or []) if isinstance(item, dict)]
+
+    @staticmethod
+    def _tool_steps_summary(tool_steps: list[dict[str, Any]], *, limit: int = 5) -> str:
+        steps = [item for item in list(tool_steps or []) if isinstance(item, dict) and str(item.get('tool_name') or '').strip()]
+        if not steps:
+            return ''
+        lines = ['Recent tool calls:']
+        for item in steps[-max(1, int(limit or 1)) :]:
+            tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
+            status = str(item.get('status') or 'queued').strip() or 'queued'
+            lines.append(f'- {tool_name} [{status}]')
         return '\n'.join(lines)
 
     @staticmethod

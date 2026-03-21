@@ -14,3 +14,4 @@
 - `path` 模式只接受绝对路径；相对路径会直接报错。
 - 目录级搜索请使用 `filesystem search`，不要把 `content` 当成目录工具。
 - 搜索命中后，只打开和命中相关的局部窗口。
+- 如果 `action=search` 返回 `requires_refine=true` 或 `overflow=true`，先收窄查询，再重试；不要重复同一个超限搜索。

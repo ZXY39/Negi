@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
+from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse
+from g3ku.runtime.ceo_async_task_guard import GUARD_OVERLAY_MARKER, maybe_build_execution_overlay
 from g3ku.runtime.tool_history import analyze_tool_call_history
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
@@ -202,3 +204,57 @@ def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context()
         "tool:filesystem",
         "skill:skill-creator",
     ]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_blocks_repeated_overflowed_search() -> None:
+    class _FilesystemTool(Tool):
+        @property
+        def name(self) -> str:
+            return 'filesystem'
+
+        @property
+        def description(self) -> str:
+            return 'Filesystem stub'
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                'type': 'object',
+                'properties': {
+                    'action': {'type': 'string', 'description': 'action'},
+                    'path': {'type': 'string', 'description': 'path'},
+                    'query': {'type': 'string', 'description': 'query'},
+                },
+                'required': ['action', 'path', 'query'],
+            }
+
+        async def execute(self, **kwargs):
+            raise AssertionError(f'overflowed search should not execute again: {kwargs!r}')
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    result = await loop._execute_tool(
+        tools={'filesystem': _FilesystemTool()},
+        tool_name='filesystem',
+        arguments={'action': 'search', 'path': '/tmp/demo.py', 'query': 'needle'},
+        runtime_context={'prior_overflow_signatures': ['filesystem|/tmp/demo.py|needle']},
+    )
+
+    assert result == 'Error: previous search overflowed; refine query before retrying'
+
+
+def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    base_messages = [
+        {'role': 'system', 'content': 'base system'},
+        {'role': 'user', 'content': 'base user'},
+    ]
+    overlay = maybe_build_execution_overlay(iteration=21, can_spawn_children=True)
+
+    request_messages = loop._apply_temporary_system_overlay(base_messages, overlay_text=overlay)
+
+    assert base_messages[0]['content'] == 'base system'
+    assert request_messages[0]['role'] == 'system'
+    assert '当前你已调用20轮工具' in str(request_messages[0]['content'])
+    assert f'{GUARD_OVERLAY_MARKER}\n' in str(request_messages[0]['content'])
+    assert request_messages[1:] == base_messages

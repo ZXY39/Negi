@@ -18,6 +18,7 @@
 
 - 运行 shell 命令
 - 默认使用进程当前目录；只有显式传入 `working_dir` 时才会切换目录，且应提供绝对路径
+- 命令会继承当前 G3KU 进程的 Python 环境；如需调用 Python，优先使用运行时提供的项目解释器提示，或读取 `G3KU_PROJECT_PYTHON`
 - `timeout`、`PATH` 补充、`restrict_to_workspace` 和 `enable_safety_guard` 都来自 `tools/exec/resource.yaml -> settings`
 - 默认不启用命令安全守卫；如需恢复拦截，可在 `tools/exec/resource.yaml -> settings` 中设置 `enable_safety_guard: true`
 
@@ -26,6 +27,10 @@
 - 统一文件工具，支持 `read`、`list`、`write`、`edit`、`delete`、`propose_patch`
 - `path` 必须是绝对本地路径；`artifact:` / content 引用不是 filesystem 路径
 - `restrict_to_workspace` 来自 `tools/filesystem/resource.yaml -> settings`
+- `write` 写入后可按 `write_validation_*` 配置立即执行校验；校验失败时会回滚：新建文件会删除，已有文件会恢复原内容
+- `edit` 支持两种互斥模式：`old_text + new_text` 文本替换，或 `start_line + end_line + replacement` 行号区间替换
+- `edit` 修改后可按 `edit_validation_*` 配置立即执行校验；校验失败时会自动回滚到修改前内容
+- 若实际执行了校验命令，`write` / `edit` 的成功消息会附带 `validated by N command(s)` 后缀
 - `propose_patch` 生成补丁工件，不直接修改文件
 
 ## content

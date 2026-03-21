@@ -52,6 +52,7 @@ class RuntimeAgentSession:
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
         self._preserved_inflight_turn: dict[str, Any] | None = None
+        self._turn_lock = asyncio.Lock()
 
     @property
     def state(self) -> AgentState:
@@ -72,6 +73,32 @@ class RuntimeAgentSession:
         if self._state.last_error is not None:
             data["last_error"] = asdict(self._state.last_error)
         return data
+
+    def _normalize_live_context(self, live_context: dict[str, str] | None) -> dict[str, str]:
+        current_channel = str(getattr(self, "_channel", "") or "cli").strip() or "cli"
+        current_chat_id = str(getattr(self, "_chat_id", "") or "direct").strip() or "direct"
+        current_memory_channel = (
+            str(getattr(self, "_memory_channel", "") or current_channel).strip() or current_channel
+        )
+        current_memory_chat_id = (
+            str(getattr(self, "_memory_chat_id", "") or current_chat_id).strip() or current_chat_id
+        )
+        payload = live_context if isinstance(live_context, dict) else {}
+        return {
+            "channel": str(payload.get("channel") or current_channel).strip() or current_channel,
+            "chat_id": str(payload.get("chat_id") or current_chat_id).strip() or current_chat_id,
+            "memory_channel": str(payload.get("memory_channel") or current_memory_channel).strip()
+            or current_memory_channel,
+            "memory_chat_id": str(payload.get("memory_chat_id") or current_memory_chat_id).strip()
+            or current_memory_chat_id,
+        }
+
+    def _apply_live_context(self, live_context: dict[str, str] | None) -> None:
+        normalized = self._normalize_live_context(live_context)
+        self._channel = normalized["channel"]
+        self._chat_id = normalized["chat_id"]
+        self._memory_channel = normalized["memory_channel"]
+        self._memory_chat_id = normalized["memory_chat_id"]
 
     def _now(self) -> str:
         return datetime.now().isoformat()
@@ -514,152 +541,160 @@ class RuntimeAgentSession:
             on_progress=self._handle_progress,
         )
 
-    async def prompt(self, message: str | UserInputMessage, *, persist_transcript: bool = True) -> RunResult:
+    async def prompt(
+        self,
+        message: str | UserInputMessage,
+        *,
+        persist_transcript: bool = True,
+        live_context: dict[str, str] | None = None,
+    ) -> RunResult:
         from g3ku.shells.web import refresh_web_agent_runtime
 
-        await refresh_web_agent_runtime(force=False, reason="prompt")
-        user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
-        heartbeat_internal = self._is_heartbeat_internal_prompt(user_input)
-        if heartbeat_internal:
-            current_snapshot = self._current_inflight_turn_snapshot()
-            current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
-            if current_snapshot is not None and current_source != "heartbeat":
-                self._preserved_inflight_turn = copy.deepcopy(current_snapshot)
-        else:
-            self._preserved_inflight_turn = None
-        cancel_token = self._loop.create_session_cancellation_token(self._state.session_key)
-        self._active_cancel_token = cancel_token
-        try:
-            self._last_prompt = user_input
-            self._event_log = []
-            self._pending_tool_names.clear()
-            self._state.is_running = True
-            self._state.paused = False
-            self._state.status = "running"
-            self._state.latest_message = ""
-            self._state.last_error = None
-            self._state.pending_tool_calls.clear()
+        async with self._turn_lock:
+            self._apply_live_context(live_context)
+            await refresh_web_agent_runtime(force=False, reason="prompt")
+            user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
+            heartbeat_internal = self._is_heartbeat_internal_prompt(user_input)
+            if heartbeat_internal:
+                current_snapshot = self._current_inflight_turn_snapshot()
+                current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
+                if current_snapshot is not None and current_source != "heartbeat":
+                    self._preserved_inflight_turn = copy.deepcopy(current_snapshot)
+            else:
+                self._preserved_inflight_turn = None
+            cancel_token = self._loop.create_session_cancellation_token(self._state.session_key)
+            self._active_cancel_token = cancel_token
+            try:
+                self._last_prompt = user_input
+                self._event_log = []
+                self._pending_tool_names.clear()
+                self._state.is_running = True
+                self._state.paused = False
+                self._state.status = "running"
+                self._state.latest_message = ""
+                self._state.last_error = None
+                self._state.pending_tool_calls.clear()
 
-            await self._emit("agent_start", session_key=self._state.session_key, trigger="prompt")
-            await self._emit("turn_start", session_key=self._state.session_key)
-            await self._emit_state_snapshot()
+                await self._emit("agent_start", session_key=self._state.session_key, trigger="prompt")
+                await self._emit("turn_start", session_key=self._state.session_key)
+                await self._emit_state_snapshot()
 
-            output = await self._run_message(user_input)
-        except asyncio.CancelledError:
-            self._state.is_running = False
-            self._state.paused = True
-            self._state.status = "paused"
-            await self._emit("control_ack", action="pause", accepted=True)
-            await self._emit("agent_end", session_key=self._state.session_key, status="paused")
-            await self._emit_state_snapshot()
-            raise
-        except Exception as exc:
-            self._state.is_running = False
-            self._state.status = "error"
-            self._state.last_error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)
-            await self._emit(
-                "error",
-                code="legacy_session_error",
-                message=str(exc),
-                recoverable=True,
-                source="runtime",
-            )
-            await self._emit("agent_end", session_key=self._state.session_key, status="error")
-            await self._emit_state_snapshot()
-            raise
-        else:
-            assistant = AssistantMessage(content=output, timestamp=self._now())
-            self._state.messages.append(assistant)
-            self._state.latest_message = output
-            self._state.is_running = False
-            self._state.status = "completed"
-            self._state.pending_tool_calls.clear()
-            user_text = self._history_text(user_input.content)
-            interaction_flow = self._interaction_flow_snapshot()
-            if getattr(self._loop, "prompt_trace", False):
-                logger.info(render_output_trace(output))
-            persisted_session = None
-            if persist_transcript:
-                try:
-                    persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-                    persisted_session.add_message(
-                        "user",
-                        user_text,
-                        attachments=list(user_input.attachments or []),
-                        metadata=dict(user_input.metadata or {}),
-                    )
-                    assistant_payload: dict[str, Any] = {}
-                    if interaction_flow:
-                        assistant_payload["tool_events"] = interaction_flow
-                    persisted_session.add_message("assistant", output, **assistant_payload)
-                    if self._state.session_key.startswith("web:"):
-                        from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
-
-                        update_ceo_session_after_turn(
-                            persisted_session,
-                            user_text=user_text,
-                            assistant_text=output,
-                            route_kind=str(getattr(self, "_last_route_kind", "") or ""),
-                        )
-                    self._loop.sessions.save(persisted_session)
-                except Exception:
-                    await self._emit(
-                        "message_delta",
-                        channel="analysis",
-                        kind="persistence_warning",
-                        text="Session transcript persistence failed; response is still available in-memory.",
-                    )
-                if getattr(self._loop, "memory_manager", None) is not None and self._loop._use_rag_memory():
+                output = await self._run_message(user_input)
+            except asyncio.CancelledError:
+                self._state.is_running = False
+                self._state.paused = True
+                self._state.status = "paused"
+                await self._emit("control_ack", action="pause", accepted=True)
+                await self._emit("agent_end", session_key=self._state.session_key, status="paused")
+                await self._emit_state_snapshot()
+                raise
+            except Exception as exc:
+                self._state.is_running = False
+                self._state.status = "error"
+                self._state.last_error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)
+                await self._emit(
+                    "error",
+                    code="legacy_session_error",
+                    message=str(exc),
+                    recoverable=True,
+                    source="runtime",
+                )
+                await self._emit("agent_end", session_key=self._state.session_key, status="error")
+                await self._emit_state_snapshot()
+                raise
+            else:
+                assistant = AssistantMessage(content=output, timestamp=self._now())
+                self._state.messages.append(assistant)
+                self._state.latest_message = output
+                self._state.is_running = False
+                self._state.status = "completed"
+                self._state.pending_tool_calls.clear()
+                user_text = self._history_text(user_input.content)
+                interaction_flow = self._interaction_flow_snapshot()
+                if getattr(self._loop, "prompt_trace", False):
+                    logger.info(render_output_trace(output))
+                persisted_session = None
+                if persist_transcript:
                     try:
-                        await self._loop.memory_manager.ingest_turn(
-                            session_key=self._state.session_key,
-                            channel=self._memory_channel,
-                            chat_id=self._memory_chat_id,
-                            messages=[
-                                {"role": "user", "content": user_text},
-                                {"role": "assistant", "content": output},
-                            ],
+                        persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+                        persisted_session.add_message(
+                            "user",
+                            user_text,
+                            attachments=list(user_input.attachments or []),
+                            metadata=dict(user_input.metadata or {}),
                         )
+                        assistant_payload: dict[str, Any] = {}
+                        if interaction_flow:
+                            assistant_payload["tool_events"] = interaction_flow
+                        persisted_session.add_message("assistant", output, **assistant_payload)
+                        if self._state.session_key.startswith("web:"):
+                            from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
+
+                            update_ceo_session_after_turn(
+                                persisted_session,
+                                user_text=user_text,
+                                assistant_text=output,
+                                route_kind=str(getattr(self, "_last_route_kind", "") or ""),
+                            )
+                        self._loop.sessions.save(persisted_session)
                     except Exception:
                         await self._emit(
                             "message_delta",
                             channel="analysis",
                             kind="persistence_warning",
-                            text="RAG memory ingest failed; turn history is still available in session transcript.",
+                            text="Session transcript persistence failed; response is still available in-memory.",
                         )
-                if persisted_session is not None and getattr(self._loop, "commit_service", None) is not None:
-                    try:
-                        artifact = await self._loop.commit_service.maybe_commit(
-                            session=persisted_session,
-                            channel=self._memory_channel,
-                            chat_id=self._memory_chat_id,
-                        )
-                        if artifact is not None:
-                            self._loop.sessions.save(persisted_session)
-                    except Exception:
-                        await self._emit(
-                            "message_delta",
-                            channel="analysis",
-                            kind="persistence_warning",
-                            text="RAG memory commit pipeline failed; new turns remain available in session transcript.",
-                        )
-            await self._emit(
-                "message_end",
-                role="assistant",
-                text=output,
-                heartbeat_internal=self._is_heartbeat_internal_prompt(user_input),
-            )
-            await self._emit("turn_end", session_key=self._state.session_key, status="completed")
-            await self._emit("agent_end", session_key=self._state.session_key, status="completed")
-            await self._emit_state_snapshot()
-            return RunResult(output=output, events=list(self._event_log))
-        finally:
-            if self._active_cancel_token is cancel_token:
-                self._active_cancel_token = None
-            self._loop.release_session_cancellation_token(self._state.session_key, cancel_token)
+                    if getattr(self._loop, "memory_manager", None) is not None and self._loop._use_rag_memory():
+                        try:
+                            await self._loop.memory_manager.ingest_turn(
+                                session_key=self._state.session_key,
+                                channel=self._memory_channel,
+                                chat_id=self._memory_chat_id,
+                                messages=[
+                                    {"role": "user", "content": user_text},
+                                    {"role": "assistant", "content": output},
+                                ],
+                            )
+                        except Exception:
+                            await self._emit(
+                                "message_delta",
+                                channel="analysis",
+                                kind="persistence_warning",
+                                text="RAG memory ingest failed; turn history is still available in session transcript.",
+                            )
+                    if persisted_session is not None and getattr(self._loop, "commit_service", None) is not None:
+                        try:
+                            artifact = await self._loop.commit_service.maybe_commit(
+                                session=persisted_session,
+                                channel=self._memory_channel,
+                                chat_id=self._memory_chat_id,
+                            )
+                            if artifact is not None:
+                                self._loop.sessions.save(persisted_session)
+                        except Exception:
+                            await self._emit(
+                                "message_delta",
+                                channel="analysis",
+                                kind="persistence_warning",
+                                text="RAG memory commit pipeline failed; new turns remain available in session transcript.",
+                            )
+                await self._emit(
+                    "message_end",
+                    role="assistant",
+                    text=output,
+                    heartbeat_internal=self._is_heartbeat_internal_prompt(user_input),
+                )
+                await self._emit("turn_end", session_key=self._state.session_key, status="completed")
+                await self._emit("agent_end", session_key=self._state.session_key, status="completed")
+                await self._emit_state_snapshot()
+                return RunResult(output=output, events=list(self._event_log))
+            finally:
+                if self._active_cancel_token is cancel_token:
+                    self._active_cancel_token = None
+                self._loop.release_session_cancellation_token(self._state.session_key, cancel_token)
 
-    async def continue_(self) -> RunResult:
-        return await self.prompt(self._last_prompt)
+    async def continue_(self, *, live_context: dict[str, str] | None = None) -> RunResult:
+        return await self.prompt(self._last_prompt, live_context=live_context)
 
     def steer(self, message: str | UserInputMessage) -> None:
         content = message.content if isinstance(message, UserInputMessage) else str(message)

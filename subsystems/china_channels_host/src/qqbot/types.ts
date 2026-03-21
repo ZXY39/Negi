@@ -63,6 +63,7 @@ export interface InboundContext {
   CommandBody: string;
   BodyForAgent?: string;
   BodyForCommands?: string;
+  AgentAttachments?: Array<Record<string, unknown>>;
   ReplyToId?: string;
   ReplyToBody?: string;
   ReplyToSender?: string;

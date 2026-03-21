@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.runtime.project_environment import apply_project_environment, resolve_project_environment
 
 
 class ExecTool(Tool):
@@ -88,15 +89,7 @@ class ExecTool(Tool):
             )
 
         resource_state = self._capture_resource_tree_state()
-        env = os.environ.copy()
-        temp_dir = str(runtime.get("temp_dir") or env.get("G3KU_TMP_DIR") or "").strip()
-        if temp_dir:
-            env["G3KU_TMP_DIR"] = temp_dir
-            env["TMPDIR"] = temp_dir
-            env["TMP"] = temp_dir
-            env["TEMP"] = temp_dir
-        if self.path_append:
-            env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
+        env = self._build_subprocess_env(runtime=runtime, cwd=cwd)
 
         try:
             if os.name == "nt":
@@ -205,6 +198,28 @@ class ExecTool(Tool):
                     return "Error: Command blocked by safety guard (path outside workspace)"
 
         return None
+
+    def _build_subprocess_env(self, *, runtime: dict[str, Any], cwd: str) -> dict[str, str]:
+        env = os.environ.copy()
+        temp_dir = str(runtime.get("temp_dir") or env.get("G3KU_TMP_DIR") or "").strip()
+        if temp_dir:
+            env["G3KU_TMP_DIR"] = temp_dir
+            env["TMPDIR"] = temp_dir
+            env["TMP"] = temp_dir
+            env["TEMP"] = temp_dir
+        return apply_project_environment(
+            env,
+            runtime=resolve_project_environment(
+                runtime=runtime,
+                shell_family='powershell' if os.name == 'nt' else None,
+                workspace_root=self.workspace_root,
+                process_cwd=cwd,
+            ),
+            shell_family='powershell' if os.name == 'nt' else None,
+            workspace_root=self.workspace_root,
+            process_cwd=cwd,
+            path_append=self.path_append,
+        )
 
     def _resolve_cwd(self, working_dir: str | None) -> str:
         if not working_dir:

@@ -627,6 +627,7 @@ function resolveEventId(payload: Record<string, unknown>, fallbackEventId?: stri
 
 type ResolvedInboundAttachment = {
   attachment: QQInboundAttachment;
+  localFilePath?: string;
   localImagePath?: string;
   voiceTranscript?: string;
 };
@@ -781,7 +782,7 @@ async function resolveInboundAttachmentsForAgent(params: {
 
   for (const att of list) {
     const next: ResolvedInboundAttachment = { attachment: att };
-    if (isImageAttachment(att) && isHttpUrl(att.url)) {
+    if (isHttpUrl(att.url)) {
       try {
         const downloaded = await downloadToTempFile(att.url, {
           timeout,
@@ -795,8 +796,13 @@ async function resolveInboundAttachmentsForAgent(params: {
           tempDir: inboundMediaTempDir,
           inboundDir: inboundMediaDir,
         });
-        next.localImagePath = finalPath;
-        logger.info(`inbound image cached: ${finalPath}`);
+        next.localFilePath = finalPath;
+        if (isImageAttachment(att)) {
+          next.localImagePath = finalPath;
+          logger.info(`inbound image cached: ${finalPath}`);
+        } else {
+          logger.info(`inbound attachment cached: ${finalPath}`);
+        }
         if (finalPath === downloaded.path) {
           scheduleTempCleanup(downloaded.path);
         }
@@ -855,6 +861,36 @@ async function resolveInboundAttachmentsForAgent(params: {
     hasVoiceTranscript,
     asrErrorMessage,
   };
+}
+
+function buildAgentAttachmentPayload(
+  attachments: ResolvedInboundAttachment[]
+): Array<Record<string, unknown>> | undefined {
+  if (attachments.length === 0) {
+    return undefined;
+  }
+
+  return attachments.map((item) => {
+    const att = item.attachment;
+    const path = item.localFilePath?.trim() || item.localImagePath?.trim();
+    const type = resolveRefAttachmentType(att);
+    const kind =
+      type === "image"
+        ? "image"
+        : type === "voice"
+          ? "audio"
+          : type === "video"
+            ? "video"
+            : "file";
+    return {
+      kind,
+      ...(att.url?.trim() ? { url: att.url.trim() } : {}),
+      ...(path ? { path } : {}),
+      ...(att.contentType?.trim() ? { mime_type: att.contentType.trim() } : {}),
+      ...(att.filename?.trim() ? { file_name: att.filename.trim() } : {}),
+      ...(typeof att.size === "number" ? { size_bytes: att.size } : {}),
+    };
+  });
 }
 
 function buildInboundContentWithAttachments(params: {
@@ -2564,6 +2600,10 @@ async function dispatchToAgent(params: {
     if (localImageCount > 0) {
       logger.info(`prepared ${localImageCount} local image attachment(s) for agent`);
     }
+    const localAttachmentCount = resolvedAttachments.filter((item) => Boolean(item.localFilePath)).length;
+    if (localAttachmentCount > 0) {
+      logger.info(`prepared ${localAttachmentCount} local attachment(s) for agent`);
+    }
     let replyToId: string | undefined;
     let replyToBody: string | undefined;
     let replyToSender: string | undefined;
@@ -2648,6 +2688,7 @@ async function dispatchToAgent(params: {
     const stableTo = ctxOriginatingTo ?? ctxTo ?? target.to;
     finalCtx.To = stableTo;
     finalCtx.OriginatingTo = stableTo;
+    finalCtx.AgentAttachments = buildAgentAttachmentPayload(resolvedAttachments);
     if (replyToId) {
       finalCtx.ReplyToId = replyToId;
       finalCtx.ReplyToBody = replyToBody;

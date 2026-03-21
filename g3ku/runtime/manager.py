@@ -57,6 +57,29 @@ class SessionRuntimeManager:
         self._meta[key] = (channel_value, chat_value)
         return session
 
+    def bind_live_context(
+        self,
+        session: RuntimeAgentSession,
+        *,
+        channel: str,
+        chat_id: str,
+        memory_channel: str | None = None,
+        memory_chat_id: str | None = None,
+    ) -> dict[str, str]:
+        channel_value = str(channel or "cli").strip() or "cli"
+        chat_value = str(chat_id or "direct").strip() or "direct"
+        memory_channel_value = str(memory_channel or channel_value).strip() or channel_value
+        memory_chat_value = str(memory_chat_id or chat_value).strip() or chat_value
+        key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        if key:
+            self._meta[key] = (channel_value, chat_value)
+        return {
+            "channel": channel_value,
+            "chat_id": chat_value,
+            "memory_channel": memory_channel_value,
+            "memory_chat_id": memory_chat_value,
+        }
+
     async def prompt(
         self,
         message: str | UserInputMessage,
@@ -66,6 +89,10 @@ class SessionRuntimeManager:
         chat_id: str,
         memory_channel: str | None = None,
         memory_chat_id: str | None = None,
+        runtime_channel: str | None = None,
+        runtime_chat_id: str | None = None,
+        runtime_memory_channel: str | None = None,
+        runtime_memory_chat_id: str | None = None,
         persist_transcript: bool = True,
     ) -> Any:
         session = self.get_or_create(
@@ -75,7 +102,18 @@ class SessionRuntimeManager:
             memory_channel=memory_channel,
             memory_chat_id=memory_chat_id,
         )
-        return await session.prompt(message, persist_transcript=persist_transcript)
+        live_context = self.bind_live_context(
+            session,
+            channel=runtime_channel or channel,
+            chat_id=runtime_chat_id or chat_id,
+            memory_channel=runtime_memory_channel or memory_channel,
+            memory_chat_id=runtime_memory_chat_id or memory_chat_id,
+        )
+        return await session.prompt(
+            message,
+            persist_transcript=persist_transcript,
+            live_context=live_context,
+        )
 
     async def continue_(
         self,
@@ -85,6 +123,10 @@ class SessionRuntimeManager:
         chat_id: str,
         memory_channel: str | None = None,
         memory_chat_id: str | None = None,
+        runtime_channel: str | None = None,
+        runtime_chat_id: str | None = None,
+        runtime_memory_channel: str | None = None,
+        runtime_memory_chat_id: str | None = None,
     ) -> Any:
         session = self.get_or_create(
             session_key=session_key,
@@ -93,7 +135,14 @@ class SessionRuntimeManager:
             memory_channel=memory_channel,
             memory_chat_id=memory_chat_id,
         )
-        return await session.continue_()
+        live_context = self.bind_live_context(
+            session,
+            channel=runtime_channel or channel,
+            chat_id=runtime_chat_id or chat_id,
+            memory_channel=runtime_memory_channel or memory_channel,
+            memory_chat_id=runtime_memory_chat_id or memory_chat_id,
+        )
+        return await session.continue_(live_context=live_context)
 
     async def cancel(self, session_key: str, *, reason: str = "user_cancelled") -> int:
         key = str(session_key or "").strip()

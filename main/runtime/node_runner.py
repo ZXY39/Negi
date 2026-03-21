@@ -11,6 +11,7 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
+from g3ku.runtime.project_environment import current_project_environment
 from main.errors import TaskPausedError
 from main.ids import new_node_id
 from main.models import (
@@ -192,6 +193,11 @@ class NodeRunner:
             (task.metadata or {}).get('memory_scope') if isinstance(task.metadata, dict) else None,
             fallback_session_key=task.session_id,
         )
+        project_environment = current_project_environment(
+            shell_family=self._shell_family(),
+            workspace_root=self._workspace_root(),
+            process_cwd=self._process_cwd(),
+        )
         return {
             'session_key': task.session_id,
             'task_id': task.task_id,
@@ -199,8 +205,15 @@ class NodeRunner:
             'depth': node.depth,
             'node_kind': node.node_kind,
             'actor_role': self._actor_role_for_node(node),
+            'can_spawn_children': bool(node.can_spawn_children),
             'memory_channel': str(memory_scope.get('channel') or 'unknown'),
             'memory_chat_id': str(memory_scope.get('chat_id') or 'unknown'),
+            'project_python': str(project_environment.get('project_python') or ''),
+            'project_python_dir': str(project_environment.get('project_python_dir') or ''),
+            'project_scripts_dir': str(project_environment.get('project_scripts_dir') or ''),
+            'project_path_entries': list(project_environment.get('project_path_entries') or []),
+            'project_virtual_env': str(project_environment.get('project_virtual_env') or ''),
+            'project_python_hint': str(project_environment.get('project_python_hint') or ''),
         }
 
     @staticmethod
@@ -234,11 +247,21 @@ class NodeRunner:
         return 'sh'
 
     def _runtime_environment_payload(self) -> dict[str, Any]:
+        project_environment = current_project_environment(
+            shell_family=self._shell_family(),
+            workspace_root=self._workspace_root(),
+            process_cwd=self._process_cwd(),
+        )
         return {
             'os_family': self._os_family(),
-            'shell_family': self._shell_family(),
-            'process_cwd': str(self._process_cwd()),
-            'workspace_root': str(self._workspace_root()),
+            'shell_family': str(project_environment.get('shell_family') or self._shell_family()),
+            'process_cwd': str(project_environment.get('process_cwd') or self._process_cwd()),
+            'workspace_root': str(project_environment.get('workspace_root') or self._workspace_root()),
+            'project_python': str(project_environment.get('project_python') or ''),
+            'project_python_dir': str(project_environment.get('project_python_dir') or ''),
+            'project_scripts_dir': str(project_environment.get('project_scripts_dir') or ''),
+            'project_virtual_env': str(project_environment.get('project_virtual_env') or ''),
+            'project_python_hint': str(project_environment.get('project_python_hint') or ''),
             'path_policy': {
                 'relative_paths_bind_to_workspace': False,
                 'filesystem_requires_absolute_path': True,
@@ -249,7 +272,14 @@ class NodeRunner:
             'tool_guidance': {
                 'filesystem': 'Use absolute paths. Prefer filesystem.search for recursive directory searches.',
                 'content': 'Use ref navigation or absolute file paths for a single content body; do not expect directory search here.',
-                'exec': 'Exec runs in PowerShell on Windows and in the host shell elsewhere. Do not assume bash heredocs, rg, or Unix shell builtins such as `true` are available. Pass an explicit working_dir when you need a specific directory.',
+                'exec': (
+                    'Exec runs in PowerShell on Windows and in the host shell elsewhere. '
+                    'It inherits the same Python environment as the current G3KU process and injects '
+                    'that interpreter onto PATH. Do not assume bash heredocs, rg, or Unix shell '
+                    'builtins such as `true` are available. Pass an explicit working_dir when you '
+                    f"need a specific directory. When exact interpreter choice matters, prefer `{project_environment.get('project_python_hint') or 'python'}` "
+                    'instead of assuming bare `python` resolves correctly.'
+                ),
             },
         }
 
@@ -263,12 +293,16 @@ class NodeRunner:
             f"- Shell family for `exec`: {env['shell_family']}",
             f"- Current process cwd: {env['process_cwd']}",
             f"- Workspace root: {env['workspace_root']}",
+            f"- Project Python for exact `exec` calls: {env['project_python']}",
+            f"- Project Python shell hint: {env['project_python_hint']}",
             '- Relative path policy: Do not assume relative paths bind to workspace. '
             f"`filesystem` absolute-only={str(path_policy['filesystem_requires_absolute_path']).lower()}, "
             f"`content` absolute-only={str(path_policy['content_requires_absolute_path']).lower()}, "
             f"`exec` default working_dir={path_policy['exec_default_working_dir']}.",
             '- Tool usage guidance:',
         ]
+        if str(env.get('project_virtual_env') or '').strip():
+            lines.append(f"- Active virtual environment: {env['project_virtual_env']}")
         lines.extend(
             [
                 f"- `filesystem`: {tool_guidance['filesystem']}",

@@ -24,6 +24,20 @@ permissions:
     - workspace
 settings:
   restrict_to_workspace: false
+  edit_validation_enabled: true
+  edit_validation_timeout_seconds: 20
+  edit_validation_rollback_on_failure: true
+  edit_validation_default_commands: []
+  edit_validation_commands_by_ext:
+    .py:
+      - python -m py_compile {path}
+  write_validation_enabled: true
+  write_validation_timeout_seconds: 20
+  write_validation_rollback_on_failure: true
+  write_validation_default_commands: []
+  write_validation_commands_by_ext:
+    .py:
+      - python -m py_compile {path}
 parameters:
   type: object
   properties:
@@ -58,10 +72,10 @@ parameters:
       description: Optional context lines after each hit when action=search on a single file.
     start_line:
       type: integer
-      description: Optional start line when action=open.
+      description: Optional start line when action=open, or required start line when action=edit in line-range mode.
     end_line:
       type: integer
-      description: Optional end line when action=open.
+      description: Optional end line when action=open, or required end line when action=edit in line-range mode.
     around_line:
       type: integer
       description: Optional center line when action=open.
@@ -76,10 +90,13 @@ parameters:
       description: Required when action=write.
     old_text:
       type: string
-      description: Required when action=edit or action=propose_patch. Must match exactly once.
+      description: Required when action=edit in text-replace mode or action=propose_patch. Must match exactly once. Mutually exclusive with start_line/end_line/replacement.
     new_text:
       type: string
-      description: Replacement text for action=edit or action=propose_patch.
+      description: Replacement text for action=edit in text-replace mode or action=propose_patch. Mutually exclusive with start_line/end_line/replacement.
+    replacement:
+      type: string
+      description: Replacement text for action=edit in line-range mode. Mutually exclusive with old_text/new_text.
     summary:
       type: string
       description: Optional patch summary when action=propose_patch.

@@ -26,6 +26,10 @@
 - 统一文件工具，支持 `read`、`list`、`write`、`edit`、`delete`、`propose_patch`
 - `path` 必须是绝对本地路径；`artifact:` / content 引用不是 filesystem 路径
 - `restrict_to_workspace` 来自 `tools/filesystem/resource.yaml -> settings`
+- `write` 写入后可按 `write_validation_*` 配置立即执行校验；校验失败时会回滚：新建文件会删除，已有文件会恢复原内容
+- `edit` 支持两种互斥模式：`old_text + new_text` 文本替换，或 `start_line + end_line + replacement` 行号区间替换
+- `edit` 修改后可按 `edit_validation_*` 配置立即执行校验；校验失败时会自动回滚到修改前内容
+- 若实际执行了校验命令，`write` / `edit` 的成功消息会附带 `validated by N command(s)` 后缀
 - `propose_patch` 生成补丁工件，不直接修改文件
 
 ## content

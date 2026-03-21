@@ -9,18 +9,16 @@ source:
   ref: openclaw-2026.3.13-1
 current_version:
   number: 0.1.0
-  summary: 首个 G3KU 适配版；参考 OpenClaw web_fetch 的轻量抓取、正文提取、缓存与安全边界思路，以 Python 内置解析实现最小可用能力。
-  compare_rule: 以 main/ 实现、参数契约、安全策略、缓存行为或返回结构变化为准；仅修改 toolskills 文案不单独视为版本升级。
-protocol:
-  transport: inprocess
-  runtime: python
+  summary: 棣栦釜 G3KU 閫傞厤鐗堬紱鍙傝€?OpenClaw web_fetch 鐨勮交閲忔姄鍙栥€佹鏂囨彁鍙栥€佺紦瀛樹笌瀹夊叏杈圭晫鎬濊矾锛屼互 Python 鍐呯疆瑙ｆ瀽瀹炵幇鏈€灏忓彲鐢ㄨ兘鍔涖€?
+  compare_rule: 浠?main/ 瀹炵幇銆佸弬鏁板绾︺€佸畨鍏ㄧ瓥鐣ャ€佺紦瀛樿涓烘垨杩斿洖缁撴瀯鍙樺寲涓哄噯锛涗粎淇敼 toolskills 鏂囨涓嶅崟鐙涓虹増鏈崌绾с€?
+protocol: mcp
 mcp:
   enabled: false
 requires: []
 permissions:
   network:
     outbound: true
-    notes: 仅允许访问公开 http(s) 目标；默认阻断私网、回环、链路本地与 localhost。
+    notes: 浠呭厑璁歌闂叕寮€ http(s) 鐩爣锛涢粯璁ら樆鏂缃戙€佸洖鐜€侀摼璺湰鍦颁笌 localhost銆?
   filesystem:
     read:
     - .g3ku/cache/web_fetch
@@ -46,24 +44,24 @@ parameters:
   properties:
     url:
       type: string
-      description: 目标页面 URL，仅允许 http/https。
+      description: 鐩爣椤甸潰 URL锛屼粎鍏佽 http/https銆?
     max_chars:
       type: integer
-      description: 返回正文最大字符数，默认 12000，上限 20000。
+      description: 杩斿洖姝ｆ枃鏈€澶у瓧绗︽暟锛岄粯璁?12000锛屼笂闄?20000銆?
       minimum: 500
       maximum: 20000
     extract_main_content:
       type: boolean
-      description: 是否优先返回提取后的可读正文，默认 true。
+      description: 鏄惁浼樺厛杩斿洖鎻愬彇鍚庣殑鍙姝ｆ枃锛岄粯璁?true銆?
     include_raw_html:
       type: boolean
-      description: 是否附带截断后的原始 HTML，同样会按不可信内容包装。
+      description: 鏄惁闄勫甫鎴柇鍚庣殑鍘熷 HTML锛屽悓鏍蜂細鎸変笉鍙俊鍐呭鍖呰銆?
     use_cache:
       type: boolean
-      description: 是否启用内存+磁盘短 TTL 缓存，默认 true。
+      description: 鏄惁鍚敤鍐呭瓨+纾佺洏鐭?TTL 缂撳瓨锛岄粯璁?true銆?
     timeout_seconds:
       type: number
-      description: 单次请求超时时间，默认 12 秒。
+      description: 鍗曟璇锋眰瓒呮椂鏃堕棿锛岄粯璁?12 绉掋€?
       minimum: 1
       maximum: 30
   required:
@@ -77,11 +75,12 @@ governance:
   - extraction
   - security
   usage_notes:
-  - 用于轻量 HTTP 抓取与正文提取，不执行 JavaScript，也不替代 browser。
-  - 返回的 text/raw_html 均视为不可信外部内容，调用方不得直接执行或无过滤渲染。
-  - 当页面依赖登录、复杂交互或脚本渲染时，应改用 browser 或人工确认。
+  - 鐢ㄤ簬杞婚噺 HTTP 鎶撳彇涓庢鏂囨彁鍙栵紝涓嶆墽琛?JavaScript锛屼篃涓嶆浛浠?browser銆?
+  - 杩斿洖鐨?text/raw_html 鍧囪涓轰笉鍙俊澶栭儴鍐呭锛岃皟鐢ㄦ柟涓嶅緱鐩存帴鎵ц鎴栨棤杩囨护娓叉煋銆?
+  - 褰撻〉闈緷璧栫櫥褰曘€佸鏉備氦浜掓垨鑴氭湰娓叉煋鏃讹紝搴旀敼鐢?browser 鎴栦汉宸ョ‘璁ゃ€?
 exposure:
   agent: true
   org_graph: true
 toolskill:
   enabled: true
+

@@ -237,8 +237,10 @@ def _load_agent_browser_handler(workspace: Path):
 
     tool_root = workspace / 'tools' / 'agent_browser'
     (tool_root / 'main').mkdir(parents=True, exist_ok=True)
+    (tool_root / 'toolskills').mkdir(parents=True, exist_ok=True)
     shutil.copy2(REPO_ROOT / 'tools' / 'agent_browser' / 'resource.yaml', tool_root / 'resource.yaml')
     shutil.copy2(REPO_ROOT / 'tools' / 'agent_browser' / 'main' / 'tool.py', tool_root / 'main' / 'tool.py')
+    shutil.copy2(REPO_ROOT / 'tools' / 'agent_browser' / 'toolskills' / 'SKILL.md', tool_root / 'toolskills' / 'SKILL.md')
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
     descriptor = registry.discover().tools['agent_browser']
@@ -484,6 +486,221 @@ async def test_filesystem_tool_rejects_artifact_refs_with_content_guidance(tmp_p
         result = await tool.execute(action='head', path='artifact:artifact:demo123', lines=5)
         assert 'content ref is not a filesystem path' in result
         assert 'use the content tool with ref=artifact:artifact:demo123' in result
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_search_overflow_requires_refine(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_dir = workspace / 'src'
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_file = target_dir / 'target.txt'
+    target_file.write_text('\n'.join(['needle'] * 20) + '\n', encoding='utf-8')
+    for index in range(6):
+        (target_dir / f'module_{index}.txt').write_text('needle\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        file_payload = json.loads(await tool.execute(action='search', path=str(target_file), query='needle', limit=5))
+        assert file_payload['ok'] is True
+        assert file_payload['overflow'] is True
+        assert file_payload['requires_refine'] is True
+        assert file_payload['hits'] == []
+        assert file_payload['count'] == 0
+        assert file_payload['overflow_lower_bound'] == 6
+        assert file_payload['scope_type'] == 'file'
+
+        dir_payload = json.loads(await tool.execute(action='search', path=str(target_dir), query='needle', limit=5))
+        assert dir_payload['ok'] is True
+        assert dir_payload['overflow'] is True
+        assert dir_payload['requires_refine'] is True
+        assert dir_payload['hits'] == []
+        assert dir_payload['count'] == 0
+        assert dir_payload['overflow_lower_bound'] == 6
+        assert dir_payload['scope_type'] == 'directory'
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_content_search_overflow_requires_refine(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('\n'.join(['needle'] * 20) + '\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+        payload = json.loads(await tool.execute(action='search', path=str(target_file), query='needle', limit=5))
+        assert payload['ok'] is True
+        assert payload['overflow'] is True
+        assert payload['requires_refine'] is True
+        assert payload['hits'] == []
+        assert payload['count'] == 0
+        assert payload['overflow_lower_bound'] == 6
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_edit_line_range_mode(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('alpha\nbeta\ngamma\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        result = await tool.execute(
+            action='edit',
+            path=str(target_file),
+            start_line=1,
+            end_line=2,
+            replacement='delta\nepsilon\n',
+        )
+        assert 'Successfully edited' in result
+        assert target_file.read_text(encoding='utf-8') == 'delta\nepsilon\ngamma\n'
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_edit_validation_failure_rolls_back(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.py'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('print("before")\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        tool._handler._settings = tool._handler._settings.model_copy(
+            update={
+                'edit_validation_default_commands': [],
+                'edit_validation_commands_by_ext': {
+                    '.py': [f'{_python_launcher()} -c "import sys; sys.exit(1)"']
+                },
+            }
+        )
+        result = await tool.execute(
+            action='edit',
+            path=str(target_file),
+            old_text='print("before")\n',
+            new_text='print("after")\n',
+        )
+        assert result.startswith('Error: Edit validation failed')
+        assert target_file.read_text(encoding='utf-8') == 'print("before")\n'
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_edit_rejects_mixed_modes(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('before\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        result = await tool.execute(
+            action='edit',
+            path=str(target_file),
+            old_text='before',
+            new_text='after',
+            start_line=1,
+            end_line=1,
+            replacement='after\n',
+        )
+        assert result == 'Error: edit requires exactly one mode: text-replace or line-range'
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_write_validation_failure_removes_new_file(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.py'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        tool._handler._settings = tool._handler._settings.model_copy(
+            update={
+                'write_validation_default_commands': [],
+                'write_validation_commands_by_ext': {
+                    '.py': [f'{_python_launcher()} -c "import sys; sys.exit(1)"']
+                },
+            }
+        )
+        result = await tool.execute(action='write', path=str(target_file), content='print("after")\n')
+        assert result.startswith('Error: Write validation failed')
+        assert target_file.exists() is False
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_write_validation_failure_restores_existing_file(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.py'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('print("before")\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        tool._handler._settings = tool._handler._settings.model_copy(
+            update={
+                'write_validation_default_commands': [],
+                'write_validation_commands_by_ext': {
+                    '.py': [f'{_python_launcher()} -c "import sys; sys.exit(1)"']
+                },
+            }
+        )
+        result = await tool.execute(action='write', path=str(target_file), content='print("after")\n')
+        assert result.startswith('Error: Write validation failed')
+        assert target_file.read_text(encoding='utf-8') == 'print("before")\n'
     finally:
         manager.close()
 
@@ -1634,3 +1851,18 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
     assert payload['initial_attempt']['exit_code'] == 1
     assert 'daemon already running' in payload['initial_attempt']['stderr']
     assert payload['session_cleanup']['ok'] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_missing_cli_returns_install_guidance(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    handler = _load_agent_browser_handler(workspace)
+    handler._settings = handler._settings.model_copy(update={'command_prefix': ['missing-g3ku-agent-browser-cli']})
+
+    payload = json.loads(await handler.execute(args=['open', 'https://example.com']))
+
+    assert payload['ok'] is False
+    assert payload['missing_dependency'] is True
+    assert payload['error'] == 'agent-browser CLI not found'
+    assert payload['repo_url'] == 'https://github.com/vercel-labs/agent-browser'
+    assert 'load_tool_context(tool_id="agent_browser")' in payload['next_actions']

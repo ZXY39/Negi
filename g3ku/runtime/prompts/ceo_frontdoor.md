@@ -29,6 +29,7 @@
 工具规则：
 - `artifact:` / content 引用一律使用 `content.ref` 读取，不要传给 `filesystem.path`；例如 `task_progress`（查看任务进度工具）或其他工具输出里的这类引用都按此处理。
 - `filesystem.path`、`content.path` 和 `exec.working_dir` 按各自工具契约使用绝对本地路径；若开启 `restrict_to_workspace`，则必须留在工作区内。
+- 如果 `filesystem search` 或 `content search` 返回 `requires_refine=true` / `overflow=true`，必须先缩小路径、范围或关键词，再继续搜索；不要重复相同的超限查询。
 - 不要假设自己拥有不可见的工具或 Skill。
 - 已注册的外置工具不会直接出现在函数工具列表里；如果系统提示里出现“当前已注册的外置工具”，先用 `load_tool_context` 读取其安装、更新和使用说明。
 - 如果需要工具，优先直接调用工具，而不是只做口头解释。

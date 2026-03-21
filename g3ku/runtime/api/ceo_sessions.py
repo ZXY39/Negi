@@ -6,13 +6,16 @@ from fastapi import APIRouter, Body, HTTPException
 
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
+    build_ceo_session_catalog,
     create_web_ceo_session,
     delete_web_ceo_session_artifacts,
     ensure_active_web_ceo_session,
+    find_ceo_session_catalog_item,
     list_web_ceo_sessions,
     main_runtime_depth_limits,
     normalize_ceo_metadata,
     normalize_task_defaults,
+    resolve_active_ceo_session_id,
     workspace_path,
 )
 from g3ku.shells.web import get_agent, get_runtime_manager, get_web_heartbeat_service
@@ -68,13 +71,29 @@ def _list_session_items(session_manager, runtime_manager, *, active_session_id: 
     )
 
 
+def _is_channel_session_id(session_id: str) -> bool:
+    return str(session_id or "").strip().startswith("china:")
+
+
+def _raise_channel_session_readonly() -> None:
+    raise HTTPException(status_code=409, detail="channel_session_readonly")
+
+
+def _build_catalog(session_manager, runtime_manager, *, active_session_id: str) -> dict[str, object]:
+    return build_ceo_session_catalog(
+        session_manager,
+        active_session_id=active_session_id,
+        is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
+    )
+
+
 def _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store) -> None:
     service = getattr(agent, 'main_task_service', None)
     registry = getattr(service, 'registry', None) if service is not None else None
     if registry is None or not hasattr(registry, 'publish_global_ceo'):
         return
-    active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
-    items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
+    active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
     seq_session_id = active_session_id or 'web:shared'
     registry.publish_global_ceo(
         build_envelope(
@@ -82,7 +101,12 @@ def _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, stat
             session_id=seq_session_id,
             seq=registry.next_ceo_seq(seq_session_id),
             type='ceo.sessions.snapshot',
-            data={'items': items, 'active_session_id': active_session_id},
+            data={
+                'items': catalog.get('items') or [],
+                'channel_groups': catalog.get('channel_groups') or [],
+                'active_session_id': active_session_id,
+                'active_session_family': catalog.get('active_session_family') or 'local',
+            },
         )
     )
 
@@ -150,27 +174,42 @@ def _task_defaults_response(session) -> dict:
 @router.get("/ceo/sessions")
 async def list_ceo_sessions():
     _agent, session_manager, runtime_manager, state_store = _sessions()
-    active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
-    items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
-    return {"ok": True, "items": items, "active_session_id": active_session_id}
+    active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
+    return {
+        "ok": True,
+        "items": catalog.get("items") or [],
+        "channel_groups": catalog.get("channel_groups") or [],
+        "active_session_id": active_session_id,
+        "active_session_family": catalog.get("active_session_family") or "local",
+    }
 
 
 @router.post("/ceo/sessions")
 async def create_ceo_session(payload: dict | None = Body(default=None)):
     agent, session_manager, runtime_manager, state_store = _sessions()
-    ensure_active_web_ceo_session(session_manager, state_store)
+    resolve_active_ceo_session_id(session_manager, state_store)
     session = create_web_ceo_session(session_manager, title=str((payload or {}).get("title") or "").strip() or None)
     state_store.set_active_session_id(session.key)
-    items = _list_session_items(session_manager, runtime_manager, active_session_id=session.key)
-    item = next((entry for entry in items if entry["session_id"] == session.key), None)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=session.key)
+    item = next((entry for entry in list(catalog.get("items") or []) if entry["session_id"] == session.key), None)
     _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
-    return {"ok": True, "item": item, "items": items, "active_session_id": session.key}
+    return {
+        "ok": True,
+        "item": item,
+        "items": catalog.get("items") or [],
+        "channel_groups": catalog.get("channel_groups") or [],
+        "active_session_id": session.key,
+        "active_session_family": catalog.get("active_session_family") or "local",
+    }
 
 
 @router.patch("/ceo/sessions/{session_id}")
 async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     agent, session_manager, runtime_manager, state_store = _sessions()
-    current_active = ensure_active_web_ceo_session(session_manager, state_store)
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    current_active = resolve_active_ceo_session_id(session_manager, state_store)
     _assert_no_running_turn(runtime_manager, current_active)
     session = _assert_known_session(session_manager, session_id)
     title = str(payload.get("title") or "").strip()
@@ -180,15 +219,24 @@ async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     session.metadata["title"] = title
     session.updated_at = datetime.now()
     session_manager.save(session)
-    active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
-    items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
-    item = next((entry for entry in items if entry["session_id"] == session.key), None)
+    active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
+    item = next((entry for entry in list(catalog.get("items") or []) if entry["session_id"] == session.key), None)
     _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
-    return {"ok": True, "item": item, "items": items, "active_session_id": active_session_id}
+    return {
+        "ok": True,
+        "item": item,
+        "items": catalog.get("items") or [],
+        "channel_groups": catalog.get("channel_groups") or [],
+        "active_session_id": active_session_id,
+        "active_session_family": catalog.get("active_session_family") or "local",
+    }
 
 
 @router.get("/ceo/sessions/{session_id}/task-defaults")
 async def get_ceo_session_task_defaults(session_id: str):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
     _agent, session_manager, _runtime_manager, _state_store = _sessions()
     session = _assert_known_session(session_manager, session_id)
     if normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session.key) != getattr(session, "metadata", None):
@@ -199,6 +247,8 @@ async def get_ceo_session_task_defaults(session_id: str):
 
 @router.patch("/ceo/sessions/{session_id}/task-defaults")
 async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body(...)):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
     _agent, session_manager, _runtime_manager, _state_store = _sessions()
     session = _assert_known_session(session_manager, session_id)
     depth_limits = main_runtime_depth_limits()
@@ -222,17 +272,30 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
 @router.post("/ceo/sessions/{session_id}/activate")
 async def activate_ceo_session(session_id: str):
     agent, session_manager, runtime_manager, state_store = _sessions()
-    target = _assert_known_session(session_manager, session_id)
-    ensure_active_web_ceo_session(session_manager, state_store)
-    state_store.set_active_session_id(target.key)
-    items = _list_session_items(session_manager, runtime_manager, active_session_id=target.key)
-    item = next((entry for entry in items if entry["session_id"] == target.key), None)
+    current_active = resolve_active_ceo_session_id(session_manager, state_store)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=current_active)
+    item = find_ceo_session_catalog_item(catalog, session_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    target_id = str(item.get("session_id") or "").strip()
+    state_store.set_active_session_id(target_id)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=target_id)
+    item = find_ceo_session_catalog_item(catalog, target_id)
     _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
-    return {"ok": True, "item": item, "items": items, "active_session_id": target.key}
+    return {
+        "ok": True,
+        "item": item,
+        "items": catalog.get("items") or [],
+        "channel_groups": catalog.get("channel_groups") or [],
+        "active_session_id": target_id,
+        "active_session_family": catalog.get("active_session_family") or "local",
+    }
 
 
 @router.get('/ceo/sessions/{session_id}/delete-check')
 async def get_ceo_session_delete_check(session_id: str):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
     agent, session_manager, _runtime_manager, _state_store = _sessions()
     session = _assert_known_session(session_manager, session_id)
     service = await _task_service(agent)
@@ -241,9 +304,11 @@ async def get_ceo_session_delete_check(session_id: str):
 
 @router.delete("/ceo/sessions/{session_id}")
 async def delete_ceo_session(session_id: str, payload: dict | None = Body(default=None)):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
     agent, session_manager, runtime_manager, state_store = _sessions()
     service = await _task_service(agent)
-    current_active = ensure_active_web_ceo_session(session_manager, state_store)
+    current_active = resolve_active_ceo_session_id(session_manager, state_store)
     _assert_no_running_turn(runtime_manager, current_active)
     session = _assert_known_session(session_manager, session_id)
     if current_active != session.key:
@@ -279,9 +344,9 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     cancel = getattr(agent, "cancel_session_tasks", None)
     if callable(cancel):
         await cancel(session.key)
-    active_session_id = ensure_active_web_ceo_session(session_manager, state_store)
+    active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
-    items = _list_session_items(session_manager, runtime_manager, active_session_id=active_session_id)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
     _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
     return {
         "ok": True,
@@ -289,6 +354,8 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
         "session_id": session.key,
         "deleted_task_count": deleted_task_count,
         "stopped_background_tool_count": stopped_background_tool_count,
-        "items": items,
+        "items": catalog.get("items") or [],
+        "channel_groups": catalog.get("channel_groups") or [],
         "active_session_id": active_session_id,
+        "active_session_family": catalog.get("active_session_family") or "local",
     }

@@ -1,84 +1,67 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
 CREATE_ASYNC_TASK_TOOL_NAME = 'create_async_task'
-STATE_KEY = 'ceo_async_task_guard_state'
-REMINDER_TEMPLATE = (
-    '由于执行轮数超过{threshold}轮，工具执行暂被拦截，立即评估是否需要将剩余工作改成异步任务，'
-    '如果继续自行执行，请重新调用工具。'
-)
+SPAWN_CHILD_NODES_TOOL_NAME = 'spawn_child_nodes'
+
+GUARD_OVERLAY_MARKER = '[[G3KU_GUARD_OVERLAY_V1]]'
 
 
-def build_guard_state(
-    *,
-    completed_rounds: int = 0,
-    consumed_thresholds: list[int] | None = None,
-) -> dict[str, Any]:
-    normalized_thresholds = sorted(
-        {max(0, int(item or 0)) for item in list(consumed_thresholds or []) if int(item or 0) > 0}
-    )
-    return {
-        'completed_rounds': max(0, int(completed_rounds or 0)),
-        'consumed_thresholds': normalized_thresholds,
-    }
+def overlay_threshold_for_iteration(iteration: int) -> int | None:
+    completed_rounds = max(0, int(iteration or 0) - 1)
+    return _trigger_threshold_for_completed_rounds(completed_rounds)
 
 
-def should_track_ceo_self_execution(context: Any) -> bool:
-    return str(_context_value(context, 'actor_role', '') or '').strip().lower() == 'ceo'
-
-
-def ensure_guard_state(context: Any) -> dict[str, Any] | None:
-    if context is None or not should_track_ceo_self_execution(context):
-        return None
-    existing = _context_value(context, STATE_KEY, None)
-    if isinstance(existing, dict):
-        existing['completed_rounds'] = max(0, int(existing.get('completed_rounds', 0) or 0))
-        thresholds = existing.get('consumed_thresholds')
-        if not isinstance(thresholds, list):
-            thresholds = []
-        existing['consumed_thresholds'] = sorted(
-            {max(0, int(item or 0)) for item in list(thresholds or []) if int(item or 0) > 0}
-        )
-        return existing
-    state = build_guard_state()
-    if _context_assign(context, STATE_KEY, state):
-        return state
-    return None
-
-
-def maybe_build_intercept_message(context: Any, *, tool_name: str) -> str | None:
-    normalized_tool_name = str(tool_name or '').strip()
-    if not normalized_tool_name or normalized_tool_name == CREATE_ASYNC_TASK_TOOL_NAME:
-        return None
-    state = ensure_guard_state(context)
-    if state is None:
-        return None
-    threshold = _trigger_threshold_for_completed_rounds(int(state.get('completed_rounds', 0) or 0))
+def maybe_build_ceo_overlay(*, iteration: int) -> str | None:
+    threshold = overlay_threshold_for_iteration(iteration)
     if threshold is None:
         return None
-    consumed = {
-        max(0, int(item or 0))
-        for item in list(state.get('consumed_thresholds') or [])
-        if int(item or 0) > 0
+    return _build_overlay(
+        threshold=threshold,
+        advisory_kind='ceo_async_task_overlay',
+        recommended_tool=CREATE_ASYNC_TASK_TOOL_NAME,
+    )
+
+
+def maybe_build_execution_overlay(*, iteration: int, can_spawn_children: bool) -> str | None:
+    if not bool(can_spawn_children):
+        return None
+    threshold = overlay_threshold_for_iteration(iteration)
+    if threshold is None:
+        return None
+    return _build_overlay(
+        threshold=threshold,
+        advisory_kind='execution_spawn_child_overlay',
+        recommended_tool=SPAWN_CHILD_NODES_TOOL_NAME,
+    )
+
+
+def _build_overlay(*, threshold: int, advisory_kind: str, recommended_tool: str) -> str:
+    tool_name = str(recommended_tool or '').strip()
+    text = (
+        f'【注意：当前你已调用{int(threshold or 0)}轮工具，你必须立即评估是否 {tool_name} '
+        '还是继续自主完成，若不选择分流，则忽略本次提醒】'
+    )
+    payload = {
+        'status': 'advisory',
+        'advisory_kind': str(advisory_kind or '').strip(),
+        'threshold': max(0, int(threshold or 0)),
+        'recommended_tool': tool_name,
+        'allowed_next_actions': [tool_name, 'continue_self_execute'],
+        'must_evaluate': True,
+        'ignore_allowed': True,
+        'text': text,
     }
-    if threshold in consumed:
-        return None
-    consumed.add(threshold)
-    state['consumed_thresholds'] = sorted(consumed)
-    return REMINDER_TEMPLATE.format(threshold=threshold)
-
-
-def record_completed_tool_round(context: Any, *, tool_name: str) -> None:
-    normalized_tool_name = str(tool_name or '').strip()
-    if not normalized_tool_name or normalized_tool_name == CREATE_ASYNC_TASK_TOOL_NAME:
-        return None
-    state = ensure_guard_state(context)
-    if state is None:
-        return None
-    state['completed_rounds'] = max(0, int(state.get('completed_rounds', 0) or 0)) + 1
-    return None
+    return '\n'.join(
+        [
+            text,
+            GUARD_OVERLAY_MARKER,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        ]
+    )
 
 
 def _trigger_threshold_for_completed_rounds(completed_rounds: int) -> int | None:
@@ -92,18 +75,7 @@ def _trigger_threshold_for_completed_rounds(completed_rounds: int) -> int | None
     return None
 
 
-def _context_value(context: Any, key: str, default: Any = '') -> Any:
+def context_value(context: Any, key: str, default: Any = '') -> Any:
     if isinstance(context, dict):
         return context.get(key, default)
     return getattr(context, key, default)
-
-
-def _context_assign(context: Any, key: str, value: Any) -> bool:
-    if isinstance(context, dict):
-        context[key] = value
-        return True
-    try:
-        setattr(context, key, value)
-    except Exception:
-        return False
-    return True

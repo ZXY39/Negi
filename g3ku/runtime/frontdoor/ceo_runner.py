@@ -6,15 +6,42 @@ from langchain.agents import create_agent
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from loguru import logger
 
+try:
+    from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+    from langchain_core.messages import SystemMessage
+except ModuleNotFoundError:  # pragma: no cover - optional dependency fallback
+    AgentMiddleware = object  # type: ignore[assignment]
+    ModelRequest = Any  # type: ignore[assignment]
+    ModelResponse = Any  # type: ignore[assignment]
+
+    class SystemMessage:  # type: ignore[no-redef]
+        def __init__(self, content: str = ""):
+            self.content = content
+            self.text = content
+
 from g3ku.agent.chatmodel_utils import ensure_chat_model
 from g3ku.integrations.langchain_runtime import extract_final_response
 from g3ku.providers.chatmodels import build_chat_model
-from g3ku.runtime.ceo_async_task_guard import build_guard_state
+from g3ku.runtime.ceo_async_task_guard import maybe_build_ceo_overlay
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.context import ContextAssemblyService
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
+from g3ku.runtime.project_environment import current_project_environment
 from main.runtime.chat_backend import build_stable_prompt_cache_key
+
+
+class TemporaryCeoGuardOverlayMiddleware(AgentMiddleware):
+    def __init__(self) -> None:
+        self._iteration = 0
+
+    async def awrap_model_call(self, request: ModelRequest[Any], handler) -> ModelResponse[Any]:
+        self._iteration += 1
+        overlay_text = maybe_build_ceo_overlay(iteration=self._iteration)
+        if not overlay_text:
+            return await handler(request)
+        patched_messages = [SystemMessage(content=overlay_text), *list(getattr(request, 'messages', []) or [])]
+        return await handler(request.override(messages=patched_messages))
 
 
 class CeoFrontDoorRunner:
@@ -151,11 +178,11 @@ class CeoFrontDoorRunner:
             *persisted_history,
             {'role': 'user', 'content': self._model_content(getattr(user_input, 'content', ''))},
         ]
+        project_environment = current_project_environment(workspace_root=getattr(self._loop, 'workspace', None))
         runtime_context = {
             'on_progress': on_progress,
             'emit_lifecycle': True,
             'actor_role': 'ceo',
-            'ceo_async_task_guard_state': build_guard_state(),
             'session_key': session.state.session_key,
             'channel': getattr(session, '_channel', 'cli'),
             'chat_id': getattr(session, '_chat_id', session.state.session_key),
@@ -165,6 +192,12 @@ class CeoFrontDoorRunner:
             'tool_snapshot_supplier': getattr(session, 'inflight_turn_snapshot', None),
             'temp_dir': str(getattr(self._loop, 'temp_dir', '') or ''),
             'loop': self._loop,
+            'project_python': str(project_environment.get('project_python') or ''),
+            'project_python_dir': str(project_environment.get('project_python_dir') or ''),
+            'project_scripts_dir': str(project_environment.get('project_scripts_dir') or ''),
+            'project_path_entries': list(project_environment.get('project_path_entries') or []),
+            'project_virtual_env': str(project_environment.get('project_virtual_env') or ''),
+            'project_python_hint': str(project_environment.get('project_python_hint') or ''),
         }
         token = self._loop.tools.push_runtime_context(runtime_context)
         try:
@@ -180,6 +213,7 @@ class CeoFrontDoorRunner:
             agent = create_agent(
                 model=bound_model_client,
                 tools=tools,
+                middleware=[TemporaryCeoGuardOverlayMiddleware()],
                 checkpointer=getattr(self._loop, '_checkpointer', None),
                 store=getattr(self._loop, '_store', None),
                 name='g3ku_ceo_frontdoor',

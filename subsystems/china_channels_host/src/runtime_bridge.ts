@@ -23,6 +23,27 @@ type RuntimeBridgeOptions = {
   channelsConfig: Record<string, any>;
 };
 
+function normalizeInboundAttachments(value: unknown): Array<Record<string, unknown>> {
+  const items: Array<Record<string, unknown>> = [];
+  for (const raw of Array.isArray(value) ? value : []) {
+    if (!raw || typeof raw !== "object") continue;
+    const entry = raw as Record<string, unknown>;
+    const next: Record<string, unknown> = {};
+    for (const key of ["kind", "url", "path", "mime_type", "file_name", "size_bytes"]) {
+      const field = entry[key];
+      if (field === undefined || field === null || field === "") {
+        continue;
+      }
+      next[key] = field;
+    }
+    if (Object.keys(next).length === 0) {
+      continue;
+    }
+    items.push(next);
+  }
+  return items;
+}
+
 function splitText(text: string, limit: number): string[] {
   const source = String(text || "");
   if (!source || source.length <= limit) return [source];
@@ -116,10 +137,9 @@ export class G3kuRuntimeBridge {
       const pending = this.pending.get(frame.event_id);
       if (!pending) return;
       const mode = String(frame.payload?.mode || "progress");
-      const info = { kind: mode === "final" ? "final" : mode };
-      if (mode === "final") {
-        pending.counts.final += 1;
-      }
+      if (mode !== "final") return;
+      const info = { kind: "final" as const };
+      pending.counts.final += 1;
       try {
         await pending.deliver({
           text: frame.payload?.text,
@@ -225,6 +245,7 @@ export class G3kuRuntimeBridge {
         : { kind: ctx.ChatType === "group" ? "group" : "user", id: to || String(ctx.From || "unknown") };
     const text = String(ctx.BodyForAgent || ctx.Body || ctx.RawBody || "");
     const messageId = String(ctx.MessageSid || ctx.messageId || "").trim() || undefined;
+    const attachments = normalizeInboundAttachments(ctx.AgentAttachments);
     const pending = new Promise<{ queuedFinal: boolean; counts: { final: number } }>((resolve, reject) => {
       this.pending.set(eventId, {
         eventId,
@@ -244,7 +265,7 @@ export class G3kuRuntimeBridge {
       message: {
         id: messageId,
         text,
-        attachments: [],
+        attachments,
       },
       metadata: {
         platform_ctx: ctx,

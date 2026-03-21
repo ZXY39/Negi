@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from g3ku.runtime.project_environment import current_project_environment
+
 
 FRONTDOOR_DEDUPLICATION_MARKERS = (
     '并要求下游执行节点继续评估是否需要派生子节点',
@@ -19,10 +21,17 @@ class CeoPromptBuilder:
         self._repo_prompt_dir = Path(__file__).resolve().parents[1] / 'prompts'
 
     def build(self, *, skills: list) -> str:
+        project_environment = current_project_environment(workspace_root=getattr(self._loop, 'workspace', None))
         exec_runtime_guidance = (
             '- `exec` on Windows always runs in PowerShell. Prefer PowerShell-compatible commands such as '
             '`Get-ChildItem`, `Get-Location`, `Get-Content`, or aliases like `ls` / `pwd`; do not assume '
             'Unix shell builtins such as `true`, `false`, bash heredocs, or `rg` are available.'
+        )
+        project_python_guidance = (
+            '- `exec` inherits the same Python environment as the current G3KU process. '
+            f"When exact interpreter choice matters, prefer `{project_environment.get('project_python_hint') or 'python'}` "
+            'or the injected `G3KU_PROJECT_PYTHON` env var instead of assuming bare `python` '
+            'points at the correct interpreter.'
         )
         base = self._read_prompt('ceo_frontdoor.md', self._default_prompt())
         base = self._normalize_frontdoor_prompt(base)
@@ -30,6 +39,8 @@ class CeoPromptBuilder:
             base = f'{base}\n{CORE_REQUIREMENT_GUIDANCE}'
         if 'PowerShell-compatible commands' not in base:
             base = f'{base}\n{exec_runtime_guidance}'
+        if 'same Python environment as the current G3KU process' not in base:
+            base = f'{base}\n{project_python_guidance}'
         inventory = self._skill_inventory(skills)
         if inventory:
             return f'{base}\n\n## 当前对主 Agent 可见的 Skills\n\n{inventory}'

@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from g3ku.china_bridge.session_keys import build_session_key, parse_china_session_key
 from g3ku.config.loader import load_config
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.utils.helpers import ensure_dir, safe_filename
@@ -394,7 +395,373 @@ def build_session_summary(session: Any, *, is_active: bool, is_running: bool = F
         "is_active": bool(is_active),
         "is_running": bool(is_running),
         "task_defaults": dict(session.metadata.get("task_defaults") or {}),
+        "session_family": "local",
+        "session_origin": "web",
+        "is_readonly": False,
+        "can_rename": True,
+        "can_delete": True,
     }
+
+
+CHINA_SESSION_CHANNEL_SPECS = (
+    {"attr": "qqbot", "channel_id": "qqbot", "label": "QQ Bot"},
+    {"attr": "dingtalk", "channel_id": "dingtalk", "label": "DingTalk"},
+    {"attr": "wecom", "channel_id": "wecom", "label": "企业微信"},
+    {"attr": "wecom_app", "channel_id": "wecom-app", "label": "企业微信应用"},
+    {"attr": "feishu_china", "channel_id": "feishu-china", "label": "飞书"},
+)
+
+CHINA_CHANNEL_LABELS = {
+    spec["channel_id"]: spec["label"]
+    for spec in CHINA_SESSION_CHANNEL_SPECS
+}
+
+
+def _non_empty(value: Any) -> bool:
+    return value not in (None, "", [], {}, False)
+
+
+def _channel_session_kind(parsed) -> str:
+    if parsed is None:
+        return "dm"
+    return "thread" if parsed.thread_id else parsed.chat_type
+
+
+def _channel_label(channel_id: str) -> str:
+    return CHINA_CHANNEL_LABELS.get(str(channel_id or "").strip(), str(channel_id or "渠道").strip() or "渠道")
+
+
+def _channel_title(parsed) -> str:
+    label = _channel_label(parsed.channel)
+    if parsed.thread_id:
+        return f"{label} · {parsed.account_id} · Thread · {str(parsed.thread_id).strip()[:24]}"
+    if parsed.chat_type == "group":
+        peer = str(parsed.peer_id or "group").strip()[:24]
+        return f"{label} · {parsed.account_id} · Group · {peer}"
+    return f"{label} · {parsed.account_id} · DM"
+
+
+def _channel_preview_text(session: Any, *, fallback_text: str = "") -> str:
+    messages = list(getattr(session, "messages", []) or [])
+    for item in reversed(messages):
+        content = item.get("content") if isinstance(item, dict) else ""
+        preview = summarize_preview_text(content or "")
+        if preview:
+            return preview
+    return str(fallback_text or "").strip()
+
+
+def _session_time_value(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "").strip()
+
+
+def _session_created_at(session: Any) -> str:
+    return _session_time_value(getattr(session, "created_at", None))
+
+
+def _session_updated_at(session: Any) -> str:
+    updated_at = _session_time_value(getattr(session, "updated_at", None))
+    if updated_at:
+        return updated_at
+    messages = list(getattr(session, "messages", []) or [])
+    for item in reversed(messages):
+        if isinstance(item, dict) and str(item.get("timestamp") or "").strip():
+            return str(item.get("timestamp") or "").strip()
+    return ""
+
+
+def _session_last_assistant_at(session: Any) -> str:
+    return latest_llm_output_at(session)
+
+
+def _canonical_china_session_id(parsed) -> str:
+    if parsed.chat_type == "group":
+        return build_session_key(
+            channel=parsed.channel,
+            account_id=parsed.account_id,
+            peer_kind="group",
+            peer_id=str(parsed.peer_id or ""),
+            thread_id=parsed.thread_id,
+        )
+    return build_session_key(
+        channel=parsed.channel,
+        account_id=parsed.account_id,
+        peer_kind="user",
+        peer_id=str(parsed.peer_id or ""),
+        thread_id=parsed.thread_id,
+    )
+
+
+def _top_level_channel_payload(channel_cfg: Any) -> dict[str, Any]:
+    if channel_cfg is None:
+        return {}
+    if hasattr(channel_cfg, "model_dump"):
+        data = channel_cfg.model_dump(by_alias=True, exclude_none=True)
+        return data if isinstance(data, dict) else {}
+    if isinstance(channel_cfg, dict):
+        return dict(channel_cfg)
+    return {}
+
+
+def _has_base_channel_account(channel_cfg: Any) -> bool:
+    payload = _top_level_channel_payload(channel_cfg)
+    ignore = {"enabled", "name", "defaultAccount", "default_account", "accounts"}
+    return any(key not in ignore and _non_empty(value) for key, value in payload.items())
+
+
+def _iter_enabled_channel_accounts() -> list[dict[str, str]]:
+    cfg = load_config()
+    rows: list[dict[str, str]] = []
+    channels_cfg = getattr(getattr(cfg, "china_bridge", None), "channels", None)
+    if channels_cfg is None:
+        return rows
+    for spec in CHINA_SESSION_CHANNEL_SPECS:
+        channel_cfg = getattr(channels_cfg, spec["attr"], None)
+        payload = _top_level_channel_payload(channel_cfg)
+        if not bool(payload.get("enabled")):
+            continue
+        accounts = payload.get("accounts") if isinstance(payload.get("accounts"), dict) else {}
+        seen_accounts: set[str] = set()
+        if _has_base_channel_account(channel_cfg):
+            rows.append(
+                {
+                    "channel_id": spec["channel_id"],
+                    "label": spec["label"],
+                    "account_id": "default",
+                }
+            )
+            seen_accounts.add("default")
+        for account_id, account_payload in sorted(accounts.items()):
+            if not isinstance(account_payload, dict):
+                continue
+            normalized_account_id = str(account_id or "").strip() or "default"
+            if normalized_account_id in seen_accounts:
+                continue
+            if account_payload.get("enabled") is False:
+                continue
+            rows.append(
+                {
+                    "channel_id": spec["channel_id"],
+                    "label": spec["label"],
+                    "account_id": normalized_account_id,
+                }
+            )
+            seen_accounts.add(normalized_account_id)
+        if not rows or rows[-1]["channel_id"] != spec["channel_id"]:
+            if not accounts:
+                rows.append(
+                    {
+                        "channel_id": spec["channel_id"],
+                        "label": spec["label"],
+                        "account_id": "default",
+                    }
+                )
+    return rows
+
+
+def _channel_session_summary_from_entry(
+    *,
+    session_id: str,
+    parsed,
+    is_active: bool,
+    is_running: bool,
+    preview_text: str,
+    message_count: int,
+    created_at: str,
+    updated_at: str,
+    last_llm_output_at: str,
+    is_virtual: bool,
+) -> dict[str, Any]:
+    kind = _channel_session_kind(parsed)
+    return {
+        "session_id": session_id,
+        "title": _channel_title(parsed),
+        "preview_text": preview_text,
+        "message_count": message_count,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "last_llm_output_at": last_llm_output_at,
+        "is_active": bool(is_active),
+        "is_running": bool(is_running),
+        "session_family": "channel",
+        "session_origin": "china",
+        "is_readonly": True,
+        "can_rename": False,
+        "can_delete": False,
+        "channel_id": parsed.channel,
+        "account_id": parsed.account_id,
+        "chat_type": kind,
+        "peer_id": parsed.peer_id,
+        "thread_id": parsed.thread_id,
+        "is_virtual": bool(is_virtual),
+    }
+
+
+def list_local_ceo_sessions(
+    session_manager: Any,
+    *,
+    active_session_id: str,
+    is_running_resolver: Callable[[str], bool] | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    changed_keys: list[str] = []
+    for item in session_manager.list_sessions():
+        key = str(item.get("key") or "").strip()
+        if not key.startswith("web:"):
+            continue
+        session = session_manager.get_or_create(key)
+        if ensure_ceo_session_metadata(session):
+            changed_keys.append(key)
+        is_running = False
+        if callable(is_running_resolver):
+            try:
+                is_running = bool(is_running_resolver(key))
+            except Exception:
+                is_running = False
+        rows.append(build_session_summary(session, is_active=key == active_session_id, is_running=is_running))
+    for key in changed_keys:
+        session_manager.save(session_manager.get_or_create(key))
+    rows.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("session_id") or "")), reverse=True)
+    return rows
+
+
+def list_channel_ceo_sessions(
+    session_manager: Any,
+    *,
+    active_session_id: str,
+    is_running_resolver: Callable[[str], bool] | None = None,
+) -> list[dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+
+    for account in _iter_enabled_channel_accounts():
+        session_id = f"china:{account['channel_id']}:{account['account_id']}:dm"
+        parsed = parse_china_session_key(session_id)
+        if parsed is None:
+            continue
+        summaries[session_id] = _channel_session_summary_from_entry(
+            session_id=session_id,
+            parsed=parsed,
+            is_active=session_id == active_session_id,
+            is_running=bool(callable(is_running_resolver) and is_running_resolver(session_id)),
+            preview_text="等待该渠道的私聊消息",
+            message_count=0,
+            created_at="",
+            updated_at="",
+            last_llm_output_at="",
+            is_virtual=True,
+        )
+
+    for item in session_manager.list_sessions():
+        key = str(item.get("key") or "").strip()
+        if not key.startswith("china:"):
+            continue
+        parsed = parse_china_session_key(key)
+        if parsed is None:
+            continue
+        session = session_manager.get_or_create(key)
+        canonical_id = _canonical_china_session_id(parsed)
+        canonical_parsed = parse_china_session_key(canonical_id) or parsed
+        summary = _channel_session_summary_from_entry(
+            session_id=canonical_id,
+            parsed=canonical_parsed,
+            is_active=canonical_id == active_session_id,
+            is_running=bool(callable(is_running_resolver) and is_running_resolver(canonical_id)),
+            preview_text=_channel_preview_text(session),
+            message_count=len(list(getattr(session, "messages", []) or [])),
+            created_at=_session_created_at(session),
+            updated_at=_session_updated_at(session),
+            last_llm_output_at=_session_last_assistant_at(session),
+            is_virtual=False,
+        )
+        existing = summaries.get(canonical_id)
+        if existing is None:
+            summaries[canonical_id] = summary
+            continue
+        existing_updated_at = str(existing.get("updated_at") or existing.get("last_llm_output_at") or "")
+        summary_updated_at = str(summary.get("updated_at") or summary.get("last_llm_output_at") or "")
+        merged = dict(existing)
+        merged["message_count"] = int(existing.get("message_count") or 0) + int(summary.get("message_count") or 0)
+        merged["is_virtual"] = bool(existing.get("is_virtual")) and bool(summary.get("is_virtual"))
+        merged["is_running"] = bool(existing.get("is_running")) or bool(summary.get("is_running"))
+        if summary_updated_at >= existing_updated_at:
+            for key_name in ("preview_text", "created_at", "updated_at", "last_llm_output_at"):
+                merged[key_name] = summary.get(key_name) or merged.get(key_name)
+        summaries[canonical_id] = merged
+
+    rows = list(summaries.values())
+    rows = [
+        item
+        for item in rows
+        if item.get("chat_type") == "dm"
+        or int(item.get("message_count") or 0) > 0
+        or not bool(item.get("is_virtual"))
+    ]
+    rows.sort(
+        key=lambda item: (
+            0 if str(item.get("chat_type") or "") == "dm" else 1,
+            str(item.get("last_llm_output_at") or item.get("updated_at") or item.get("created_at") or ""),
+            str(item.get("session_id") or ""),
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def build_ceo_session_catalog(
+    session_manager: Any,
+    *,
+    active_session_id: str,
+    is_running_resolver: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
+    local_items = list_local_ceo_sessions(
+        session_manager,
+        active_session_id=active_session_id,
+        is_running_resolver=is_running_resolver,
+    )
+    channel_items = list_channel_ceo_sessions(
+        session_manager,
+        active_session_id=active_session_id,
+        is_running_resolver=is_running_resolver,
+    )
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in channel_items:
+        channel_id = str(item.get("channel_id") or "").strip()
+        if not channel_id:
+            continue
+        bucket = grouped.get(channel_id)
+        if bucket is None:
+            bucket = {
+                "channel_id": channel_id,
+                "label": _channel_label(channel_id),
+                "items": [],
+            }
+            grouped[channel_id] = bucket
+        bucket["items"].append(item)
+    channel_groups = [grouped[key] for key in [spec["channel_id"] for spec in CHINA_SESSION_CHANNEL_SPECS] if key in grouped]
+    channel_ids = {str(item.get("session_id") or "") for item in channel_items}
+    active_family = "channel" if str(active_session_id or "") in channel_ids else "local"
+    return {
+        "items": local_items,
+        "channel_groups": channel_groups,
+        "active_session_id": str(active_session_id or "").strip(),
+        "active_session_family": active_family,
+        "_channel_items": channel_items,
+    }
+
+
+def find_ceo_session_catalog_item(catalog: dict[str, Any], session_id: str) -> dict[str, Any] | None:
+    target = str(session_id or "").strip()
+    if not target:
+        return None
+    for item in list(catalog.get("items") or []):
+        if str(item.get("session_id") or "").strip() == target:
+            return item
+    for item in list(catalog.get("_channel_items") or []):
+        if str(item.get("session_id") or "").strip() == target:
+            return item
+    return None
 
 
 class WebCeoStateStore:
@@ -455,26 +822,26 @@ def list_web_ceo_sessions(
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    changed_keys: list[str] = []
-    for item in session_manager.list_sessions():
-        key = str(item.get("key") or "").strip()
-        if not key.startswith("web:"):
-            continue
-        session = session_manager.get_or_create(key)
-        if ensure_ceo_session_metadata(session):
-            changed_keys.append(key)
-        is_running = False
-        if callable(is_running_resolver):
-            try:
-                is_running = bool(is_running_resolver(key))
-            except Exception:
-                is_running = False
-        rows.append(build_session_summary(session, is_active=key == active_session_id, is_running=is_running))
-    for key in changed_keys:
-        session_manager.save(session_manager.get_or_create(key))
-    rows.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("session_id") or "")), reverse=True)
-    return rows
+    return list_local_ceo_sessions(
+        session_manager,
+        active_session_id=active_session_id,
+        is_running_resolver=is_running_resolver,
+    )
+
+
+def resolve_active_ceo_session_id(session_manager: Any, state_store: WebCeoStateStore) -> str:
+    requested = state_store.get_active_session_id()
+    catalog = build_ceo_session_catalog(session_manager, active_session_id=requested)
+    if find_ceo_session_catalog_item(catalog, requested) is not None:
+        return requested
+    local_items = list(catalog.get("items") or [])
+    if local_items:
+        fallback = str(local_items[0].get("session_id") or "").strip()
+        state_store.set_active_session_id(fallback)
+        return fallback
+    created = create_web_ceo_session(session_manager)
+    state_store.set_active_session_id(created.key)
+    return str(created.key)
 
 
 def ensure_active_web_ceo_session(session_manager: Any, state_store: WebCeoStateStore) -> str:

@@ -11,7 +11,6 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import ConfigDict, Field, create_model
 
 from g3ku.agent.tools.base import Tool
-from g3ku.runtime.ceo_async_task_guard import maybe_build_intercept_message, record_completed_tool_round
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -80,15 +79,12 @@ class ToolRegistry:
             # StructuredTool may include optional args as `None`; legacy schema validators
             # treat these as type mismatches, so drop unset values before validation/dispatch.
             normalized = {k: v for k, v in params.items() if v is not None}
-            runtime_context = self._runtime_context.get() or {}
-            guard_message = maybe_build_intercept_message(runtime_context, tool_name=name)
-            if guard_message:
-                return guard_message
             errors = tool.validate_params(normalized)
             if errors:
                 await self._emit_progress(f"[tool:{name}] 鍙傛暟鏍￠獙澶辫触: {'; '.join(errors)}")
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
 
+            runtime_context = self._runtime_context.get() or {}
             callback = runtime_context.get("on_progress")
             emit_lifecycle = bool(runtime_context.get("emit_lifecycle", False))
 
@@ -102,15 +98,12 @@ class ToolRegistry:
                 except Exception:
                     pass
 
-            try:
-                result = await self._execute_tool_with_runtime(
-                    tool=tool,
-                    tool_name=name,
-                    params=normalized,
-                    runtime_context=runtime_context,
-                )
-            finally:
-                record_completed_tool_round(runtime_context, tool_name=name)
+            result = await self._execute_tool_with_runtime(
+                tool=tool,
+                tool_name=name,
+                params=normalized,
+                runtime_context=runtime_context,
+            )
             if isinstance(result, str) and result.startswith("Error"):
                 await self._emit_progress(f"[tool:{name}] 鎵ц澶辫触: {result}")
                 if callback and emit_lifecycle:

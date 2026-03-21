@@ -370,10 +370,7 @@ def summarize_runtime_snapshot(
         latest_node = progress.get("latest_node") if isinstance(progress.get("latest_node"), dict) else {}
         root = progress.get("root") if isinstance(progress.get("root"), dict) else {}
         live_state = progress.get("live_state") if isinstance(progress.get("live_state"), dict) else payload.get("runtime_summary")
-        tool_steps = []
-        execution_trace = latest_node.get("execution_trace") if isinstance(latest_node, dict) else None
-        if isinstance(execution_trace, dict):
-            tool_steps = list(execution_trace.get("tool_steps") or [])
+        tool_steps = _progress_tool_steps(progress, preferred_node_id=latest_node.get("node_id"))
         if not tool_steps:
             tool_steps = _runtime_summary_tool_steps(live_state)
         recent_tools = [
@@ -389,7 +386,7 @@ def summarize_runtime_snapshot(
             live_state,
             preferred_node_id=latest_node.get("node_id"),
             limit=list_limit,
-        )
+        ) or _tool_steps_summary(tool_steps, limit=list_limit)
         latest_summary = _clip_text(
             latest_summary_source,
             limit=text_char_limit,
@@ -467,6 +464,58 @@ def summarize_runtime_snapshot(
         "snapshot_type": "scalar",
         "summary_text": _clip_text(payload, limit=text_char_limit),
     }
+
+
+
+def _progress_tool_steps(progress: Any, *, preferred_node_id: Any = '') -> list[dict[str, Any]]:
+    if not isinstance(progress, dict):
+        return []
+    preferred = str(preferred_node_id or '').strip()
+    latest_node = progress.get("latest_node") if isinstance(progress.get("latest_node"), dict) else {}
+    execution_trace = latest_node.get("execution_trace") if isinstance(latest_node, dict) else None
+    if isinstance(execution_trace, dict):
+        tool_steps = [item for item in list(execution_trace.get("tool_steps") or []) if isinstance(item, dict)]
+        if tool_steps:
+            return tool_steps
+    selected = None
+    for item in list(progress.get("nodes") or []):
+        if not isinstance(item, dict):
+            continue
+        if preferred and str(item.get("node_id") or "").strip() != preferred:
+            continue
+        selected = item
+        break
+    if selected is None and isinstance(latest_node, dict):
+        latest_node_id = str(latest_node.get("node_id") or "").strip()
+        if latest_node_id:
+            selected = next(
+                (
+                    item
+                    for item in list(progress.get("nodes") or [])
+                    if isinstance(item, dict) and str(item.get("node_id") or "").strip() == latest_node_id
+                ),
+                None,
+            )
+    if selected is None:
+        selected = next((item for item in list(progress.get("nodes") or []) if isinstance(item, dict)), None)
+    if not isinstance(selected, dict):
+        return []
+    execution_trace = selected.get("execution_trace") if isinstance(selected.get("execution_trace"), dict) else None
+    if not isinstance(execution_trace, dict):
+        return []
+    return [item for item in list(execution_trace.get("tool_steps") or []) if isinstance(item, dict)]
+
+
+def _tool_steps_summary(tool_steps: list[dict[str, Any]], *, limit: int = 3) -> str:
+    steps = [item for item in list(tool_steps or []) if isinstance(item, dict) and str(item.get("tool_name") or "").strip()]
+    if not steps:
+        return ""
+    lines = ["Recent tool calls:"]
+    for item in steps[-max(1, int(limit or 1)) :]:
+        tool_name = str(item.get("tool_name") or "tool").strip() or "tool"
+        status = str(item.get("status") or "queued").strip() or "queued"
+        lines.append(f"- {tool_name} [{status}]")
+    return "\n".join(lines)
 
 
 def _runtime_summary_tool_steps(runtime_summary: Any) -> list[dict[str, Any]]:

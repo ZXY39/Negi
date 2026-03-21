@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import difflib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -74,12 +76,14 @@ class FilesystemTool:
         allowed_dir: Path | None = None,
         artifact_store: Any = None,
         main_task_service: Any = None,
+        settings: FilesystemToolSettings | None = None,
     ) -> None:
         self._workspace = workspace
         self._allowed_dir = allowed_dir
         self._artifact_store = artifact_store
         self._main_task_service = main_task_service
         self._content_store = getattr(main_task_service, 'content_store', None) if main_task_service is not None else None
+        self._settings = settings or FilesystemToolSettings()
 
     async def execute(
         self,
@@ -113,9 +117,9 @@ class FilesystemTool:
             if operation == 'list':
                 return self._list(path)
             if operation == 'write':
-                return self._write(path, content)
+                return await self._write(path, content)
             if operation == 'edit':
-                return self._edit(path, old_text, new_text)
+                return await self._edit(path, old_text, new_text, runtime=runtime, **kwargs)
             if operation == 'delete':
                 return self._delete(path)
             if operation == 'propose_patch':
@@ -163,7 +167,17 @@ class FilesystemTool:
             missing_kind = 'Directory' if str(path).endswith(('\\', '/')) or not Path(path).suffix else 'File'
             raise FileNotFoundError(f'{missing_kind} not found: {path}')
         if resolved.is_dir():
-            hits = self._search_directory(resolved, query=needle, limit=max_hits)
+            hits, overflow = self._search_directory(resolved, query=needle, limit=max_hits)
+            if overflow:
+                return json.dumps(
+                    self._search_refine_payload(
+                        query=needle,
+                        cap=max_hits,
+                        scope_type='directory',
+                        path=str(resolved),
+                    ),
+                    ensure_ascii=False,
+                )
             return json.dumps(
                 {
                     'ok': True,
@@ -172,6 +186,12 @@ class FilesystemTool:
                     'scope_type': 'directory',
                     'hits': hits,
                     'count': len(hits),
+                    'overflow': False,
+                    'requires_refine': False,
+                    'cap': max_hits,
+                    'overflow_lower_bound': None,
+                    'message': '',
+                    'suggestions': [],
                 },
                 ensure_ascii=False,
             )
@@ -223,35 +243,133 @@ class FilesystemTool:
             return f'Directory {path} is empty'
         return '\n'.join(items)
 
-    def _write(self, path: str, content: str | None) -> str:
+    async def _write(self, path: str, content: str | None) -> str:
         if content is None:
             return 'Error: content is required when action=write'
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+        existed_before = file_path.exists()
+        original = ''
+        if existed_before and file_path.is_file():
+            original = file_path.read_text(encoding='utf-8')
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding='utf-8')
+        validation_result = await self._validate_file(
+            file_path=file_path,
+            enabled=bool(self._settings.write_validation_enabled),
+            timeout_seconds=max(1, int(self._settings.write_validation_timeout_seconds or 20)),
+            rollback_on_failure=bool(self._settings.write_validation_rollback_on_failure),
+            default_commands=list(self._settings.write_validation_default_commands or []),
+            commands_by_ext=dict(self._settings.write_validation_commands_by_ext or {}),
+            original_content=original,
+            existed_before=existed_before,
+            action_label='Write',
+        )
+        if validation_result is not None:
+            return validation_result
         self._notify_resource_change(file_path, trigger='tool:filesystem.write')
+        validated_count = int(self._validation_success_count(
+            enabled=bool(self._settings.write_validation_enabled),
+            file_path=file_path,
+            default_commands=list(self._settings.write_validation_default_commands or []),
+            commands_by_ext=dict(self._settings.write_validation_commands_by_ext or {}),
+        ) or 0)
+        if validated_count > 0:
+            return f'Successfully wrote {len(content)} bytes to {file_path} (validated by {validated_count} command(s))'
         return f'Successfully wrote {len(content)} bytes to {file_path}'
 
-    def _edit(self, path: str, old_text: str | None, new_text: str | None) -> str:
-        if old_text is None:
-            return 'Error: old_text is required when action=edit'
-        if new_text is None:
-            return 'Error: new_text is required when action=edit'
+    async def _edit(
+        self,
+        path: str,
+        old_text: str | None,
+        new_text: str | None,
+        *,
+        runtime: dict[str, Any],
+        start_line: Any = None,
+        end_line: Any = None,
+        replacement: str | None = None,
+        **_: Any,
+    ) -> str:
+        text_mode = old_text is not None or new_text is not None
+        range_mode = start_line is not None or end_line is not None or replacement is not None
+        if text_mode and range_mode:
+            return 'Error: edit requires exactly one mode: text-replace or line-range'
+        if not text_mode and not range_mode:
+            return 'Error: edit requires exactly one mode: text-replace or line-range'
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
         if not file_path.exists():
             return f'Error: File not found: {path}'
         if not file_path.is_file():
             return f'Error: Not a file: {path}'
-        content = file_path.read_text(encoding='utf-8')
+        original = file_path.read_text(encoding='utf-8')
+        if text_mode:
+            if old_text is None:
+                return 'Error: old_text is required when action=edit in text-replace mode'
+            if new_text is None:
+                return 'Error: new_text is required when action=edit in text-replace mode'
+            updated_or_error = self._edit_by_text(path=path, content=original, old_text=old_text, new_text=new_text)
+        else:
+            updated_or_error = self._edit_by_range(
+                path=path,
+                content=original,
+                start_line=start_line,
+                end_line=end_line,
+                replacement=replacement,
+            )
+        if isinstance(updated_or_error, str) and updated_or_error.startswith(('Error:', 'Warning:')):
+            return updated_or_error
+        updated = str(updated_or_error)
+        file_path.write_text(updated, encoding='utf-8')
+        validation_result = await self._validate_file(
+            file_path=file_path,
+            enabled=bool(self._settings.edit_validation_enabled),
+            timeout_seconds=max(1, int(self._settings.edit_validation_timeout_seconds or 20)),
+            rollback_on_failure=bool(self._settings.edit_validation_rollback_on_failure),
+            default_commands=list(self._settings.edit_validation_default_commands or []),
+            commands_by_ext=dict(self._settings.edit_validation_commands_by_ext or {}),
+            original_content=original,
+            existed_before=True,
+            action_label='Edit',
+        )
+        if validation_result is not None:
+            return validation_result
+        self._notify_resource_change(file_path, trigger='tool:filesystem.edit')
+        validated_count = int(self._validation_success_count(
+            enabled=bool(self._settings.edit_validation_enabled),
+            file_path=file_path,
+            default_commands=list(self._settings.edit_validation_default_commands or []),
+            commands_by_ext=dict(self._settings.edit_validation_commands_by_ext or {}),
+        ) or 0)
+        if validated_count > 0:
+            return f'Successfully edited {file_path} (validated by {validated_count} command(s))'
+        return f'Successfully edited {file_path}'
+
+    @staticmethod
+    def _edit_by_text(*, path: str, content: str, old_text: str, new_text: str) -> str:
         if old_text not in content:
-            return self._not_found_message(old_text, content, path)
+            return FilesystemTool._not_found_message(old_text, content, path)
         count = content.count(old_text)
         if count > 1:
             return f'Warning: old_text appears {count} times. Please provide more context to make it unique.'
-        updated = content.replace(old_text, new_text, 1)
-        file_path.write_text(updated, encoding='utf-8')
-        self._notify_resource_change(file_path, trigger='tool:filesystem.edit')
-        return f'Successfully edited {file_path}'
+        return content.replace(old_text, new_text, 1)
+
+    @staticmethod
+    def _edit_by_range(*, path: str, content: str, start_line: Any, end_line: Any, replacement: str | None) -> str:
+        if start_line is None or end_line is None:
+            return 'Error: start_line and end_line are required when action=edit in line-range mode'
+        try:
+            start = int(start_line)
+            end = int(end_line)
+        except (TypeError, ValueError):
+            return 'Error: invalid line range'
+        lines = content.splitlines(keepends=True)
+        if start < 1 or end < start or end > len(lines):
+            return 'Error: invalid line range'
+        replacement_text = '' if replacement is None else str(replacement)
+        replacement_lines = replacement_text.splitlines(keepends=True)
+        if replacement_text and not replacement_lines:
+            replacement_lines = [replacement_text]
+        updated_lines = lines[: start - 1] + replacement_lines + lines[end:]
+        return ''.join(updated_lines)
 
     def _delete(self, path: str) -> str:
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
@@ -363,13 +481,14 @@ class FilesystemTool:
         )
 
     @staticmethod
-    def _search_directory(path: Path, *, query: str, limit: int) -> list[dict[str, Any]]:
+    def _search_directory(path: Path, *, query: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
         try:
             pattern = re.compile(query, re.IGNORECASE)
         except re.error:
             pattern = re.compile(re.escape(query), re.IGNORECASE)
 
         hits: list[dict[str, Any]] = []
+        total_matches = 0
         for file_path in sorted(path.rglob('*')):
             if not file_path.is_file():
                 continue
@@ -380,6 +499,9 @@ class FilesystemTool:
                             raise UnicodeDecodeError('utf-8', b'\x00', 0, 1, 'binary content')
                         if not pattern.search(line):
                             continue
+                        total_matches += 1
+                        if total_matches > limit:
+                            return hits, True
                         hits.append(
                             {
                                 'path': str(file_path.resolve()),
@@ -387,11 +509,208 @@ class FilesystemTool:
                                 'preview': line.strip()[:240],
                             }
                         )
-                        if len(hits) >= limit:
-                            return hits
             except (OSError, UnicodeDecodeError):
                 continue
-        return hits
+        return hits, False
+
+    def _search_refine_payload(self, *, query: str, cap: int, scope_type: str, path: str) -> dict[str, Any]:
+        suggestions = [
+            'Use a more specific symbol, function name, or field name.',
+            'Narrow the path to a smaller file or directory before searching again.',
+        ]
+        if scope_type == 'file':
+            suggestions.append('Open a local excerpt first, then search within that smaller context.')
+        else:
+            suggestions.append('List or describe the directory first, then search a smaller subtree.')
+            suggestions.append('Limit the query to a filename pattern or extension before retrying.')
+        return {
+            'ok': True,
+            'path': path,
+            'query': query,
+            'scope_type': scope_type,
+            'hits': [],
+            'count': 0,
+            'overflow': True,
+            'requires_refine': True,
+            'cap': cap,
+            'overflow_lower_bound': cap + 1,
+            'message': f'Search matched more than {cap} results. Refine the query before retrying.',
+            'suggestions': suggestions,
+        }
+
+    async def _validate_file(
+        self,
+        *,
+        file_path: Path,
+        enabled: bool,
+        timeout_seconds: int,
+        rollback_on_failure: bool,
+        default_commands: list[str],
+        commands_by_ext: dict[str, list[str]],
+        original_content: str,
+        existed_before: bool,
+        action_label: str,
+    ) -> str | None:
+        if not bool(enabled):
+            return None
+        commands = self._validation_commands_for(file_path, default_commands=default_commands, commands_by_ext=commands_by_ext)
+        if not commands:
+            return None
+        workspace = Path(self._workspace or file_path.parent).resolve()
+        for template in commands:
+            command = self._format_validation_command(template=template, file_path=file_path, workspace=workspace)
+            result = await self._run_validation_command(
+                command=command,
+                cwd=str(workspace),
+                timeout_seconds=timeout_seconds,
+            )
+            if not bool(result.get('ok')):
+                rollback_applied = False
+                if rollback_on_failure:
+                    try:
+                        if existed_before:
+                            file_path.write_text(original_content, encoding='utf-8')
+                        elif file_path.exists():
+                            file_path.unlink()
+                        rollback_applied = True
+                    except Exception:
+                        rollback_applied = False
+                preview = self._validation_error_preview(result)
+                failure_suffix = ' after rollback' if rollback_applied else ' without rollback'
+                return f"Error: {action_label} validation failed for {file_path}{failure_suffix}. Validation command failed: {command}. {preview}".strip()
+        return None
+
+    def _validation_commands_for(
+        self,
+        file_path: Path,
+        *,
+        default_commands: list[str],
+        commands_by_ext: dict[str, list[str]],
+    ) -> list[str]:
+        mapping = dict(commands_by_ext or {})
+        ext = str(file_path.suffix or '').lower()
+        if ext and mapping.get(ext):
+            return [str(item) for item in list(mapping.get(ext) or []) if str(item or '').strip()]
+        return [str(item) for item in list(default_commands or []) if str(item or '').strip()]
+
+    def _validation_success_count(
+        self,
+        *,
+        enabled: bool,
+        file_path: Path,
+        default_commands: list[str],
+        commands_by_ext: dict[str, list[str]],
+    ) -> int:
+        if not enabled:
+            return 0
+        return len(self._validation_commands_for(file_path, default_commands=default_commands, commands_by_ext=commands_by_ext))
+
+    def _format_validation_command(self, *, template: str, file_path: Path, workspace: Path) -> str:
+        relative_path = str(file_path.resolve().relative_to(workspace)).replace('\\', '/') if file_path.resolve().is_relative_to(workspace) else file_path.name
+        replacements = {
+            '{path}': self._quote_shell_value(str(file_path.resolve())),
+            '{relative_path}': self._quote_shell_value(relative_path),
+            '{workspace}': self._quote_shell_value(str(workspace.resolve())),
+        }
+        rendered = str(template or '')
+        for key, value in replacements.items():
+            rendered = rendered.replace(key, value)
+        return rendered
+
+    @staticmethod
+    def _quote_shell_value(value: str) -> str:
+        text = str(value or '')
+        if os.name == 'nt':
+            return "'" + text.replace("'", "''") + "'"
+        escaped = text.replace("'", "'\"'\"'")
+        return f"'{escaped}'"
+
+    async def _run_validation_command(self, *, command: str, cwd: str, timeout_seconds: int) -> dict[str, Any]:
+        try:
+            if os.name == 'nt':
+                process = await asyncio.create_subprocess_exec(
+                    *self._windows_shell_argv(command),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=os.environ.copy(),
+                )
+            else:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=os.environ.copy(),
+                )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                process.kill()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+                return {
+                    'ok': False,
+                    'timed_out': True,
+                    'exit_code': None,
+                    'stdout': '',
+                    'stderr': f'Validation command timed out after {timeout_seconds} seconds',
+                }
+            return {
+                'ok': process.returncode == 0,
+                'timed_out': False,
+                'exit_code': process.returncode,
+                'stdout': stdout.decode('utf-8', errors='replace') if stdout else '',
+                'stderr': stderr.decode('utf-8', errors='replace') if stderr else '',
+            }
+        except Exception as exc:
+            return {
+                'ok': False,
+                'timed_out': False,
+                'exit_code': None,
+                'stdout': '',
+                'stderr': str(exc),
+            }
+
+    @staticmethod
+    def _validation_error_preview(result: dict[str, Any]) -> str:
+        timed_out = bool(result.get('timed_out'))
+        exit_code = result.get('exit_code')
+        stdout_text = str(result.get('stdout') or '').strip()
+        stderr_text = str(result.get('stderr') or '').strip()
+        parts: list[str] = []
+        if timed_out:
+            parts.append('timed out')
+        if exit_code not in {None, ''}:
+            parts.append(f'exit_code={exit_code}')
+        if stderr_text:
+            parts.append(f"stderr={stderr_text.splitlines()[0][:240]}")
+        elif stdout_text:
+            parts.append(f"stdout={stdout_text.splitlines()[0][:240]}")
+        return '; '.join(parts)
+
+    @staticmethod
+    def _windows_shell_argv(command: str) -> list[str]:
+        return [
+            FilesystemTool._windows_powershell_executable(),
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            command,
+        ]
+
+    @staticmethod
+    def _windows_powershell_executable() -> str:
+        system_root = str(os.environ.get('SystemRoot') or os.environ.get('WINDIR') or '').strip()
+        if system_root:
+            candidate = Path(system_root) / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'
+            if candidate.exists():
+                return str(candidate)
+        return 'powershell.exe'
 
     def _notify_resource_change(self, path: Path, *, trigger: str) -> None:
         service = self._main_task_service
@@ -414,4 +733,5 @@ def build(runtime):
         allowed_dir=allowed_dir,
         artifact_store=artifact_store,
         main_task_service=service,
+        settings=settings,
     )

@@ -1479,6 +1479,49 @@ async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_admin_endpoints_expose_builtin_agent_browser_fields(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'agent_browser')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        client = TestClient(_build_app(service))
+
+        item_response = client.get('/api/resources/tools/agent_browser')
+        assert item_response.status_code == 200
+        item = item_response.json()['item']
+        assert item['tool_type'] == 'internal'
+        assert item['callable'] is True
+        assert item['install_dir'] is None
+        assert item['actions'][0]['action_id'] == 'browse'
+        assert item['actions'][0]['allowed_roles'] == ['ceo', 'execution']
+
+        toolskill_response = client.get('/api/resources/tools/agent_browser/toolskill')
+        assert toolskill_response.status_code == 200
+        payload = toolskill_response.json()
+        assert payload['tool_type'] == 'internal'
+        assert payload['callable'] is True
+        assert '## 安装' in payload['content']
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

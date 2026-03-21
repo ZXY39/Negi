@@ -21,7 +21,7 @@ class SpawnChildNodesTool(Tool):
 
     @property
     def description(self) -> str:
-        return '并发创建多个子节点。只有在子任务范围广、复杂度高或需要复核时，才为该子节点追加验收节点。'
+        return '并发创建多个子节点。'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -38,7 +38,7 @@ class SpawnChildNodesTool(Tool):
                 },
                 'requires_acceptance': {
                     'type': 'boolean',
-                    'description': '是否需要为该子节点追加验收节点。仅在范围广、复杂度高或需要一致性复核时设为 true。',
+                    'description': '是否需要为该子节点追加验收节点。仅在范围广、复杂度高，出错代价大，或需要一致性复核时设为 true。',
                 },
                 'acceptance_prompt': {
                     'type': 'string',

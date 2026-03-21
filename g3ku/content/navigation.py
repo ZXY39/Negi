@@ -50,6 +50,29 @@ def _tail_preview_text(text: str, *, lines: int, max_chars: int = _PREVIEW_CHAR_
     return selected[:max_chars].rstrip() + "..."
 
 
+def _search_refine_payload(*, query: str, cap: int, ref: str, handle: ContentHandle, scope_type: str = 'file') -> dict[str, Any]:
+    suggestions = [
+        'Use a more specific symbol, function name, or field name.',
+        'Open a narrower excerpt first, then search within that smaller context.',
+        'Reduce the path or file scope before retrying the same query.',
+    ]
+    return {
+        'ok': True,
+        'ref': ref,
+        'handle': handle.to_dict(),
+        'query': query,
+        'scope_type': scope_type,
+        'hits': [],
+        'count': 0,
+        'overflow': True,
+        'requires_refine': True,
+        'cap': cap,
+        'overflow_lower_bound': cap + 1,
+        'message': f'Search matched more than {cap} results. Refine the query before retrying.',
+        'suggestions': suggestions,
+    }
+
+
 def _display_name(display_name: str, *, source_kind: str, fallback: str) -> str:
     return str(display_name or "").strip() or str(fallback or "").strip() or str(source_kind or "content")
 
@@ -422,9 +445,13 @@ class ContentNavigationService:
             pattern = re.compile(needle, re.IGNORECASE)
         except re.error:
             pattern = re.compile(re.escape(needle), re.IGNORECASE)
+        total_matches = 0
         for index, line in enumerate(lines):
             if not pattern.search(line):
                 continue
+            total_matches += 1
+            if total_matches > max_hits:
+                return _search_refine_payload(query=needle, cap=max_hits, ref=handle.ref, handle=handle)
             start = max(0, index - before_count)
             end = min(len(lines), index + after_count + 1)
             results.append(
@@ -433,8 +460,6 @@ class ContentNavigationService:
                     "preview": "\n".join(lines[start:end]).strip(),
                 }
             )
-            if len(results) >= max_hits:
-                break
         return {
             "ok": True,
             "ref": handle.ref,
@@ -442,6 +467,12 @@ class ContentNavigationService:
             "query": needle,
             "hits": results,
             "count": len(results),
+            "overflow": False,
+            "requires_refine": False,
+            "cap": max_hits,
+            "overflow_lower_bound": None,
+            "message": "",
+            "suggestions": [],
         }
 
     def _excerpt(self, *, ref: str | None = None, path: str | None = None, start_line: int, end_line: int) -> dict[str, Any]:

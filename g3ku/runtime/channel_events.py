@@ -5,7 +5,6 @@ from typing import Any, Awaitable, Callable
 from g3ku.bus.events import OutboundMessage
 from g3ku.bus.queue import MessageBus
 from g3ku.core.events import AgentEvent
-from g3ku.runtime.bridge import build_state_snapshot, build_structured_event, cli_event_text
 
 
 async def publish_channel_event(
@@ -46,44 +45,8 @@ def build_channel_outbound_message(
     seq: int,
     base_metadata: dict[str, Any] | None = None,
 ) -> OutboundMessage | None:
-    event_type = str(getattr(event, "type", "") or "")
-    if event_type in {"state_snapshot", "agent_start", "agent_end", "turn_start", "turn_end", "message_start"}:
-        return None
-    if event_type == "message_end" and str((event.payload or {}).get("role") or "") == "assistant":
-        return None
-
-    kind, text = cli_event_text(event)
-    if not text:
-        return None
-
-    metadata = dict(base_metadata or {})
-    metadata.update(
-        {
-            "_session_event": True,
-            "_progress": True,
-            "_tool_hint": kind == "tool_plan",
-            "_progress_kind": kind or "progress",
-            "_agent_event": build_structured_event(
-                event,
-                session_id=str(getattr(getattr(session, "state", None), "session_key", "") or ""),
-                run_id=run_id,
-                turn_id=turn_id,
-                seq=seq,
-            ),
-            "_state_snapshot": build_state_snapshot(
-                session,
-                session_id=str(getattr(getattr(session, "state", None), "session_key", "") or ""),
-                run_id=run_id,
-                turn_id=turn_id,
-            ),
-        }
-    )
-    return OutboundMessage(
-        channel=channel,
-        chat_id=chat_id,
-        content=text,
-        metadata=metadata,
-    )
+    _ = event, session, channel, chat_id, run_id, turn_id, seq, base_metadata
+    return None
 
 
 def make_channel_event_listener(

@@ -260,7 +260,7 @@ async def test_ceo_frontdoor_runner_binds_stable_prompt_cache_key(monkeypatch, t
     create_agent_calls: list[dict[str, object]] = []
     agent_invocations: list[dict[str, object]] = []
 
-    def _fake_create_agent(*, model, tools, checkpointer, store, name):
+    def _fake_create_agent(*, model, tools, checkpointer, store, name, middleware=()):
         create_agent_calls.append(
             {
                 'model': model,
@@ -268,6 +268,7 @@ async def test_ceo_frontdoor_runner_binds_stable_prompt_cache_key(monkeypatch, t
                 'checkpointer': checkpointer,
                 'store': store,
                 'name': name,
+                'middleware': middleware,
             }
         )
 
