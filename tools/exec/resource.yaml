@@ -25,6 +25,7 @@ settings:
   timeout: 60
   path_append: ''
   restrict_to_workspace: false
+  enable_safety_guard: false
 parameters:
   type: object
   properties:

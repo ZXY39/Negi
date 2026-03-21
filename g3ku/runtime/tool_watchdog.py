@@ -385,12 +385,10 @@ def summarize_runtime_snapshot(
             for item in tool_steps[-list_limit:]
             if isinstance(item, dict)
         ]
-        latest_summary_source = (
-            latest_node.get("output")
-            or _runtime_summary_phase_and_tools(live_state, preferred_node_id=latest_node.get("node_id"), limit=list_limit)
-            or progress.get("text")
-            or root.get("goal")
-            or ""
+        latest_summary_source = latest_node.get("output") or _runtime_summary_tool_calls_summary(
+            live_state,
+            preferred_node_id=latest_node.get("node_id"),
+            limit=list_limit,
         )
         latest_summary = _clip_text(
             latest_summary_source,
@@ -491,7 +489,7 @@ def _runtime_summary_tool_steps(runtime_summary: Any) -> list[dict[str, Any]]:
     return collected
 
 
-def _runtime_summary_phase_and_tools(
+def _runtime_summary_tool_calls_summary(
     runtime_summary: Any,
     *,
     preferred_node_id: Any = "",
@@ -519,9 +517,6 @@ def _runtime_summary_phase_and_tools(
     if selected is None:
         selected = frames[0]
     lines: list[str] = []
-    phase = str(selected.get("phase") or "").strip()
-    if phase:
-        lines.append(f"Current phase: {phase}")
     tool_calls = [item for item in list(selected.get("tool_calls") or []) if isinstance(item, dict) and str(item.get("tool_name") or "").strip()]
     if tool_calls:
         lines.append("Recent tool calls:")

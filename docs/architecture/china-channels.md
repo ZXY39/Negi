@@ -55,7 +55,13 @@ The only supported communication config path is:
 
 Top-level `channels.*` is no longer supported. Startup fails fast if any legacy channel config is present.
 
+When `chinaBridge.enabled=true` and `chinaBridge.autoStart=true`, G3KU also auto-checks
+`subsystems/china_channels_host` on startup and builds it before launch if `dist/` is missing or stale.
+
 ## Session Keys
+
+The control WebSocket between Node and Python is global and is not bound to a single session at connect time.
+Python resolves the destination session for each inbound message independently.
 
 Python generates all session keys with this format:
 

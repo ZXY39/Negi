@@ -3,15 +3,18 @@ from __future__ import annotations
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from loguru import logger
 
 from g3ku.agent.chatmodel_utils import ensure_chat_model
 from g3ku.integrations.langchain_runtime import extract_final_response
 from g3ku.providers.chatmodels import build_chat_model
+from g3ku.runtime.ceo_async_task_guard import build_guard_state
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.context import ContextAssemblyService
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
+from main.runtime.chat_backend import build_stable_prompt_cache_key
 
 
 class CeoFrontDoorRunner:
@@ -52,6 +55,25 @@ class CeoFrontDoorRunner:
     @staticmethod
     def _model_content(value: Any) -> Any:
         return value if isinstance(value, list) else str(value or '')
+
+    @staticmethod
+    def _provider_model_ref(model_client: Any, model_chain: list[str]) -> str:
+        default_model = str(getattr(model_client, 'default_model', '') or '').strip()
+        if default_model:
+            return default_model
+        return str(model_chain[0] if model_chain else '').strip()
+
+    @staticmethod
+    def _tool_schemas(tools: list[Any]) -> list[dict[str, Any]]:
+        schemas: list[dict[str, Any]] = []
+        for tool in list(tools or []):
+            try:
+                schema = convert_to_openai_tool(tool)
+            except Exception:
+                continue
+            if isinstance(schema, dict):
+                schemas.append(schema)
+        return schemas
 
     def _resolve_ceo_model_client(self) -> tuple[Any, list[str]]:
         refresh_loop_runtime_config(self._loop, force=False, reason="ceo_model_client")
@@ -133,6 +155,7 @@ class CeoFrontDoorRunner:
             'on_progress': on_progress,
             'emit_lifecycle': True,
             'actor_role': 'ceo',
+            'ceo_async_task_guard_state': build_guard_state(),
             'session_key': session.state.session_key,
             'channel': getattr(session, '_channel', 'cli'),
             'chat_id': getattr(session, '_chat_id', session.state.session_key),
@@ -147,8 +170,15 @@ class CeoFrontDoorRunner:
         try:
             tools = self._loop.tools.to_langchain_tools_filtered(tool_names)
             model_client, model_chain = self._resolve_ceo_model_client()
+            provider_model = self._provider_model_ref(model_client, model_chain)
+            stable_prompt_cache_key = build_stable_prompt_cache_key(
+                messages,
+                self._tool_schemas(tools),
+                provider_model,
+            )
+            bound_model_client = model_client.bind(prompt_cache_key=stable_prompt_cache_key)
             agent = create_agent(
-                model=model_client,
+                model=bound_model_client,
                 tools=tools,
                 checkpointer=getattr(self._loop, '_checkpointer', None),
                 store=getattr(self._loop, '_store', None),

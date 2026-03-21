@@ -6690,99 +6690,257 @@ function normalizeCommunicationJsonText(text) {
     const source = String(text || "").trim();
     if (!source) return "{}";
     try {
-        return JSON.stringify(JSON.parse(source), null, 2);
+        return JSON.stringify(parseCommunicationJsonText(source), null, 2);
     } catch {
         return source;
     }
 }
 
+function stripJsonComments(text) {
+    const source = String(text || "");
+    let result = "";
+    let quote = "";
+    let escaped = false;
+    let inLineComment = false;
+    let inBlockComment = false;
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        const next = source[index + 1];
+        if (inLineComment) {
+            if (char === "\n" || char === "\r") {
+                inLineComment = false;
+                result += char;
+            }
+            continue;
+        }
+        if (inBlockComment) {
+            if (char === "*" && next === "/") {
+                inBlockComment = false;
+                index += 1;
+                continue;
+            }
+            if (char === "\n" || char === "\r") result += char;
+            continue;
+        }
+        if (quote) {
+            result += char;
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (char === "\\") {
+                escaped = true;
+                continue;
+            }
+            if (char === quote) {
+                quote = "";
+            }
+            continue;
+        }
+        if (char === '"' || char === "'") {
+            quote = char;
+            result += char;
+            continue;
+        }
+        if (char === "/" && next === "/") {
+            inLineComment = true;
+            index += 1;
+            continue;
+        }
+        if (char === "/" && next === "*") {
+            inBlockComment = true;
+            index += 1;
+            continue;
+        }
+        result += char;
+    }
+    return result;
+}
+
+function removeJsonTrailingCommas(text) {
+    const source = String(text || "");
+    let result = "";
+    let quote = "";
+    let escaped = false;
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (quote) {
+            result += char;
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (char === "\\") {
+                escaped = true;
+                continue;
+            }
+            if (char === quote) {
+                quote = "";
+            }
+            continue;
+        }
+        if (char === '"' || char === "'") {
+            quote = char;
+            result += char;
+            continue;
+        }
+        if (char === ",") {
+            let lookahead = index + 1;
+            while (lookahead < source.length && /\s/.test(source[lookahead])) {
+                lookahead += 1;
+            }
+            if (source[lookahead] === "}" || source[lookahead] === "]") {
+                continue;
+            }
+        }
+        result += char;
+    }
+    return result;
+}
+
+function sanitizeCommunicationJsonText(text) {
+    return removeJsonTrailingCommas(stripJsonComments(text));
+}
+
+function parseCommunicationJsonText(text) {
+    const source = sanitizeCommunicationJsonText(text).trim();
+    if (!source) return {};
+    return JSON.parse(source);
+}
+
+function buildCommunicationJsonTemplate(text) {
+    return String(text || "").trim();
+}
+
 const COMMUNICATION_JSON_TEMPLATES = {
-    qqbot: {
-        appId: "your-qq-app-id",
-        clientSecret: "your-qq-client-secret",
-        webhookPath: "/qqbot/callback",
-        mode: "webhook",
-        accounts: {
-            default: {
-                name: "default",
-                token: "your-qq-bot-token",
-                appId: "your-qq-app-id",
-                clientSecret: "your-qq-client-secret",
-            },
-        },
-    },
-    dingtalk: {
-        clientId: "your-dingtalk-client-id",
-        clientSecret: "your-dingtalk-client-secret",
-        connectionMode: "stream",
-        webhookPath: "/dingtalk/callback",
-        accounts: {
-            default: {
-                name: "default",
-                clientId: "your-dingtalk-client-id",
-                clientSecret: "your-dingtalk-client-secret",
-                connectionMode: "stream",
-            },
-        },
-    },
-    wecom: {
-        botId: "your-wecom-bot-id",
-        secret: "your-wecom-bot-secret",
-        token: "your-wecom-token",
-        encodingAesKey: "your-wecom-encoding-aes-key",
-        mode: "ws",
-        webhookPath: "/wecom",
-        accounts: {
-            default: {
-                name: "default",
-                botId: "your-wecom-bot-id",
-                secret: "your-wecom-bot-secret",
-                token: "your-wecom-token",
-                encodingAesKey: "your-wecom-encoding-aes-key",
-                mode: "ws",
-            },
-        },
-    },
-    wecomApp: {
-        corpId: "your-wecom-corp-id",
-        corpSecret: "your-wecom-corp-secret",
-        agentId: 1000001,
-        token: "your-wecom-app-token",
-        encodingAesKey: "your-wecom-app-encoding-aes-key",
-        webhookPath: "/wecom-app",
-        accounts: {
-            default: {
-                name: "default",
-                corpId: "your-wecom-corp-id",
-                corpSecret: "your-wecom-corp-secret",
-                agentId: 1000001,
-                token: "your-wecom-app-token",
-                encodingAesKey: "your-wecom-app-encoding-aes-key",
-            },
-        },
-    },
-    feishuChina: {
-        appId: "your-feishu-app-id",
-        appSecret: "your-feishu-app-secret",
-        token: "your-feishu-verification-token",
-        webhookPath: "/feishu",
-        mode: "websocket",
-        accounts: {
-            default: {
-                name: "default",
-                appId: "your-feishu-app-id",
-                appSecret: "your-feishu-app-secret",
-                token: "your-feishu-verification-token",
-                mode: "websocket",
-            },
-        },
-    },
+    qqbot: buildCommunicationJsonTemplate(`
+{
+  // 必填：QQ 机器人 AppId
+  "appId": "your-qq-app-id",
+  // 必填：QQ 机器人 Client Secret
+  "clientSecret": "your-qq-client-secret",
+
+  // 可选：是否启用 Markdown 发送，默认 true
+  // "markdownSupport": true,
+
+  // 可选：多账号时指定默认账号 ID
+  // "defaultAccount": "default",
+
+  // 可选：多账号配置；单账号时可不填
+  // "accounts": {
+  //   "default": {
+  //     "appId": "your-qq-app-id",
+  //     "clientSecret": "your-qq-client-secret"
+  //   }
+  // }
+}
+`),
+    dingtalk: buildCommunicationJsonTemplate(`
+{
+  // 必填：钉钉应用 AppKey
+  "clientId": "your-dingtalk-client-id",
+  // 必填：钉钉应用 AppSecret
+  "clientSecret": "your-dingtalk-client-secret",
+
+  // 可选：启用 AI Card 回复
+  // "enableAICard": true,
+
+  // 可选：Gateway 鉴权 token；未配置时走全局 gateway.auth.token
+  // "gatewayToken": "your-dingtalk-gateway-token",
+
+  // 可选：多账号时指定默认账号 ID
+  // "defaultAccount": "default",
+
+  // 可选：多账号配置；单账号时可不填
+  // "accounts": {
+  //   "default": {
+  //     "clientId": "your-dingtalk-client-id",
+  //     "clientSecret": "your-dingtalk-client-secret"
+  //   }
+  // }
+}
+`),
+    wecom: buildCommunicationJsonTemplate(`
+{
+  // 必填（ws 模式，默认）：企业微信机器人 BotId
+  "botId": "your-wecom-bot-id",
+  // 必填（ws 模式，默认）：企业微信机器人 Secret
+  "secret": "your-wecom-bot-secret",
+
+  // 可选：连接模式。默认 "ws"；改成 "webhook" 后需填写 token + encodingAESKey
+  // "mode": "ws",
+
+  // 可选（webhook 模式必填）：回调校验 Token
+  // "token": "your-wecom-token",
+  // 可选（webhook 模式必填）：回调加解密 EncodingAESKey
+  // "encodingAESKey": "your-wecom-encoding-aes-key",
+  // 可选（webhook 模式）：回调路径，默认 "/wecom"
+  // "webhookPath": "/wecom",
+
+  // 可选：多账号时指定默认账号 ID
+  // "defaultAccount": "default",
+
+  // 可选：多账号配置；单账号时可不填
+  // "accounts": {
+  //   "default": {
+  //     "botId": "your-wecom-bot-id",
+  //     "secret": "your-wecom-bot-secret"
+  //   }
+  // }
+}
+`),
+    wecomApp: buildCommunicationJsonTemplate(`
+{
+  // 必填：企业微信应用回调 Token
+  "token": "your-wecom-app-token",
+  // 必填：企业微信应用回调 EncodingAESKey
+  "encodingAESKey": "your-wecom-app-encoding-aes-key",
+
+  // 可选：回调路径，默认 "/wecom-app"
+  // "webhookPath": "/wecom-app",
+
+  // 可选：如需主动发消息，再填写下面 3 项
+  // "corpId": "your-wecom-corp-id",
+  // "corpSecret": "your-wecom-corp-secret",
+  // "agentId": 1000001,
+
+  // 可选：多账号时指定默认账号 ID
+  // "defaultAccount": "default",
+
+  // 可选：多账号配置；单账号时可不填
+  // "accounts": {
+  //   "default": {
+  //     "token": "your-wecom-app-token",
+  //     "encodingAESKey": "your-wecom-app-encoding-aes-key",
+  //     "corpId": "your-wecom-corp-id",
+  //     "corpSecret": "your-wecom-corp-secret",
+  //     "agentId": 1000001
+  //   }
+  // }
+}
+`),
+    feishuChina: buildCommunicationJsonTemplate(`
+{
+  // 必填：飞书应用 App ID
+  "appId": "your-feishu-app-id",
+  // 必填：飞书应用 App Secret
+  "appSecret": "your-feishu-app-secret",
+
+  // 可选：连接模式，当前仅支持 websocket
+  // "connectionMode": "websocket",
+
+  // 可选：Markdown 消息按卡片发送，默认 true
+  // "sendMarkdownAsCard": true,
+
+  // 可选：仅发送最终回复，关闭流式中间消息
+  // "replyFinalOnly": false
+}
+`),
 };
 
 function getCommunicationTemplate(channelId) {
     const key = String(channelId || "").trim();
-    const template = COMMUNICATION_JSON_TEMPLATES[key];
-    return template ? JSON.parse(JSON.stringify(template)) : {};
+    return String(COMMUNICATION_JSON_TEMPLATES[key] || "{}").trim();
 }
 
 function syncCommunicationDirtyState() {
@@ -6899,7 +7057,7 @@ function renderCommunicationDetail() {
                 <div class="resource-draft-hint${S.communicationDirty ? " is-dirty" : ""}" ${S.communicationDirty ? "" : "hidden"}></div>
                 <div class="resource-section">
                     <h3>JSON 配置</h3>
-                    <div class="resource-copy-block">此处仅编辑该渠道的 JSON 配置对象；启用状态请使用上方开关。</div>
+                    <div class="resource-copy-block">此处仅编辑该渠道的 JSON 配置对象；启用状态请使用上方开关。支持 <code>//</code> 与 <code>/* ... */</code> 注释，保存时会自动去除注释和多余逗号。</div>
                     <div class="communication-section-head">
                         <span class="communication-section-spacer" aria-hidden="true"></span>
                         <button type="button" class="toolbar-btn ghost small" id="communication-load-template-btn">加载模板</button>
@@ -6936,7 +7094,7 @@ function renderCommunicationDetail() {
     });
     U.communicationDetail.querySelector("#communication-load-template-btn")?.addEventListener("click", () => {
         const template = getCommunicationTemplate(item.id);
-        S.communicationDraftText = JSON.stringify(template, null, 2);
+        S.communicationDraftText = template;
         const editor = U.communicationDetail.querySelector("#communication-json-editor");
         if (editor) editor.value = S.communicationDraftText;
         syncCommunicationDirtyState();
@@ -7028,7 +7186,7 @@ async function saveCommunication() {
     }
     let configPayload = {};
     try {
-        configPayload = JSON.parse(S.communicationDraftText || "{}");
+        configPayload = parseCommunicationJsonText(S.communicationDraftText || "{}");
         if (!configPayload || typeof configPayload !== "object" || Array.isArray(configPayload)) {
             throw new Error("JSON 配置必须是对象");
         }

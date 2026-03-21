@@ -31,3 +31,23 @@ async def test_exec_tool_runs_pwd_on_windows() -> None:
 
     assert payload['status'] == 'success'
     assert payload['exit_code'] == 0
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_safety_guard_disabled_by_default() -> None:
+    tool = ExecTool()
+    payload = json.loads(await tool.execute(command='echo shutdown', __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'success'
+    assert payload['exit_code'] == 0
+    assert 'shutdown' in payload['head_preview'].lower()
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_can_explicitly_enable_safety_guard() -> None:
+    tool = ExecTool(enable_safety_guard=True)
+    payload = json.loads(await tool.execute(command='echo shutdown', __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'error'
+    assert payload['exit_code'] is None
+    assert 'dangerous pattern detected' in payload['error'].lower()

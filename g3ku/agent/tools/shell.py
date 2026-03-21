@@ -21,6 +21,7 @@ class ExecTool(Tool):
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
+        enable_safety_guard: bool = False,
         path_append: str = "",
         content_store: Any = None,
         main_task_service: Any = None,
@@ -41,6 +42,7 @@ class ExecTool(Tool):
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
+        self.enable_safety_guard = enable_safety_guard
         self.path_append = path_append
         self.content_store = content_store
         self.main_task_service = main_task_service
@@ -171,6 +173,9 @@ class ExecTool(Tool):
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""
+        if not self.enable_safety_guard:
+            return None
+
         cmd = command.strip()
         lower = cmd.lower()
 

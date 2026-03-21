@@ -303,6 +303,7 @@ class ProviderChatModelAdapter(BaseChatModel):
         requested_tool_choice = kwargs.get("tool_choice")
         normalized_tool_choice = _normalize_tool_choice(requested_tool_choice)
         parallel_tool_calls = kwargs.get("parallel_tool_calls")
+        prompt_cache_key = kwargs.get("prompt_cache_key")
 
         model = str(kwargs.get("model") or self.default_model)
         temperature = float(kwargs.get("temperature", self.default_temperature))
@@ -322,6 +323,7 @@ class ProviderChatModelAdapter(BaseChatModel):
             parallel_tool_calls=(
                 bool(parallel_tool_calls) if isinstance(parallel_tool_calls, bool) else None
             ),
+            prompt_cache_key=(str(prompt_cache_key).strip() or None) if prompt_cache_key is not None else None,
         )
 
         additional_kwargs: dict[str, Any] = {}

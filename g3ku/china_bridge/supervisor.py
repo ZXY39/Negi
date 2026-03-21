@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import time
 from pathlib import Path
 from typing import Any
 
 from g3ku.china_bridge.client import ChinaBridgeClient
 from g3ku.china_bridge.models import ChinaBridgeState
 from g3ku.china_bridge.status import ChinaBridgeStatusStore
+
+
+class _BuildRetryPending(Exception):
+    """Internal sentinel used to delay repeated china bridge build attempts."""
 
 
 class ChinaBridgeSupervisor:
@@ -28,6 +34,7 @@ class ChinaBridgeSupervisor:
         self._client_task: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._stop = asyncio.Event()
+        self._next_build_attempt_at = 0.0
         self._state = ChinaBridgeState(
             enabled=bool(app_config.china_bridge.enabled),
             public_port=int(app_config.china_bridge.public_port),
@@ -80,15 +87,8 @@ class ChinaBridgeSupervisor:
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
-            dist_entry = self._workspace / "subsystems" / "china_channels_host" / "dist" / "index.js"
-            if not dist_entry.exists():
-                self._write_state(running=False, connected=False, built=False, last_error=f"missing build output: {dist_entry}")
-                try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    pass
-                continue
             try:
+                dist_entry = await self._ensure_host_build()
                 await self._spawn_process(dist_entry)
                 url = f"ws://{self._app_config.china_bridge.control_host}:{self._app_config.china_bridge.control_port}"
                 client = ChinaBridgeClient(
@@ -108,9 +108,140 @@ class ChinaBridgeSupervisor:
                 await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 raise
+            except _BuildRetryPending:
+                continue
             except Exception as exc:
                 self._write_state(running=False, connected=False, pid=None, last_error=str(exc))
                 await asyncio.sleep(1.0)
+
+    def _host_root(self) -> Path:
+        return self._workspace / "subsystems" / "china_channels_host"
+
+    def _dist_entry(self) -> Path:
+        return self._host_root() / "dist" / "index.js"
+
+    def _node_modules_dir(self) -> Path:
+        return self._host_root() / "node_modules"
+
+    def _resolve_package_manager(self) -> tuple[str, str]:
+        preferred = str(self._app_config.china_bridge.npm_client or "pnpm").strip() or "pnpm"
+        candidates: list[str] = [preferred]
+        for fallback in ("pnpm", "npm"):
+            if fallback not in candidates:
+                candidates.append(fallback)
+        for candidate in candidates:
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved, candidate
+        raise RuntimeError(
+            "china bridge build requires a package manager, but none of these were found: "
+            + ", ".join(candidates)
+        )
+
+    def _latest_host_source_mtime(self) -> float:
+        host_root = self._host_root()
+        latest = 0.0
+        for relative in ("package.json", "tsconfig.json", "upstream_map.yaml"):
+            path = host_root / relative
+            if path.exists():
+                latest = max(latest, path.stat().st_mtime)
+        src_root = host_root / "src"
+        if src_root.exists():
+            for path in src_root.rglob("*.ts"):
+                if path.is_file():
+                    latest = max(latest, path.stat().st_mtime)
+        return latest
+
+    def _host_build_required(self) -> bool:
+        dist_entry = self._dist_entry()
+        if not dist_entry.exists():
+            return True
+        try:
+            dist_mtime = dist_entry.stat().st_mtime
+        except OSError:
+            return True
+        return self._latest_host_source_mtime() > dist_mtime
+
+    def _trim_process_output(self, stdout: bytes, stderr: bytes) -> str:
+        combined = "\n".join(
+            part.strip()
+            for part in (
+                stdout.decode("utf-8", errors="replace"),
+                stderr.decode("utf-8", errors="replace"),
+            )
+            if part.strip()
+        ).strip()
+        if not combined:
+            return ""
+        if len(combined) <= 2000:
+            return combined
+        return combined[-2000:]
+
+    async def _run_host_command(self, *args: str) -> None:
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=str(self._host_root()),
+            env=os.environ.copy(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode == 0:
+            return
+        tail = self._trim_process_output(stdout, stderr)
+        detail = f"; output={tail}" if tail else ""
+        raise RuntimeError(f"command failed ({process.returncode}): {' '.join(args)}{detail}")
+
+    async def _ensure_host_build(self) -> Path:
+        dist_entry = self._dist_entry()
+        if not self._host_build_required():
+            self._write_state(built=True)
+            return dist_entry
+
+        now = time.monotonic()
+        if now < self._next_build_attempt_at:
+            wait_seconds = max(0.1, self._next_build_attempt_at - now)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                pass
+            raise _BuildRetryPending()
+
+        package_manager_path, package_manager_name = self._resolve_package_manager()
+
+        try:
+            if not self._node_modules_dir().exists():
+                self._write_state(
+                    running=False,
+                    connected=False,
+                    built=False,
+                    pid=None,
+                    last_error=f"installing china bridge dependencies via {package_manager_name} install",
+                )
+                install_args = [package_manager_path, "install"]
+                if package_manager_name == "npm":
+                    install_args.append("--no-package-lock")
+                await self._run_host_command(*install_args)
+
+            self._write_state(
+                running=False,
+                connected=False,
+                built=False,
+                pid=None,
+                last_error=f"building china bridge host via {package_manager_name} run build",
+            )
+            await self._run_host_command(package_manager_path, "run", "build")
+        except Exception:
+            self._next_build_attempt_at = time.monotonic() + 10.0
+            raise
+
+        if not dist_entry.exists():
+            self._next_build_attempt_at = time.monotonic() + 10.0
+            raise RuntimeError(f"china bridge build finished but output missing: {dist_entry}")
+
+        self._next_build_attempt_at = 0.0
+        self._write_state(built=True, last_error="")
+        return dist_entry
 
     async def _spawn_process(self, dist_entry: Path) -> None:
         config_path = self._workspace / ".g3ku" / "config.json"

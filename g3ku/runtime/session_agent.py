@@ -293,7 +293,19 @@ class RuntimeAgentSession:
                 await result
         return event
 
+    def _sync_persisted_inflight_turn(self) -> None:
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return
+        try:
+            from g3ku.runtime.web_ceo_sessions import write_inflight_turn_snapshot
+
+            write_inflight_turn_snapshot(session_key, self.inflight_turn_snapshot())
+        except Exception:
+            logger.debug("Skipped persisted inflight turn sync for {}", session_key)
+
     async def _emit_state_snapshot(self):
+        self._sync_persisted_inflight_turn()
         await self._emit("state_snapshot", state=self.state_dict())
 
     async def _handle_progress(
@@ -587,6 +599,7 @@ class RuntimeAgentSession:
                             persisted_session,
                             user_text=user_text,
                             assistant_text=output,
+                            route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                         )
                     self._loop.sessions.save(persisted_session)
                 except Exception:

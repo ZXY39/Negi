@@ -16,6 +16,7 @@ class ExecToolSettings(Base):
     timeout: int = 60
     path_append: str = ""
     restrict_to_workspace: bool = False
+    enable_safety_guard: bool = False
 
 
 class FilesystemToolSettings(Base):

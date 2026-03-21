@@ -227,7 +227,67 @@ def _channel_has_value(payload: dict[str, Any], candidates: tuple[str, ...]) -> 
     return False
 
 
+def _channel_candidate_sections(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = [payload]
+    accounts = payload.get('accounts')
+    if isinstance(accounts, dict):
+        for account_payload in accounts.values():
+            if isinstance(account_payload, dict):
+                sections.append(account_payload)
+    return sections
+
+
+def _channel_section_value(section: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = section.get(key)
+        if value not in (None, '', [], {}, False):
+            return value
+    return None
+
+
+def _channel_section_has_all(section: dict[str, Any], *keys: tuple[str, ...]) -> bool:
+    return all(_channel_section_value(section, *key_group) is not None for key_group in keys)
+
+
+def _channel_mode_value(section: dict[str, Any], default: str) -> str:
+    raw = _channel_section_value(section, 'mode', 'connectionMode')
+    return str(raw or default).strip().lower()
+
+
 def _channel_missing_requirements(channel_id: str, payload: dict[str, Any]) -> list[str]:
+    sections = _channel_candidate_sections(payload)
+    if channel_id == 'qqbot':
+        return [] if any(
+            _channel_section_has_all(section, ('appId', 'app_id'), ('clientSecret', 'client_secret'))
+            for section in sections
+        ) else ['appId', 'clientSecret']
+    if channel_id == 'dingtalk':
+        return [] if any(
+            _channel_section_has_all(section, ('clientId', 'client_id'), ('clientSecret', 'client_secret'))
+            for section in sections
+        ) else ['clientId', 'clientSecret']
+    if channel_id == 'wecom':
+        return [] if any(
+            (
+                _channel_mode_value(section, 'ws') == 'webhook'
+                and _channel_section_has_all(section, ('token',), ('encodingAESKey', 'encoding_aes_key'))
+            )
+            or (
+                _channel_mode_value(section, 'ws') != 'webhook'
+                and _channel_section_has_all(section, ('botId', 'bot_id'), ('secret',))
+            )
+            for section in sections
+        ) else ['mode=ws 需 botId + secret；mode=webhook 需 token + encodingAESKey']
+    if channel_id == 'wecomApp':
+        return [] if any(
+            _channel_section_has_all(section, ('token',), ('encodingAESKey', 'encoding_aes_key'))
+            for section in sections
+        ) else ['token', 'encodingAESKey']
+    if channel_id == 'feishuChina':
+        return [] if any(
+            _channel_section_has_all(section, ('appId', 'app_id'), ('appSecret', 'app_secret'))
+            for section in sections
+        ) else ['appId', 'appSecret']
     spec = _china_channel_spec(channel_id)
     missing: list[str] = []
     for label, candidates in spec.get('requirements') or ():

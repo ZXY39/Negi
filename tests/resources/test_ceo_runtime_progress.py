@@ -15,6 +15,7 @@ from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatServ
 from g3ku.runtime.context.assembly import ContextAssemblyService
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import websocket_ceo
+from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
 
@@ -546,6 +547,118 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
     assert len(final_events) == 1
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
+
+
+def test_ceo_websocket_restores_paused_inflight_turn_after_runtime_session_reset(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _PauseableRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input
+            await on_progress(
+                "skill-installer started",
+                event_kind="tool_start",
+                event_data={"tool_name": "skill-installer"},
+            )
+            session.state.latest_message = "Working on it..."
+            await asyncio.Future()
+
+    class _AgentLoopStub:
+        def __init__(self, workspace: Path) -> None:
+            self.model = "gpt-test"
+            self.reasoning_effort = None
+            self.sessions = SessionManager(workspace)
+            self.main_task_service = _TaskService()
+            self.multi_agent_runner = _PauseableRunner()
+            self.memory_manager = None
+            self.commit_service = None
+            self.prompt_trace = False
+            self._active_tasks: dict[str, set[asyncio.Task[object]]] = {}
+
+        def create_session_cancellation_token(self, _session_key: str):
+            return _CancelToken()
+
+        def release_session_cancellation_token(self, _session_key: str, _token) -> None:
+            return None
+
+        def _register_active_task(self, session_key: str, task: asyncio.Task[object]) -> None:
+            bucket = self._active_tasks.setdefault(str(session_key or ""), set())
+            bucket.add(task)
+
+        async def cancel_session_tasks(self, session_key: str) -> int:
+            key = str(session_key or "")
+            tasks = list(self._active_tasks.pop(key, set()))
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            return len(tasks)
+
+        def _use_rag_memory(self) -> bool:
+            return False
+
+    def _recv_until(ws, predicate, *, limit: int = 20):
+        seen: list[dict[str, object]] = []
+        for _ in range(limit):
+            payload = ws.receive_json()
+            seen.append(payload)
+            if predicate(payload):
+                return payload, seen
+        raise AssertionError(f"Did not receive expected websocket payload. Seen: {seen!r}")
+
+    session_id = "web:ceo-pause-reconnect"
+    agent = _AgentLoopStub(tmp_path)
+    runtime_manager = SessionRuntimeManager(agent)
+    holder = SimpleNamespace(manager=runtime_manager)
+
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: holder.manager)
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        _recv_until(ws, lambda payload: payload.get("type") == "ceo.sessions.snapshot")
+
+        ws.send_json({"type": "client.user_message", "text": "Pause and restore me"})
+
+        _recv_until(
+            ws,
+            lambda payload: payload.get("type") == "ceo.agent.tool"
+            and payload.get("data", {}).get("tool_name") == "skill-installer",
+        )
+
+        ws.send_json({"type": "client.pause_turn"})
+
+        _recv_until(
+            ws,
+            lambda payload: payload.get("type") == "ceo.state"
+            and str(payload.get("data", {}).get("state", {}).get("status") or "") == "paused",
+        )
+
+    holder.manager = SessionRuntimeManager(agent)
+
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        snapshot, _seen = _recv_until(ws, lambda payload: payload.get("type") == "snapshot.ceo")
+
+    inflight = snapshot["data"].get("inflight_turn")
+    assert inflight is not None
+    assert inflight["status"] == "paused"
+    assert inflight["user_message"]["content"] == "Pause and restore me"
+    assert inflight["assistant_text"] == "Working on it..."
+    assert [item["tool_name"] for item in inflight["tool_events"]].count("skill-installer") >= 1
 
 
 def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:

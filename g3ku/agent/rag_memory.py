@@ -2288,6 +2288,7 @@ class MemoryManager:
         channel: str | None,
         chat_id: str | None,
         session_key: str | None = None,
+        search_context_types: Iterable[str] | None = None,
         allowed_context_types: Iterable[str] | None = None,
         allowed_resource_record_ids: Iterable[str] | None = None,
         allowed_skill_record_ids: Iterable[str] | None = None,
@@ -2303,10 +2304,26 @@ class MemoryManager:
             limit * 3,
         )
         budget_tokens = max(120, int(self.config.retrieval.max_context_tokens))
+        explicit_context_types = [
+            str(item or "").strip().lower()
+            for item in list(search_context_types or [])
+            if str(item or "").strip().lower() in CONTEXT_TYPE_ALL
+        ]
 
         planner_enabled = self._feature_enabled("query_planner")
         use_planner = planner_enabled and self._is_complex_query(raw_query)
-        if use_planner:
+        if explicit_context_types:
+            typed_queries = [
+                TypedQuery(
+                    query=raw_query,
+                    context_type=context_type,
+                    intent="explicit_scope",
+                    priority=index + 1,
+                )
+                for index, context_type in enumerate(explicit_context_types)
+            ]
+            use_planner = False
+        elif use_planner:
             typed_queries = self._plan_queries(raw_query)
             if not typed_queries:
                 typed_queries = [TypedQuery(query=raw_query, context_type="memory", intent="fallback", priority=1)]

@@ -51,6 +51,7 @@ class LoopRuntimeContext:
     message_id: str | None
     on_progress: Callable[..., Awaitable[None]] | None
     cancel_token: Any | None = None
+    ceo_async_task_guard_state: dict[str, Any] | None = None
 
 
 class LoopRuntimeMiddleware(AgentMiddleware):

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 from g3ku.content import parse_content_envelope
+from g3ku.runtime.ceo_async_task_guard import maybe_build_intercept_message, record_completed_tool_round
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
     resolve_snapshot_supplier,
@@ -303,6 +304,20 @@ class ToolExecutionBridge:
                 self._loop._preview(args, max_chars=1200),
             )
 
+        guard_message = maybe_build_intercept_message(runtime_context, tool_name=str(tool_name or ''))
+        if guard_message:
+            raw_call_id = ""
+            if isinstance(tool_call, dict):
+                raw_call_id = str(tool_call.get("id") or "")
+            elif tool_call is not None:
+                raw_call_id = str(getattr(tool_call, "id", "") or "")
+            return ToolMessage(
+                content=guard_message,
+                tool_call_id=raw_call_id or f"{tool_name or 'tool'}:ceo-guard",
+                name=str(tool_name or "tool"),
+                status="success",
+            )
+
         if on_progress and (tool_name or tool_call is not None):
             invocation = self.tool_invocation_hint(tool_call)
             await self._loop._emit_progress_event(
@@ -313,6 +328,7 @@ class ToolExecutionBridge:
             )
 
         inherited_runtime = dict(self._loop.tools.get_runtime_context() or {}) if hasattr(self._loop.tools, "get_runtime_context") else {}
+        registry_managed = bool(getattr(self._loop.tools, 'get', None) and self._loop.tools.get(str(tool_name or '')) is not None)
         token = self._loop.tools.push_runtime_context(
             {
                 **inherited_runtime,
@@ -323,6 +339,11 @@ class ToolExecutionBridge:
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "tool_name": tool_name,
+                "ceo_async_task_guard_state": runtime_context_value(
+                    runtime_context,
+                    "ceo_async_task_guard_state",
+                    inherited_runtime.get("ceo_async_task_guard_state"),
+                ),
                 "skip_tool_registry_watchdog": True,
                 "cancel_token": getattr(runtime_context, "cancel_token", None),
                 "tool_snapshot_supplier": runtime_context_value(runtime_context, "tool_snapshot_supplier", inherited_runtime.get("tool_snapshot_supplier")),
@@ -348,6 +369,8 @@ class ToolExecutionBridge:
                 )
                 if outcome.completed:
                     result = outcome.value
+                    if not registry_managed:
+                        record_completed_tool_round(runtime_context, tool_name=str(tool_name or ''))
                 else:
                     raw_call_id = ""
                     if isinstance(tool_call, dict):
@@ -362,6 +385,8 @@ class ToolExecutionBridge:
                     )
             else:
                 result = await handler(request)
+                if not registry_managed:
+                    record_completed_tool_round(runtime_context, tool_name=str(tool_name or ''))
             result_content = self._externalize_tool_result(
                 getattr(result, "content", ""),
                 runtime_context=runtime_context,
@@ -434,6 +459,15 @@ class ToolExecutionBridge:
         tool_name = str(tool_req["name"])
         tool_args = tool_req["arguments"] if isinstance(tool_req["arguments"], dict) else {}
 
+        guard_message = maybe_build_intercept_message(runtime_context, tool_name=tool_name)
+        if guard_message:
+            return ToolMessage(
+                content=guard_message,
+                tool_call_id=tool_call_id,
+                name=tool_name,
+                status="success",
+            )
+
         if on_progress and emit_progress:
             await self._loop._emit_progress_event(
                 on_progress,
@@ -454,6 +488,11 @@ class ToolExecutionBridge:
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "tool_name": tool_name,
+                "ceo_async_task_guard_state": runtime_context_value(
+                    runtime_context,
+                    "ceo_async_task_guard_state",
+                    inherited_runtime.get("ceo_async_task_guard_state"),
+                ),
                 "skip_tool_registry_watchdog": True,
                 "cancel_token": getattr(runtime_context, "cancel_token", None) if runtime_context else None,
                 "tool_snapshot_supplier": runtime_context_value(runtime_context, "tool_snapshot_supplier", inherited_runtime.get("tool_snapshot_supplier")),

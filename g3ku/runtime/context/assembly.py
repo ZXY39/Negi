@@ -6,6 +6,12 @@ from typing import Any
 from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.context.summarizer import estimate_tokens, score_query, truncate_by_tokens
 from g3ku.runtime.context.types import ContextAssemblyResult
+from g3ku.runtime.web_ceo_sessions import (
+    DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
+    build_frontdoor_compact_history_message,
+    extract_frontdoor_recent_history,
+    resolve_frontdoor_context,
+)
 
 
 class ContextAssemblyService:
@@ -19,6 +25,9 @@ class ContextAssemblyService:
         'exec': ('shell', 'command', 'bash', 'powershell', '终端', '执行命令'),
         'model_config': ('model', 'provider', 'config', 'token', 'temperature', '模型', '配置'),
     }
+    SKILL_RETRIEVAL_HINTS: tuple[str, ...] = ('skill', '技能', 'workflow', '流程', '步骤', 'skill.md', 'load_skill_context')
+    RESOURCE_RETRIEVAL_HINTS: tuple[str, ...] = ('tool', '工具', '参数', 'api', '调用', '安装', '更新', 'usage', 'load_tool_context')
+    TARGETED_RETRIEVAL_SCORE_THRESHOLD: float = 2.0
     RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("wait_tool_execution", "stop_tool_execution")
 
     def __init__(self, *, loop, prompt_builder) -> None:
@@ -36,8 +45,6 @@ class ContextAssemblyService:
         main_service = getattr(self._loop, 'main_task_service', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)
         assembly_cfg = getattr(getattr(self._loop, '_memory_runtime_settings', None), 'assembly', None)
-        recent_limit = max(1, int(getattr(assembly_cfg, 'recent_messages_limit', 24) or 24))
-        fallback_limit = max(recent_limit, int(getattr(self._loop, 'memory_window', 100) or 100))
         archive_top_k = max(0, int(getattr(assembly_cfg, 'archive_summary_top_k', 2) or 2))
         archive_budget = max(64, int(getattr(assembly_cfg, 'archive_summary_max_tokens', 320) or 320))
         inventory_top_k = max(1, int(getattr(assembly_cfg, 'skill_inventory_top_k', 8) or 8))
@@ -52,18 +59,31 @@ class ContextAssemblyService:
                 pass
 
         visible_skills = list(exposure.get('skills') or [])
+        visible_families = list(exposure.get('tool_families') or [])
         selected_skills, skill_trace = self._select_skills(
             query_text=query_text,
             visible_skills=visible_skills,
             top_k=inventory_top_k,
             token_budget=inventory_budget,
         )
-        system_prompt = self._prompt_builder.build(skills=selected_skills)
+        retrieval_scope = self._plan_retrieval_scope(
+            query_text=query_text,
+            visible_skills=visible_skills,
+            visible_families=visible_families,
+            selected_skills=selected_skills,
+        )
+        prompt_skills = [
+            item
+            for item in selected_skills
+            if str(getattr(item, 'skill_id', '') or '').strip() not in retrieval_scope['deduped_skill_ids']
+        ]
+        system_prompt = self._prompt_builder.build(skills=prompt_skills)
 
         external_tools_block, external_trace = self._build_external_tool_block(
             query_text=query_text,
-            visible_families=list(exposure.get('tool_families') or []),
+            visible_families=visible_families,
             top_k=8,
+            exclude_tool_ids=retrieval_scope['deduped_tool_ids'],
         )
         if external_tools_block:
             system_prompt = f"{system_prompt}\n\n{external_tools_block}"
@@ -86,6 +106,10 @@ class ContextAssemblyService:
                     session_key=session.state.session_key,
                     channel=getattr(session, '_memory_channel', getattr(session, '_channel', 'cli')),
                     chat_id=getattr(session, '_memory_chat_id', getattr(session, '_chat_id', session.state.session_key)),
+                    search_context_types=retrieval_scope['search_context_types'],
+                    allowed_context_types=retrieval_scope['allowed_context_types'],
+                    allowed_resource_record_ids=retrieval_scope['allowed_resource_record_ids'],
+                    allowed_skill_record_ids=retrieval_scope['allowed_skill_record_ids'],
                 )
             except Exception:
                 retrieved_memory = ''
@@ -104,10 +128,26 @@ class ContextAssemblyService:
             extension_top_k=extension_top_k,
         )
 
+        frontdoor_context: dict[str, Any] = {}
+        frontdoor_context_source = ''
+        frontdoor_summary_message: dict[str, Any] | None = None
+        frontdoor_summary_tokens = 0
         recent_history = []
         if persisted_session is not None:
-            has_compact_context = bool(archive_block or retrieved_memory)
-            recent_history = persisted_session.get_history(max_messages=recent_limit if has_compact_context else fallback_limit)
+            frontdoor_context, frontdoor_context_source = resolve_frontdoor_context(
+                persisted_session,
+                raw_tail_turns=DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
+            )
+            frontdoor_summary_message = build_frontdoor_compact_history_message(frontdoor_context)
+            if frontdoor_summary_message is not None:
+                recent_history.append(frontdoor_summary_message)
+                frontdoor_summary_tokens = estimate_tokens(str(frontdoor_summary_message.get('content') or ''))
+            recent_history.extend(
+                extract_frontdoor_recent_history(
+                    persisted_session,
+                    raw_tail_turns=int(frontdoor_context.get('raw_tail_turns', DEFAULT_FRONTDOOR_RAW_TAIL_TURNS) or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS),
+                )
+            )
 
         trace = {
             'query': query_text,
@@ -115,12 +155,27 @@ class ContextAssemblyService:
             'selected_tools': tool_trace,
             'external_tools': external_trace,
             'archive_summaries': archive_trace,
+            'frontdoor_context': {
+                'source': frontdoor_context_source,
+                'summary_turn_count': int(frontdoor_context.get('summary_turn_count', 0) or 0),
+                'raw_tail_turns': int(frontdoor_context.get('raw_tail_turns', 0) or 0),
+                'has_summary': bool(str(frontdoor_context.get('summary_text') or '').strip()),
+            },
+            'retrieval_scope': {
+                'search_context_types': list(retrieval_scope['search_context_types']),
+                'allowed_context_types': list(retrieval_scope['allowed_context_types']),
+                'allowed_resource_record_ids': list(retrieval_scope['allowed_resource_record_ids']),
+                'allowed_skill_record_ids': list(retrieval_scope['allowed_skill_record_ids']),
+                'deduped_skill_ids': list(retrieval_scope['deduped_skill_ids']),
+                'deduped_tool_ids': list(retrieval_scope['deduped_tool_ids']),
+            },
             'recent_history_count': len(recent_history),
             'tokens': {
                 'system_prompt': estimate_tokens(system_prompt),
                 'skill_inventory': sum(int(item.get('tokens', 0)) for item in skill_trace),
                 'external_tools': sum(int(item.get('tokens', 0)) for item in external_trace),
                 'archive_summaries': sum(int(item.get('tokens', 0)) for item in archive_trace),
+                'frontdoor_summary': frontdoor_summary_tokens,
                 'retrieved_context': retrieval_tokens,
             },
         }
@@ -140,6 +195,74 @@ class ContextAssemblyService:
             tool_names=selected_tool_names,
             trace=trace,
         )
+
+    def _plan_retrieval_scope(
+        self,
+        *,
+        query_text: str,
+        visible_skills: list[Any],
+        visible_families: list[Any],
+        selected_skills: list[Any],
+    ) -> dict[str, list[str]]:
+        query_lower = str(query_text or '').strip().lower()
+        targeted_skill_ids: list[str] = []
+        targeted_tool_ids: list[str] = []
+
+        for item in list(visible_skills or []):
+            skill_id = str(getattr(item, 'skill_id', '') or '').strip()
+            if not skill_id:
+                continue
+            display_name = str(getattr(item, 'display_name', '') or '').strip()
+            score = score_query(
+                query_text,
+                getattr(item, 'description', ''),
+            )
+            if skill_id.lower() in query_lower or (display_name and display_name.lower() in query_lower) or score >= self.TARGETED_RETRIEVAL_SCORE_THRESHOLD:
+                targeted_skill_ids.append(skill_id)
+
+        for family in list(visible_families or []):
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            if not tool_id:
+                continue
+            display_name = str(getattr(family, 'display_name', '') or '').strip()
+            executor_names: list[str] = []
+            for action in list(getattr(family, 'actions', []) or []):
+                executor_names.extend(str(name or '').strip() for name in list(getattr(action, 'executor_names', []) or []) if str(name or '').strip())
+            score = score_query(
+                query_text,
+                getattr(family, 'description', ''),
+                ' '.join(executor_names),
+            )
+            if tool_id.lower() in query_lower or (display_name and display_name.lower() in query_lower) or score >= self.TARGETED_RETRIEVAL_SCORE_THRESHOLD:
+                targeted_tool_ids.append(tool_id)
+
+        if not targeted_skill_ids and any(hint.lower() in query_lower for hint in self.SKILL_RETRIEVAL_HINTS):
+            targeted_skill_ids = [str(getattr(item, 'skill_id', '') or '').strip() for item in list(visible_skills or []) if str(getattr(item, 'skill_id', '') or '').strip()][:3]
+        if not targeted_tool_ids and any(hint.lower() in query_lower for hint in self.RESOURCE_RETRIEVAL_HINTS):
+            targeted_tool_ids = [str(getattr(item, 'tool_id', '') or '').strip() for item in list(visible_families or []) if str(getattr(item, 'tool_id', '') or '').strip()][:3]
+
+        selected_skill_ids = {
+            str(getattr(item, 'skill_id', '') or '').strip()
+            for item in list(selected_skills or [])
+            if str(getattr(item, 'skill_id', '') or '').strip()
+        }
+        deduped_skill_ids = sorted({item for item in targeted_skill_ids if item in selected_skill_ids})
+        deduped_tool_ids = sorted(set(targeted_tool_ids))
+
+        search_context_types = ['memory']
+        if targeted_skill_ids:
+            search_context_types.append('skill')
+        if targeted_tool_ids:
+            search_context_types.append('resource')
+
+        return {
+            'search_context_types': search_context_types,
+            'allowed_context_types': list(search_context_types),
+            'allowed_resource_record_ids': [f'tool:{item}' for item in deduped_tool_ids] if targeted_tool_ids else [],
+            'allowed_skill_record_ids': [f'skill:{item}' for item in targeted_skill_ids] if targeted_skill_ids else [],
+            'deduped_skill_ids': deduped_skill_ids,
+            'deduped_tool_ids': deduped_tool_ids,
+        }
 
     def _select_skills(self, *, query_text: str, visible_skills: list[Any], top_k: int, token_budget: int) -> tuple[list[Any], list[dict[str, Any]]]:
         ranked = sorted(
@@ -185,14 +308,16 @@ class ContextAssemblyService:
         query_text: str,
         visible_families: list[Any],
         top_k: int,
+        exclude_tool_ids: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         ranked: list[tuple[float, str, Any]] = []
+        excluded = {str(item or '').strip() for item in list(exclude_tool_ids or []) if str(item or '').strip()}
         for family in visible_families:
             if bool(getattr(family, 'callable', True)):
                 continue
             tool_id = str(getattr(family, 'tool_id', '') or '').strip()
             install_dir = str(getattr(family, 'install_dir', '') or '').strip()
-            if not tool_id or not install_dir:
+            if not tool_id or not install_dir or tool_id in excluded:
                 continue
             score = score_query(
                 query_text,

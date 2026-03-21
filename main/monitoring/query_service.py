@@ -448,7 +448,7 @@ class TaskQueryService:
                     'output_ref': projection_ref or latest_node.output_ref,
                 }
             )
-        live_output = self._live_phase_tool_call_summary(live_state, preferred_node_id=latest_node.node_id)
+        live_output = self._live_tool_call_summary(live_state, preferred_node_id=latest_node.node_id)
         if not live_output:
             return latest_node
         return latest_node.model_copy(update={'output': live_output})
@@ -469,7 +469,7 @@ class TaskQueryService:
         return output, output_ref
 
     @staticmethod
-    def _live_phase_tool_call_summary(
+    def _live_tool_call_summary(
         live_state: TaskLiveState | None,
         *,
         preferred_node_id: str = '',
@@ -495,9 +495,6 @@ class TaskQueryService:
         if selected is None:
             selected = frames[0]
         lines: list[str] = []
-        phase = str(selected.phase or '').strip()
-        if phase:
-            lines.append(f'Current phase: {phase}')
         tool_calls = [item for item in list(selected.tool_calls or []) if str(item.tool_name or '').strip()]
         if tool_calls:
             lines.append('Recent tool calls:')

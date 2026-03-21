@@ -18,8 +18,8 @@
 
 - 运行 shell 命令
 - 默认使用进程当前目录；只有显式传入 `working_dir` 时才会切换目录，且应提供绝对路径
-- 超时、`PATH` 补充和 `restrict_to_workspace` 都来自 `tools/exec/resource.yaml -> settings`
-- 仍然带有危险命令拦截
+- `timeout`、`PATH` 补充、`restrict_to_workspace` 和 `enable_safety_guard` 都来自 `tools/exec/resource.yaml -> settings`
+- 默认不启用命令安全守卫；如需恢复拦截，可在 `tools/exec/resource.yaml -> settings` 中设置 `enable_safety_guard: true`
 
 ## filesystem
 

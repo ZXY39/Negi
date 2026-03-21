@@ -11,6 +11,7 @@ def build(runtime):
         workspace_root=str(runtime.workspace),
         timeout=settings.timeout,
         restrict_to_workspace=settings.restrict_to_workspace,
+        enable_safety_guard=settings.enable_safety_guard,
         path_append=settings.path_append,
         content_store=content_store,
         main_task_service=service,

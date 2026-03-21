@@ -15,6 +15,7 @@ from g3ku.core.events import AgentEvent
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_session_summary,
+    read_inflight_turn_snapshot,
     create_web_ceo_session,
     ensure_active_web_ceo_session,
     ensure_ceo_session_metadata,
@@ -244,12 +245,14 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
     )
 
 
-def _build_inflight_turn_snapshot(session: Any) -> dict[str, Any] | None:
+def _build_inflight_turn_snapshot(session: Any, session_id: str) -> dict[str, Any] | None:
     getter = getattr(session, 'inflight_turn_snapshot', None)
     if not callable(getter):
-        return None
+        return read_inflight_turn_snapshot(session_id)
     snapshot = getter()
-    return snapshot if isinstance(snapshot, dict) else None
+    if isinstance(snapshot, dict):
+        return snapshot
+    return read_inflight_turn_snapshot(session_id)
 
 
 @router.post('/ceo/uploads')
@@ -605,7 +608,7 @@ async def ceo_websocket(websocket: WebSocket):
     global_sender_task = asyncio.create_task(sender(global_queue))
     stream_task = asyncio.create_task(sender(stream_queue))
     try:
-        inflight_turn = _build_inflight_turn_snapshot(session)
+        inflight_turn = _build_inflight_turn_snapshot(session, session_id)
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
         await _safe_send(
             build_envelope(
