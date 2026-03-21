@@ -16,6 +16,7 @@ class NodeOutputEntry(Model):
     content: str = ''
     content_ref: str = ''
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    round_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str
 
 

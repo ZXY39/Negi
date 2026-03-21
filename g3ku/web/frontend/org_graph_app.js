@@ -5868,23 +5868,60 @@ function buildLiveSectionStatus(items) {
     return "info";
 }
 
+function normalizeTraceToolStep(step) {
+    return {
+        tool_call_id: String(step?.tool_call_id || ""),
+        tool_name: String(step?.tool_name || "tool"),
+        arguments_text: String(step?.arguments_text || ""),
+        output_text: String(step?.output_text || ""),
+        output_ref: String(step?.output_ref || ""),
+        started_at: String(step?.started_at || ""),
+        finished_at: String(step?.finished_at || ""),
+        elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
+        status: ["running", "success", "error"].includes(String(step?.status || ""))
+            ? String(step.status)
+            : "info",
+    };
+}
+
+function normalizeSpawnPrecheck(precheck) {
+    const source = precheck && typeof precheck === "object" ? precheck : {};
+    const ruleIds = Array.isArray(source.rule_ids)
+        ? source.rule_ids.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0)
+        : [];
+    const violationCodes = Array.isArray(source.violation_codes)
+        ? source.violation_codes.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+    return {
+        present: !!source.present,
+        valid: ("valid" in source) ? !!source.valid : !violationCodes.length,
+        decision: String(source.decision || "").trim(),
+        reason: String(source.reason || "").trim(),
+        rule_ids: ruleIds,
+        rule_semantics: String(source.rule_semantics || "").trim(),
+        violation_codes: violationCodes,
+    };
+}
+
+function normalizeExecutionRound(round, fallbackIndex) {
+    const source = round && typeof round === "object" ? round : {};
+    return {
+        round_index: Math.max(1, normalizeInt(source.round_index, fallbackIndex)),
+        created_at: String(source.created_at || ""),
+        assistant_summary: String(source.assistant_summary || ""),
+        spawn_precheck: normalizeSpawnPrecheck(source.spawn_precheck),
+        tools: Array.isArray(source.tools) ? source.tools.map((step) => normalizeTraceToolStep(step)) : [],
+    };
+}
+
 function buildNodeExecutionTrace(node, detail, liveFrame = null) {
     const source = detail?.execution_trace && typeof detail.execution_trace === "object" ? detail.execution_trace : {};
-    const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps : [];
+    const rounds = Array.isArray(source.rounds) ? source.rounds.map((round, index) => normalizeExecutionRound(round, index + 1)) : [];
+    const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps.map((step) => normalizeTraceToolStep(step)) : [];
     return {
         initial_prompt: String(source.initial_prompt ?? detail?.prompt ?? detail?.goal ?? node?.input ?? ""),
-        tool_steps: toolSteps.map((step) => ({
-            tool_call_id: String(step?.tool_call_id || ""),
-            tool_name: String(step?.tool_name || "tool"),
-            arguments_text: String(step?.arguments_text || ""),
-            output_text: String(step?.output_text || ""),
-            started_at: String(step?.started_at || ""),
-            finished_at: String(step?.finished_at || ""),
-            elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
-            status: ["running", "success", "error"].includes(String(step?.status || ""))
-                ? String(step.status)
-                : "info",
-        })),
+        rounds,
+        tool_steps: toolSteps,
         live_tool_calls: normalizeLiveToolCalls(liveFrame),
         live_child_pipelines: normalizeLiveChildPipelines(liveFrame),
         final_output: String(source.final_output ?? detail?.final_output ?? node?.final_output ?? ""),
@@ -5917,12 +5954,28 @@ function renderTraceField(label, value, emptyText = "暂无内容") {
     `;
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", open = false, bodyHtml = "" }) {
+function renderTraceStep({
+    traceKey = "",
+    title,
+    preview = "",
+    status = "info",
+    open = false,
+    bodyHtml = "",
+    extraClass = "",
+    startedAt = "",
+    finishedAt = "",
+    elapsedSeconds = null,
+}) {
+    const classes = ["interaction-step", "task-trace-step", extraClass, status].filter(Boolean).join(" ");
+    const startedAttr = startedAt ? ` data-started-at="${esc(startedAt)}"` : "";
+    const finishedAttr = finishedAt ? ` data-finished-at="${esc(finishedAt)}"` : "";
+    const elapsedAttr = Number.isFinite(elapsedSeconds) ? ` data-elapsed-seconds="${esc(String(elapsedSeconds))}"` : "";
     return `
-        <details class="interaction-step task-trace-step ${esc(status)}" data-trace-key="${esc(traceKey)}"${open ? " open" : ""}>
+        <details class="${esc(classes)}" data-trace-key="${esc(traceKey)}" data-trace-status="${esc(status)}"${startedAttr}${finishedAttr}${elapsedAttr}${open ? " open" : ""}>
             <summary class="task-trace-summary">
                 <span class="interaction-step-lead">
                     <span class="interaction-step-title">${esc(title)}</span>
+                    ${preview ? `<span class="interaction-step-preview">${esc(preview)}</span>` : ""}
                 </span>
                 <span class="interaction-step-side">
                     <span class="task-trace-runtime" hidden></span>
@@ -5951,20 +6004,81 @@ function resolveTraceStepOpenState(step, state, index) {
     return !!step.open;
 }
 
-function buildExecutionTraceSteps(trace, node) {
+function summarizeTraceText(value, maxChars = 96) {
+    const text = readableText(value, { decodeEscapes: true, emptyText: "" }).replace(/\s+/g, " ").trim();
+    if (!text) return "";
+    return text.length > maxChars ? `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…` : text;
+}
+
+function buildTraceTimingText(step) {
     return [
-        {
-            traceKey: "initial_prompt",
-            title: "Initial Prompt",
-            status: "info",
-            open: false,
-            bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
-        },
-        ...trace.tool_steps.map((step, index) => ({
-            traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
-            title: `Tool - ${step.tool_name || "tool"}`,
+        step.started_at,
+        step.finished_at,
+        Number.isFinite(step.elapsed_seconds) ? `${step.elapsed_seconds}s` : "",
+    ].filter(Boolean).join(" | ");
+}
+
+function buildRoundStatus(round) {
+    const spawn = round?.spawn_precheck || {};
+    if (spawn.present && !spawn.valid) return "error";
+    if (round.tools.some((step) => String(step?.status || "") === "error")) return "error";
+    if (round.tools.some((step) => String(step?.status || "") === "running")) return "running";
+    if (round.tools.some((step) => String(step?.status || "") === "success")) return "success";
+    return "info";
+}
+
+function buildRoundPreview(round) {
+    const spawn = round?.spawn_precheck || {};
+    const decision = spawn.present ? (spawn.decision || "invalid") : "no precheck";
+    const validity = spawn.present ? (spawn.valid ? "valid" : "invalid") : "not required";
+    const toolCount = `${Array.isArray(round?.tools) ? round.tools.length : 0} tool${(Array.isArray(round?.tools) ? round.tools.length : 0) === 1 ? "" : "s"}`;
+    const reason = summarizeTraceText(spawn.reason || round?.assistant_summary || "", 72);
+    return [decision, validity, toolCount, reason].filter(Boolean).join(" · ");
+}
+
+function renderRoundDecisionText(round) {
+    const spawn = round?.spawn_precheck || {};
+    if (!spawn.present) return "No spawn precheck in this round";
+    return [
+        `decision=${spawn.decision || "(empty)"}`,
+        `valid=${spawn.valid ? "true" : "false"}`,
+    ].join(" | ");
+}
+
+function renderRoundReasonRulesText(round) {
+    const spawn = round?.spawn_precheck || {};
+    const parts = [];
+    if (spawn.reason) parts.push(`reason=${spawn.reason}`);
+    if (Array.isArray(spawn.rule_ids) && spawn.rule_ids.length) parts.push(`rule_ids=${spawn.rule_ids.join(", ")}`);
+    if (spawn.rule_semantics) parts.push(`rule_semantics=${spawn.rule_semantics}`);
+    if (Array.isArray(spawn.violation_codes) && spawn.violation_codes.length) parts.push(`violation_codes=${spawn.violation_codes.join(", ")}`);
+    return parts.join("\n") || "No precheck reason in this round";
+}
+
+function renderRoundTools(round, viewState) {
+    const tools = Array.isArray(round?.tools) ? round.tools : [];
+    if (!tools.length) {
+        const emptyText = round?.spawn_precheck?.present && round?.spawn_precheck?.valid === false
+            ? "本轮工具执行已被协议纠正拦截"
+            : "本轮未执行真实工具";
+        return `
+            <div class="task-trace-field task-trace-tool-list">
+                <div class="task-trace-label">Tools</div>
+                <div class="code-block task-trace-code">${esc(emptyText)}</div>
+            </div>
+        `;
+    }
+    const renderedTools = tools.map((step, index) => {
+        const descriptor = {
+            traceKey: `round:${round.round_index}:tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
+            title: `Tool ${index + 1} · ${step.tool_name || "tool"}`,
+            preview: summarizeTraceText(step.output_text || step.arguments_text || "", 72),
             status: step.status || "info",
             open: false,
+            extraClass: "task-trace-tool-step",
+            startedAt: step.started_at,
+            finishedAt: step.finished_at,
+            elapsedSeconds: step.elapsed_seconds,
             bodyHtml: [
                 renderTraceField("Arguments", step.arguments_text, "No arguments"),
                 renderTraceField(
@@ -5973,23 +6087,97 @@ function buildExecutionTraceSteps(trace, node) {
                     step.status === "running" ? "Waiting for tool output..." : "No tool output",
                     { decodeEscapes: true },
                 ),
+                renderTraceField("Timing", buildTraceTimingText(step), "No timing"),
             ].join(""),
-        })),
-        ...(trace.live_tool_calls.length ? [{
+        };
+        return renderTraceStep({
+            ...descriptor,
+            open: resolveTraceStepOpenState(descriptor, viewState, index),
+        });
+    }).join("");
+    return `
+        <div class="task-trace-field task-trace-tool-list">
+            <div class="task-trace-label">Tools</div>
+            <div class="task-trace-round-tools">${renderedTools}</div>
+        </div>
+    `;
+}
+
+function buildExecutionTraceSteps(trace, node, { viewState = null } = {}) {
+    const steps = [
+        {
+            traceKey: "initial_prompt",
+            title: "Initial Prompt",
+            preview: summarizeTraceText(trace.initial_prompt, 88),
+            status: "info",
+            open: false,
+            extraClass: "task-trace-root-step",
+            bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
+        },
+    ];
+    if (Array.isArray(trace.rounds) && trace.rounds.length) {
+        trace.rounds.forEach((round, index) => {
+            steps.push({
+                traceKey: `round:${round.round_index || index + 1}`,
+                title: `Round ${round.round_index || index + 1}`,
+                preview: buildRoundPreview(round),
+                status: buildRoundStatus(round),
+                open: false,
+                extraClass: "task-trace-root-step task-trace-round",
+                bodyHtml: [
+                    renderTraceField("Spawn Decision", renderRoundDecisionText(round), "No spawn decision"),
+                    renderTraceField("Reason / Rules", renderRoundReasonRulesText(round), "No reason", { decodeEscapes: true }),
+                    renderTraceField("Assistant Summary", round.assistant_summary, "No assistant summary", { decodeEscapes: true }),
+                    renderRoundTools(round, viewState),
+                ].join(""),
+            });
+        });
+    } else {
+        steps.push(...trace.tool_steps.map((step, index) => ({
+            traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
+            title: `Tool - ${step.tool_name || "tool"}`,
+            preview: summarizeTraceText(step.output_text || step.arguments_text || "", 72),
+            status: step.status || "info",
+            open: false,
+            extraClass: "task-trace-root-step",
+            startedAt: step.started_at,
+            finishedAt: step.finished_at,
+            elapsedSeconds: step.elapsed_seconds,
+            bodyHtml: [
+                renderTraceField("Arguments", step.arguments_text, "No arguments"),
+                renderTraceField(
+                    "Output",
+                    step.output_text,
+                    step.status === "running" ? "Waiting for tool output..." : "No tool output",
+                    { decodeEscapes: true },
+                ),
+                renderTraceField("Timing", buildTraceTimingText(step), "No timing"),
+            ].join(""),
+        })));
+    }
+    if (trace.live_tool_calls.length) {
+        steps.push({
             traceKey: "live_tools",
             title: `Live Tools (${trace.live_tool_calls.length})`,
+            preview: summarizeTraceText(trace.live_tool_calls.map((item) => `${item.tool_name || "tool"} [${item.status || "queued"}]`).join(" | "), 80),
             status: buildLiveSectionStatus(trace.live_tool_calls),
             open: true,
+            extraClass: "task-trace-root-step",
             bodyHtml: renderLiveToolFields(trace.live_tool_calls),
-        }] : []),
-        ...(trace.live_child_pipelines.length ? [{
+        });
+    }
+    if (trace.live_child_pipelines.length) {
+        steps.push({
             traceKey: "live_child_pipelines",
             title: `Live Child Pipelines (${trace.live_child_pipelines.length})`,
+            preview: summarizeTraceText(trace.live_child_pipelines.map((item) => `${item.goal || "(no goal)"} [${item.status || "queued"}]`).join(" | "), 80),
             status: buildLiveSectionStatus(trace.live_child_pipelines),
             open: true,
+            extraClass: "task-trace-root-step",
             bodyHtml: renderLiveChildFields(trace.live_child_pipelines),
-        }] : []),
-    ];
+        });
+    }
+    return steps;
 }
 
 function toPixels(value) {
@@ -6046,7 +6234,7 @@ function traceStepSummaryHeight(step) {
 function refreshTaskDetailScrollRegions() {
     const traceList = U.adFlow?.querySelector(".task-trace-list");
     if (traceList instanceof HTMLElement) {
-        setScrollViewportLimit(traceList, ".task-trace-step", 10, traceStepSummaryHeight, true);
+        setScrollViewportLimit(traceList, ".task-trace-root-step", 10, traceStepSummaryHeight, true);
     }
     if (U.artifactList instanceof HTMLElement) {
         setScrollViewportLimit(U.artifactList, ".artifact-item", 5);
@@ -6212,7 +6400,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
     const fallbackLiveFrame = liveFrameMap.get(String(node?.node_id || "").trim()) || null;
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node, fallbackLiveFrame);
-    const stepDescriptors = buildExecutionTraceSteps(trace, node);
+    const stepDescriptors = buildExecutionTraceSteps(trace, node, { viewState: effectiveViewState });
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
         open: resolveTraceStepOpenState(step, effectiveViewState, index),
@@ -6227,14 +6415,9 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     traceList.innerHTML = steps.join("");
     renderFlowHeading(stepDescriptors.length);
     const traceItems = Array.from(traceList.querySelectorAll(".task-trace-step"));
-    trace.tool_steps.forEach((step, index) => {
-        const item = traceItems[index + 1];
+    traceItems.forEach((item) => {
         if (!(item instanceof HTMLElement)) return;
-        item.dataset.traceStatus = String(step.status || "info");
-        if (step.started_at) item.dataset.startedAt = step.started_at;
-        if (step.finished_at) item.dataset.finishedAt = step.finished_at;
-        if (Number.isFinite(step.elapsed_seconds)) item.dataset.elapsedSeconds = String(step.elapsed_seconds);
-        const runtimeEl = item.querySelector(".task-trace-runtime");
+        const runtimeEl = item.querySelector(".task-trace-summary .task-trace-runtime");
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     });
     refreshTaskDetailScrollRegions();

@@ -25,7 +25,7 @@ from main.models import (
     normalize_result_payload,
 )
 from main.prompts import STRICT_CHILD_SPAWN_POLICY_PROMPT, load_prompt
-from main.runtime.internal_tools import SpawnChildNodesTool
+from main.runtime.internal_tools import SpawnChildNodesTool, SpawnPrecheckTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -114,6 +114,7 @@ class NodeRunner:
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
+            tools['spawn_precheck'] = SpawnPrecheckTool()
             tools['spawn_child_nodes'] = SpawnChildNodesTool(
                 lambda children, call_id=None: self._spawn_children(
                     task_id=task.task_id,
@@ -123,6 +124,7 @@ class NodeRunner:
                 )
             )
         else:
+            tools.pop('spawn_precheck', None)
             tools.pop('spawn_child_nodes', None)
         return tools
 

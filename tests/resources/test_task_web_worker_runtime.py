@@ -635,6 +635,151 @@ def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_pat
     assert root_progress_node["execution_trace"]["final_output"] == ""
 
 
+def test_node_detail_execution_trace_groups_rounds_and_filters_spawn_precheck(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content="round one",
+        tool_calls=[
+            {
+                'id': 'call_pre',
+                'name': 'spawn_precheck',
+                'arguments': {
+                    'decision': 'continue_self_execute',
+                    'reason': 'single file read',
+                    'rule_ids': [1, 2, 3, 4],
+                    'rule_semantics': 'unmatched',
+                },
+            },
+            {
+                'id': 'call_fs',
+                'name': 'filesystem',
+                'arguments': {'path': '/tmp/demo', 'action': 'read'},
+            },
+        ],
+        round_metadata={
+            'round_index': 1,
+            'spawn_precheck': {
+                'present': True,
+                'valid': True,
+                'decision': 'continue_self_execute',
+                'reason': 'single file read',
+                'rule_ids': [1, 2, 3, 4],
+                'rule_semantics': 'unmatched',
+                'violation_codes': [],
+            },
+        },
+    )
+
+    detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert detail is not None
+    execution_trace = detail['item']['execution_trace']
+    assert len(execution_trace['rounds']) == 1
+    assert execution_trace['rounds'][0]['round_index'] == 1
+    assert execution_trace['rounds'][0]['spawn_precheck']['decision'] == 'continue_self_execute'
+    assert len(execution_trace['rounds'][0]['tools']) == 1
+    assert execution_trace['rounds'][0]['tools'][0]['tool_name'] == 'filesystem'
+    assert len(execution_trace['tool_steps']) == 1
+    assert execution_trace['tool_steps'][0]['tool_name'] == 'filesystem'
+
+
+def test_node_detail_execution_trace_hides_blocked_tools_for_invalid_spawn_precheck_round(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content="blocked round",
+        tool_calls=[
+            {
+                'id': 'call_fs',
+                'name': 'filesystem',
+                'arguments': {'path': '/tmp/demo', 'action': 'read'},
+            },
+        ],
+        round_metadata={
+            'round_index': 1,
+            'spawn_precheck': {
+                'present': False,
+                'valid': False,
+                'decision': '',
+                'reason': '',
+                'rule_ids': [],
+                'rule_semantics': '',
+                'violation_codes': ['spawn_precheck_missing'],
+            },
+        },
+    )
+
+    detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert detail is not None
+    execution_trace = detail['item']['execution_trace']
+    assert len(execution_trace['rounds']) == 1
+    assert execution_trace['rounds'][0]['spawn_precheck']['valid'] is False
+    assert execution_trace['rounds'][0]['tools'] == []
+    assert execution_trace['tool_steps'] == []
+
+
+def test_node_detail_execution_trace_backfills_default_round_metadata_for_legacy_outputs(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content="legacy round",
+        tool_calls=[
+            {
+                'id': 'call_fs',
+                'name': 'filesystem',
+                'arguments': {'path': '/tmp/demo', 'action': 'read'},
+            },
+        ],
+    )
+
+    detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert detail is not None
+    execution_trace = detail['item']['execution_trace']
+    assert len(execution_trace['rounds']) == 1
+    assert execution_trace['rounds'][0]['round_index'] == 1
+    assert execution_trace['rounds'][0]['spawn_precheck']['present'] is False
+    assert execution_trace['rounds'][0]['spawn_precheck']['valid'] is True
+
+
 def test_task_projection_backfills_when_projection_version_is_stale(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

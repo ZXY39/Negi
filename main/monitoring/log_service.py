@@ -177,6 +177,7 @@ class TaskLogService:
         *,
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
+        round_metadata: dict[str, Any] | None = None,
         usage_attempts: list[Any] | None = None,
         model_messages: list[dict[str, Any]] | None = None,
         request_message_count: int | None = None,
@@ -207,6 +208,7 @@ class TaskLogService:
                         content=text,
                         content_ref=ref,
                         tool_calls=list(tool_calls or []),
+                        round_metadata=dict(round_metadata or {}),
                         created_at=now_iso(),
                     )
                 )

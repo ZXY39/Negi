@@ -8,6 +8,77 @@ from g3ku.agent.tools.base import Tool
 from main.models import SpawnChildResult, SpawnChildSpec
 
 
+SPAWN_PRECHECK_TOOL_NAME = 'spawn_precheck'
+SPAWN_CHILD_NODES_TOOL_NAME = 'spawn_child_nodes'
+
+
+class SpawnPrecheckTool(Tool):
+    @property
+    def name(self) -> str:
+        return SPAWN_PRECHECK_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return '在本轮调用真实工具前，先声明是否需要派生子节点及原因。'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'decision': {
+                    'type': 'string',
+                    'enum': ['spawn_child_nodes', 'continue_self_execute'],
+                    'description': '本轮选择派生子节点，还是继续自行执行。',
+                },
+                'reason': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'description': '本轮为什么做出该选择。',
+                },
+                'rule_ids': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'integer',
+                        'enum': [1, 2, 3, 4],
+                    },
+                    'minItems': 1,
+                    'description': '本轮命中或不命中的派生规则编号。',
+                },
+                'rule_semantics': {
+                    'type': 'string',
+                    'enum': ['matched', 'unmatched'],
+                    'description': 'rule_ids 表示命中的规则还是未命中的规则。',
+                },
+            },
+            'required': ['decision', 'reason', 'rule_ids', 'rule_semantics'],
+        }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        rule_ids = params.get('rule_ids') if isinstance(params, dict) else None
+        if not isinstance(rule_ids, list) or not rule_ids:
+            errors.append('rule_ids must contain at least one item')
+        decision = str((params or {}).get('decision') or '').strip()
+        semantics = str((params or {}).get('rule_semantics') or '').strip()
+        if decision == 'spawn_child_nodes' and semantics and semantics != 'matched':
+            errors.append('rule_semantics must be matched when decision=spawn_child_nodes')
+        if decision == 'continue_self_execute' and semantics and semantics != 'unmatched':
+            errors.append('rule_semantics must be unmatched when decision=continue_self_execute')
+        return errors
+
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        return json.dumps(
+            {
+                'status': 'internal_only',
+                'tool_name': self.name,
+                'summary': 'spawn_precheck must be consumed by the runtime and should not execute as a real tool',
+            },
+            ensure_ascii=False,
+        )
+
+
 class SpawnChildNodesTool(Tool):
     def __init__(
         self,
@@ -17,7 +88,7 @@ class SpawnChildNodesTool(Tool):
 
     @property
     def name(self) -> str:
-        return 'spawn_child_nodes'
+        return SPAWN_CHILD_NODES_TOOL_NAME
 
     @property
     def description(self) -> str:

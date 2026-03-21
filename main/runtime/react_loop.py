@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from typing import Any
 
 import json_repair
@@ -21,6 +22,7 @@ from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with
 from main.errors import TaskPausedError
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION
 from main.protocol import now_iso
+from main.runtime.internal_tools import SPAWN_CHILD_NODES_TOOL_NAME, SPAWN_PRECHECK_TOOL_NAME
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:artifact:[A-Za-z0-9_-]+')
 _COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
@@ -30,6 +32,7 @@ _COMPACT_HISTORY_KEEP_RECENT = 12
 _COMPACT_HISTORY_MAX_STEPS = 12
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
+_SPAWN_PRECHECK_PROTOCOL_PREFIX = '[SPAWN_PRECHECK_PROTOCOL_ERROR]'
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -39,6 +42,16 @@ _RESULT_REQUIRED_KEYS = (
     'remaining_work',
     'blocking_reason',
 )
+
+
+@dataclass
+class SpawnPrecheckTurnValidation:
+    enforced: bool = False
+    valid: bool = True
+    missing_or_invalid_spawn_precheck: bool = False
+    violation_codes: list[str] = field(default_factory=list)
+    executable_tool_calls: list[Any] = field(default_factory=list)
+    round_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class RepeatedActionCircuitBreaker:
@@ -146,19 +159,51 @@ class ReActToolLoop:
                 {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
                 for call in list(response.tool_calls or [])
             ]
+            spawn_precheck_validation = self._validate_spawn_precheck_turn(
+                response_tool_calls=list(response.tool_calls or []),
+                tools=tools,
+                runtime_context=runtime_context,
+                round_index=attempts,
+            )
             self._log_service.append_node_output(
                 task.task_id,
                 node.node_id,
                 content=str(response.content or ''),
                 tool_calls=tool_calls,
+                round_metadata=spawn_precheck_validation.round_metadata,
                 usage_attempts=list(response.attempts or []),
                 model_messages=model_messages,
                 request_message_count=getattr(response, 'request_message_count', None),
                 request_message_chars=getattr(response, 'request_message_chars', None),
             )
             if response.tool_calls:
-                control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response.tool_calls)
-                for call in response.tool_calls:
+                executable_tool_calls = list(spawn_precheck_validation.executable_tool_calls or [])
+                if not spawn_precheck_validation.valid:
+                    assistant_retry_message = self._assistant_retry_message(
+                        content=response.content,
+                        runtime_context=runtime_context,
+                        node_id=node.node_id,
+                    )
+                    if assistant_retry_message is not None:
+                        message_history.append(assistant_retry_message)
+                    message_history.append(
+                        {
+                            'role': 'user',
+                            'content': self._spawn_precheck_protocol_message(
+                                violation_codes=spawn_precheck_validation.violation_codes,
+                                missing_or_invalid_spawn_precheck=spawn_precheck_validation.missing_or_invalid_spawn_precheck,
+                            ),
+                        }
+                    )
+                    continue
+                control_only_turn = bool(executable_tool_calls) and all(
+                    call.name in self._CONTROL_TOOL_NAMES for call in executable_tool_calls
+                )
+                executable_tool_call_payloads = [
+                    {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
+                    for call in executable_tool_calls
+                ]
+                for call in executable_tool_calls:
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
                     if call.name not in self._CONTROL_TOOL_NAMES:
                         breaker.register(signature)
@@ -168,9 +213,9 @@ class ReActToolLoop:
                         'type': 'function',
                         'function': {'name': call.name, 'arguments': json.dumps(call.arguments, ensure_ascii=False)},
                     }
-                    for call in response.tool_calls
+                    for call in executable_tool_calls
                 ]
-                live_tool_calls = [self._live_tool_entry(call) for call in response.tool_calls]
+                live_tool_calls = [self._live_tool_entry(call) for call in executable_tool_calls]
                 self._log_service.update_frame(
                     task.task_id,
                     node.node_id,
@@ -180,7 +225,7 @@ class ReActToolLoop:
                         'node_kind': node.node_kind,
                         'phase': 'waiting_tool_results',
                         'messages': message_history,
-                        'pending_tool_calls': tool_calls,
+                        'pending_tool_calls': executable_tool_call_payloads,
                         'tool_calls': live_tool_calls,
                         'last_error': '',
                     },
@@ -189,7 +234,7 @@ class ReActToolLoop:
                 results = await self._execute_tool_calls(
                     task=task,
                     node=node,
-                    response_tool_calls=list(response.tool_calls or []),
+                    response_tool_calls=executable_tool_calls,
                     tools=tools,
                     allowed_content_refs=allowed_content_refs,
                     runtime_context=runtime_context,
@@ -971,6 +1016,8 @@ class ReActToolLoop:
             if lowered.startswith('error') or '"status":"error"' in lowered or '"status": "error"' in lowered:
                 tool_name = str((message or {}).get('name') or 'tool').strip() or 'tool'
                 return self._truncate_compact_text(f'Investigate failed tool result: {tool_name}')
+        if role == 'user' and self._is_spawn_precheck_protocol_prompt(message):
+            return 'Resend a valid spawn_precheck tool-call turn or final result JSON'
         if role == 'user' and self._is_result_contract_prompt(message):
             return 'Return valid result-schema JSON once implementation is complete'
         return ''
@@ -988,6 +1035,195 @@ class ReActToolLoop:
         return (
             content.startswith('Your previous reply was not valid result JSON for schema v')
             or content.startswith('Your previous reply produced parseable JSON but violated result schema v')
+            or content.startswith(_SPAWN_PRECHECK_PROTOCOL_PREFIX)
+        )
+
+    @staticmethod
+    def _is_spawn_precheck_protocol_prompt(message: dict[str, Any]) -> bool:
+        if str((message or {}).get('role') or '').strip().lower() != 'user':
+            return False
+        return str((message or {}).get('content') or '').strip().startswith(_SPAWN_PRECHECK_PROTOCOL_PREFIX)
+
+    def _assistant_retry_message(self, *, content: Any, runtime_context: dict[str, Any], node_id: str) -> dict[str, Any] | None:
+        if content is None or content == '':
+            return None
+        normalized = str(content).strip() if isinstance(content, str) else content
+        if normalized is None or normalized == '':
+            return None
+        assistant_content = self._externalize_message_content(
+            normalized,
+            runtime_context=runtime_context,
+            display_name=f'assistant:{node_id}',
+            source_kind='assistant_message',
+        )
+        if assistant_content is None or assistant_content == '':
+            return None
+        return {'role': 'assistant', 'content': assistant_content}
+
+    @staticmethod
+    def _default_round_metadata(round_index: int) -> dict[str, Any]:
+        return {
+            'round_index': int(round_index or 0),
+            'spawn_precheck': {
+                'present': False,
+                'valid': True,
+                'decision': '',
+                'reason': '',
+                'rule_ids': [],
+                'rule_semantics': '',
+                'violation_codes': [],
+            },
+        }
+
+    @staticmethod
+    def _append_violation_code(codes: list[str], code: str) -> None:
+        normalized = str(code or '').strip()
+        if normalized and normalized not in codes:
+            codes.append(normalized)
+
+    def _validate_spawn_precheck_turn(
+        self,
+        *,
+        response_tool_calls: list[Any],
+        tools: dict[str, Tool],
+        runtime_context: dict[str, Any],
+        round_index: int,
+    ) -> SpawnPrecheckTurnValidation:
+        raw_calls = list(response_tool_calls or [])
+        validation = SpawnPrecheckTurnValidation(
+            executable_tool_calls=list(raw_calls),
+            round_metadata=self._default_round_metadata(round_index),
+        )
+        if not raw_calls:
+            return validation
+
+        node_kind = str(runtime_context.get('node_kind') or '').strip().lower()
+        can_spawn_children = bool(runtime_context.get('can_spawn_children', False))
+        spawn_calls = [call for call in raw_calls if str(getattr(call, 'name', '') or '').strip() == SPAWN_PRECHECK_TOOL_NAME]
+        has_spawn_precheck = bool(spawn_calls)
+        spawn_payload = validation.round_metadata['spawn_precheck']
+        spawn_payload['present'] = has_spawn_precheck
+
+        if node_kind != 'execution' or not can_spawn_children:
+            if has_spawn_precheck:
+                validation.valid = False
+                validation.missing_or_invalid_spawn_precheck = True
+                validation.executable_tool_calls = []
+                self._append_violation_code(validation.violation_codes, 'spawn_precheck_not_allowed')
+                spawn_payload['valid'] = False
+                spawn_payload['violation_codes'] = list(validation.violation_codes)
+            return validation
+
+        real_tool_calls = [
+            call
+            for call in raw_calls
+            if str(getattr(call, 'name', '') or '').strip() not in self._CONTROL_TOOL_NAMES | {SPAWN_PRECHECK_TOOL_NAME}
+        ]
+        if not real_tool_calls:
+            if has_spawn_precheck:
+                validation.valid = False
+                validation.missing_or_invalid_spawn_precheck = True
+                validation.executable_tool_calls = []
+                self._append_violation_code(validation.violation_codes, 'spawn_precheck_without_real_tool')
+                spawn_payload['valid'] = False
+                spawn_payload['violation_codes'] = list(validation.violation_codes)
+            return validation
+
+        validation.enforced = True
+        validation.executable_tool_calls = [
+            call for call in raw_calls if str(getattr(call, 'name', '') or '').strip() != SPAWN_PRECHECK_TOOL_NAME
+        ]
+
+        if not has_spawn_precheck:
+            validation.valid = False
+            validation.missing_or_invalid_spawn_precheck = True
+            self._append_violation_code(validation.violation_codes, 'spawn_precheck_missing')
+            spawn_payload['valid'] = False
+            spawn_payload['violation_codes'] = list(validation.violation_codes)
+            validation.executable_tool_calls = []
+            return validation
+
+        if len(spawn_calls) != 1:
+            validation.valid = False
+            validation.missing_or_invalid_spawn_precheck = True
+            self._append_violation_code(validation.violation_codes, 'spawn_precheck_multiple')
+
+        spawn_call = spawn_calls[0]
+        if raw_calls and raw_calls[0] is not spawn_call:
+            validation.valid = False
+            validation.missing_or_invalid_spawn_precheck = True
+            self._append_violation_code(validation.violation_codes, 'spawn_precheck_not_first')
+
+        arguments = dict(getattr(spawn_call, 'arguments', {}) or {})
+        raw_rule_ids = arguments.get('rule_ids')
+        rule_ids = [int(item) for item in list(raw_rule_ids or []) if isinstance(item, int)] if isinstance(raw_rule_ids, list) else []
+        spawn_payload.update(
+            {
+                'present': True,
+                'decision': str(arguments.get('decision') or '').strip(),
+                'reason': str(arguments.get('reason') or '').strip(),
+                'rule_ids': rule_ids,
+                'rule_semantics': str(arguments.get('rule_semantics') or '').strip(),
+            }
+        )
+
+        precheck_tool = tools.get(SPAWN_PRECHECK_TOOL_NAME)
+        param_errors = precheck_tool.validate_params(arguments) if precheck_tool is not None else ['spawn_precheck tool unavailable']
+        if param_errors:
+            validation.valid = False
+            validation.missing_or_invalid_spawn_precheck = True
+            self._append_violation_code(validation.violation_codes, 'spawn_precheck_invalid_arguments')
+
+        decision = spawn_payload['decision']
+        rule_semantics = spawn_payload['rule_semantics']
+        if decision == SPAWN_CHILD_NODES_TOOL_NAME and rule_semantics != 'matched':
+            validation.valid = False
+            validation.missing_or_invalid_spawn_precheck = True
+            self._append_violation_code(validation.violation_codes, 'spawn_precheck_semantic_mismatch')
+        if decision == 'continue_self_execute' and rule_semantics != 'unmatched':
+            validation.valid = False
+            validation.missing_or_invalid_spawn_precheck = True
+            self._append_violation_code(validation.violation_codes, 'spawn_precheck_semantic_mismatch')
+
+        executable_names = [str(getattr(call, 'name', '') or '').strip() for call in validation.executable_tool_calls]
+        if decision == SPAWN_CHILD_NODES_TOOL_NAME:
+            if executable_names.count(SPAWN_CHILD_NODES_TOOL_NAME) != 1:
+                validation.valid = False
+                self._append_violation_code(validation.violation_codes, 'spawn_child_nodes_missing_or_multiple')
+            if any(name != SPAWN_CHILD_NODES_TOOL_NAME for name in executable_names):
+                validation.valid = False
+                self._append_violation_code(validation.violation_codes, 'spawn_child_nodes_mixed_with_other_tools')
+        elif decision == 'continue_self_execute':
+            if any(name == SPAWN_CHILD_NODES_TOOL_NAME for name in executable_names):
+                validation.valid = False
+                self._append_violation_code(validation.violation_codes, 'continue_self_execute_contains_spawn_child_nodes')
+            if not any(name not in self._CONTROL_TOOL_NAMES for name in executable_names):
+                validation.valid = False
+                self._append_violation_code(validation.violation_codes, 'continue_self_execute_missing_real_tool')
+
+        if not validation.valid:
+            validation.executable_tool_calls = []
+        spawn_payload['valid'] = validation.valid
+        spawn_payload['violation_codes'] = list(validation.violation_codes)
+        return validation
+
+    @staticmethod
+    def _spawn_precheck_protocol_message(
+        *,
+        violation_codes: list[str],
+        missing_or_invalid_spawn_precheck: bool,
+    ) -> str:
+        joined_codes = ','.join(str(item or '').strip() for item in list(violation_codes or []) if str(item or '').strip()) or 'none'
+        return (
+            f'{_SPAWN_PRECHECK_PROTOCOL_PREFIX}\n'
+            f'missing_or_invalid_spawn_precheck={str(bool(missing_or_invalid_spawn_precheck)).lower()}\n'
+            f'violation_codes={joined_codes}\n'
+            'required_next_action=reply_with_new_tool_calls\n'
+            'rule=\n'
+            '1) If you will call real tools in this round and can_spawn_children=true, tool_calls[0] must be spawn_precheck.\n'
+            '2) If decision=spawn_child_nodes, only spawn_child_nodes may follow.\n'
+            '3) If decision=continue_self_execute, spawn_child_nodes must not appear.\n'
+            '4) Do not return explanation only; resend a valid tool-call turn or final result JSON.'
         )
 
     def _dedupe_tool_messages(self, tool_messages: list[dict[str, Any]], *, existing_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

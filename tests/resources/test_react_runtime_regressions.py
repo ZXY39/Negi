@@ -7,9 +7,10 @@ import pytest
 
 from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
-from g3ku.providers.base import LLMResponse
+from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime.ceo_async_task_guard import GUARD_OVERLAY_MARKER, maybe_build_execution_overlay
 from g3ku.runtime.tool_history import analyze_tool_call_history
+from main.runtime.internal_tools import SpawnPrecheckTool
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
 
@@ -28,6 +29,7 @@ class _FakeLogService:
         self._store = _FakeTaskStore()
         self._content_store = None
         self._snapshot_payload_builder = None
+        self.node_outputs: list[dict[str, object]] = []
 
     def set_pause_state(self, task_id: str, pause_requested: bool, is_paused: bool) -> None:
         _ = task_id, pause_requested, is_paused
@@ -39,13 +41,47 @@ class _FakeLogService:
         _ = args, kwargs
 
     def append_node_output(self, *args, **kwargs) -> None:
-        _ = args, kwargs
+        self.node_outputs.append({'args': args, 'kwargs': kwargs})
 
     def update_frame(self, *args, **kwargs) -> None:
         _ = args, kwargs
 
     def remove_frame(self, *args, **kwargs) -> None:
         _ = args, kwargs
+
+
+class _RecordingTool(Tool):
+    def __init__(self, *, name: str = 'filesystem', result: str = '{"status":"ok"}') -> None:
+        self._name = name
+        self._result = result
+        self.calls: list[dict[str, object]] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f'{self._name} stub'
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            'type': 'object',
+            'properties': {
+                'path': {'type': 'string', 'description': 'path'},
+                'action': {'type': 'string', 'description': 'action'},
+                'children': {'type': 'array', 'items': {'type': 'object'}},
+            },
+        }
+
+    async def execute(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return self._result
+
+
+def _tool_call(call_id: str, name: str, arguments: dict[str, object]) -> ToolCallRequest:
+    return ToolCallRequest(id=call_id, name=name, arguments=arguments)
 
 
 def test_compact_history_preserves_complete_tool_turns() -> None:
@@ -258,3 +294,207 @@ def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
     assert '当前你已调用20轮工具' in str(request_messages[0]['content'])
     assert f'{GUARD_OVERLAY_MARKER}\n' in str(request_messages[0]['content'])
     assert request_messages[1:] == base_messages
+
+
+def test_validate_spawn_precheck_requires_first_precheck_for_real_tools() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+
+    validation = loop._validate_spawn_precheck_turn(
+        response_tool_calls=[
+            _tool_call('call_1', 'filesystem', {'path': '/tmp/demo', 'action': 'read'}),
+        ],
+        tools={'spawn_precheck': SpawnPrecheckTool()},
+        runtime_context={'node_kind': 'execution', 'can_spawn_children': True},
+        round_index=1,
+    )
+
+    assert validation.valid is False
+    assert 'spawn_precheck_missing' in validation.violation_codes
+    assert validation.round_metadata['spawn_precheck']['valid'] is False
+
+
+def test_validate_spawn_precheck_rejects_spawn_child_nodes_mixed_with_other_tools() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+
+    validation = loop._validate_spawn_precheck_turn(
+        response_tool_calls=[
+            _tool_call('call_pre', 'spawn_precheck', {
+                'decision': 'spawn_child_nodes',
+                'reason': 'task can be split',
+                'rule_ids': [1, 3],
+                'rule_semantics': 'matched',
+            }),
+            _tool_call('call_spawn', 'spawn_child_nodes', {'children': [{'goal': 'a', 'prompt': 'b'}]}),
+            _tool_call('call_fs', 'filesystem', {'path': '/tmp/demo', 'action': 'read'}),
+        ],
+        tools={'spawn_precheck': SpawnPrecheckTool()},
+        runtime_context={'node_kind': 'execution', 'can_spawn_children': True},
+        round_index=1,
+    )
+
+    assert validation.valid is False
+    assert 'spawn_child_nodes_mixed_with_other_tools' in validation.violation_codes
+
+
+def test_validate_spawn_precheck_allows_control_only_turn_without_precheck() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+
+    validation = loop._validate_spawn_precheck_turn(
+        response_tool_calls=[
+            _tool_call('call_wait', 'wait_tool_execution', {'execution_id': 'exec-1'}),
+        ],
+        tools={'spawn_precheck': SpawnPrecheckTool()},
+        runtime_context={'node_kind': 'execution', 'can_spawn_children': True},
+        round_index=1,
+    )
+
+    assert validation.valid is True
+    assert validation.executable_tool_calls
+    assert validation.round_metadata['spawn_precheck']['present'] is False
+
+
+def test_validate_spawn_precheck_rejects_precheck_when_node_cannot_spawn() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+
+    validation = loop._validate_spawn_precheck_turn(
+        response_tool_calls=[
+            _tool_call('call_pre', 'spawn_precheck', {
+                'decision': 'continue_self_execute',
+                'reason': 'keep going',
+                'rule_ids': [1, 2, 3, 4],
+                'rule_semantics': 'unmatched',
+            }),
+            _tool_call('call_fs', 'filesystem', {'path': '/tmp/demo', 'action': 'read'}),
+        ],
+        tools={},
+        runtime_context={'node_kind': 'execution', 'can_spawn_children': False},
+        round_index=1,
+    )
+
+    assert validation.valid is False
+    assert 'spawn_precheck_not_allowed' in validation.violation_codes
+
+
+@pytest.mark.asyncio
+async def test_react_loop_soft_blocks_invalid_spawn_precheck_turn_and_requests_retry() -> None:
+    log_service = _FakeLogService()
+    filesystem_tool = _RecordingTool(name='filesystem')
+    requests: list[list[dict[str, object]]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, **kwargs):
+            self.calls += 1
+            requests.append([dict(item) for item in list(kwargs.get('messages') or [])])
+            if self.calls == 1:
+                return LLMResponse(
+                    content='searching without precheck',
+                    tool_calls=[_tool_call('call_fs', 'filesystem', {'path': '/tmp/demo', 'action': 'read'})],
+                    finish_reason='stop',
+                )
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        'status': 'success',
+                        'delivery_status': 'final',
+                        'summary': 'done',
+                        'answer': 'done',
+                        'evidence': [],
+                        'remaining_work': [],
+                        'blocking_reason': '',
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+                finish_reason='stop',
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=4)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-1'),
+        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-1","goal":"demo"}'},
+        ],
+        tools={'spawn_precheck': SpawnPrecheckTool(), 'filesystem': filesystem_tool},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-1', 'node_id': 'node-1', 'node_kind': 'execution', 'can_spawn_children': True},
+        max_iterations=4,
+    )
+
+    assert result.status == 'success'
+    assert filesystem_tool.calls == []
+    assert log_service.node_outputs[0]['kwargs']['round_metadata']['spawn_precheck']['valid'] is False
+    assert 'spawn_precheck_missing' in log_service.node_outputs[0]['kwargs']['round_metadata']['spawn_precheck']['violation_codes']
+    assert any(
+        str(item.get('role') or '') == 'user' and '[SPAWN_PRECHECK_PROTOCOL_ERROR]' in str(item.get('content') or '')
+        for item in requests[1]
+    )
+
+
+@pytest.mark.asyncio
+async def test_react_loop_executes_valid_continue_self_execute_turn_without_dangling_precheck() -> None:
+    log_service = _FakeLogService()
+    filesystem_tool = _RecordingTool(name='filesystem', result='{"status":"ok","summary":"read ok"}')
+    requests: list[list[dict[str, object]]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, **kwargs):
+            self.calls += 1
+            requests.append([dict(item) for item in list(kwargs.get('messages') or [])])
+            if self.calls == 1:
+                return LLMResponse(
+                    content='first turn',
+                    tool_calls=[
+                        _tool_call('call_pre', 'spawn_precheck', {
+                            'decision': 'continue_self_execute',
+                            'reason': 'single file read is cheaper',
+                            'rule_ids': [1, 2, 3, 4],
+                            'rule_semantics': 'unmatched',
+                        }),
+                        _tool_call('call_fs', 'filesystem', {'path': '/tmp/demo', 'action': 'read'}),
+                    ],
+                    finish_reason='stop',
+                )
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        'status': 'success',
+                        'delivery_status': 'final',
+                        'summary': 'done',
+                        'answer': 'done',
+                        'evidence': [{'kind': 'file', 'path': '/tmp/demo', 'ref': '', 'start_line': 1, 'end_line': 1, 'note': 'checked'}],
+                        'remaining_work': [],
+                        'blocking_reason': '',
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+                finish_reason='stop',
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=4)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-1'),
+        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-1","goal":"demo"}'},
+        ],
+        tools={'spawn_precheck': SpawnPrecheckTool(), 'filesystem': filesystem_tool},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-1', 'node_id': 'node-1', 'node_kind': 'execution', 'can_spawn_children': True},
+        max_iterations=4,
+    )
+
+    assert result.status == 'success'
+    assert len(filesystem_tool.calls) == 1
+    assert log_service.node_outputs[0]['kwargs']['round_metadata']['spawn_precheck']['valid'] is True
+    assert log_service.node_outputs[0]['kwargs']['round_metadata']['spawn_precheck']['decision'] == 'continue_self_execute'
+    assert analyze_tool_call_history(requests[1]).dangling_assistant_call_ids == []
