@@ -432,6 +432,132 @@ async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_co
     assert tool_registry.runtime_contexts[-1]['task_defaults'] == {'max_depth': 4}
 
 
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_uses_last_non_empty_ai_message_when_final_ai_message_is_empty(monkeypatch, tmp_path) -> None:
+    def _fake_create_agent(*, model, tools, checkpointer, store, name, middleware=()):
+        _ = model, tools, checkpointer, store, name, middleware
+
+        class _Agent:
+            async def ainvoke(self, payload, config=None):
+                _ = payload, config
+                return {
+                    'messages': [
+                        AIMessage(content='我来访问。'),
+                        AIMessage(content=''),
+                    ]
+                }
+
+        return _Agent()
+
+    async def _noop_ready() -> None:
+        return None
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr('g3ku.runtime.frontdoor.ceo_runner.create_agent', _fake_create_agent)
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_client', lambda: (_FakeModelClient(), ['openai_codex:gpt-test']))
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='你来访问'), session=session)
+
+    assert output == '我来访问。'
+    assert getattr(session, '_last_route_kind', '') == 'direct_reply'
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_returns_visible_fallback_when_all_ai_messages_are_empty(monkeypatch, tmp_path) -> None:
+    def _fake_create_agent(*, model, tools, checkpointer, store, name, middleware=()):
+        _ = model, tools, checkpointer, store, name, middleware
+
+        class _Agent:
+            async def ainvoke(self, payload, config=None):
+                _ = payload, config
+                return {'messages': [AIMessage(content='')]}
+
+        return _Agent()
+
+    async def _noop_ready() -> None:
+        return None
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr('g3ku.runtime.frontdoor.ceo_runner.create_agent', _fake_create_agent)
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_client', lambda: (_FakeModelClient(), ['openai_codex:gpt-test']))
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='你来访问'), session=session)
+
+    assert '没有生成可展示的回复' in output
+    assert '你来访问' in output
+    assert getattr(session, '_last_route_kind', '') == 'direct_reply'
+
+
 class _ProviderRecorder:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []

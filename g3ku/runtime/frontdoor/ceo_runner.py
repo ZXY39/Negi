@@ -20,7 +20,6 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency fallback
             self.text = content
 
 from g3ku.agent.chatmodel_utils import ensure_chat_model
-from g3ku.integrations.langchain_runtime import extract_final_response
 from g3ku.providers.chatmodels import build_chat_model
 from g3ku.runtime.ceo_async_task_guard import maybe_build_ceo_overlay
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
@@ -82,6 +81,26 @@ class CeoFrontDoorRunner:
     @staticmethod
     def _model_content(value: Any) -> Any:
         return value if isinstance(value, list) else str(value or '')
+
+    @classmethod
+    def _extract_visible_output(cls, messages: list[Any]) -> str:
+        for message in reversed(list(messages or [])):
+            message_type = str(getattr(message, 'type', '') or '').strip().lower()
+            if message_type != 'ai':
+                continue
+            text = cls._content_text(getattr(message, 'content', ''))
+            if text.strip():
+                return text.strip()
+        return ''
+
+    @staticmethod
+    def _empty_reply_fallback(query_text: str) -> str:
+        snippet = " ".join(str(query_text or "").split()).strip()
+        if len(snippet) > 32:
+            snippet = f"{snippet[:29].rstrip()}..."
+        if snippet:
+            return f"我这边这次没有生成可展示的回复。请直接再发一次“{snippet}”，我会继续处理。"
+        return "我这边这次没有生成可展示的回复。请直接再发一次你的请求，我会继续处理。"
 
     @staticmethod
     def _provider_model_ref(model_client: Any, model_chain: list[str]) -> str:
@@ -158,6 +177,8 @@ class CeoFrontDoorRunner:
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._loop._ensure_checkpointer_ready()
         query_text = self._content_text(getattr(user_input, 'content', ''))
+        metadata = dict(getattr(user_input, 'metadata', None) or {})
+        heartbeat_internal = bool(metadata.get('heartbeat_internal'))
         persisted_history: list[dict[str, Any]] = []
         runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
         persisted_session = None
@@ -217,6 +238,7 @@ class CeoFrontDoorRunner:
             'project_virtual_env': str(project_environment.get('project_virtual_env') or ''),
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
         }
+        setattr(session, '_last_route_kind', 'direct_reply')
         token = self._loop.tools.push_runtime_context(runtime_context)
         try:
             tools = self._loop.tools.to_langchain_tools_filtered(tool_names)
@@ -240,13 +262,19 @@ class CeoFrontDoorRunner:
         finally:
             self._loop.tools.pop_runtime_context(token)
         result_messages = list(result.get('messages') or [])
-        final = extract_final_response(result_messages)
-        output = final.content if final and final.content else ''
+        output = self._extract_visible_output(result_messages)
         used_tools = [message.name for message in result_messages if getattr(message, 'name', None)]
         route_kind = 'direct_reply'
         if 'create_async_task' in used_tools:
             route_kind = 'task_dispatch'
         elif used_tools:
             route_kind = 'self_execute'
+        if not output and not heartbeat_internal:
+            logger.warning(
+                'ceo frontdoor produced empty visible output; session_key={} used_tools={}',
+                str(getattr(session.state, 'session_key', '') or ''),
+                used_tools,
+            )
+            output = self._empty_reply_fallback(query_text)
         setattr(session, '_last_route_kind', route_kind)
         return output
