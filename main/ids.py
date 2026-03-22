@@ -29,3 +29,11 @@ def new_command_id() -> str:
 
 def new_worker_id() -> str:
     return _new_id('worker')
+
+
+def new_stage_id() -> str:
+    return _new_id('stage')
+
+
+def new_stage_round_id() -> str:
+    return _new_id('stage_round')

@@ -24,8 +24,8 @@ from main.models import (
     normalize_final_acceptance_metadata,
     normalize_result_payload,
 )
-from main.prompts import STRICT_CHILD_SPAWN_POLICY_PROMPT, load_prompt
-from main.runtime.internal_tools import SpawnChildNodesTool
+from main.prompts import EXECUTION_STAGE_POLICY_PROMPT, load_prompt
+from main.runtime.internal_tools import SpawnChildNodesTool, SubmitNextStageTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -33,8 +33,6 @@ ACCEPTANCE_REF_GUIDANCE = (
     'If more detail is needed, use content.search first and then content.open for targeted reads. '
     'Do not request the full document body.'
 )
-CHILD_SPAWN_PRECHECK_PAYLOAD_KEY = 'child_spawn_precheck'
-CHILD_SPAWN_PRECHECK_SOURCE = 'system_prompt'
 CORE_REQUIREMENT_NOTICE_TEMPLATE = '注意：你正在完成的任务是核心需求【{core_requirement}】的细分任务之一，不要做与核心需求或细分任务无关的事。'
 CORE_REQUIREMENT_NOTICE_PATTERN = re.compile(
     r'^注意：你正在完成的任务是核心需求【.*】的细分任务之一，不要做与核心需求或细分任务无关的事。$'
@@ -74,6 +72,9 @@ class NodeRunner:
             raise ValueError(f'missing task or node: {task_id} / {node_id}')
         if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return self._result_from_record(node)
+        if self._pause_requested(task_id):
+            self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+            raise TaskPausedError(task_id)
         if task.cancel_requested:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         try:
@@ -94,6 +95,9 @@ class NodeRunner:
         except TaskPausedError:
             raise
         except asyncio.CancelledError:
+            if self._pause_requested(task_id):
+                self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+                raise TaskPausedError(task_id)
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
             return self._mark_failed(task_id, node.node_id, reason=str(exc))
@@ -113,16 +117,28 @@ class NodeRunner:
 
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
-        if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
-            tools['spawn_child_nodes'] = SpawnChildNodesTool(
-                lambda children, call_id=None: self._spawn_children(
+        if node.node_kind == KIND_EXECUTION:
+            tools['submit_next_stage'] = SubmitNextStageTool(
+                lambda stage_goal, tool_round_budget: self._submit_next_stage(
                     task_id=task.task_id,
-                    parent_node_id=node.node_id,
-                    specs=children,
-                    call_id=call_id,
+                    node_id=node.node_id,
+                    stage_goal=stage_goal,
+                    tool_round_budget=tool_round_budget,
                 )
             )
+            if node.can_spawn_children:
+                tools['spawn_child_nodes'] = SpawnChildNodesTool(
+                    lambda children, call_id=None: self._spawn_children(
+                        task_id=task.task_id,
+                        parent_node_id=node.node_id,
+                        specs=children,
+                        call_id=call_id,
+                    )
+                )
+            else:
+                tools.pop('spawn_child_nodes', None)
         else:
+            tools.pop('submit_next_stage', None)
             tools.pop('spawn_child_nodes', None)
         return tools
 
@@ -139,8 +155,8 @@ class NodeRunner:
             'core_requirement': self._resolve_core_requirement(task),
             'runtime_environment': self._runtime_environment_payload(),
         }
-        if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
-            payload[CHILD_SPAWN_PRECHECK_PAYLOAD_KEY] = self._child_spawn_precheck_payload()
+        if node.node_kind == KIND_EXECUTION:
+            payload['execution_stage'] = self._execution_stage_payload(task=task, node=node)
         completion_contract = self._completion_contract_payload(task=task, node=node)
         if completion_contract is not None:
             payload['completion_contract'] = completion_contract
@@ -161,16 +177,12 @@ class NodeRunner:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
         prompt = load_prompt(system_name).strip()
         environment_guidance = self._environment_context_guidance(node=node)
-        if node.node_kind == KIND_EXECUTION and node.can_spawn_children:
-            return f'{prompt}\n\n{STRICT_CHILD_SPAWN_POLICY_PROMPT}\n\n{environment_guidance}'
+        if node.node_kind == KIND_EXECUTION:
+            return f'{prompt}\n\n{EXECUTION_STAGE_POLICY_PROMPT}\n\n{environment_guidance}'
         return f'{prompt}\n\n{environment_guidance}'
 
-    @staticmethod
-    def _child_spawn_precheck_payload() -> dict[str, Any]:
-        return {
-            'required': True,
-            'source': CHILD_SPAWN_PRECHECK_SOURCE,
-        }
+    def _execution_stage_payload(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        return self._log_service.execution_stage_prompt_payload(task.task_id, node.node_id)
 
     def _completion_contract_payload(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
         if node.node_kind != KIND_EXECUTION or node.parent_node_id is not None:
@@ -332,6 +344,7 @@ class NodeRunner:
             raise ValueError('parent task or node missing')
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
+        self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = str(call_id or f'call:{len(specs)}')
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
@@ -816,8 +829,33 @@ class NodeRunner:
             'evidence_summary': evidence_summary,
         }
 
+    async def _submit_next_stage(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        stage_goal: str,
+        tool_round_budget: int,
+    ) -> dict[str, Any]:
+        stage = self._log_service.submit_next_stage(
+            task_id,
+            node_id,
+            stage_goal=str(stage_goal or '').strip(),
+            tool_round_budget=int(tool_round_budget or 0),
+        )
+        return {
+            'stage_id': str(stage.get('stage_id') or ''),
+            'stage_index': int(stage.get('stage_index') or 0),
+            'mode': str(stage.get('mode') or ''),
+            'status': str(stage.get('status') or ''),
+            'stage_goal': str(stage.get('stage_goal') or ''),
+            'tool_round_budget': int(stage.get('tool_round_budget') or 0),
+            'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
+        }
+
     def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED
+        self._log_service.finalize_execution_stage(task_id, node_id, status=status)
         self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
         self._persist_result_payload(task_id, node_id, result)
         self._log_service.update_node_status(
@@ -846,6 +884,12 @@ class NodeRunner:
                 blocking_reason=text,
             ),
         )
+
+    def _pause_requested(self, task_id: str) -> bool:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
+        return bool(task.pause_requested) and not bool(task.cancel_requested)
 
     def _persist_result_payload(self, task_id: str, node_id: str, result: NodeFinalResult) -> None:
         payload = result.payload_dict()

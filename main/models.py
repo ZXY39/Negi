@@ -76,6 +76,34 @@ class FinalAcceptanceState(Model):
     status: str = 'pending'
 
 
+class ExecutionStageRound(Model):
+    round_id: str = ''
+    round_index: int = 0
+    created_at: str = ''
+    tool_call_ids: list[str] = Field(default_factory=list)
+    tool_names: list[str] = Field(default_factory=list)
+    budget_counted: bool = False
+
+
+class ExecutionStageRecord(Model):
+    stage_id: str = ''
+    stage_index: int = 0
+    mode: Literal['自主执行', '包含派生'] = '自主执行'
+    status: Literal['进行中', '完成', '失败'] = '进行中'
+    stage_goal: str = ''
+    tool_round_budget: int = 0
+    tool_rounds_used: int = 0
+    created_at: str = ''
+    finished_at: str = ''
+    rounds: list[ExecutionStageRound] = Field(default_factory=list)
+
+
+class ExecutionStageState(Model):
+    active_stage_id: str = ''
+    transition_required: bool = False
+    stages: list[ExecutionStageRecord] = Field(default_factory=list)
+
+
 class SpawnChildSpec(Model):
     goal: str
     prompt: str
@@ -190,6 +218,37 @@ def normalize_final_acceptance_metadata(value: Any) -> FinalAcceptanceState:
         prompt=prompt,
         node_id=str(payload.get('node_id') or '').strip(),
         status=status,
+    )
+
+
+def normalize_execution_stage_metadata(value: Any) -> ExecutionStageState:
+    payload = value.model_dump(mode='json') if isinstance(value, ExecutionStageState) else (dict(value) if isinstance(value, dict) else {})
+    active_stage_id = str(payload.get('active_stage_id') or '').strip()
+    transition_required = bool(payload.get('transition_required'))
+    stages: list[ExecutionStageRecord] = []
+    for item in list(payload.get('stages') or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            stage = ExecutionStageRecord.model_validate(item)
+        except Exception:
+            continue
+        tool_round_budget = max(0, int(stage.tool_round_budget or 0))
+        tool_rounds_used = max(0, min(int(stage.tool_rounds_used or 0), tool_round_budget or int(stage.tool_rounds_used or 0)))
+        stages.append(
+            stage.model_copy(
+                update={
+                    'tool_round_budget': tool_round_budget,
+                    'tool_rounds_used': tool_rounds_used,
+                }
+            )
+        )
+    if active_stage_id and not any(stage.stage_id == active_stage_id for stage in stages):
+        active_stage_id = ''
+    return ExecutionStageState(
+        active_stage_id=active_stage_id,
+        transition_required=transition_required,
+        stages=stages,
     )
 
 

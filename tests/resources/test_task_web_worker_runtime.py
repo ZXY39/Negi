@@ -10,10 +10,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import g3ku.shells.web as web_shell
+from g3ku.providers.base import LLMResponse, ToolCallRequest
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
-from main.models import TaskRecord
+from main.models import SpawnChildSpec, TaskRecord
 from main.monitoring.models import TaskProjectionMetaRecord
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
@@ -601,6 +602,110 @@ def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path:
     assert node_payload["item"]["output"] == "projection-output"
 
 
+def test_task_snapshot_preserves_auxiliary_acceptance_children(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=root,
+        goal=f"最终验收:{root.goal}",
+        acceptance_prompt="核对最终结果是否满足要求。",
+        parent_node_id=root.node_id,
+        metadata={"final_acceptance": True},
+    )
+    service.log_service.update_node_check_result(record.task_id, acceptance.node_id, "验收通过")
+    service.log_service.update_node_status(
+        record.task_id,
+        acceptance.node_id,
+        status="success",
+        final_output="验收通过",
+    )
+
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+
+    assert snapshot is not None
+    tree_root = snapshot["tree_root"]
+    auxiliary_children = tree_root["auxiliary_children"]
+
+    assert [item["node_id"] for item in auxiliary_children] == [acceptance.node_id]
+    assert auxiliary_children[0]["node_kind"] == "acceptance"
+    assert acceptance.node_id in [item["node_id"] for item in tree_root["children"]]
+
+
+def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+    )
+    service.log_service.update_node_status(
+        record.task_id,
+        child.node_id,
+        status="success",
+        final_output="child done",
+    )
+
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=child,
+        goal="accept:child goal",
+        acceptance_prompt="检查 child 输出。",
+        parent_node_id=child.node_id,
+    )
+    service.log_service.update_node_check_result(record.task_id, child.node_id, "child acceptance passed")
+    service.log_service.update_node_check_result(record.task_id, acceptance.node_id, "验收通过")
+    service.log_service.update_node_status(
+        record.task_id,
+        acceptance.node_id,
+        status="success",
+        final_output="验收通过",
+    )
+
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+
+    assert snapshot is not None
+    tree_root = snapshot["tree_root"]
+    child_item = next(item for item in tree_root["children"] if item["node_id"] == child.node_id)
+
+    assert [item["node_id"] for item in child_item["auxiliary_children"]] == [acceptance.node_id]
+    assert child_item["auxiliary_children"][0]["node_kind"] == "acceptance"
+    assert acceptance.node_id in [item["node_id"] for item in child_item["children"]]
+
+
 def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -775,4 +880,92 @@ async def test_pause_task_cancels_active_background_run_without_marking_failed(t
         assert root.failure_reason == ""
     finally:
         blocker.set()
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_during_model_call_keeps_task_resumable_and_resume_finishes_same_task(tmp_path: Path):
+    class _PauseableChatBackend:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.call_count = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.call_count += 1
+            if self.call_count == 1:
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
+            if self.call_count == 2:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(
+                            id="call:stage",
+                            name="submit_next_stage",
+                            arguments={"stage_goal": "resume after pause", "tool_round_budget": 1},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage={"input_tokens": 8, "output_tokens": 4},
+                )
+            return LLMResponse(
+                content='{"status":"success","delivery_status":"final","summary":"done","answer":"done","evidence":[{"kind":"artifact","note":"resume path completed"}],"remaining_work":[],"blocking_reason":""}',
+                tool_calls=[],
+                finish_reason="stop",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            )
+
+    backend = _PauseableChatBackend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+
+    try:
+        record = await service.create_task("pause and resume me", session_id="web:shared")
+        await asyncio.wait_for(backend.started.wait(), timeout=1.0)
+
+        await service.pause_task(record.task_id)
+
+        paused = service.get_task(record.task_id)
+        assert paused is not None
+        assert paused.task_id == record.task_id
+        assert paused.status == "in_progress"
+        assert paused.is_paused is True
+        assert paused.pause_requested is True
+        assert backend.call_count == 1
+        assert backend.cancelled.is_set() is True
+        assert service.task_runner.is_active(record.task_id) is False
+
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        assert root.status == "in_progress"
+        assert root.failure_reason == ""
+
+        await service.resume_task(record.task_id)
+        finished = await asyncio.wait_for(service.wait_for_task(record.task_id), timeout=2.0)
+        assert finished is not None
+        assert finished.task_id == record.task_id
+        assert finished.status == "success"
+        assert finished.is_paused is False
+        assert finished.pause_requested is False
+        assert finished.failure_reason == ""
+        assert backend.call_count == 3
+
+        latest_root = service.get_node(record.root_node_id)
+        assert latest_root is not None
+        assert latest_root.status == "success"
+        assert latest_root.failure_reason == ""
+        assert len(service.store.list_tasks()) == 1
+    finally:
         await service.close()

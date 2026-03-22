@@ -5542,9 +5542,26 @@ function rawNodeRounds(node) {
         .filter((round) => round.round_id);
 }
 
+function rawAuxiliaryChildren(node) {
+    const explicitAuxiliary = dedupeTreeNodes(node?.auxiliary_children);
+    if (explicitAuxiliary.length) return explicitAuxiliary;
+    const directChildren = dedupeTreeNodes(node?.children);
+    const rounds = rawNodeRounds(node);
+    if (!directChildren.length || !rounds.length) return [];
+    const roundChildIds = new Set(
+        rounds.flatMap((round) => dedupeTreeNodes(round.children)
+            .map((child) => String(child?.node_id || "").trim())
+            .filter(Boolean)),
+    );
+    return directChildren.filter((child) => {
+        const childId = String(child?.node_id || "").trim();
+        return !childId || !roundChildIds.has(childId);
+    });
+}
+
 function rawTreeDirectChildren(node) {
     const rounds = rawNodeRounds(node);
-    const auxiliary = dedupeTreeNodes(node?.auxiliary_children);
+    const auxiliary = rawAuxiliaryChildren(node);
     const roundChildren = rounds.flatMap((round) => dedupeTreeNodes(round.children));
     if (auxiliary.length || roundChildren.length) return dedupeTreeNodes([...auxiliary, ...roundChildren]);
     return dedupeTreeNodes(node?.children);
@@ -5607,7 +5624,7 @@ function resolveSelectedRoundId(node, selections) {
 function projectTaskTree(node, selections) {
     if (!node) return null;
     const rounds = rawNodeRounds(node);
-    const projectedAuxiliaryChildren = dedupeTreeNodes(node?.auxiliary_children)
+    const projectedAuxiliaryChildren = rawAuxiliaryChildren(node)
         .map((child) => projectTaskTree(child, selections))
         .filter(Boolean);
     const projectedRounds = rounds.map((round) => ({
@@ -5888,8 +5905,13 @@ function buildLiveSectionStatus(items) {
 function buildNodeExecutionTrace(node, detail, liveFrame = null) {
     const source = detail?.execution_trace && typeof detail.execution_trace === "object" ? detail.execution_trace : {};
     const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps : [];
+    const stages = (Array.isArray(source.stages) ? source.stages : []).map((stage, index) => normalizeExecutionStageTrace(stage, index));
+    const initialPrompt = [source.initial_prompt, detail?.prompt, detail?.goal, node?.prompt, node?.goal, node?.input]
+        .map((value) => String(value ?? ""))
+        .find((value) => value.trim())
+        || "";
     return {
-        initial_prompt: String(source.initial_prompt ?? detail?.prompt ?? detail?.goal ?? node?.input ?? ""),
+        initial_prompt: initialPrompt,
         tool_steps: toolSteps.map((step) => ({
             tool_call_id: String(step?.tool_call_id || ""),
             tool_name: String(step?.tool_name || "tool"),
@@ -5902,11 +5924,88 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
                 ? String(step.status)
                 : "info",
         })),
+        stages,
         live_tool_calls: normalizeLiveToolCalls(liveFrame),
         live_child_pipelines: normalizeLiveChildPipelines(liveFrame),
         final_output: String(source.final_output ?? detail?.final_output ?? node?.final_output ?? ""),
         acceptance_result: String(source.acceptance_result ?? detail?.check_result ?? node?.check_result ?? ""),
     };
+}
+
+function normalizeExecutionStageTrace(stage, index = 0) {
+    const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
+    return {
+        stage_id: String(stage?.stage_id || ""),
+        stage_index: normalizeInt(stage?.stage_index, index + 1),
+        mode: String(stage?.mode || "自主执行").trim() || "自主执行",
+        status: String(stage?.status || "进行中").trim() || "进行中",
+        stage_goal: String(stage?.stage_goal || "").trim(),
+        stage_total_steps: normalizeInt(stage?.tool_round_budget, 0),
+        tool_rounds_used: normalizeInt(stage?.tool_rounds_used, 0),
+        created_at: String(stage?.created_at || ""),
+        finished_at: String(stage?.finished_at || ""),
+        rounds: rounds.map((round, roundIndex) => ({
+            round_id: String(round?.round_id || ""),
+            round_index: normalizeInt(round?.round_index, roundIndex + 1),
+            created_at: String(round?.created_at || ""),
+            budget_counted: !!round?.budget_counted,
+            tools: (Array.isArray(round?.tools) ? round.tools : []).map((step) => ({
+                tool_call_id: String(step?.tool_call_id || ""),
+                tool_name: String(step?.tool_name || "tool"),
+                arguments_text: String(step?.arguments_text || ""),
+                output_text: String(step?.output_text || ""),
+                started_at: String(step?.started_at || ""),
+                finished_at: String(step?.finished_at || ""),
+                elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
+                status: ["running", "success", "error"].includes(String(step?.status || ""))
+                    ? String(step.status)
+                    : "info",
+            })),
+        })),
+    };
+}
+
+function stageTraceStatus(stage) {
+    return ({
+        "进行中": "running",
+        "完成": "success",
+        "失败": "error",
+    }[String(stage?.status || "").trim()] || "info");
+}
+
+function roundTraceStatus(round) {
+    const tools = Array.isArray(round?.tools) ? round.tools : [];
+    return buildLiveSectionStatus(tools);
+}
+
+function renderExecutionStageRounds(stage) {
+    const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
+    if (!rounds.length) {
+        return renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次");
+    }
+    return rounds.map((round, index) => {
+        const title = `第 ${round.round_index || index + 1} 轮${round.budget_counted ? " · 计入预算" : ""}`;
+        const tools = Array.isArray(round.tools) ? round.tools : [];
+        const toolDetails = tools.length
+            ? tools.map((step, toolIndex) => renderTraceStep({
+                traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}:tool:${step.tool_call_id || toolIndex}`,
+                title: `工具 · ${step.tool_name || "tool"}`,
+                status: step.status || "info",
+                open: false,
+                bodyHtml: [
+                    renderTraceField("参数", step.arguments_text, "无参数"),
+                    renderTraceField("工具输出", step.output_text, step.status === "running" ? "等待工具输出…" : "暂无工具输出"),
+                ].join(""),
+            })).join("")
+            : renderTraceField("工具", "", "本轮暂无工具记录");
+        return renderTraceStep({
+            traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}`,
+            title: `${title}${round.created_at ? ` · ${formatCompactTime(round.created_at)}` : ""}`,
+            status: roundTraceStatus(round),
+            open: false,
+            bodyHtml: toolDetails,
+        });
+    }).join("");
 }
 
 function traceStatusLabel(status) {
@@ -5969,14 +6068,32 @@ function resolveTraceStepOpenState(step, state, index) {
 }
 
 function buildExecutionTraceSteps(trace, node) {
+    const initialPromptStep = {
+        traceKey: "initial_prompt",
+        title: "Initial Prompt",
+        status: "info",
+        open: false,
+        bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
+    };
+    if (Array.isArray(trace?.stages) && trace.stages.length) {
+        return [
+            initialPromptStep,
+            ...trace.stages.map((stage, index) => ({
+            traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
+            title: `${stage.mode || "自主执行"}${stage.created_at ? ` · ${formatCompactTime(stage.created_at)}` : ""}`,
+            status: stageTraceStatus(stage),
+            open: index === trace.stages.length - 1,
+            bodyHtml: [
+                renderTraceField("阶段总步骤数", String(stage.stage_total_steps || 0), "0"),
+                renderTraceField("状态", String(stage.status || "进行中"), "进行中"),
+                renderTraceField("阶段目标", stage.stage_goal, "暂无阶段目标"),
+                renderExecutionStageRounds(stage),
+            ].join(""),
+            })),
+        ];
+    }
     return [
-        {
-            traceKey: "initial_prompt",
-            title: "Initial Prompt",
-            status: "info",
-            open: false,
-            bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
-        },
+        initialPromptStep,
         ...trace.tool_steps.map((step, index) => ({
             traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
             title: `Tool - ${step.tool_name || "tool"}`,
@@ -5992,20 +6109,6 @@ function buildExecutionTraceSteps(trace, node) {
                 ),
             ].join(""),
         })),
-        ...(trace.live_tool_calls.length ? [{
-            traceKey: "live_tools",
-            title: `Live Tools (${trace.live_tool_calls.length})`,
-            status: buildLiveSectionStatus(trace.live_tool_calls),
-            open: true,
-            bodyHtml: renderLiveToolFields(trace.live_tool_calls),
-        }] : []),
-        ...(trace.live_child_pipelines.length ? [{
-            traceKey: "live_child_pipelines",
-            title: `Live Child Pipelines (${trace.live_child_pipelines.length})`,
-            status: buildLiveSectionStatus(trace.live_child_pipelines),
-            open: true,
-            bodyHtml: renderLiveChildFields(trace.live_child_pipelines),
-        }] : []),
     ];
 }
 
@@ -6244,13 +6347,8 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     traceList.innerHTML = steps.join("");
     renderFlowHeading(stepDescriptors.length);
     const traceItems = Array.from(traceList.querySelectorAll(".task-trace-step"));
-    trace.tool_steps.forEach((step, index) => {
-        const item = traceItems[index + 1];
+    traceItems.forEach((item) => {
         if (!(item instanceof HTMLElement)) return;
-        item.dataset.traceStatus = String(step.status || "info");
-        if (step.started_at) item.dataset.startedAt = step.started_at;
-        if (step.finished_at) item.dataset.finishedAt = step.finished_at;
-        if (Number.isFinite(step.elapsed_seconds)) item.dataset.elapsedSeconds = String(step.elapsed_seconds);
         const runtimeEl = item.querySelector(".task-trace-runtime");
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     });

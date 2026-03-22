@@ -6,6 +6,7 @@ from typing import Any
 
 from g3ku.content import content_summary_and_ref
 from main.models import ModelTokenUsageRecord, NodeRecord, TokenUsageSummary
+from main.monitoring.execution_trace import build_execution_trace
 from main.token_usage import aggregate_node_token_usage
 from main.monitoring.models import (
     LatestTaskNodeOutput,
@@ -195,7 +196,7 @@ class TaskQueryService:
             'node_id': root.node_id,
             'parent_node_id': root.parent_node_id,
             'depth': int(root.depth or 0),
-            'node_kind': 'execution',
+            'node_kind': str(getattr(root, 'node_kind', 'execution') or 'execution'),
             'status': root.status,
             'title': root.title,
             'updated_at': root.updated_at,
@@ -217,6 +218,7 @@ class TaskQueryService:
                 for round_item in list(root.spawn_rounds or [])
             ],
             'default_round_id': str(root.default_round_id or ''),
+            'auxiliary_children': [self._compact_tree_payload(child) for child in list(getattr(root, 'auxiliary_children', []) or [])],
             'children': [self._compact_tree_payload(child) for child in list(root.children or [])],
         }
 
@@ -296,10 +298,15 @@ class TaskQueryService:
                     )
                 )
             selected_round = next((item for item in spawn_rounds if item.round_id == selected_round_id), None)
+            auxiliary_children = [
+                child
+                for child in (_build(child_id) for child_id in auxiliary_child_ids)
+                if child is not None
+            ]
             children = [
                 child
                 for child in (
-                    [_build(child_id) for child_id in auxiliary_child_ids]
+                    auxiliary_children
                     + list(selected_round.children if selected_round is not None else [])
                 )
                 if child is not None
@@ -314,6 +321,7 @@ class TaskQueryService:
                 updated_at=str(record.updated_at or ''),
                 spawn_rounds=spawn_rounds,
                 default_round_id=str(record.default_round_id or ''),
+                auxiliary_children=auxiliary_children,
                 children=children,
             )
 
@@ -366,6 +374,10 @@ class TaskQueryService:
                     depth=int(record.depth or 0),
                     node_kind=str(record.node_kind or 'execution'),
                     phase=str(record.phase or ''),
+                    stage_mode=str(payload.get('stage_mode') or ''),
+                    stage_status=str(payload.get('stage_status') or ''),
+                    stage_goal=str(payload.get('stage_goal') or ''),
+                    stage_total_steps=int(payload.get('stage_total_steps') or 0),
                     tool_calls=[
                         TaskLiveToolCall(
                             tool_call_id=str(item.get('tool_call_id') or ''),
@@ -622,72 +634,7 @@ class TaskQueryService:
         return payload
 
     def _execution_trace(self, node: NodeRecord) -> dict[str, object]:
-        tool_message_map = self._tool_message_map(node)
-        tool_output_map = self._tool_output_map(node)
-        tool_ref_map = self._tool_output_ref_map(node)
-        tool_steps: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        background_steps: dict[str, dict[str, Any]] = {}
-
-        for entry in list(node.output or []):
-            for call in list(entry.tool_calls or []):
-                tool_call_id = str(call.get('id') or '').strip()
-                if not tool_call_id or tool_call_id in seen_ids:
-                    continue
-                seen_ids.add(tool_call_id)
-                tool_name = str(call.get('name') or 'tool')
-                output_text = str(tool_output_map.get(tool_call_id) or '')
-                output_ref = str(tool_ref_map.get(tool_call_id) or '')
-                message_meta = dict(tool_message_map.get(tool_call_id) or {})
-                payload = self._parse_tool_payload(message_meta.get('content'))
-                arguments = call.get('arguments')
-                if isinstance(arguments, (dict, list)):
-                    arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2)
-                else:
-                    arguments_text = str(arguments or '')
-
-                if tool_name in _CONTROL_TOOL_NAMES:
-                    execution_id = str((payload or {}).get('execution_id') or '').strip()
-                    if execution_id and execution_id in background_steps:
-                        self._merge_background_execution_update(
-                            background_steps[execution_id],
-                            payload=payload or {},
-                            message_meta=message_meta,
-                            output_text=output_text,
-                            output_ref=output_ref,
-                        )
-                    continue
-
-                step: dict[str, Any] = {
-                    'tool_call_id': tool_call_id,
-                    'tool_name': tool_name,
-                    'arguments_text': arguments_text,
-                    'output_text': output_text,
-                    'output_ref': output_ref,
-                    'status': self._tool_step_status(output_text, node.status, payload=payload),
-                    'started_at': str(entry.created_at or ''),
-                    'finished_at': str(message_meta.get('finished_at') or ''),
-                }
-                step['elapsed_seconds'] = self._resolve_tool_elapsed_seconds(
-                    message_meta=message_meta,
-                    payload=payload,
-                    started_at=str(entry.created_at or ''),
-                    is_running=step['status'] == 'running',
-                )
-                execution_id = str((payload or {}).get('execution_id') or '').strip()
-                if execution_id:
-                    step['execution_id'] = execution_id
-                    background_steps[execution_id] = step
-                tool_steps.append(step)
-
-        return {
-            'initial_prompt': str(node.prompt or node.goal or ''),
-            'tool_steps': tool_steps,
-            'final_output': str(node.final_output or ''),
-            'final_output_ref': str(getattr(node, 'final_output_ref', '') or ''),
-            'acceptance_result': str(node.check_result or ''),
-            'acceptance_result_ref': str(getattr(node, 'check_result_ref', '') or ''),
-        }
+        return build_execution_trace(node)
 
     @staticmethod
     def _live_state(runtime_state: dict[str, Any]) -> TaskLiveState | None:
@@ -732,6 +679,10 @@ class TaskQueryService:
                     depth=int(frame.get('depth') or 0),
                     node_kind=str(frame.get('node_kind') or 'execution'),
                     phase=str(frame.get('phase') or ''),
+                    stage_mode=str(frame.get('stage_mode') or ''),
+                    stage_status=str(frame.get('stage_status') or ''),
+                    stage_goal=str(frame.get('stage_goal') or ''),
+                    stage_total_steps=int(frame.get('stage_total_steps') or 0),
                     tool_calls=tool_calls,
                     child_pipelines=child_pipelines,
                 )

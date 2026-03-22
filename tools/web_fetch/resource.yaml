@@ -5,12 +5,16 @@ display_name: Web Fetch
 description: Lightweight HTTP fetch for reading public web pages and extracting readable text without a browser runtime.
 source:
   type: local_adapted
-  url: file:///D:/zxy/project/openclaw-2026.3.13-1/src/agents/tools/web-fetch.ts
+  url: file:///E:/Program/openclaw-2026.3.13-1/src/agents/tools/web-fetch.ts
   ref: openclaw-2026.3.13-1
 current_version:
-  number: 0.1.0
-  summary: 棣栦釜 G3KU 閫傞厤鐗堬紱鍙傝€?OpenClaw web_fetch 鐨勮交閲忔姄鍙栥€佹鏂囨彁鍙栥€佺紦瀛樹笌瀹夊叏杈圭晫鎬濊矾锛屼互 Python 鍐呯疆瑙ｆ瀽瀹炵幇鏈€灏忓彲鐢ㄨ兘鍔涖€?
-  compare_rule: 浠?main/ 瀹炵幇銆佸弬鏁板绾︺€佸畨鍏ㄧ瓥鐣ャ€佺紦瀛樿涓烘垨杩斿洖缁撴瀯鍙樺寲涓哄噯锛涗粎淇敼 toolskills 鏂囨涓嶅崟鐙涓虹増鏈崌绾с€?
+  number: 0.1.1
+  released_at: '2026-03-23'
+  summary: Initial G3KU-adapted local implementation based on OpenClaw web-fetch.
+tool_type: internal
+entry:
+  module: tools.web_fetch.main.tool
+  symbol: build
 protocol: mcp
 mcp:
   enabled: false
@@ -18,69 +22,93 @@ requires: []
 permissions:
   network:
     outbound: true
-    notes: 浠呭厑璁歌闂叕寮€ http(s) 鐩爣锛涢粯璁ら樆鏂缃戙€佸洖鐜€侀摼璺湰鍦颁笌 localhost銆?
+    notes: 仅允许访问公开 http(s) 目标；默认阻断私网、回环、链路本地与 localhost。
   filesystem:
-    read:
-    - .g3ku/cache/web_fetch
-    write:
-    - .g3ku/cache/web_fetch
-settings:
-  timeout_seconds:
-    type: number
-    default: 12
-    minimum: 1
-    maximum: 30
-  max_chars:
-    type: integer
-    default: 12000
-    minimum: 500
-    maximum: 20000
-  cache_ttl_seconds:
-    type: integer
-    default: 300
-parameters:
+    read: false
+    write: false
+  shell:
+    execute: false
+  model:
+    invoke: false
+  browser:
+    interactive: false
+parameters_schema:
   type: object
   additionalProperties: false
+  required:
+    - url
   properties:
     url:
       type: string
-      description: 鐩爣椤甸潰 URL锛屼粎鍏佽 http/https銆?
+      description: Public http(s) URL to fetch.
     max_chars:
       type: integer
-      description: 杩斿洖姝ｆ枃鏈€澶у瓧绗︽暟锛岄粯璁?12000锛屼笂闄?20000銆?
       minimum: 500
       maximum: 20000
-    extract_main_content:
-      type: boolean
-      description: 鏄惁浼樺厛杩斿洖鎻愬彇鍚庣殑鍙姝ｆ枃锛岄粯璁?true銆?
-    include_raw_html:
-      type: boolean
-      description: 鏄惁闄勫甫鎴柇鍚庣殑鍘熷 HTML锛屽悓鏍蜂細鎸変笉鍙俊鍐呭鍖呰銆?
-    use_cache:
-      type: boolean
-      description: 鏄惁鍚敤鍐呭瓨+纾佺洏鐭?TTL 缂撳瓨锛岄粯璁?true銆?
-    timeout_seconds:
-      type: number
-      description: 鍗曟璇锋眰瓒呮椂鏃堕棿锛岄粯璁?12 绉掋€?
-      minimum: 1
-      maximum: 30
+      default: 6000
+      description: Maximum characters of readable text to keep.
+    timeout_ms:
+      type: integer
+      minimum: 1000
+      maximum: 30000
+      default: 10000
+      description: Network timeout in milliseconds.
+executor:
+  kind: python_object
+  symbol: build
+parameters:
+  type: object
+  additionalProperties: false
   required:
-  - url
+    - url
+  properties:
+    url:
+      type: string
+      description: Public http(s) URL to fetch.
+    max_chars:
+      type: integer
+      minimum: 500
+      maximum: 20000
+      default: 6000
+    timeout_ms:
+      type: integer
+      minimum: 1000
+      maximum: 30000
+      default: 10000
+returns:
+  type: object
+  properties:
+    url:
+      type: string
+    status_code:
+      type: integer
+    content_type:
+      type: string
+    title:
+      type: string
+    text:
+      type: string
+behavior_contract:
+  summary:
+    - 仅允许抓取公网 http/https 资源。
+    - 默认抽取可读文本并截断到 max_chars。
+    - 非法 URL、私网目标或不支持的 scheme 将直接报错。
+    - 超时、网络异常、解码异常按工具错误返回。
 governance:
-  owner: ceo
-  review_cadence: monthly
-  tags:
-  - web
-  - fetch
-  - extraction
-  - security
-  usage_notes:
-  - 鐢ㄤ簬杞婚噺 HTTP 鎶撳彇涓庢鏂囨彁鍙栵紝涓嶆墽琛?JavaScript锛屼篃涓嶆浛浠?browser銆?
-  - 杩斿洖鐨?text/raw_html 鍧囪涓轰笉鍙俊澶栭儴鍐呭锛岃皟鐢ㄦ柟涓嶅緱鐩存帴鎵ц鎴栨棤杩囨护娓叉煋銆?
-  - 褰撻〉闈緷璧栫櫥褰曘€佸鏉備氦浜掓垨鑴氭湰娓叉煋鏃讹紝搴旀敼鐢?browser 鎴栦汉宸ョ‘璁ゃ€?
+  family: web_fetch
+  display_name: Web Fetch
+  description: Fetch a public web page over HTTP(S) and return extracted readable text without browser automation.
+  actions:
+    - id: fetch
+      label: Fetch Web Page
+      risk_level: medium
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
 exposure:
   agent: true
-  org_graph: true
+  main_runtime: true
 toolskill:
   enabled: true
-

@@ -102,6 +102,22 @@ class CeoFrontDoorRunner:
                 schemas.append(schema)
         return schemas
 
+    @staticmethod
+    def _session_task_defaults(session_record: Any) -> dict[str, Any]:
+        metadata = getattr(session_record, 'metadata', None)
+        if not isinstance(metadata, dict):
+            return {}
+        payload = metadata.get('task_defaults', metadata.get('taskDefaults'))
+        if not isinstance(payload, dict):
+            return {}
+        max_depth = payload.get('max_depth', payload.get('maxDepth'))
+        if max_depth in (None, ''):
+            return dict(payload)
+        return {
+            **dict(payload),
+            'max_depth': max_depth,
+        }
+
     def _resolve_ceo_model_client(self) -> tuple[Any, list[str]]:
         refresh_loop_runtime_config(self._loop, force=False, reason="ceo_model_client")
         app_config = getattr(self._loop, 'app_config', None)
@@ -179,6 +195,7 @@ class CeoFrontDoorRunner:
             {'role': 'user', 'content': self._model_content(getattr(user_input, 'content', ''))},
         ]
         project_environment = current_project_environment(workspace_root=getattr(self._loop, 'workspace', None))
+        session_task_defaults = self._session_task_defaults(runtime_session)
         runtime_context = {
             'on_progress': on_progress,
             'emit_lifecycle': True,
@@ -192,6 +209,7 @@ class CeoFrontDoorRunner:
             'tool_snapshot_supplier': getattr(session, 'inflight_turn_snapshot', None),
             'temp_dir': str(getattr(self._loop, 'temp_dir', '') or ''),
             'loop': self._loop,
+            'task_defaults': session_task_defaults,
             'project_python': str(project_environment.get('project_python') or ''),
             'project_python_dir': str(project_environment.get('project_python_dir') or ''),
             'project_scripts_dir': str(project_environment.get('project_scripts_dir') or ''),

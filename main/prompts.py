@@ -4,17 +4,18 @@ from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).resolve().parent / 'prompts'
 
-STRICT_CHILD_SPAWN_POLICY_PROMPT = """
-注意，接下来的任务符合以下至少一条时，立即拆分任务，派生子节点完成：
-1. 任务开放，必须在执行中灵活探索旁支，例如需要多方面多角度的进行任务；
-2. 任务存在冲突领域，必须隔离推理上下文，例如需要从正反面等对立点进行任务；
-3. 任务可以并行推进，例如有多个相互独立，工作量大的任务；
-4. 在自行完成一部分任务后，发现任务量明显高于预期，继续自行完成会显著降低效率。
-确认以上都不满足时，才自主完成任务：
+EXECUTION_STAGE_POLICY_PROMPT = """
+你必须按阶段推进当前执行节点，：
+1. 在开始任何普通工具调用或派生子节点之前，必须先调用 `submit_next_stage` 创建当前阶段。
+2. 每个阶段都必须提供 `stage_goal` 和 `tool_round_budget`；`tool_round_budget` 必须是 1 到 10 的整数。
+3. `stage_goal` 必须清晰说明当前阶段的完成目标，为了提高完成效率，目标中只要有互不交叉可以并行的任务，就必须派生子节点完成，此类任务不允许自主完成。
+4. 除了创建新阶段之外，你必须在任何时候都只能围绕当前阶段目标推进；如果下一步已经不属于当前阶段目标，就先基于已完成工作创建下一阶段。
 
-派生子节点时，需要判断：
-- 范围窄、低复杂度、低风险、不易出错的子任务，设置 `requires_acceptance=false`。
-- 范围广、跨多来源、需要一致性核对、复杂推理复核的子任务，设置 `requires_acceptance=true`，并提供明确的 `acceptance_prompt`。"""
+当前阶段达到 `tool_round_budget` 后:
+1. 优先考虑下一阶段是否可以通过增加派生子节点来避免继续超预算。
+2. 必须先总结尚未完成的工作，然后创建下一阶段。
+3. 必要时适当放大下一阶段的 `tool_round_budget`，但上限仍是 10。
+"""
 
 def load_prompt(name: str) -> str:
     return (PROMPTS_DIR / name).read_text(encoding='utf-8')

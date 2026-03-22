@@ -6,9 +6,19 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from g3ku.content import ContentNavigationService
+from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
-from main.models import NodeOutputEntry, NodeRecord, TaskRecord, normalize_final_acceptance_metadata
+from main.ids import new_stage_id, new_stage_round_id
+from main.models import (
+    ExecutionStageRecord,
+    ExecutionStageRound,
+    ExecutionStageState,
+    NodeOutputEntry,
+    NodeRecord,
+    TaskRecord,
+    normalize_execution_stage_metadata,
+    normalize_final_acceptance_metadata,
+)
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.projection_service import TaskProjectionService
 from main.protocol import build_envelope, now_iso
@@ -21,6 +31,23 @@ def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
     if len(text) <= max_chars:
         return text
     return f'{text[: max_chars - 3].rstrip()}...'
+
+
+_EXECUTION_STAGE_METADATA_KEY = 'execution_stages'
+_EXECUTION_STAGE_TOOL_NAME = 'submit_next_stage'
+_EXECUTION_STAGE_MODE_SELF = '自主执行'
+_EXECUTION_STAGE_MODE_WITH_CHILDREN = '包含派生'
+_EXECUTION_STAGE_STATUS_ACTIVE = '进行中'
+_EXECUTION_STAGE_STATUS_COMPLETED = '完成'
+_EXECUTION_STAGE_STATUS_FAILED = '失败'
+_NON_BUDGET_EXECUTION_TOOLS = {
+    _EXECUTION_STAGE_TOOL_NAME,
+    'spawn_child_nodes',
+    'wait_tool_execution',
+    'stop_tool_execution',
+}
+
+_NON_BUDGET_REF_CONTENT_ACTIONS = {'describe', 'open', 'search', 'head', 'tail'}
 
 
 class TaskLogService:
@@ -62,6 +89,10 @@ class TaskLogService:
             'depth': int(depth or 0),
             'node_kind': str(node_kind or 'execution').strip() or 'execution',
             'phase': str(phase or '').strip(),
+            'stage_mode': '',
+            'stage_status': '',
+            'stage_goal': '',
+            'stage_total_steps': 0,
             'messages': [],
             'pending_tool_calls': [],
             'pending_child_specs': [],
@@ -449,6 +480,309 @@ class TaskLogService:
 
     def set_pause_state(self, task_id: str, *, pause_requested: bool | None = None, is_paused: bool | None = None) -> TaskRecord | None:
         return self.update_task_control(task_id, pause_requested=pause_requested, is_paused=is_paused)
+
+    @staticmethod
+    def _execution_stage_state(node: NodeRecord | None) -> ExecutionStageState:
+        payload = (node.metadata or {}).get(_EXECUTION_STAGE_METADATA_KEY) if node is not None and isinstance(node.metadata, dict) else {}
+        return normalize_execution_stage_metadata(payload)
+
+    @staticmethod
+    def _normalize_content_ref_value(value: Any) -> str:
+        envelope = parse_content_envelope(value)
+        if envelope is not None:
+            return str(envelope.ref or '').strip()
+        return str(value or '').strip()
+
+    @classmethod
+    def _tool_call_counts_against_stage_budget(cls, tool_call: dict[str, Any]) -> bool:
+        tool_name = str((tool_call or {}).get('name') or '').strip()
+        if not tool_name:
+            return False
+        if tool_name in _NON_BUDGET_EXECUTION_TOOLS:
+            return False
+        if tool_name != 'content':
+            return True
+        arguments = dict((tool_call or {}).get('arguments') or {}) if isinstance((tool_call or {}).get('arguments'), dict) else {}
+        action = str(arguments.get('action') or '').strip().lower()
+        ref = cls._normalize_content_ref_value(arguments.get('ref'))
+        path = str(arguments.get('path') or '').strip()
+        if action in _NON_BUDGET_REF_CONTENT_ACTIONS and ref and not path:
+            return False
+        return True
+
+    @staticmethod
+    def _active_execution_stage(state: ExecutionStageState) -> ExecutionStageRecord | None:
+        active_stage_id = str(state.active_stage_id or '').strip()
+        if not active_stage_id:
+            return None
+        for stage in list(state.stages or []):
+            if str(stage.stage_id or '').strip() == active_stage_id:
+                return stage
+        return None
+
+    @staticmethod
+    def _execution_stage_frame_payload(state: ExecutionStageState) -> dict[str, Any]:
+        active = TaskLogService._active_execution_stage(state)
+        if active is None:
+            return {
+                'stage_mode': '',
+                'stage_status': '',
+                'stage_goal': '',
+                'stage_total_steps': 0,
+            }
+        return {
+            'stage_mode': str(active.mode or ''),
+            'stage_status': str(active.status or ''),
+            'stage_goal': str(active.stage_goal or ''),
+            'stage_total_steps': int(active.tool_round_budget or 0),
+        }
+
+    def execution_stage_gate_snapshot(self, task_id: str, node_id: str) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            node = self._store.get_node(node_id)
+            state = self._execution_stage_state(node)
+            active = self._active_execution_stage(state)
+            completed_stages = [
+                {
+                    'stage_index': int(stage.stage_index or 0),
+                    'mode': str(stage.mode or ''),
+                    'status': str(stage.status or ''),
+                    'stage_goal': str(stage.stage_goal or ''),
+                    'tool_round_budget': int(stage.tool_round_budget or 0),
+                    'tool_rounds_used': int(stage.tool_rounds_used or 0),
+                }
+                for stage in list(state.stages or [])
+                if str(stage.status or '') != _EXECUTION_STAGE_STATUS_ACTIVE
+            ]
+            return {
+                'has_active_stage': active is not None,
+                'transition_required': bool(state.transition_required),
+                'active_stage': active.model_dump(mode='json') if active is not None else None,
+                'completed_stages': completed_stages,
+            }
+
+    def execution_stage_prompt_payload(self, task_id: str, node_id: str) -> dict[str, Any]:
+        snapshot = self.execution_stage_gate_snapshot(task_id, node_id)
+        active = snapshot.get('active_stage') if isinstance(snapshot, dict) else None
+        completed_stages: list[dict[str, Any]] = []
+        record = self._store.get_node(node_id)
+        state = self._execution_stage_state(record)
+        for stage in list(state.stages or []):
+            if str(stage.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE:
+                continue
+            completed_stages.append(
+                {
+                    'stage_index': int(stage.stage_index or 0),
+                    'mode': str(stage.mode or ''),
+                    'status': str(stage.status or ''),
+                    'stage_goal': str(stage.stage_goal or ''),
+                    'tool_round_budget': int(stage.tool_round_budget or 0),
+                    'tool_rounds_used': int(stage.tool_rounds_used or 0),
+                }
+            )
+        return {
+            'has_active_stage': bool(snapshot.get('has_active_stage')) if isinstance(snapshot, dict) else False,
+            'transition_required': bool(snapshot.get('transition_required')) if isinstance(snapshot, dict) else False,
+            'active_stage': dict(active or {}) if isinstance(active, dict) else None,
+            'completed_stages': completed_stages,
+        }
+
+    def _persist_execution_stage_state_locked(
+        self,
+        *,
+        task: TaskRecord,
+        node_id: str,
+        state: ExecutionStageState,
+    ) -> NodeRecord | None:
+        payload = state.model_dump(mode='json')
+        updated = self._store.update_node(
+            node_id,
+            lambda current: current.model_copy(
+                update={
+                    'metadata': {**dict(current.metadata or {}), _EXECUTION_STAGE_METADATA_KEY: payload},
+                    'updated_at': now_iso(),
+                }
+            ),
+        )
+        if updated is not None:
+            self._append_task_event(
+                task=task,
+                event_type='task.node.updated',
+                data={'task_id': task.task_id, 'node_id': node_id},
+            )
+        return updated
+
+    def _sync_execution_stage_frame_locked(self, *, task_id: str, node_id: str, state: ExecutionStageState) -> None:
+        payload = self._execution_stage_frame_payload(state)
+        self.update_frame(
+            task_id,
+            node_id,
+            lambda frame: {
+                **(frame or self._default_frame(node_id=node_id)),
+                **payload,
+            },
+            publish_snapshot=True,
+        )
+
+    def submit_next_stage(self, task_id: str, node_id: str, *, stage_goal: str, tool_round_budget: int) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            node = self._store.get_node(node_id)
+            if node is None:
+                raise ValueError(f'node not found: {node_id}')
+            normalized_goal = str(stage_goal or '').strip()
+            normalized_budget = int(tool_round_budget or 0)
+            if not normalized_goal:
+                raise ValueError('stage_goal must not be empty')
+            if normalized_budget < 1 or normalized_budget > 10:
+                raise ValueError('tool_round_budget must be between 1 and 10')
+            state = self._execution_stage_state(node)
+            now = now_iso()
+            stages: list[ExecutionStageRecord] = []
+            for stage in list(state.stages or []):
+                current = stage
+                if str(stage.stage_id or '').strip() == str(state.active_stage_id or '').strip() and str(stage.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE:
+                    current = stage.model_copy(update={'status': _EXECUTION_STAGE_STATUS_COMPLETED, 'finished_at': now})
+                stages.append(current)
+            next_stage = ExecutionStageRecord(
+                stage_id=new_stage_id(),
+                stage_index=len(stages) + 1,
+                mode=_EXECUTION_STAGE_MODE_SELF,
+                status=_EXECUTION_STAGE_STATUS_ACTIVE,
+                stage_goal=normalized_goal,
+                tool_round_budget=normalized_budget,
+                tool_rounds_used=0,
+                created_at=now,
+                finished_at='',
+                rounds=[],
+            )
+            next_state = ExecutionStageState(
+                active_stage_id=next_stage.stage_id,
+                transition_required=False,
+                stages=[*stages, next_stage],
+            )
+            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
+            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return next_stage.model_dump(mode='json')
+
+    def record_execution_stage_round(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        tool_calls: list[dict[str, Any]],
+        created_at: str,
+    ) -> dict[str, Any] | None:
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            node = self._store.get_node(node_id)
+            if node is None:
+                return None
+            state = self._execution_stage_state(node)
+            active = self._active_execution_stage(state)
+            if active is None or bool(state.transition_required):
+                return None
+            visible_calls = [
+                item for item in list(tool_calls or [])
+                if str(item.get('name') or '').strip() and str(item.get('name') or '').strip() != _EXECUTION_STAGE_TOOL_NAME
+            ]
+            if not visible_calls:
+                return None
+            tool_names = [str(item.get('name') or '').strip() for item in visible_calls if str(item.get('name') or '').strip()]
+            counts_budget = any(self._tool_call_counts_against_stage_budget(item) for item in visible_calls)
+            next_round = ExecutionStageRound(
+                round_id=new_stage_round_id(),
+                round_index=len(list(active.rounds or [])) + 1,
+                created_at=str(created_at or now_iso()),
+                tool_call_ids=[str(item.get('id') or '').strip() for item in visible_calls if str(item.get('id') or '').strip()],
+                tool_names=tool_names,
+                budget_counted=counts_budget,
+            )
+            stages: list[ExecutionStageRecord] = []
+            for stage in list(state.stages or []):
+                current = stage
+                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
+                    next_used = int(stage.tool_rounds_used or 0) + (1 if counts_budget else 0)
+                    if int(stage.tool_round_budget or 0) > 0:
+                        next_used = min(next_used, int(stage.tool_round_budget or 0))
+                    current = stage.model_copy(
+                        update={
+                            'tool_rounds_used': next_used,
+                            'rounds': [*list(stage.rounds or []), next_round],
+                        }
+                    )
+                stages.append(current)
+            latest_active = next((item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()), None)
+            next_state = ExecutionStageState(
+                active_stage_id=str(state.active_stage_id or '').strip(),
+                transition_required=bool(
+                    latest_active is not None
+                    and int(latest_active.tool_round_budget or 0) > 0
+                    and int(latest_active.tool_rounds_used or 0) >= int(latest_active.tool_round_budget or 0)
+                ),
+                stages=stages,
+            )
+            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
+            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return next_round.model_dump(mode='json')
+
+    def mark_execution_stage_contains_spawn(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            node = self._store.get_node(node_id)
+            if node is None:
+                return None
+            state = self._execution_stage_state(node)
+            active = self._active_execution_stage(state)
+            if active is None or str(active.mode or '') == _EXECUTION_STAGE_MODE_WITH_CHILDREN:
+                return active.model_dump(mode='json') if active is not None else None
+            stages: list[ExecutionStageRecord] = []
+            for stage in list(state.stages or []):
+                current = stage
+                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
+                    current = stage.model_copy(update={'mode': _EXECUTION_STAGE_MODE_WITH_CHILDREN})
+                stages.append(current)
+            next_state = ExecutionStageState(
+                active_stage_id=str(state.active_stage_id or '').strip(),
+                transition_required=bool(state.transition_required),
+                stages=stages,
+            )
+            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
+            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
+            self.refresh_task_view(task_id, mark_unread=True)
+            current = next((item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()), None)
+            return current.model_dump(mode='json') if current is not None else None
+
+    def finalize_execution_stage(self, task_id: str, node_id: str, *, status: str) -> dict[str, Any] | None:
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            node = self._store.get_node(node_id)
+            if task is None or node is None:
+                return None
+            state = self._execution_stage_state(node)
+            active = self._active_execution_stage(state)
+            if active is None:
+                return None
+            final_status = _EXECUTION_STAGE_STATUS_COMPLETED if str(status or '').strip().lower() == 'success' else _EXECUTION_STAGE_STATUS_FAILED
+            now = now_iso()
+            stages: list[ExecutionStageRecord] = []
+            for stage in list(state.stages or []):
+                current = stage
+                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
+                    current = stage.model_copy(update={'status': final_status, 'finished_at': now})
+                stages.append(current)
+            next_state = ExecutionStageState(
+                active_stage_id='',
+                transition_required=False,
+                stages=stages,
+            )
+            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
+            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
+            self.refresh_task_view(task_id, mark_unread=True)
+            current = next((item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()), None)
+            return current.model_dump(mode='json') if current is not None else None
 
     def update_node_metadata(self, node_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]]) -> NodeRecord | None:
         record = self._store.get_node(node_id)
@@ -977,7 +1311,7 @@ class TaskLogService:
             'node_id': root.node_id,
             'parent_node_id': root.parent_node_id,
             'depth': int(root.depth or 0),
-            'node_kind': 'execution',
+            'node_kind': str(getattr(root, 'node_kind', 'execution') or 'execution'),
             'status': root.status,
             'title': root.title,
             'updated_at': root.updated_at,
@@ -999,6 +1333,7 @@ class TaskLogService:
                 for round_item in list(root.spawn_rounds or [])
             ],
             'default_round_id': str(root.default_round_id or ''),
+            'auxiliary_children': [self._compact_tree_payload(child) for child in list(getattr(root, 'auxiliary_children', []) or [])],
             'children': [self._compact_tree_payload(child) for child in list(root.children or [])],
         }
 
@@ -1020,6 +1355,10 @@ class TaskLogService:
             'depth': int(payload.get('depth') or 0),
             'node_kind': str(payload.get('node_kind') or 'execution'),
             'phase': str(payload.get('phase') or ''),
+            'stage_mode': str(payload.get('stage_mode') or ''),
+            'stage_status': str(payload.get('stage_status') or ''),
+            'stage_goal': str(payload.get('stage_goal') or ''),
+            'stage_total_steps': int(payload.get('stage_total_steps') or 0),
             'messages': [dict(item) for item in list(payload.get('messages') or []) if isinstance(item, dict)],
             'pending_tool_calls': [dict(item) for item in list(payload.get('pending_tool_calls') or []) if isinstance(item, dict)],
             'pending_child_specs': [dict(item) for item in list(payload.get('pending_child_specs') or []) if isinstance(item, dict)],
@@ -1037,6 +1376,10 @@ class TaskLogService:
             'depth': int(payload.get('depth') or 0),
             'node_kind': str(payload.get('node_kind') or 'execution'),
             'phase': str(payload.get('phase') or ''),
+            'stage_mode': str(payload.get('stage_mode') or ''),
+            'stage_status': str(payload.get('stage_status') or ''),
+            'stage_goal': str(payload.get('stage_goal') or ''),
+            'stage_total_steps': int(payload.get('stage_total_steps') or 0),
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
         }

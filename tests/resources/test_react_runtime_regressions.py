@@ -9,7 +9,6 @@ from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse
 from g3ku.runtime.ceo_async_task_guard import GUARD_OVERLAY_MARKER, maybe_build_execution_overlay
-from g3ku.runtime.tool_history import analyze_tool_call_history
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
 
@@ -48,57 +47,59 @@ class _FakeLogService:
         _ = args, kwargs
 
 
-def test_compact_history_preserves_complete_tool_turns() -> None:
+def test_prepare_messages_passthrough_keeps_original_messages_even_with_content_store() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    original = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+        {"role": "assistant", "content": "plain assistant summary"},
+        {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": "tool output"},
+    ]
+
+    prepared = loop._prepare_messages(original, runtime_context={"task_id": "task-1", "node_id": "node-1"})
+
+    assert prepared == original
+    assert all("[[G3KU_COMPACT_HISTORY_V1]]" not in str(item.get("content") or "") for item in prepared)
+
+
+@pytest.mark.asyncio
+async def test_react_loop_run_keeps_long_history_uncompacted() -> None:
+    calls: list[list[dict[str, object]]] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            return LLMResponse(
+                content='{"status":"failed","delivery_status":"blocked","summary":"done","answer":"","evidence":[],"remaining_work":[],"blocking_reason":"done"}',
+                tool_calls=[],
+                finish_reason="stop",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
-        {
-            "role": "assistant",
-            "content": "turn-1",
-            "tool_calls": [
-                {"id": "call-a|fc_1", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-                {"id": "call-b|fc_2", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-                {"id": "call-c|fc_3", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-                {"id": "call-d|fc_4", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-            ],
-        },
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-a|fc_1", "content": "a"},
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-b|fc_2", "content": "b"},
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-c|fc_3", "content": "c"},
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-d|fc_4", "content": "d"},
-        {
-            "role": "assistant",
-            "content": "turn-2",
-            "tool_calls": [
-                {"id": "call-e|fc_5", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-                {"id": "call-f|fc_6", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-                {"id": "call-g|fc_7", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-            ],
-        },
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-e|fc_5", "content": "e"},
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-f|fc_6", "content": "f"},
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-g|fc_7", "content": "g"},
-        {
-            "role": "assistant",
-            "content": "turn-3",
-            "tool_calls": [
-                {"id": "call-h|fc_8", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-                {"id": "call-i|fc_9", "type": "function", "function": {"name": "filesystem", "arguments": "{}"}},
-            ],
-        },
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-h|fc_8", "content": "h"},
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-i|fc_9", "content": "i"},
     ]
+    for index in range(40):
+        messages.append({"role": "assistant", "content": f"assistant-{index}"})
+        messages.append({"role": "tool", "name": "filesystem", "tool_call_id": f"call-{index}", "content": f"tool-{index}"})
 
-    compacted = loop._compact_history(messages, preserve_non_system=6)
-    compacted_analysis = analyze_tool_call_history(compacted)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-1'),
+        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
+        messages=messages,
+        tools={},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
+        max_iterations=2,
+    )
 
-    assert compacted_analysis.orphan_tool_result_ids == []
-    assert compacted_analysis.dangling_assistant_call_ids == []
-    assert any(item.get("role") == "assistant" and str(item.get("content") or "") == "turn-2" for item in compacted)
-    assert any(item.get("role") == "assistant" and str(item.get("content") or "") == "turn-3" for item in compacted)
-    assert compacted[-7:] == messages[-7:]
+    assert result.status == "failed"
+    assert len(calls) == 1
+    sent_messages = calls[0]
+    assert len(sent_messages) == len(messages)
+    assert all("[[G3KU_COMPACT_HISTORY_V1]]" not in str(item.get("content") or "") for item in sent_messages)
 
 
 @pytest.mark.asyncio

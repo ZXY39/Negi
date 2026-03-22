@@ -228,13 +228,14 @@ async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw(tmp_pat
 class _FakeToolRegistry:
     def __init__(self, tools: list[StructuredTool]) -> None:
         self._tools = list(tools)
+        self.runtime_contexts: list[dict[str, object]] = []
 
     def get(self, name: str):
         _ = name
         return None
 
     def push_runtime_context(self, context: dict[str, object]):
-        _ = context
+        self.runtime_contexts.append(dict(context))
         return object()
 
     def pop_runtime_context(self, token) -> None:
@@ -366,6 +367,69 @@ async def test_ceo_frontdoor_runner_binds_stable_prompt_cache_key(monkeypatch, t
     assert fourth_key != first_key
     assert create_agent_calls[0]['name'] == 'g3ku_ceo_frontdoor'
     assert agent_invocations[0]['payload']['messages'][0]['role'] == 'system'
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_context(monkeypatch, tmp_path) -> None:
+    def _fake_create_agent(*, model, tools, checkpointer, store, name, middleware=()):
+        _ = model, tools, checkpointer, store, name, middleware
+
+        class _Agent:
+            async def ainvoke(self, payload, config=None):
+                _ = payload, config
+                return {'messages': [AIMessage(content='done')]}
+
+        return _Agent()
+
+    async def _noop_ready() -> None:
+        return None
+
+    tool_registry = _FakeToolRegistry([_filesystem_tool(description='Read files from disk')])
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=tool_registry,
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    persisted_session = loop.sessions.get_or_create('web:shared')
+    persisted_session.metadata['task_defaults'] = {'max_depth': 4}
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr('g3ku.runtime.frontdoor.ceo_runner.create_agent', _fake_create_agent)
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_client', lambda: (_FakeModelClient(), ['openai_codex:gpt-test']))
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    await runner.run_turn(user_input=SimpleNamespace(content='dispatch work'), session=session)
+
+    assert tool_registry.runtime_contexts[-1]['task_defaults'] == {'max_depth': 4}
 
 
 class _ProviderRecorder:

@@ -14,6 +14,12 @@
 - 页面内容依赖前端脚本渲染，静态抓取拿不到正文。
 - 需要截图、DOM 精确定位、可视化验证或多步导航。
 
+## 与 OpenClaw 参考实现的关系
+
+- 参考来源：`E:\Program\openclaw-2026.3.13-1\src\agents\tools\web-fetch.ts`。
+- 当前版本保留了 `web_fetch` 的核心定位：单 URL 轻量抓取、正文提取、超时控制、缓存与安全边界。
+- 当前版本没有直接搬运 OpenClaw 的 TypeScript 工具装配链，也没有引入其 Readability/浏览器回退链路，而是按 G3KU 的 Python 工具规范实现为可直接加载的内置工具。
+
 ## 与 browser 的边界
 
 - `web_fetch`：面向单 URL 的轻量 HTTP 抓取 + 正文提取；不执行 JavaScript。
@@ -31,18 +37,24 @@
 
 ## 输出重点
 
+- `url` / `final_url` / `status_code`：请求结果基础信息。
 - `title` / `description`：页面标题与 meta description（若可提取）。
 - `text`：带 `UNTRUSTED_EXTERNAL_CONTENT_*` 包装的正文。
 - `links`：最多前 20 个链接文本与 href。
 - `security`：返回当前安全边界说明。
-- `implementation`：说明是否使用正文提取、是否有浏览器回退等能力。
+- `implementation`：说明是否使用正文提取、是否启用缓存、是否存在浏览器回退等能力。
+
+## 异步与非阻塞约束
+
+- 工具入口为异步 `__call__`，网络请求使用 `httpx.AsyncClient`。
+- 该工具不启动浏览器进程，不执行同步长阻塞外部命令。
+- 正文解析在单次响应大小与字符上限内运行，避免占用过多运行时资源。
 
 ## 安全原则
 
 - 仅允许 `http` / `https`。
-- 默认阻断 `localhost`、回环地址、私网地址、链路本地地址与 `.local` 主机。
-- 重定向后会再次检查目标地址，降低 SSRF 风险。
-- 外部返回文本与原始 HTML 都按**不可信内容**包装，不能直接当作可信指令执行。
+- 默认阻断 `localhost`、回环地址、私网地址、链路本地地址与常见元数据地址。
+- 返回正文时用 `UNTRUSTED_EXTERNAL_CONTENT_BEGIN/END` 包裹，提醒调用方不要把网页内容当作可信指令。
 
 ## 当前实现限制
 

@@ -80,6 +80,10 @@ class TaskLiveFrame(Model):
     depth: int = 0
     node_kind: str = 'execution'
     phase: str = ''
+    stage_mode: str = ''
+    stage_status: str = ''
+    stage_goal: str = ''
+    stage_total_steps: int = 0
     tool_calls: list[TaskLiveToolCall] = Field(default_factory=list)
     child_pipelines: list[TaskLiveChildPipeline] = Field(default_factory=list)
 
@@ -123,6 +127,7 @@ class TaskTreeNodeSummary(Model):
     updated_at: str = ''
     spawn_rounds: list[TaskSpawnRound] = Field(default_factory=list)
     default_round_id: str = ''
+    auxiliary_children: list['TaskTreeNodeSummary'] = Field(default_factory=list)
     children: list['TaskTreeNodeSummary'] = Field(default_factory=list)
 
 
