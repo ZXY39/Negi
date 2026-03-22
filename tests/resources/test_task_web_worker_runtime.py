@@ -41,12 +41,19 @@ class _HeartbeatRecorder:
     def __init__(self) -> None:
         self.payloads: list[dict[str, object]] = []
         self.started = 0
+        self._dedupe_keys: set[str] = set()
 
     async def start(self) -> None:
         self.started += 1
 
     def enqueue_task_terminal_payload(self, payload: dict[str, object] | None) -> bool:
-        self.payloads.append(dict(payload or {}))
+        normalized = dict(payload or {})
+        dedupe_key = str(normalized.get("dedupe_key") or "").strip()
+        if dedupe_key and dedupe_key in self._dedupe_keys:
+            return False
+        if dedupe_key:
+            self._dedupe_keys.add(dedupe_key)
+        self.payloads.append(normalized)
         return True
 
 
@@ -88,7 +95,7 @@ def _mark_worker_at(
     )
 
 
-def test_internal_task_terminal_callback_marks_outbox_delivered_and_dedupes(tmp_path: Path, monkeypatch):
+def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -136,7 +143,7 @@ def test_internal_task_terminal_callback_marks_outbox_delivered_and_dedupes(tmp_
 
     entry = service.store.get_task_terminal_outbox(str(payload.get("dedupe_key") or ""))
     assert entry is not None
-    assert entry["delivery_state"] == "delivered"
+    assert entry["delivery_state"] == "pending"
     assert len(heartbeat.payloads) == 1
 
 
@@ -174,7 +181,7 @@ async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(
 
     entry = service.store.get_task_terminal_outbox(str(payload.get("dedupe_key") or ""))
     assert entry is not None
-    assert entry["delivery_state"] == "delivered"
+    assert entry["delivery_state"] == "pending"
     assert heartbeat.started == 1
     assert heartbeat.payloads == [payload]
 
@@ -704,6 +711,114 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
     assert [item["node_id"] for item in child_item["auxiliary_children"]] == [acceptance.node_id]
     assert child_item["auxiliary_children"][0]["node_kind"] == "acceptance"
     assert acceptance.node_id in [item["node_id"] for item in child_item["children"]]
+
+
+def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    service.log_service.submit_next_stage(
+        record.task_id,
+        root.node_id,
+        stage_goal="根阶段目标",
+        tool_round_budget=1,
+    )
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+    )
+    service.log_service.submit_next_stage(
+        record.task_id,
+        child.node_id,
+        stage_goal="子阶段目标",
+        tool_round_budget=1,
+    )
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=child,
+        goal="accept child",
+        acceptance_prompt="检查 child 输出。",
+        parent_node_id=child.node_id,
+    )
+
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    text = service.view_progress(record.task_id, mark_read=False)
+
+    assert snapshot is not None
+    assert text == (
+        "Task status: in_progress\n"
+        f"({root.node_id},in_progress,根阶段目标)\n"
+        f"|-({child.node_id},in_progress,子阶段目标)\n"
+        f"  |-({acceptance.node_id},in_progress,检验中)"
+    )
+    assert "Latest node output" not in text
+    assert "Active parallel work:" not in text
+
+
+def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    service.log_service.submit_next_stage(
+        record.task_id,
+        root.node_id,
+        stage_goal="旧阶段目标",
+        tool_round_budget=1,
+    )
+    service.log_service.update_runtime_state(
+        record.task_id,
+        active_node_ids=[root.node_id],
+        runnable_node_ids=[],
+        waiting_node_ids=[],
+        frames=[
+            {
+                "node_id": root.node_id,
+                "depth": 0,
+                "node_kind": "execution",
+                "phase": "execution",
+                "stage_mode": "自主执行",
+                "stage_status": "进行中",
+                "stage_goal": "最新阶段目标",
+                "stage_total_steps": 1,
+                "tool_calls": [],
+                "child_pipelines": [],
+            }
+        ],
+    )
+
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+
+    assert snapshot is not None
+    assert snapshot["progress"]["tree_text"] == f"({root.node_id},in_progress,最新阶段目标)"
 
 
 def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_path: Path):

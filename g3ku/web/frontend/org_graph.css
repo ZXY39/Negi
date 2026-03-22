@@ -873,6 +873,22 @@ textarea {
     word-break: break-word;
 }
 
+.execution-tree-node-note {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    margin-bottom: var(--space-2);
+    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 68%, var(--bg-panel) 32%);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1.35;
+    white-space: normal;
+}
+
 .execution-tree-node-stack {
     display: flex;
     flex-direction: column;

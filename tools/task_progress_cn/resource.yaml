@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "\u67e5\u770b\u4efb\u52a1\u8fdb\u5ea6\u5de5\u5177"
 name: task_progress
-description: 按任务 id 返回任务状态、树状图文本和最新节点输出内容，并将任务标记为已读。
+description: 按任务 id 返回任务状态和带阶段目标的树状图文本，并将任务标记为已读。
 source:
   type: ''
   url: ''

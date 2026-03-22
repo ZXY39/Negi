@@ -48,6 +48,5 @@ async def post_task_terminal_callback(
 
     accepted = heartbeat.enqueue_task_terminal_payload(normalized)
     if not accepted:
-        raise HTTPException(status_code=400, detail='task_terminal_payload_rejected')
-    service.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
+        return {'ok': True, 'duplicate': True, 'dedupe_key': dedupe_key}
     return {'ok': True, 'duplicate': False, 'dedupe_key': dedupe_key}

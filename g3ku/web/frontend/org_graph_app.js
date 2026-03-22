@@ -6495,6 +6495,10 @@ function renderTree() {
         const fullTitle = String(node.fullTitle || title);
         const nodeStatus = String(node.state || "").trim().toLowerCase();
         const displayState = String(node.display_state || node.state || "").toUpperCase();
+        const roundOptions = Array.isArray(node.roundOptions) ? node.roundOptions : [];
+        const visibleChildren = Array.isArray(node.children) ? node.children : [];
+        const hasSwitchableSubtrees = roundOptions.length > 1;
+        const showStaticSubtreeHint = !hasSwitchableSubtrees && visibleChildren.length > 0;
         const item = document.createElement("li");
         item.className = "execution-tree-item";
         item.dataset.status = nodeStatus;
@@ -6508,7 +6512,7 @@ function renderTree() {
         el.dataset.status = nodeStatus;
         el.title = fullTitle;
         el.setAttribute("aria-pressed", S.selectedNodeId === node.node_id ? "true" : "false");
-        el.innerHTML = `<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.state || "")}">${esc(displayState)}</span></span>`;
+        el.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">暂无其他可切换子树</span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.state || "")}">${esc(displayState)}</span></span>`;
         el.addEventListener("click", (e) => {
             if (S.treePan.suppressClickNodeId && S.treePan.suppressClickNodeId === String(node.node_id || "")) {
                 S.treePan.suppressClickNodeId = null;
@@ -6527,7 +6531,7 @@ function renderTree() {
             void showAgent(node, { preserveViewState: false });
         });
         stack.appendChild(el);
-        if ((node.roundOptions || []).length > 1) {
+        if (hasSwitchableSubtrees) {
             const roundWrap = document.createElement("div");
             roundWrap.className = "execution-tree-node-rounds";
             ["mousedown", "click", "wheel"].forEach((eventName) => {
@@ -6539,7 +6543,7 @@ function renderTree() {
             const select = document.createElement("select");
             select.className = "execution-tree-round-select";
             select.setAttribute("aria-label", `${fullTitle} 轮次`);
-            (node.roundOptions || []).forEach((round) => {
+            roundOptions.forEach((round) => {
                 const option = document.createElement("option");
                 option.value = round.roundId;
                 option.textContent = round.isLatest ? `${round.label}（最新）` : round.label;
@@ -6555,11 +6559,11 @@ function renderTree() {
             stack.appendChild(roundWrap);
         }
         item.appendChild(stack);
-        if ((node.children || []).length) {
+        if (visibleChildren.length) {
             const branch = document.createElement("ul");
             branch.className = "execution-tree-list";
             branch.dataset.parentStatus = nodeStatus;
-            (node.children || []).forEach((child) => branch.appendChild(walk(child)));
+            visibleChildren.forEach((child) => branch.appendChild(walk(child)));
             item.appendChild(branch);
         }
         return item;

@@ -12,7 +12,7 @@ from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbea
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.web_ceo_sessions import normalize_ceo_metadata, update_ceo_session_after_turn
 from main.models import TaskRecord
-from main.protocol import build_envelope
+from main.protocol import build_envelope, now_iso
 from main.service.task_terminal_callback import build_task_terminal_payload, normalize_task_terminal_payload
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
@@ -321,6 +321,61 @@ class WebSessionHeartbeatService:
             lines.append(f"  Summary: {summary}")
         return "\n".join(lines).strip()
 
+    @staticmethod
+    def _task_terminal_events(events: list[SessionHeartbeatEvent]) -> list[SessionHeartbeatEvent]:
+        return [
+            event
+            for event in list(events or [])
+            if str(event.reason or "").strip().lower() == "task_terminal"
+        ]
+
+    @staticmethod
+    def _truncate_text(text: str, *, limit: int = 180) -> str:
+        normalized = str(text or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[: max(0, limit - 3)].rstrip()}..."
+
+    def _build_task_terminal_fallback_reply(self, events: list[SessionHeartbeatEvent]) -> str:
+        task_events = self._task_terminal_events(events)
+        if not task_events:
+            return ""
+        lines: list[str] = []
+        for event in task_events[:3]:
+            payload = dict(event.payload or {})
+            task_id = str(payload.get("task_id") or "task").strip() or "task"
+            short_task_id = task_id[5:] if task_id.startswith("task:") else task_id
+            status = str(payload.get("status") or "").strip().lower()
+            summary = self._truncate_text(
+                str(payload.get("brief_text") or payload.get("failure_reason") or "").strip() or "No summary.",
+                limit=180,
+            )
+            if status == "success":
+                lines.append(f"任务 `{short_task_id}` 已完成：{summary}")
+            else:
+                lines.append(f"任务 `{short_task_id}` 已失败：{summary}")
+        remaining = len(task_events) - min(3, len(task_events))
+        if remaining > 0:
+            lines.append(f"另有 {remaining} 个任务终态已处理。")
+        return "\n".join(lines).strip()
+
+    def _ack_task_terminal_events(self, events: list[SessionHeartbeatEvent]) -> None:
+        task_events = self._task_terminal_events(events)
+        if not task_events:
+            return
+        store = getattr(getattr(self._main_task_service, "store", None), "mark_task_terminal_outbox_delivered", None)
+        if not callable(store):
+            return
+        delivered_at = now_iso()
+        for event in task_events:
+            dedupe_key = str(event.dedupe_key or "").strip()
+            if not dedupe_key:
+                continue
+            try:
+                store(dedupe_key, delivered_at=delivered_at)
+            except Exception:
+                logger.debug("task terminal outbox ack skipped for {}", dedupe_key)
+
     def _serialize_tool_event(self, event: AgentEvent) -> dict[str, Any] | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
         tool_name = str(payload.get("tool_name") or "tool").strip() or "tool"
@@ -454,14 +509,21 @@ class WebSessionHeartbeatService:
                 self._prompt_tasks.pop(key, None)
 
         output = str(getattr(result, "output", "") or "").strip()
-        event_ids = {event.event_id for event in events}
-        self._events.pop_many(key, event_ids=event_ids)
-        self._requeue_running_background_events(key, events)
+        task_terminal_events = self._task_terminal_events(events)
+        if (not output or output == HEARTBEAT_OK) and task_terminal_events:
+            output = self._build_task_terminal_fallback_reply(task_terminal_events)
+
         if not self._session_exists(key):
+            event_ids = {event.event_id for event in events}
+            self._events.pop_many(key, event_ids=event_ids)
+            self._requeue_running_background_events(key, events)
             self.clear_session(key)
             return None
-        next_delay = self._events.next_delay(key)
         if not output or output == HEARTBEAT_OK:
+            event_ids = {event.event_id for event in events}
+            self._events.pop_many(key, event_ids=event_ids)
+            self._requeue_running_background_events(key, events)
+            next_delay = self._events.next_delay(key)
             self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
             return next_delay
 
@@ -472,4 +534,9 @@ class WebSessionHeartbeatService:
         ]
         self._persist_assistant_reply(key, text=output, task_ids=task_ids, reason=heartbeat_reason)
         self._publish_ceo(key, "ceo.reply.final", {"text": output, "source": "heartbeat"})
+        event_ids = {event.event_id for event in events}
+        self._events.pop_many(key, event_ids=event_ids)
+        self._requeue_running_background_events(key, events)
+        self._ack_task_terminal_events(events)
+        next_delay = self._events.next_delay(key)
         return next_delay

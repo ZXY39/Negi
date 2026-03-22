@@ -54,9 +54,14 @@ class _Registry:
 class _TaskService:
     def __init__(self) -> None:
         self.registry = _Registry()
+        self.delivered: list[tuple[str, str]] = []
+        self.store = SimpleNamespace(mark_task_terminal_outbox_delivered=self._mark_task_terminal_outbox_delivered)
 
     async def startup(self) -> None:
         return None
+
+    def _mark_task_terminal_outbox_delivered(self, dedupe_key: str, *, delivered_at: str) -> None:
+        self.delivered.append((str(dedupe_key or ""), str(delivered_at or "")))
 
 
 class _RuntimeManager:
@@ -717,7 +722,7 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
             "tool_name": "skill-installer",
             "execution_id": "tool-exec:1",
             "elapsed_seconds": 30.0,
-            "recommended_wait_seconds": 0.05,
+            "recommended_wait_seconds": 0.2,
             "runtime_snapshot": {"summary_text": "still fetching remote repository"},
         },
     )
@@ -728,7 +733,7 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
     assert initial_delay > 0
     assert live_session.prompts == []
 
-    await asyncio.sleep(0.06)
+    await asyncio.sleep(0.21)
 
     next_delay = await service._run_session(session_id)
 
@@ -744,7 +749,7 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
     published_types = [envelope["type"] for _session_id, envelope in task_service.registry.published]
     assert "ceo.turn.discard" in published_types
 
-    await asyncio.sleep(0.08)
+    await asyncio.sleep(0.22)
 
     assert len(live_session.prompts) >= 2
     assert manager.calls[:2] == [("tool-exec:1", 0.1), ("tool-exec:1", 0.1)]
@@ -796,6 +801,55 @@ async def test_web_session_heartbeat_runs_immediately_when_background_tool_turns
     assert "reached a terminal state" in str(prompt.content)
     assert "still running" not in str(prompt.content)
     assert service._events.peek(session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_returns_heartbeat_ok(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-fallback"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    task_service = _TaskService()
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    payload = {
+        "task_id": "task:demo-terminal",
+        "session_id": session_id,
+        "title": "demo terminal task",
+        "status": "success",
+        "brief_text": "task finished successfully",
+        "finished_at": "2026-03-23T01:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00",
+    }
+    accepted = service.enqueue_task_terminal_payload(payload)
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert len(live_session.prompts) == 1
+    assert service._events.peek(session_id) == []
+    assert len(task_service.registry.published) == 1
+    published_session, envelope = task_service.registry.published[0]
+    assert published_session == session_id
+    assert envelope["type"] == "ceo.reply.final"
+    assert "demo-terminal" in str(envelope["data"]["text"])
+    assert "已完成" in str(envelope["data"]["text"])
+    assert len(task_service.delivered) == 1
+    assert task_service.delivered[0][0] == "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00"
+
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.messages[-1]["role"] == "assistant"
+    assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
+    assert "demo-terminal" in str(reloaded.messages[-1]["content"])
+    assert "已完成" in str(reloaded.messages[-1]["content"])
 
 
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:

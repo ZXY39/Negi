@@ -107,7 +107,7 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'task_progress': {
         'tool_id': 'task_runtime',
         'display_name': 'Task Runtime',
-        'description': 'View task status, tree text, and the latest node output, and mark the task as read.',
+        'description': 'View task status and stage-goal-aware tree text, and mark the task as read.',
         'actions': [{'id': 'progress_cn', 'label': 'Task Progress', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
     },
     'load_skill_context': {

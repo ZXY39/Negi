@@ -82,7 +82,6 @@ class TaskQueryService:
             self._log_service.mark_task_read(task_id)
             task = self._store.get_task(task_id) or task
         root = self._projection_root(task)
-        tree_text = self._render_projection_tree_text(root)
         token_usage = task.token_usage
         runtime_nodes = self._store.list_nodes(task.task_id)
         _runtime_token_usage, token_usage_by_model = aggregate_node_token_usage(
@@ -91,6 +90,7 @@ class TaskQueryService:
         )
         latest_node = self._latest_projection_node(task_id)
         live_state = self._projection_live_state(task_id)
+        tree_text = self._render_projection_tree_text(root, task_id=task.task_id, live_state=live_state)
         latest_node = self._with_display_fallback_for_latest_node(
             task_id,
             latest_node=latest_node,
@@ -100,12 +100,6 @@ class TaskQueryService:
         text = f'Task status: {task.status}'
         if tree_text:
             text = f'{text}\n{tree_text}'
-        live_summary_lines = self._live_summary_lines(live_state)
-        if live_summary_lines:
-            text = f'{text}\n' + '\n'.join(live_summary_lines)
-        if latest_node is not None:
-            latest_output = latest_node.output.strip() or '(empty)'
-            text = f'{text}\nLatest node output [{latest_node.node_id}]:\n{latest_output}'
         return TaskProgressResult(
             task_id=task.task_id,
             task_status=task.status,
@@ -571,14 +565,21 @@ class TaskQueryService:
             lines.append(f'- {tool_name} [{status}]')
         return '\n'.join(lines)
 
-    @staticmethod
-    def _render_projection_tree_text(root: TaskTreeNodeSummary | None) -> str:
+    def _render_projection_tree_text(
+        self,
+        root: TaskTreeNodeSummary | None,
+        *,
+        task_id: str,
+        live_state: TaskLiveState | None = None,
+    ) -> str:
         if root is None:
             return '(empty tree)'
         lines: list[str] = []
+        stage_goals = self._node_stage_goal_map(task_id, live_state=live_state)
 
         def _walk(node: TaskTreeNodeSummary, prefix: str = '', *, is_root: bool = False) -> None:
-            label = f'({node.node_id},{node.status})'
+            stage_goal = self._tree_display_stage_goal(node, stage_goals)
+            label = f'({node.node_id},{node.status},{stage_goal})'
             lines.append(label if is_root else f'{prefix}|-{label}')
             child_prefix = '' if is_root else f'{prefix}  '
             for child in list(node.children or []):
@@ -586,6 +587,58 @@ class TaskQueryService:
 
         _walk(root, is_root=True)
         return '\n'.join(lines)
+
+    def _node_stage_goal_map(
+        self,
+        task_id: str,
+        *,
+        live_state: TaskLiveState | None = None,
+    ) -> dict[str, str]:
+        goals: dict[str, str] = {}
+        for detail in list(self._store.list_task_node_details(task_id) or []):
+            node_id = str(getattr(detail, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            payload = dict(getattr(detail, 'payload', {}) or {})
+            execution_trace = payload.get('execution_trace') if isinstance(payload.get('execution_trace'), dict) else {}
+            stage_goal = self._latest_stage_goal_from_execution_trace(execution_trace)
+            if stage_goal:
+                goals[node_id] = stage_goal
+        if live_state is None:
+            return goals
+        for frame in list(live_state.frames or []):
+            node_id = str(frame.node_id or '').strip()
+            stage_goal = str(frame.stage_goal or '').strip()
+            if node_id and stage_goal:
+                goals[node_id] = stage_goal
+        return goals
+
+    @staticmethod
+    def _latest_stage_goal_from_execution_trace(execution_trace: dict[str, Any] | None) -> str:
+        if not isinstance(execution_trace, dict):
+            return ''
+        scored: list[tuple[int, str, str]] = []
+        for stage in list(execution_trace.get('stages') or []):
+            if not isinstance(stage, dict):
+                continue
+            stage_goal = str(stage.get('stage_goal') or '').strip()
+            if not stage_goal:
+                continue
+            try:
+                stage_index = int(stage.get('stage_index') or 0)
+            except (TypeError, ValueError):
+                stage_index = 0
+            scored.append((stage_index, str(stage.get('stage_id') or ''), stage_goal))
+        if not scored:
+            return ''
+        return max(scored, key=lambda item: (item[0], item[1]))[2]
+
+    @staticmethod
+    def _tree_display_stage_goal(node: TaskTreeNodeSummary, stage_goals: dict[str, str]) -> str:
+        if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() == 'acceptance':
+            return '检验中'
+        stage_goal = str(stage_goals.get(str(node.node_id or '').strip()) or '').strip()
+        return stage_goal or '无阶段目标'
 
     def _latest_node(self, nodes: list[NodeRecord]) -> LatestTaskNodeOutput | None:
         if not nodes:

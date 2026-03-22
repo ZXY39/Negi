@@ -2053,7 +2053,7 @@ class ViewTaskProgressTool(Tool):
 
     @property
     def description(self) -> str:
-        return '按任务 id 返回任务状态、树状图文本和最新节点输出内容，并将任务标记为已读。'
+        return '按任务 id 返回任务状态和带阶段目标的树状图文本，并将任务标记为已读。'
 
     @property
     def parameters(self) -> dict[str, Any]:

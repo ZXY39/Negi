@@ -292,11 +292,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
         if main_task_service is not None:
             for entry in main_task_service.store.list_pending_task_terminal_outbox(limit=500):
                 payload = dict(entry.get('payload') or {})
-                dedupe_key = str(entry.get('dedupe_key') or '').strip()
-                if not dedupe_key:
-                    continue
-                if heartbeat.enqueue_task_terminal_payload(payload):
-                    main_task_service.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
+                heartbeat.enqueue_task_terminal_payload(payload)
     await _ensure_china_bridge_services(runtime_agent)
 
 
