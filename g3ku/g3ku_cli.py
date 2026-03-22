@@ -14,7 +14,7 @@ from pathlib import Path
 import typer
 import uvicorn
 
-from g3ku.config.loader import load_config
+from g3ku.config.loader import ensure_startup_config_ready, load_config
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_PATH,
     TASK_TERMINAL_CALLBACK_TOKEN_ENV,
@@ -151,6 +151,7 @@ async def _run_worker_runtime() -> None:
     from g3ku.config.loader import load_config
 
     os.environ["G3KU_TASK_RUNTIME_ROLE"] = "worker"
+    ensure_startup_config_ready()
     config = load_config()
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
@@ -203,6 +204,7 @@ def start(
     """
 
     root = _resolve_project_root()
+    ensure_startup_config_ready()
     resolved_port = _resolve_backend_port(port)
     frontend_mode = _ensure_frontend_ready()
     _set_prompt_log_mode(log_enabled)
@@ -254,6 +256,7 @@ def start(
 def worker() -> None:
     """Start the background task worker."""
     root = _resolve_project_root()
+    ensure_startup_config_ready()
     typer.echo(f"[g3ku] project root: {root}")
     typer.echo("[g3ku] task runtime role: worker")
     try:

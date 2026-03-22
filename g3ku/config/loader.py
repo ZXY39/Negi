@@ -18,7 +18,7 @@ def _project_config_path() -> Path:
 
 
 def _project_example_config_path() -> Path:
-    return Path.cwd() / ".g3ku" / "config - example.json"
+    return Path.cwd() / ".g3ku" / "config.example.json"
 
 
 def get_config_path() -> Path:
@@ -36,6 +36,33 @@ def get_data_dir() -> Path:
     from g3ku.utils.helpers import get_data_path
 
     return get_data_path()
+
+
+def ensure_startup_config_ready(config_path: Path | None = None) -> bool:
+    """Apply safe first-start bootstrap tweaks before loading runtime config.
+
+    If the project config file does not exist but a checked-in example file
+    does, bootstrap the config by copying the example.  The user still needs
+    to fill in real API keys before LLM features will work.
+    """
+    path = Path(config_path) if config_path is not None else get_config_path()
+    if not path.exists():
+        example_path = get_example_config_path()
+        if example_path.exists():
+            import shutil
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(example_path, path)
+            from loguru import logger
+
+            logger.info(
+                "Config bootstrapped from example: {}. "
+                "Please configure your API keys before using LLM features.",
+                path,
+            )
+            return True
+        return False
+    return False
 
 
 def _load_json_file(path: Path) -> dict[str, Any]:

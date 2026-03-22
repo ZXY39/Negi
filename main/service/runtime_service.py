@@ -767,8 +767,8 @@ class MainRuntimeService:
         self._react_loop._parallel_tool_calls_enabled = parallel_enabled
         self._react_loop._max_parallel_tool_calls = max_parallel_tool_calls
         self.node_runner._max_parallel_child_pipelines = max_parallel_child_pipelines
-        if self._resource_manager is not None and hasattr(self._resource_manager, 'bind_app_config'):
-            self._resource_manager.bind_app_config(config)
+        # Resource manager config binding and reload are handled by refresh_loop_runtime_config().
+        # Rebinding here clears dynamic tool instances before CEO exposure is assembled.
         self.resource_registry.refresh_from_current_resources()
         self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()

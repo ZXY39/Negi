@@ -136,6 +136,7 @@ const S = {
     selectedSkill: null,
     skillFiles: [],
     skillContents: {},
+    skillFileLoads: {},
     selectedSkillFile: "",
     skillBusy: false,
     skillDirty: false,
@@ -1803,17 +1804,30 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
     }, { scrollMode });
 }
 
-function getActiveCeoTurn() {
-    return S.ceoPendingTurns.find((turn) => !turn.finalized) || null;
+function normalizeCeoTurnSource(source = "") {
+    const normalized = String(source || "").trim().toLowerCase();
+    return normalized || "user";
 }
 
-function pullActiveCeoTurn(source = "") {
-    const expected = String(source || "").trim().toLowerCase();
-    const index = S.ceoPendingTurns.findIndex((turn) => {
-        if (!turn || turn.finalized) return false;
-        if (!expected) return true;
-        return String(turn.source || "user").trim().toLowerCase() === expected;
-    });
+function findActiveCeoTurnIndex(source = null) {
+    const hasExpected = source !== null && source !== undefined;
+    const expected = hasExpected ? normalizeCeoTurnSource(source) : "";
+    for (let index = S.ceoPendingTurns.length - 1; index >= 0; index -= 1) {
+        const turn = S.ceoPendingTurns[index];
+        if (!turn || turn.finalized) continue;
+        if (!hasExpected) return index;
+        if (normalizeCeoTurnSource(turn.source) === expected) return index;
+    }
+    return -1;
+}
+
+function getActiveCeoTurn(source = null) {
+    const index = findActiveCeoTurnIndex(source);
+    return index >= 0 ? S.ceoPendingTurns[index] || null : null;
+}
+
+function pullActiveCeoTurn(source = null) {
+    const index = findActiveCeoTurnIndex(source);
     if (index < 0) return null;
     const [turn] = S.ceoPendingTurns.splice(index, 1);
     return turn || null;
@@ -1830,12 +1844,13 @@ function discardActiveCeoTurn({ source = "" } = {}) {
 }
 
 function ensureActiveCeoTurn({ source = "" } = {}) {
-    const existing = getActiveCeoTurn();
+    const normalizedSource = normalizeCeoTurnSource(source);
+    const existing = getActiveCeoTurn(normalizedSource);
     if (existing) {
-        if (!existing.source) existing.source = String(source || "").trim().toLowerCase() || "user";
+        existing.source = normalizedSource;
         return existing;
     }
-    const created = createPendingCeoTurn(String(source || "").trim().toLowerCase() || "user");
+    const created = createPendingCeoTurn(normalizedSource);
     if (created) S.ceoPendingTurns.push(created);
     return created;
 }
@@ -2250,7 +2265,7 @@ function stopLiveDurationTicker() {
 }
 
 function appendCeoToolEvent(event = {}) {
-    const source = String(event?.source || "").trim().toLowerCase();
+    const source = normalizeCeoTurnSource(event?.source || "");
     const turn = ensureActiveCeoTurn({ source });
     if (!turn?.listEl || !turn.flowEl) return;
     mutateCeoFeed(() => {
@@ -2329,7 +2344,7 @@ function finalizeCeoTurn(text, meta = {}) {
     S.ceoPauseBusy = false;
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     syncCeoPrimaryButton();
-    const turn = pullActiveCeoTurn(meta?.source || "");
+    const turn = pullActiveCeoTurn(normalizeCeoTurnSource(meta?.source || "user"));
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
         return;
@@ -4639,6 +4654,7 @@ function clearSkillSelection() {
     S.selectedSkill = null;
     S.skillFiles = [];
     S.skillContents = {};
+    S.skillFileLoads = {};
     S.selectedSkillFile = "";
     S.skillDirty = false;
     renderSkills();
@@ -5697,8 +5713,9 @@ function clearAgentSelection({ rerender = true } = {}) {
     S.pendingTaskDetailRestore = null;
     U.feedTitle.textContent = "Node Details";
     hideAgent();
+    setTaskSelectionEmptyVisible(true);
     scheduleTaskDetailSessionPersist();
-    if (rerender) renderTree();
+    if (rerender) syncExecutionTreeSelection(previousNodeId, "");
 }
 function findTreeNode(node, nodeId) {
     if (!node) return null;
@@ -6332,6 +6349,35 @@ function buildExecutionTree(rawTree) {
     return walk(rawTree);
 }
 
+function executionTreeNodeSelector(nodeId) {
+    const key = String(nodeId || "").trim();
+    if (!key || !U.tree) return "";
+    const escaped = key
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"');
+    return `.execution-tree-node[data-id="${escaped}"]`;
+}
+
+function syncExecutionTreeSelection(previousNodeId, nextNodeId) {
+    if (!U.tree) return;
+    const previousKey = String(previousNodeId || "").trim();
+    const nextKey = String(nextNodeId || "").trim();
+    if (previousKey) {
+        const previousButton = U.tree.querySelector(executionTreeNodeSelector(previousKey));
+        if (previousButton instanceof HTMLElement) {
+            previousButton.classList.remove("selected");
+            previousButton.setAttribute("aria-pressed", "false");
+        }
+    }
+    if (nextKey) {
+        const nextButton = U.tree.querySelector(executionTreeNodeSelector(nextKey));
+        if (nextButton instanceof HTMLElement) {
+            nextButton.classList.add("selected");
+            nextButton.setAttribute("aria-pressed", "true");
+        }
+    }
+}
+
 function renderTree() {
     if (!S.tree) return;
     const projectedTree = projectTaskTree(S.tree, S.treeRoundSelectionsByNodeId);
@@ -6373,12 +6419,14 @@ function renderTree() {
             e.stopPropagation();
             const previousNodeId = String(S.selectedNodeId || "").trim();
             const nextNodeId = String(node.node_id || "").trim();
+            if (!nextNodeId) return;
             if (previousNodeId && previousNodeId !== nextNodeId) {
                 stashTaskDetailViewState({ nodeId: previousNodeId });
             }
             S.selectedNodeId = node.node_id;
+            setTaskSelectionEmptyVisible(false);
+            syncExecutionTreeSelection(previousNodeId, nextNodeId);
             void showAgent(node, { preserveViewState: false });
-            renderTree();
         });
         stack.appendChild(el);
         if ((node.roundOptions || []).length > 1) {
@@ -7542,9 +7590,13 @@ function renderSkillDetail() {
     }
     U.skillEmpty.style.display = "none";
     setDrawerOpen(U.skillBackdrop, U.skillDrawer, true);
+    const selectedFileKey = String(S.selectedSkillFile || "").trim();
+    const fileLoaded = selectedFileKey
+        ? Object.prototype.hasOwnProperty.call(S.skillContents, selectedFileKey)
+        : false;
     const roles = ["ceo", "execution", "inspection"];
     const allowedRoles = Array.isArray(S.selectedSkill.allowed_roles) ? S.selectedSkill.allowed_roles : [];
-    const editorValue = esc(S.skillContents[S.selectedSkillFile] || "");
+    const editorValue = esc(fileLoaded ? (S.skillContents[selectedFileKey] || "") : "Loading file...");
     const availabilityState = resourceAvailabilityStatus(S.selectedSkill);
     const unavailableReasons = resourceAvailabilityReasons(S.selectedSkill);
     const fileTabs = S.skillFiles.length
@@ -7593,7 +7645,7 @@ function renderSkillDetail() {
                 <div class="resource-section">
                     <h3>文件内容</h3>
                     <div class="resource-filter-row">${fileTabs}</div>
-                    <textarea id="skill-editor" rows="18" class="resource-editor">${editorValue}</textarea>
+                    <textarea id="skill-editor" rows="18" class="resource-editor"${selectedFileKey && !fileLoaded ? " disabled" : ""}>${editorValue}</textarea>
                 </div>
             </div>
         </article>`;
@@ -7619,10 +7671,16 @@ function renderSkillDetail() {
         renderSkillDetail();
     }));
     U.skillDetail.querySelectorAll(".skill-file").forEach((button) => button.addEventListener("click", () => {
+        const nextFileKey = String(button.dataset.file || "").trim();
+        if (!nextFileKey || nextFileKey === String(S.selectedSkillFile || "").trim()) return;
         const editor = document.getElementById("skill-editor");
-        if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
-        S.selectedSkillFile = button.dataset.file;
+        const currentFileKey = String(S.selectedSkillFile || "").trim();
+        if (editor && currentFileKey && Object.prototype.hasOwnProperty.call(S.skillContents, currentFileKey)) {
+            S.skillContents[currentFileKey] = editor.value;
+        }
+        S.selectedSkillFile = nextFileKey;
         renderSkillDetail();
+        void ensureSkillFileLoaded(S.selectedSkill?.skill_id, nextFileKey);
     }));
     U.skillDetail.querySelector("#skill-editor")?.addEventListener("input", (e) => {
         if (!S.selectedSkillFile) return;
@@ -7630,6 +7688,46 @@ function renderSkillDetail() {
         setSkillDirty(true);
     });
     renderSkillActions();
+}
+
+async function ensureSkillFileLoaded(skillId, fileKey) {
+    const normalizedSkillId = String(skillId || S.selectedSkill?.skill_id || "").trim();
+    const normalizedFileKey = String(fileKey || "").trim();
+    const loadKey = `${normalizedSkillId}::${normalizedFileKey}`;
+    if (!normalizedSkillId || !normalizedFileKey) return "";
+    if (Object.prototype.hasOwnProperty.call(S.skillContents, normalizedFileKey)) {
+        return S.skillContents[normalizedFileKey] || "";
+    }
+    if (S.skillFileLoads[loadKey]) {
+        return S.skillFileLoads[loadKey];
+    }
+    S.skillFileLoads[loadKey] = ApiClient.getSkillFile(normalizedSkillId, normalizedFileKey)
+        .then((data) => {
+            const content = String(data?.content || "");
+            if (String(S.selectedSkill?.skill_id || "").trim() === normalizedSkillId) {
+                S.skillContents[normalizedFileKey] = content;
+                if (String(S.selectedSkillFile || "").trim() === normalizedFileKey) {
+                    renderSkillDetail();
+                }
+            }
+            return content;
+        })
+        .catch((error) => {
+            if (String(S.selectedSkill?.skill_id || "").trim() === normalizedSkillId) {
+                S.skillContents[normalizedFileKey] = "";
+                if (String(S.selectedSkillFile || "").trim() === normalizedFileKey) {
+                    renderSkillDetail();
+                }
+                showToast({ title: "Skill file load failed", text: error.message || normalizedFileKey, kind: "error" });
+            }
+            return "";
+        })
+        .finally(() => {
+            if (S.skillFileLoads[loadKey]) {
+                delete S.skillFileLoads[loadKey];
+            }
+        });
+    return S.skillFileLoads[loadKey];
 }
 
 async function loadSkills({ renderDetail = true } = {}) {
@@ -7673,13 +7771,13 @@ async function openSkill(skillId, quiet = false) {
         S.skillFiles = files;
         S.selectedSkillFile = files[0]?.file_key || "";
         S.skillContents = {};
+        S.skillFileLoads = {};
         S.skillDirty = false;
-        await Promise.all(files.map(async (file) => {
-            const data = await ApiClient.getSkillFile(skillId, file.file_key);
-            S.skillContents[file.file_key] = data.content || "";
-        }));
         renderSkills();
         renderSkillDetail();
+        if (S.selectedSkillFile) {
+            await ensureSkillFileLoaded(skillId, S.selectedSkillFile);
+        }
     } catch (e) {
         U.skillDetail.innerHTML = `<div class="empty-state error">Failed to load skill details: ${esc(e.message)}</div>`;
         addNotice({ kind: "resource_failed", title: "Skill detail failed", text: e.message || "Unknown error" });

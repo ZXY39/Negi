@@ -1639,6 +1639,67 @@ async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp
 
 
 @pytest.mark.asyncio
+async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workspace)
+    _write_runtime_config(workspace)
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(
+        workspace,
+        'content',
+        'memory_search',
+        'memory_runtime',
+        'message',
+        'load_skill_context',
+        'load_tool_context',
+        'create_async_task_cn',
+        'task_fetch_cn',
+        'task_progress_cn',
+        'task_summary_cn',
+    )
+
+    from g3ku.config.loader import load_config
+    import main.service.runtime_service as runtime_service_module
+
+    config = load_config()
+    monkeypatch.setattr(runtime_service_module, 'get_runtime_config', lambda force=False: (config, 7, True))
+
+    manager = ResourceManager(workspace, app_config=config)
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        app_config=config,
+        resource_manager=manager,
+        store_path=workspace / '.g3ku' / 'main-runtime' / 'runtime.sqlite3',
+        files_base_dir=workspace / '.g3ku' / 'main-runtime' / 'tasks',
+        artifact_dir=workspace / '.g3ku' / 'main-runtime' / 'artifacts',
+        governance_store_path=workspace / '.g3ku' / 'main-runtime' / 'governance.sqlite3',
+    )
+    manager.bind_service_getter(lambda: {'main_task_service': service, 'app_config': config})
+    manager.reload_now(trigger='test-service-bind')
+    service.bind_resource_manager(manager)
+
+    try:
+        await service.startup()
+        before = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
+        assert 'create_async_task' in before
+
+        changed = service.ensure_runtime_config_current(force=True, reason='test')
+
+        assert changed is True
+        assert 'create_async_task' in manager.tool_instances()
+        after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
+        assert 'create_async_task' in after
+        assert {'task_list', 'task_progress', 'task_summary'}.issubset(set(after))
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_core_tool_admin_endpoints_block_disable_delete_and_ceo_removal(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
