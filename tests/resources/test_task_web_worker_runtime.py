@@ -14,7 +14,7 @@ from g3ku.providers.base import LLMResponse, ToolCallRequest
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
-from main.models import SpawnChildSpec, TaskRecord
+from main.models import NodeFinalResult, SpawnChildSpec, TaskRecord
 from main.monitoring.models import TaskProjectionMetaRecord
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
@@ -1082,5 +1082,55 @@ async def test_pause_during_model_call_keeps_task_resumable_and_resume_finishes_
         assert latest_root.status == "success"
         assert latest_root.failure_reason == ""
         assert len(service.store.list_tasks()) == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_requested_after_valid_result_flushes_node_output_before_task_pauses(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+
+    async def _pause_after_valid_result(**kwargs):
+        task = kwargs["task"]
+        service.log_service.set_pause_state(task.task_id, pause_requested=True, is_paused=True)
+        return NodeFinalResult(
+            status="success",
+            delivery_status="final",
+            summary="done",
+            answer="done",
+            evidence=[{"kind": "artifact", "note": "pause flush completed"}],
+            remaining_work=[],
+            blocking_reason="",
+        )
+
+    service.node_runner._react_loop.run = _pause_after_valid_result
+
+    try:
+        record = await service.create_task("pause after valid result", session_id="web:shared")
+
+        for _ in range(100):
+            current = service.get_task(record.task_id)
+            if current is not None and current.is_paused and not service.task_runner.is_active(record.task_id):
+                break
+            await asyncio.sleep(0.01)
+
+        paused = service.get_task(record.task_id)
+        assert paused is not None
+        assert paused.status in {"in_progress", "success"}
+        assert paused.is_paused is True
+        assert paused.pause_requested is True
+
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        assert root.status == "success"
+        assert root.final_output == "done"
+        assert root.failure_reason == ""
     finally:
         await service.close()

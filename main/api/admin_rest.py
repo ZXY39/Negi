@@ -10,7 +10,6 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.schema import Config
 from g3ku.config.model_manager import ModelManager, VALID_SCOPES
-from g3ku.llm_config.facade import MEMORY_EMBEDDING_CONFIG_ID, MEMORY_RERANK_CONFIG_ID
 from g3ku.shells.web import get_agent, refresh_web_agent_runtime
 
 router = APIRouter()
@@ -729,12 +728,29 @@ async def get_llm_memory_binding():
 @router.put('/llm/memory')
 async def update_llm_memory_binding(payload: dict | None = Body(default=None)):
     manager = ModelManager.load()
+    body = payload if isinstance(payload, dict) else {}
     try:
-        result = manager.facade.get_memory_binding()
-        if not result.embedding_config_id or result.embedding_config_id != MEMORY_EMBEDDING_CONFIG_ID:
-            raise ValueError('memory embedding config is missing')
-        if not result.rerank_config_id or result.rerank_config_id != MEMORY_RERANK_CONFIG_ID:
-            raise ValueError('memory rerank config is missing')
+        current = manager.facade.get_memory_binding()
+
+        def _pick(snake_key: str, camel_key: str, current_value: str | None) -> str | None:
+            if snake_key in body:
+                return str(body.get(snake_key) or '').strip() or None
+            if camel_key in body:
+                return str(body.get(camel_key) or '').strip() or None
+            return current_value
+
+        result = manager.facade.set_memory_binding(
+            embedding_config_id=_pick(
+                'embedding_config_id',
+                'embeddingConfigId',
+                current.embedding_config_id,
+            ),
+            rerank_config_id=_pick(
+                'rerank_config_id',
+                'rerankConfigId',
+                current.rerank_config_id,
+            ),
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _refresh_runtime('admin_llm_memory_update')

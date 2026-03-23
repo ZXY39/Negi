@@ -1,10 +1,6 @@
 (() => {
   const DEFAULT_RETRY_ON = ["network", "429", "5xx"];
   const SCOPE_LABELS = { ceo: "CEO", execution: "Execution", inspection: "Inspection" };
-  const MEMORY_TEMPLATE_IDS = {
-    embedding: ["dashscope_embedding"],
-    rerank: ["dashscope_rerank"],
-  };
 
   function emptyMemorySection(label, capability) {
     return {
@@ -189,9 +185,8 @@
   }
 
   function memoryTemplates(capability) {
-    const allowedIds = MEMORY_TEMPLATE_IDS[String(capability || "").trim()] || [];
-    const allowedSet = new Set(allowedIds.map((item) => trim(item)));
-    return llmState().templates.filter((item) => allowedSet.has(trim(item.provider_id)));
+    const expectedCapability = trim(capability);
+    return llmState().templates.filter((item) => trim(item.capability || "chat") === expectedCapability);
   }
 
   function defaultMemoryTemplateProviderId(capability, providerId = "") {
@@ -331,6 +326,38 @@
     section.jsonText = JSON.stringify(draft, null, 2);
   }
 
+  async function loadMemorySectionConfig(editor, sectionKey, meta) {
+    const section = editor.memory?.[sectionKey];
+    if (!section) return;
+    section.configId = trim(meta?.configId);
+    section.providerId = "";
+    section.providerModel = trim(meta?.providerModel);
+    section.templateProviderId = "";
+    section.jsonText = "";
+    section.validation = null;
+    section.probe = null;
+    section.error = "";
+    if (!section.configId) {
+      section.templateProviderId = defaultMemoryTemplateProviderId(section.capability);
+      if (!section.templateProviderId) {
+        section.error = `${section.label} 暂无可用模板。`;
+        return;
+      }
+      await ensureTemplate(section.templateProviderId);
+      const draft = buildDraftFromTemplate(section.templateProviderId, section.capability);
+      section.providerId = trim(draft.provider_id);
+      section.providerModel = providerModelFromDraft(draft);
+      section.jsonText = JSON.stringify(draft, null, 2);
+      return;
+    }
+    const record = await ApiClient.getLlmConfig(section.configId, { includeSecrets: true });
+    const draft = draftFromConfig(record);
+    section.providerId = trim(draft.provider_id);
+    section.providerModel = trim(meta?.providerModel || providerModelFromDraft(draft));
+    section.templateProviderId = defaultMemoryTemplateProviderId(section.capability, section.providerId);
+    section.jsonText = JSON.stringify(draft, null, 2);
+  }
+
   function syncMemorySectionText(sectionKey) {
     const section = llmState().editor.memory?.[sectionKey];
     if (!section) return null;
@@ -364,8 +391,8 @@
       && !trim(memory.error)
       && !trim(memory.embedding.error)
       && !trim(memory.rerank.error)
-      && trim(memory.embedding.configId)
-      && trim(memory.rerank.configId)
+      && trim(memory.embedding.jsonText)
+      && trim(memory.rerank.jsonText)
     );
   }
 
@@ -443,11 +470,11 @@
       const memoryBinding = await ApiClient.getLlmMemoryModels();
       if (llmState().editor !== editor) return;
       await Promise.all([
-        loadMemorySection(editor, "embedding", {
+        loadMemorySectionConfig(editor, "embedding", {
           configId: memoryBinding?.embedding_config_id,
           providerModel: memoryBinding?.embedding_provider_model,
         }),
-        loadMemorySection(editor, "rerank", {
+        loadMemorySectionConfig(editor, "rerank", {
           configId: memoryBinding?.rerank_config_id,
           providerModel: memoryBinding?.rerank_provider_model,
         }),
@@ -1029,9 +1056,18 @@
         kind: "info",
         persistent: true,
       });
-      await ApiClient.updateLlmConfig(embeddingSection.configId, embeddingDraft);
-      await ApiClient.updateLlmConfig(rerankSection.configId, rerankDraft);
-      await ApiClient.updateLlmMemoryModels();
+      const embeddingConfig = trim(embeddingSection.configId)
+        ? await ApiClient.updateLlmConfig(embeddingSection.configId, embeddingDraft)
+        : await ApiClient.createLlmConfig(embeddingDraft);
+      const rerankConfig = trim(rerankSection.configId)
+        ? await ApiClient.updateLlmConfig(rerankSection.configId, rerankDraft)
+        : await ApiClient.createLlmConfig(rerankDraft);
+      embeddingSection.configId = trim(embeddingConfig?.config_id || embeddingSection.configId);
+      rerankSection.configId = trim(rerankConfig?.config_id || rerankSection.configId);
+      await ApiClient.updateLlmMemoryModels({
+        embedding_config_id: embeddingSection.configId,
+        rerank_config_id: rerankSection.configId,
+      });
       showToast({
         title: "保存成功",
         text: "记忆模型配置已更新",

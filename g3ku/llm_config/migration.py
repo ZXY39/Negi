@@ -19,8 +19,6 @@ from .models import NormalizedProviderConfig
 
 EMBEDDING_KEY = MEMORY_EMBEDDING_CONFIG_ID
 RERANK_KEY = MEMORY_RERANK_CONFIG_ID
-_DEFAULT_MEMORY_EMBEDDING_MODEL = "qwen3-vl-embedding"
-_DEFAULT_MEMORY_RERANK_MODEL = "qwen3-vl-rerank"
 _MEMORY_KEYS = {EMBEDDING_KEY, RERANK_KEY}
 
 
@@ -135,55 +133,26 @@ def _provider_payload(legacy_providers: dict[str, Any], provider_id: str) -> tup
     return api_key, api_base, extra_headers
 
 
-def _copy_record_to_fixed_id(
-    facade: LLMConfigFacade,
-    *,
-    source_config_id: str,
-    target_config_id: str,
-    capability: Capability,
-) -> bool:
-    source = facade._get_optional_record(source_config_id)
-    if source is None:
-        return False
-    if source.capability != capability:
-        return False
-    existing = facade._get_optional_record(target_config_id)
-    record = source.model_copy(
-        update={
-            "config_id": target_config_id,
-            "created_at": existing.created_at if existing is not None else source.created_at,
-            "updated_at": datetime.now(UTC),
-        }
-    )
-    facade.repository.save(record, last_probe_status=None)
-    return True
-
-
-def _ensure_memory_record(
+def _resolve_memory_binding_config_id(
     facade: LLMConfigFacade,
     legacy_providers: dict[str, Any],
     *,
-    target_config_id: str,
     capability: Capability,
     provider_model: str = "",
     source_config_id: str | None = None,
-    fallback_model_id: str,
-) -> bool:
-    if source_config_id and _copy_record_to_fixed_id(
-        facade,
-        source_config_id=source_config_id,
-        target_config_id=target_config_id,
-        capability=capability,
-    ):
-        return True
+    legacy_fixed_config_id: str | None = None,
+) -> str | None:
+    if source_config_id:
+        source = facade._get_optional_record(source_config_id)
+        if source is not None and source.capability == capability:
+            return source_config_id
 
     normalized_provider_model = str(provider_model or "").strip()
     if normalized_provider_model and ":" in normalized_provider_model:
         provider_id, model_id = normalized_provider_model.split(":", 1)
         api_key, api_base, extra_headers = _provider_payload(legacy_providers, provider_id)
-        _build_record(
+        return _build_record(
             facade,
-            config_id=target_config_id,
             provider_id=provider_id,
             model_id=model_id.strip(),
             api_key=api_key,
@@ -191,23 +160,13 @@ def _ensure_memory_record(
             extra_headers=extra_headers,
             capability=capability,
         )
-        return True
 
-    if facade._get_optional_record(target_config_id) is not None:
-        return False
+    if legacy_fixed_config_id and facade._get_optional_record(legacy_fixed_config_id) is not None:
+        record = facade._get_optional_record(legacy_fixed_config_id)
+        if record is not None and record.capability == capability:
+            return legacy_fixed_config_id
 
-    api_key, api_base, extra_headers = _provider_payload(legacy_providers, "dashscope")
-    _build_record(
-        facade,
-        config_id=target_config_id,
-        provider_id="dashscope",
-        model_id=fallback_model_id,
-        api_key=api_key,
-        api_base=api_base,
-        extra_headers=extra_headers,
-        capability=capability,
-    )
-    return True
+    return None
 
 
 def _first_catalog_item(catalog: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
@@ -352,24 +311,38 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
             memory_manifest.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
             changed = True
 
-    changed = _ensure_memory_record(
+    embedding_binding_config_id = _resolve_memory_binding_config_id(
         facade,
         legacy_providers,
-        target_config_id=MEMORY_EMBEDDING_CONFIG_ID,
         capability=Capability.EMBEDDING,
         provider_model=embedding_provider_model,
         source_config_id=embedding_source_config_id,
-        fallback_model_id=_DEFAULT_MEMORY_EMBEDDING_MODEL,
-    ) or changed
-    changed = _ensure_memory_record(
+        legacy_fixed_config_id=MEMORY_EMBEDDING_CONFIG_ID,
+    )
+    rerank_binding_config_id = _resolve_memory_binding_config_id(
         facade,
         legacy_providers,
-        target_config_id=MEMORY_RERANK_CONFIG_ID,
         capability=Capability.RERANK,
         provider_model=rerank_provider_model,
         source_config_id=rerank_source_config_id,
-        fallback_model_id=_DEFAULT_MEMORY_RERANK_MODEL,
-    ) or changed
+        legacy_fixed_config_id=MEMORY_RERANK_CONFIG_ID,
+    )
+    current_binding = facade.get_memory_binding()
+    desired_embedding_binding = embedding_binding_config_id
+    desired_rerank_binding = rerank_binding_config_id
+    if desired_embedding_binding is None and current_binding.embedding_config_id:
+        desired_embedding_binding = current_binding.embedding_config_id
+    if desired_rerank_binding is None and current_binding.rerank_config_id:
+        desired_rerank_binding = current_binding.rerank_config_id
+    if (
+        desired_embedding_binding != current_binding.embedding_config_id
+        or desired_rerank_binding != current_binding.rerank_config_id
+    ):
+        facade.set_memory_binding(
+            embedding_config_id=desired_embedding_binding,
+            rerank_config_id=desired_rerank_binding,
+        )
+        changed = True
 
     if changed:
         for provider_id in referenced_provider_ids:
@@ -386,7 +359,18 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
         if isinstance(item, dict)
     }
     retained_config_ids.discard("")
-    retained_config_ids.update({MEMORY_EMBEDDING_CONFIG_ID, MEMORY_RERANK_CONFIG_ID})
+    retained_config_ids.update(
+        {
+            config_id
+            for config_id in (
+                desired_embedding_binding,
+                desired_rerank_binding,
+                MEMORY_EMBEDDING_CONFIG_ID,
+                MEMORY_RERANK_CONFIG_ID,
+            )
+            if config_id
+        }
+    )
     _delete_orphaned_memory_records(
         facade,
         orphaned_config_ids=orphaned_memory_record_ids,

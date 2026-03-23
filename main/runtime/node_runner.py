@@ -89,13 +89,19 @@ class NodeRunner:
                 runtime_context=self._runtime_context(task=task, node=node),
                 max_iterations=self._max_iterations_for(node),
             )
+            if self._pause_requested(task_id):
+                self._mark_finished(task_id, node.node_id, result)
+                self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+                raise TaskPausedError(task_id)
             if (self._store.get_task(task_id) or task).cancel_requested:
                 return self._mark_failed(task_id, node.node_id, reason='canceled')
             return self._mark_finished(task_id, node.node_id, result)
         except TaskPausedError:
+            self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
             raise
         except asyncio.CancelledError:
             if self._pause_requested(task_id):
+                self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
                 self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
                 raise TaskPausedError(task_id)
             return self._mark_failed(task_id, node.node_id, reason='canceled')
@@ -114,6 +120,91 @@ class NodeRunner:
         return {
             'messages': await self._build_messages(task=task, node=node),
         }
+
+    def _flush_latest_valid_result_if_paused(self, *, task_id: str, node_id: str) -> NodeFinalResult | None:
+        latest = self._store.get_node(node_id)
+        if latest is None or latest.status in {STATUS_SUCCESS, STATUS_FAILED}:
+            return None
+
+        candidate_text = self._latest_output_candidate_text(latest)
+        if not str(candidate_text or '').strip():
+            return None
+
+        parsed = self._react_loop._parse_final_result(candidate_text)
+        if parsed is None:
+            return None
+
+        stage_gate = self._react_loop._execution_stage_gate(
+            task_id=task_id,
+            node_id=node_id,
+            node_kind=latest.node_kind,
+        )
+        if self._react_loop._execution_stage_result_block_message(
+            node_kind=latest.node_kind,
+            stage_gate=stage_gate,
+        ):
+            return None
+
+        result, raw_payload = parsed
+        messages = self._runtime_frame_messages(task_id=task_id, node_id=node_id)
+        has_tool_results = self._react_loop._has_tool_results(messages)
+        if not has_tool_results:
+            has_tool_results = any(list(getattr(entry, 'tool_calls', []) or []) for entry in list(latest.output or []))
+        violations = self._react_loop._validate_final_result(
+            result=result,
+            raw_payload=raw_payload,
+            has_tool_results=has_tool_results,
+        )
+        if violations:
+            return None
+        return self._mark_finished(task_id, node_id, result)
+
+    def _latest_output_candidate_text(self, node: NodeRecord) -> str:
+        for entry in reversed(list(node.output or [])):
+            ref = str(getattr(entry, 'content_ref', '') or '').strip()
+            if ref:
+                resolved = self._resolve_content_ref(ref)
+                if str(resolved or '').strip():
+                    return str(resolved or '')
+            text = str(getattr(entry, 'content', '') or '')
+            if text.strip():
+                return text
+
+        detail_getter = getattr(self._store, 'get_task_node_detail', None)
+        if callable(detail_getter):
+            detail = detail_getter(node.node_id)
+            if detail is not None:
+                ref = str(getattr(detail, 'output_ref', '') or '').strip()
+                if ref:
+                    resolved = self._resolve_content_ref(ref)
+                    if str(resolved or '').strip():
+                        return str(resolved or '')
+                text = str(getattr(detail, 'output_text', '') or '')
+                if text.strip():
+                    return text
+        return ''
+
+    def _resolve_content_ref(self, ref: str) -> str:
+        content_store = getattr(self._log_service, '_content_store', None)
+        resolver = getattr(content_store, '_resolve', None) if content_store is not None else None
+        if not callable(resolver):
+            return ''
+        try:
+            text, _handle = resolver(ref=ref, path=None)
+        except Exception:
+            return ''
+        return str(text or '')
+
+    def _runtime_frame_messages(self, *, task_id: str, node_id: str) -> list[dict[str, Any]]:
+        state = self._log_service.read_runtime_state(task_id) or {}
+        for frame in list(state.get('frames') or []):
+            if str(frame.get('node_id') or '') != str(node_id or ''):
+                continue
+            messages = frame.get('messages')
+            if isinstance(messages, list):
+                return [item for item in messages if isinstance(item, dict)]
+            return []
+        return []
 
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})

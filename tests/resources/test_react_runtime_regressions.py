@@ -259,3 +259,23 @@ def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
     assert '当前你已调用20轮工具' in str(request_messages[0]['content'])
     assert f'{GUARD_OVERLAY_MARKER}\n' in str(request_messages[0]['content'])
     assert request_messages[1:] == base_messages
+
+
+def test_execution_result_protocol_message_avoids_partial_guidance() -> None:
+    message = ReActToolLoop._result_protocol_message(node_kind='execution')
+
+    assert 'failed+partial' not in message
+    assert 'delivery_status="partial"' in message
+    assert 'failed+blocked' in message
+
+
+def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only() -> None:
+    message = ReActToolLoop._result_contract_violation_message(
+        ['summary must not be empty'],
+        node_kind='acceptance',
+    )
+
+    assert 'failed+partial' not in message
+    assert 'delivery_status="partial"' in message
+    assert 'failed+final' in message
+    assert 'failed+blocked' in message

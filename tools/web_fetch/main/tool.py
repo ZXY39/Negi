@@ -118,9 +118,10 @@ class _ArticleParser(HTMLParser):
 
 
 class WebFetchTool:
-    def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
-        self.cache_dir = workspace / ".g3ku" / "cache" / "web_fetch"
+    def __init__(self, workspace: str | Path) -> None:
+        workspace_path = Path(workspace)
+        self.workspace = workspace_path
+        self.cache_dir = workspace_path / ".g3ku" / "cache" / "web_fetch"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._memory_cache: dict[str, _CacheEntry] = {}
 

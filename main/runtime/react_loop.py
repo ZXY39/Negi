@@ -301,7 +301,13 @@ class ReActToolLoop:
                     self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
                     return result
                 last_contract_violations = list(contract_violations)
-                violation_message = {'role': 'user', 'content': self._result_contract_violation_message(contract_violations)}
+                violation_message = {
+                    'role': 'user',
+                    'content': self._result_contract_violation_message(
+                        contract_violations,
+                        node_kind=node.node_kind,
+                    ),
+                }
                 message_history.append(violation_message)
                 continue
 
@@ -309,7 +315,10 @@ class ReActToolLoop:
                 error_text = str(getattr(response, 'error_text', None) or response.content or 'model response failed').strip() or 'model response failed'
                 raise RuntimeError(error_text)
 
-            protocol_message = {'role': 'user', 'content': self._result_protocol_message()}
+            protocol_message = {
+                'role': 'user',
+                'content': self._result_protocol_message(node_kind=node.node_kind),
+            }
             message_history.append(protocol_message)
 
         if last_contract_violations:
@@ -877,7 +886,8 @@ class ReActToolLoop:
         return False
 
     @staticmethod
-    def _result_protocol_message() -> str:
+    def _result_protocol_message(*, node_kind: str = 'execution') -> str:
+        guidance = ReActToolLoop._result_repair_guidance(node_kind=node_kind)
         return (
             f'Your previous reply was not valid result JSON for schema v{RESULT_SCHEMA_VERSION}. '
             'Reply with only one JSON object using exactly these keys: '
@@ -885,19 +895,33 @@ class ReActToolLoop:
             '"answer":"...","evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
             '"remaining_work":["..."],"blocking_reason":"..."}. '
             'Do not use Markdown. '
-            'If the task is not actually complete yet, do not return success. Continue using tools when helpful; '
-            'otherwise return failed+partial for incomplete work or failed+blocked for blockers.'
+            f'{guidance}'
         )
 
     @staticmethod
-    def _result_contract_violation_message(violations: list[str]) -> str:
+    def _result_contract_violation_message(violations: list[str], *, node_kind: str = 'execution') -> str:
         bullet_text = '; '.join(str(item or '').strip() for item in violations if str(item or '').strip()) or 'result contract violation'
+        guidance = ReActToolLoop._result_repair_guidance(node_kind=node_kind)
         return (
             f'Your previous reply produced parseable JSON but violated result schema v{RESULT_SCHEMA_VERSION}: {bullet_text}. '
             'Fix every violation and reply with only one JSON object. '
             'Do not claim success unless the deliverable is fully complete. '
-            'If you only have intermediate findings, return failed+partial with remaining_work. '
-            'If you are blocked, return failed+blocked with blocking_reason.'
+            f'{guidance}'
+        )
+
+    @staticmethod
+    def _result_repair_guidance(*, node_kind: str) -> str:
+        normalized_kind = str(node_kind or '').strip().lower()
+        if normalized_kind == 'acceptance':
+            return (
+                'Do not use delivery_status="partial" for acceptance nodes. '
+                'If you are rejecting the deliverable, return failed+final. '
+                'If missing evidence, unreadable artifacts, or insufficient context block verification, return failed+blocked.'
+            )
+        return (
+            'Do not use delivery_status="partial" for execution nodes. '
+            'If the task is not actually complete yet, continue working instead of ending early. '
+            'Only return failed+blocked when you are truly blocked under the current permissions, environment, and tools.'
         )
 
     @staticmethod
