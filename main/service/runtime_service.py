@@ -2010,9 +2010,10 @@ class MainRuntimeService:
             return {}
         if self._builtin_tool_cache is None:
             manager_getter = lambda: self.tool_execution_manager
+            task_service_getter = lambda: self
             self._builtin_tool_cache = {
                 'wait_tool_execution': WaitToolExecutionTool(manager_getter),
-                'stop_tool_execution': StopToolExecutionTool(manager_getter),
+                'stop_tool_execution': StopToolExecutionTool(manager_getter, task_service_getter),
             }
         return dict(self._builtin_tool_cache)
 

@@ -106,6 +106,8 @@ class CeoPromptBuilder:
 - 用户已给出任务 id 时，使用 `task_progress`（查看任务进度工具）查询具体任务进度。
 - 用户未给出任务 id 时，先用 `task_list`（获取任务）查看 `任务类型=4` 的未读任务；如无未读，再按需要查看 `任务类型=2` 或 `任务类型=1`。
 - `task_progress`（查看任务进度工具）只用于获取任务状态和树状图，不要把它当作完整日志或完整文档读取工具。
+- 处理任务控制请求时，先区分 `task_id` 和后台工具 `execution_id`：`task_progress` 面向异步任务，`wait_tool_execution` 只面向后台工具执行。
+- 用户要求取消或停止异步任务且提供的是 `task_id` 时，不要把它误当成后台工具 `execution_id`；如需兜底，可调用 `stop_tool_execution`，系统会在识别到该标识实际是 `task_id` 时自动改为取消对应异步任务。
 
 工具规则：
 - `artifact:` / content 引用一律使用 `content.ref` 读取，不要传给 `filesystem.path`；例如 `task_progress`（查看任务进度工具）或其他工具输出里的这类引用都按此处理。
