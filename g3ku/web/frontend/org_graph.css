@@ -515,6 +515,11 @@ textarea {
     color: var(--status-running-text);
 }
 
+.status-badge[data-status="inspecting"] {
+    background-color: var(--status-running-bg);
+    color: var(--status-running-text);
+}
+
 .status-badge[data-status="completed"],
 .status-badge[data-status="passed"],
 .status-badge[data-status="success"] {
@@ -630,6 +635,26 @@ textarea {
     overscroll-behavior: contain;
 }
 
+.task-tree-recovery-bubble {
+    position: sticky;
+    top: var(--space-3);
+    z-index: 4;
+    width: fit-content;
+    max-width: min(720px, calc(100% - var(--space-6)));
+    margin: 0 auto var(--space-3);
+    padding: 10px 14px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--warning) 44%, var(--border-color));
+    background: color-mix(in srgb, var(--warning) 16%, var(--bg-app));
+    box-shadow: 0 12px 32px color-mix(in srgb, var(--warning) 16%, transparent);
+    color: color-mix(in srgb, var(--warning) 88%, var(--text-primary));
+    font-size: 0.84rem;
+    font-weight: 700;
+    line-height: 1.35;
+    text-align: center;
+    pointer-events: none;
+}
+
 .tree-container.is-panning {
     cursor: grabbing;
     user-select: none;
@@ -741,6 +766,10 @@ textarea {
     --tree-branch-color: var(--tree-line-running);
 }
 
+.execution-tree-item[data-status="inspecting"] {
+    --tree-branch-color: var(--tree-line-running);
+}
+
 .execution-tree-item[data-status="completed"],
 .execution-tree-item[data-status="passed"],
 .execution-tree-item[data-status="success"] {
@@ -754,6 +783,10 @@ textarea {
 
 .execution-tree-list[data-parent-status="running"],
 .execution-tree-list[data-parent-status="in_progress"] {
+    --tree-branch-color: var(--tree-line-running);
+}
+
+.execution-tree-list[data-parent-status="inspecting"] {
     --tree-branch-color: var(--tree-line-running);
 }
 
@@ -802,6 +835,11 @@ textarea {
     background: color-mix(in srgb, var(--status-running-bg) 24%, var(--bg-panel));
 }
 
+.execution-tree-node[data-status="inspecting"] {
+    border-color: color-mix(in srgb, var(--status-running-text) 24%, var(--tree-node-border));
+    background: color-mix(in srgb, var(--status-running-bg) 24%, var(--bg-panel));
+}
+
 .execution-tree-node[data-status="success"],
 .execution-tree-node[data-status="completed"],
 .execution-tree-node[data-status="passed"] {
@@ -817,6 +855,12 @@ textarea {
 
 .execution-tree-node[data-status="running"]::after,
 .execution-tree-node[data-status="in_progress"]::after {
+    border-color: color-mix(in srgb, var(--ceo-session-running-ring) 88%, var(--tree-node-border));
+    opacity: 1;
+    animation: ceo-session-breathe 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.execution-tree-node[data-status="inspecting"]::after {
     border-color: color-mix(in srgb, var(--ceo-session-running-ring) 88%, var(--tree-node-border));
     opacity: 1;
     animation: ceo-session-breathe 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
@@ -898,6 +942,32 @@ textarea {
     max-width: 320px;
     align-items: stretch;
     flex: 0 0 auto;
+}
+
+.execution-tree-node-stack.has-inspection {
+    gap: 0;
+}
+
+.execution-tree-node-stack.has-inspection > .execution-tree-node {
+    border-radius: 0;
+}
+
+.execution-tree-node-stack.has-inspection > .execution-tree-node + .execution-tree-node {
+    margin-top: -1px;
+}
+
+.execution-tree-node-stack.has-inspection > .execution-tree-node:first-child {
+    border-top-left-radius: 18px;
+    border-top-right-radius: 18px;
+}
+
+.execution-tree-node-stack.has-inspection > .execution-tree-node.execution-tree-node-base {
+    border-bottom-left-radius: 18px;
+    border-bottom-right-radius: 18px;
+}
+
+.execution-tree-node.is-inspection::before {
+    background: color-mix(in srgb, var(--status-running-text) 60%, var(--brand-primary) 40%);
 }
 
 .execution-tree-node-rounds {
@@ -4771,11 +4841,21 @@ textarea {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 12px;
     padding: 10px 14px;
     border-radius: 14px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+}
+
+.task-depth-setting-main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex: 1 1 220px;
+    min-width: 0;
 }
 
 .task-depth-label {
@@ -4844,6 +4924,47 @@ textarea {
 .task-depth-select:disabled {
     cursor: not-allowed;
     opacity: 0.65;
+}
+
+.task-depth-custom {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex: 1 1 220px;
+}
+
+.task-depth-custom-input {
+    width: min(100%, 160px);
+    min-height: 40px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    border-radius: 10px;
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    padding: 8px 10px;
+    font: inherit;
+}
+
+.task-depth-custom-input:focus-visible {
+    outline: 0;
+    border-color: color-mix(in srgb, var(--brand-primary) 44%, var(--border-color));
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 16%, transparent);
+}
+
+.task-depth-custom-input:disabled {
+    cursor: not-allowed;
+    opacity: 0.65;
+}
+
+.spinless-number-input {
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+
+.spinless-number-input::-webkit-outer-spin-button,
+.spinless-number-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
 }
 
 .task-depth-hint {

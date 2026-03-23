@@ -29,6 +29,7 @@ from main.runtime.internal_tools import SpawnChildNodesTool, SubmitNextStageTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
+_RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
 ACCEPTANCE_REF_GUIDANCE = (
     'If more detail is needed, use content.search first and then content.open for targeted reads. '
     'Do not request the full document body.'
@@ -511,7 +512,14 @@ class NodeRunner:
             child_id = str(entry.get('child_node_id') or '').strip()
             child = self._store.get_node(child_id) if child_id else None
             if child is None:
-                child = self._create_execution_child(task=task, parent=parent, spec=spec)
+                child = self._find_reusable_execution_child(
+                    task=task,
+                    parent=parent,
+                    spec=spec,
+                    exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='child_node_id', skip_index=index),
+                )
+                if child is None:
+                    child = self._create_execution_child(task=task, parent=parent, spec=spec)
                 self._update_spawn_entry(
                     task_id=task.task_id,
                     parent_node_id=parent.node_id,
@@ -578,13 +586,24 @@ class NodeRunner:
             acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
             acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
             if acceptance is None:
-                acceptance = self.create_acceptance_node(
+                acceptance_goal = f'accept:{spec.goal}'
+                acceptance_prompt = str(spec.acceptance_prompt or '')
+                acceptance = self._find_reusable_acceptance_node(
                     task=task,
                     accepted_node=child,
-                    goal=f'accept:{spec.goal}',
-                    acceptance_prompt=str(spec.acceptance_prompt or ''),
+                    goal=acceptance_goal,
+                    acceptance_prompt=acceptance_prompt,
                     parent_node_id=child.node_id,
+                    exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='acceptance_node_id', skip_index=index),
                 )
+                if acceptance is None:
+                    acceptance = self.create_acceptance_node(
+                        task=task,
+                        accepted_node=child,
+                        goal=acceptance_goal,
+                        acceptance_prompt=acceptance_prompt,
+                        parent_node_id=child.node_id,
+                    )
                 self._update_spawn_entry(
                     task_id=task.task_id,
                     parent_node_id=parent.node_id,
@@ -791,6 +810,153 @@ class NodeRunner:
         return bool(str(spec.acceptance_prompt or '').strip())
 
     @staticmethod
+    def _claimed_spawn_node_ids(*, entries: list[dict[str, Any]], field: str, skip_index: int) -> set[str]:
+        claimed: set[str] = set()
+        for index, entry in enumerate(list(entries or [])):
+            if index == int(skip_index):
+                continue
+            if not isinstance(entry, dict):
+                continue
+            node_id = str(entry.get(field) or '').strip()
+            if node_id:
+                claimed.add(node_id)
+        return claimed
+
+    def _find_reusable_execution_child(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        spec: SpawnChildSpec,
+        exclude_node_ids: set[str],
+    ) -> NodeRecord | None:
+        expected_prompt = self._inject_core_requirement_notice(spec.prompt, self._resolve_core_requirement(task))
+        expected_fingerprint = self._execution_child_recovery_fingerprint(
+            parent_node_id=parent.node_id,
+            goal=spec.goal,
+            prompt=expected_prompt,
+        )
+        return self._find_reusable_node(
+            parent_node_id=parent.node_id,
+            node_kind=KIND_EXECUTION,
+            expected_goal=spec.goal,
+            expected_prompt=expected_prompt,
+            expected_fingerprint=expected_fingerprint,
+            exclude_node_ids=exclude_node_ids,
+            metadata_filter=None,
+        )
+
+    def _find_reusable_acceptance_node(
+        self,
+        *,
+        task,
+        accepted_node: NodeRecord,
+        goal: str,
+        acceptance_prompt: str,
+        parent_node_id: str,
+        exclude_node_ids: set[str],
+    ) -> NodeRecord | None:
+        child_handoff = self._child_handoff_payload(
+            task_id=task.task_id,
+            node=accepted_node,
+            fallback_output='',
+        )
+        expected_prompt = self._compose_acceptance_prompt(
+            acceptance_prompt=acceptance_prompt,
+            node_output=str(child_handoff.get('summary') or ''),
+            node_output_ref=str(child_handoff.get('output_ref') or ''),
+            result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
+            evidence_summary=str(child_handoff.get('evidence_summary') or ''),
+            core_requirement=self._resolve_core_requirement(task),
+        )
+        expected_fingerprint = self._acceptance_node_recovery_fingerprint(
+            parent_node_id=parent_node_id,
+            goal=goal,
+            prompt=expected_prompt,
+            accepted_node_id=accepted_node.node_id,
+        )
+        return self._find_reusable_node(
+            parent_node_id=parent_node_id,
+            node_kind=KIND_ACCEPTANCE,
+            expected_goal=goal,
+            expected_prompt=expected_prompt,
+            expected_fingerprint=expected_fingerprint,
+            exclude_node_ids=exclude_node_ids,
+            metadata_filter={'accepted_node_id': accepted_node.node_id},
+        )
+
+    def _find_reusable_node(
+        self,
+        *,
+        parent_node_id: str,
+        node_kind: str,
+        expected_goal: str,
+        expected_prompt: str,
+        expected_fingerprint: str,
+        exclude_node_ids: set[str],
+        metadata_filter: dict[str, str] | None,
+    ) -> NodeRecord | None:
+        candidates: list[NodeRecord] = []
+        for node in list(self._store.list_children(parent_node_id) or []):
+            if node.node_id in exclude_node_ids:
+                continue
+            if str(node.node_kind or '').strip().lower() != str(node_kind or '').strip().lower():
+                continue
+            if str(node.status or '').strip().lower() != STATUS_SUCCESS:
+                continue
+            metadata = dict(node.metadata or {})
+            if metadata_filter:
+                mismatch = False
+                for key, expected in metadata_filter.items():
+                    if str(metadata.get(key) or '').strip() != str(expected or '').strip():
+                        mismatch = True
+                        break
+                if mismatch:
+                    continue
+            fingerprint = str(metadata.get(_RECOVERY_FINGERPRINT_KEY) or '').strip()
+            if fingerprint:
+                if fingerprint != expected_fingerprint:
+                    continue
+            else:
+                if str(node.goal or '') != str(expected_goal or ''):
+                    continue
+                if str(node.prompt or '') != str(expected_prompt or ''):
+                    continue
+            candidates.append(node)
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: (str(item.updated_at or ''), str(item.created_at or ''), str(item.node_id or '')),
+            reverse=True,
+        )
+        return candidates[0]
+
+    @staticmethod
+    def _recovery_fingerprint(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    def _execution_child_recovery_fingerprint(self, *, parent_node_id: str, goal: str, prompt: str) -> str:
+        return self._recovery_fingerprint(
+            {
+                'node_kind': KIND_EXECUTION,
+                'parent_node_id': str(parent_node_id or '').strip(),
+                'goal': str(goal or ''),
+                'prompt': str(prompt or ''),
+            }
+        )
+
+    def _acceptance_node_recovery_fingerprint(self, *, parent_node_id: str, goal: str, prompt: str, accepted_node_id: str) -> str:
+        return self._recovery_fingerprint(
+            {
+                'node_kind': KIND_ACCEPTANCE,
+                'parent_node_id': str(parent_node_id or '').strip(),
+                'goal': str(goal or ''),
+                'prompt': str(prompt or ''),
+                'accepted_node_id': str(accepted_node_id or '').strip(),
+            }
+        )
+
+    @staticmethod
     def _core_requirement_notice(core_requirement: str) -> str:
         return CORE_REQUIREMENT_NOTICE_TEMPLATE.format(core_requirement=str(core_requirement or '').strip())
 
@@ -815,6 +981,13 @@ class NodeRunner:
 
     def _create_execution_child(self, *, task, parent: NodeRecord, spec: SpawnChildSpec) -> NodeRecord:
         child_prompt = self._inject_core_requirement_notice(spec.prompt, self._resolve_core_requirement(task))
+        metadata = {
+            _RECOVERY_FINGERPRINT_KEY: self._execution_child_recovery_fingerprint(
+                parent_node_id=parent.node_id,
+                goal=spec.goal,
+                prompt=child_prompt,
+            )
+        }
         child = NodeRecord(
             node_id=new_node_id(),
             task_id=task.task_id,
@@ -834,7 +1007,7 @@ class NodeRunner:
             updated_at=_now(),
             token_usage=TokenUsageSummary(tracked=bool(getattr(task.token_usage, 'tracked', False))),
             token_usage_by_model=[],
-            metadata={},
+            metadata=metadata,
         )
         return self._log_service.create_node(task.task_id, child)
 
@@ -861,6 +1034,15 @@ class NodeRunner:
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
             core_requirement=self._resolve_core_requirement(task),
         )
+        base_metadata = {
+            'accepted_node_id': accepted_node.node_id,
+            _RECOVERY_FINGERPRINT_KEY: self._acceptance_node_recovery_fingerprint(
+                parent_node_id=parent_node_id or accepted_node.node_id,
+                goal=goal,
+                prompt=prompt,
+                accepted_node_id=accepted_node.node_id,
+            ),
+        }
         acceptance = NodeRecord(
             node_id=new_node_id(),
             task_id=task.task_id,
@@ -880,7 +1062,7 @@ class NodeRunner:
             updated_at=_now(),
             token_usage=TokenUsageSummary(tracked=bool(getattr(task.token_usage, 'tracked', False))),
             token_usage_by_model=[],
-            metadata={'accepted_node_id': accepted_node.node_id, **dict(metadata or {})},
+            metadata={**base_metadata, **dict(metadata or {})},
         )
         return self._log_service.create_node(task.task_id, acceptance)
 

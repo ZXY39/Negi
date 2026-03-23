@@ -533,11 +533,12 @@ def test_main_runtime_settings_endpoint_reads_and_updates_global_depth(tmp_path:
 
     updated = client.put('/api/main-runtime/settings', json={'max_depth': 9})
     assert updated.status_code == 200
-    assert updated.json()['task_defaults']['max_depth'] == 4
+    assert updated.json()['task_defaults']['max_depth'] == 9
+    assert updated.json()['main_runtime']['hard_max_depth'] == 9
     assert captured == {'force': True, 'reason': 'admin_main_runtime_update'}
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
-    assert saved['mainRuntime']['defaultMaxDepth'] == 4
+    assert saved['mainRuntime']['defaultMaxDepth'] == 9
 
 
 def test_ceo_session_activate_endpoint_allows_switching_from_running_session(tmp_path: Path):

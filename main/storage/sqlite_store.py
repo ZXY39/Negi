@@ -290,6 +290,14 @@ class SQLiteTaskStore:
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE parent_node_id = ? ORDER BY created_at ASC, node_id ASC', (parent_node_id,))
         return [self._parse(row['payload_json'], NodeRecord) for row in rows]
 
+    def delete_nodes(self, node_ids: list[str]) -> None:
+        normalized_ids = [str(node_id or '').strip() for node_id in list(node_ids or []) if str(node_id or '').strip()]
+        if not normalized_ids:
+            return
+        placeholders = ', '.join('?' for _ in normalized_ids)
+        with self._lock, self._conn:
+            self._conn.execute(f'DELETE FROM nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+
     def update_node(self, node_id: str, mutator) -> NodeRecord | None:
         with self._lock, self._conn:
             row = self._conn.execute('SELECT payload_json FROM nodes WHERE node_id = ?', (node_id,)).fetchone()

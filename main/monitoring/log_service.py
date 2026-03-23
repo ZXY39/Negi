@@ -337,6 +337,12 @@ class TaskLogService:
                     }
                 ),
             )
+            propagated_node_ids: list[str] = []
+            if updated is not None:
+                propagated_node_ids = self._sync_acceptance_terminal_status(
+                    task_id=task_id,
+                    acceptance_node=updated,
+                )
             self.refresh_task_view(task_id, mark_unread=True)
             task = self._store.get_task(task_id)
             if updated is not None and task is not None:
@@ -345,7 +351,108 @@ class TaskLogService:
                     event_type='task.node.updated',
                     data={'task_id': task_id, 'node_id': node_id},
                 )
+                for propagated_node_id in propagated_node_ids:
+                    if str(propagated_node_id or '').strip() and propagated_node_id != node_id:
+                        self._append_task_event(
+                            task=task,
+                            event_type='task.node.updated',
+                            data={'task_id': task_id, 'node_id': propagated_node_id},
+                        )
             return updated
+
+    @staticmethod
+    def _acceptance_failure_text(node: NodeRecord) -> str:
+        for candidate in (node.failure_reason, node.final_output, node.check_result):
+            text = str(candidate or '').strip()
+            if text:
+                return text
+        return 'acceptance failed'
+
+    def _sync_acceptance_terminal_status(self, *, task_id: str, acceptance_node: NodeRecord) -> list[str]:
+        normalized_kind = str(getattr(acceptance_node, 'node_kind', '') or '').strip().lower()
+        normalized_status = str(getattr(acceptance_node, 'status', '') or '').strip().lower()
+        if normalized_kind != 'acceptance' or normalized_status not in {'success', 'failed'}:
+            return []
+
+        propagated_node_ids: list[str] = []
+        accepted_node_id = str(
+            ((acceptance_node.metadata or {}).get('accepted_node_id') if isinstance(acceptance_node.metadata, dict) else '')
+            or acceptance_node.parent_node_id
+            or ''
+        ).strip()
+        accepted_node = self._store.get_node(accepted_node_id) if accepted_node_id else None
+
+        if normalized_status == 'failed' and accepted_node is not None:
+            failure_text = self._acceptance_failure_text(acceptance_node)
+
+            def _mutate(record: NodeRecord) -> NodeRecord:
+                update: dict[str, Any] = {
+                    'status': 'failed',
+                    'updated_at': now_iso(),
+                    'finished_at': now_iso(),
+                }
+                if failure_text:
+                    update['failure_reason'] = failure_text
+                return record.model_copy(update=update)
+
+            normalized_parent_kind = str(getattr(accepted_node, 'node_kind', '') or '').strip().lower()
+            normalized_parent_status = str(getattr(accepted_node, 'status', '') or '').strip().lower()
+            if normalized_parent_kind == 'execution' and normalized_parent_status != 'failed':
+                updated_parent = self._store.update_node(accepted_node.node_id, _mutate)
+                if updated_parent is not None:
+                    accepted_node = updated_parent
+                    propagated_node_ids.append(updated_parent.node_id)
+
+        self._sync_final_acceptance_state(
+            task_id=task_id,
+            acceptance_node=acceptance_node,
+            accepted_node=accepted_node,
+            status='passed' if normalized_status == 'success' else 'failed',
+        )
+        return propagated_node_ids
+
+    def _sync_final_acceptance_state(
+        self,
+        *,
+        task_id: str,
+        acceptance_node: NodeRecord,
+        accepted_node: NodeRecord | None,
+        status: str,
+    ) -> None:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return
+
+        metadata = dict(task.metadata or {})
+        acceptance_metadata = dict(acceptance_node.metadata or {}) if isinstance(acceptance_node.metadata, dict) else {}
+        current = normalize_final_acceptance_metadata(metadata.get('final_acceptance'))
+        is_final_acceptance = bool(acceptance_metadata.get('final_acceptance')) or (
+            str(current.node_id or '').strip() == str(acceptance_node.node_id or '').strip()
+        )
+        if not is_final_acceptance:
+            return
+
+        next_final_acceptance = current.model_dump(mode='json')
+        next_final_acceptance['required'] = bool(current.required or acceptance_metadata.get('final_acceptance'))
+        next_final_acceptance['node_id'] = str(acceptance_node.node_id or '').strip()
+        next_final_acceptance['status'] = str(status or current.status or 'pending').strip().lower() or 'pending'
+        metadata['final_acceptance'] = next_final_acceptance
+
+        execution_output = str(getattr(accepted_node, 'final_output', '') or '').strip() if accepted_node is not None else ''
+        if next_final_acceptance['status'] == 'failed' and execution_output:
+            metadata['final_execution_output'] = execution_output
+        else:
+            metadata.pop('final_execution_output', None)
+
+        self._store.update_task(
+            task_id,
+            lambda record: record.model_copy(
+                update={
+                    'metadata': metadata,
+                    'updated_at': now_iso(),
+                }
+            ),
+        )
 
     def mark_task_read(self, task_id: str) -> TaskRecord | None:
         with self._task_lock(task_id):

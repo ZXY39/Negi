@@ -12,12 +12,12 @@ If the current workspace/runtime does not expose `web_fetch`, do not use this sk
 ## How to Search
 
 ```
-web_fetch(url="https://lite.duckduckgo.com/lite/?q=QUERY", extractMode="text", maxChars=8000)
+web_fetch(url="https://lite.duckduckgo.com/lite/?q=QUERY", max_chars=8000)
 ```
 
 - URL-encode the query — use `+` for spaces
-- Use `extractMode="text"` (not markdown) for clean results
-- Increase `maxChars` for more results
+- `web_fetch` in this workspace does not support `extractMode`; it already returns extracted readable text by default
+- Increase `max_chars` for more results
 
 ## Region Filtering
 
@@ -34,7 +34,7 @@ Full list: https://duckduckgo.com/params
 ### Example — Australian search
 
 ```
-web_fetch(url="https://lite.duckduckgo.com/lite/?q=best+coffee+melbourne&kl=au-en", extractMode="text", maxChars=8000)
+web_fetch(url="https://lite.duckduckgo.com/lite/?q=best+coffee+melbourne&kl=au-en", max_chars=8000)
 ```
 
 ## Reading Results

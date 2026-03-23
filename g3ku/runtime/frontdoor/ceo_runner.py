@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain_core.utils.function_calling import convert_to_openai_tool
 from loguru import logger
 
 try:
@@ -27,7 +26,7 @@ from g3ku.runtime.context import ContextAssemblyService
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.project_environment import current_project_environment
-from main.runtime.chat_backend import build_stable_prompt_cache_key
+from main.runtime.chat_backend import build_session_prompt_cache_key
 
 
 class TemporaryCeoGuardOverlayMiddleware(AgentMiddleware):
@@ -108,18 +107,6 @@ class CeoFrontDoorRunner:
         if default_model:
             return default_model
         return str(model_chain[0] if model_chain else '').strip()
-
-    @staticmethod
-    def _tool_schemas(tools: list[Any]) -> list[dict[str, Any]]:
-        schemas: list[dict[str, Any]] = []
-        for tool in list(tools or []):
-            try:
-                schema = convert_to_openai_tool(tool)
-            except Exception:
-                continue
-            if isinstance(schema, dict):
-                schemas.append(schema)
-        return schemas
 
     @staticmethod
     def _session_task_defaults(session_record: Any) -> dict[str, Any]:
@@ -244,10 +231,10 @@ class CeoFrontDoorRunner:
             tools = self._loop.tools.to_langchain_tools_filtered(tool_names)
             model_client, model_chain = self._resolve_ceo_model_client()
             provider_model = self._provider_model_ref(model_client, model_chain)
-            stable_prompt_cache_key = build_stable_prompt_cache_key(
-                messages,
-                self._tool_schemas(tools),
-                provider_model,
+            stable_prompt_cache_key = build_session_prompt_cache_key(
+                session_key=str(getattr(session.state, 'session_key', '') or ''),
+                provider_model=provider_model,
+                scope='ceo_frontdoor',
             )
             bound_model_client = model_client.bind(prompt_cache_key=stable_prompt_cache_key)
             agent = create_agent(

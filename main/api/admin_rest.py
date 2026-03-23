@@ -159,8 +159,7 @@ def _normalized_main_runtime_default_depth(cfg: Config, payload: dict[str, Any] 
         requested = int(raw_depth)
     except (TypeError, ValueError):
         requested = int(getattr(cfg.main_runtime, 'default_max_depth', 1) or 1)
-    hard_max_depth = max(0, int(getattr(cfg.main_runtime, 'hard_max_depth', requested) or requested))
-    return max(0, min(requested, hard_max_depth))
+    return max(0, requested)
 
 
 def _normalize_china_channel_id(channel_id: str) -> str:

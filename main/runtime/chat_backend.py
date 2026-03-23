@@ -96,6 +96,15 @@ def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None
     return hashlib.sha256(_json_compact(payload).encode('utf-8')).hexdigest()
 
 
+def build_session_prompt_cache_key(*, session_key: str, provider_model: str, scope: str = 'chat') -> str:
+    payload = {
+        'scope': str(scope or '').strip() or 'chat',
+        'session_key': str(session_key or '').strip(),
+        'provider_model': str(provider_model or '').strip(),
+    }
+    return hashlib.sha256(_json_compact(payload).encode('utf-8')).hexdigest()
+
+
 def _message_stats(messages: list[dict]) -> tuple[int, int]:
     message_list = list(messages or [])
     try:

@@ -257,7 +257,7 @@ class _FakeModelClient:
 
 
 @pytest.mark.asyncio
-async def test_ceo_frontdoor_runner_binds_stable_prompt_cache_key(monkeypatch, tmp_path) -> None:
+async def test_ceo_frontdoor_runner_binds_session_stable_prompt_cache_key(monkeypatch, tmp_path) -> None:
     create_agent_calls: list[dict[str, object]] = []
     agent_invocations: list[dict[str, object]] = []
 
@@ -349,7 +349,7 @@ async def test_ceo_frontdoor_runner_binds_stable_prompt_cache_key(monkeypatch, t
     )
     await runner.run_turn(user_input=user_input, session=session)
     third_key = str(fake_model.bind_calls[2]['prompt_cache_key'])
-    assert third_key != first_key
+    assert third_key == first_key
 
     current_assembly['result'] = ContextAssemblyResult(
         system_prompt='SYSTEM PROMPT',
@@ -364,7 +364,26 @@ async def test_ceo_frontdoor_runner_binds_stable_prompt_cache_key(monkeypatch, t
     loop.tools = _FakeToolRegistry([_filesystem_tool(description='Read and write files from disk')])
     await runner.run_turn(user_input=user_input, session=session)
     fourth_key = str(fake_model.bind_calls[3]['prompt_cache_key'])
-    assert fourth_key != first_key
+    assert fourth_key == first_key
+
+    other_session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:other'),
+        _memory_channel='web',
+        _memory_chat_id='other',
+        _channel='web',
+        _chat_id='other',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    await runner.run_turn(user_input=user_input, session=other_session)
+    fifth_key = str(fake_model.bind_calls[4]['prompt_cache_key'])
+    assert fifth_key != first_key
+
+    fake_model.default_model = 'openai_codex/gpt-other'
+    monkeypatch.setattr(runner, '_resolve_ceo_model_client', lambda: (fake_model, ['openai_codex:gpt-other']))
+    await runner.run_turn(user_input=user_input, session=session)
+    sixth_key = str(fake_model.bind_calls[5]['prompt_cache_key'])
+    assert sixth_key != first_key
     assert create_agent_calls[0]['name'] == 'g3ku_ceo_frontdoor'
     assert agent_invocations[0]['payload']['messages'][0]['role'] == 'system'
 

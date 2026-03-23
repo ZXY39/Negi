@@ -15,6 +15,7 @@ from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
 from main.models import NodeFinalResult, SpawnChildSpec, TaskRecord
+from main.models import normalize_final_acceptance_metadata
 from main.monitoring.models import TaskProjectionMetaRecord
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
@@ -713,6 +714,135 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
     assert acceptance.node_id in [item["node_id"] for item in child_item["children"]]
 
 
+def test_failed_acceptance_node_marks_execution_child_failed(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+    )
+    service.log_service.update_node_status(
+        record.task_id,
+        child.node_id,
+        status="success",
+        final_output="child done",
+    )
+
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=child,
+        goal="accept:child goal",
+        acceptance_prompt="检查 child 输出。",
+        parent_node_id=child.node_id,
+    )
+    service.log_service.update_node_status(
+        record.task_id,
+        acceptance.node_id,
+        status="failed",
+        final_output="child acceptance failed",
+        failure_reason="child acceptance failed",
+    )
+
+    latest_child = service.get_node(child.node_id)
+
+    assert latest_child is not None
+    assert latest_child.status == "failed"
+    assert latest_child.final_output == "child done"
+    assert latest_child.failure_reason == "child acceptance failed"
+
+
+def test_failed_final_acceptance_node_marks_root_failed(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    _mark_worker_online(service)
+    record = asyncio.run(
+        service.create_task(
+            "root final acceptance",
+            session_id="web:shared",
+            metadata={
+                "final_acceptance": {
+                    "required": True,
+                    "prompt": "核对最终结果是否满足要求。",
+                }
+            },
+        )
+    )
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="success",
+        final_output="root deliverable",
+    )
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=root,
+        goal=f"最终验收:{root.goal}",
+        acceptance_prompt="核对最终结果是否满足要求。",
+        parent_node_id=root.node_id,
+        metadata={"final_acceptance": True},
+    )
+    service.log_service.update_node_status(
+        record.task_id,
+        acceptance.node_id,
+        status="failed",
+        final_output="final acceptance failed",
+        failure_reason="final acceptance failed",
+    )
+
+    latest_task = service.get_task(record.task_id)
+    latest_root = service.get_node(record.root_node_id)
+    final_acceptance = normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")) if latest_task is not None else None
+
+    assert latest_task is not None
+    assert latest_root is not None
+    assert latest_root.status == "failed"
+    assert latest_root.final_output == "root deliverable"
+    assert latest_root.failure_reason == "final acceptance failed"
+    assert latest_task.status == "failed"
+    assert latest_task.failure_reason == "final acceptance failed"
+    assert final_acceptance is not None
+    assert final_acceptance.status == "failed"
+    assert latest_task.metadata.get("final_execution_output") == "root deliverable"
+
+
 def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -1134,3 +1264,144 @@ async def test_pause_requested_after_valid_result_flushes_node_output_before_tas
         assert root.failure_reason == ""
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spawn(tmp_path: Path):
+    store_path = tmp_path / "runtime.sqlite3"
+    tasks_dir = tmp_path / "tasks"
+    artifacts_dir = tmp_path / "artifacts"
+    governance_path = tmp_path / "governance.sqlite3"
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="embedded",
+    )
+    service.task_runner.start_background = lambda task_id: None
+
+    try:
+        record = await service.create_task("recover me", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.append_node_output(
+            record.task_id,
+            root.node_id,
+            content="stale root output before crash",
+        )
+
+        success_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+        )
+        service.log_service.update_node_status(
+            record.task_id,
+            success_child.node_id,
+            status="success",
+            final_output="child done",
+        )
+
+        in_progress_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="bad child", prompt="bad prompt"),
+        )
+        nested_success = service.node_runner._create_execution_child(
+            task=task,
+            parent=in_progress_child,
+            spec=SpawnChildSpec(goal="nested child", prompt="nested prompt"),
+        )
+        service.log_service.update_node_status(
+            record.task_id,
+            nested_success.node_id,
+            status="success",
+            final_output="nested done",
+        )
+        service.log_service.update_runtime_state(
+            record.task_id,
+            root_node_id=root.node_id,
+            paused=False,
+            pause_requested=False,
+            cancel_requested=False,
+            active_node_ids=[root.node_id, in_progress_child.node_id],
+            runnable_node_ids=[root.node_id, in_progress_child.node_id],
+            waiting_node_ids=[],
+            frames=[
+                service.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase="before_model"),
+                service.log_service._default_frame(
+                    node_id=in_progress_child.node_id,
+                    depth=in_progress_child.depth,
+                    node_kind=in_progress_child.node_kind,
+                    phase="before_model",
+                ),
+            ],
+            publish_snapshot=False,
+        )
+    finally:
+        await service.close()
+
+    restarted = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="embedded",
+    )
+    started: list[str] = []
+    restarted.task_runner.start_background = lambda task_id: started.append(str(task_id))
+
+    try:
+        await restarted.startup()
+
+        recovered_task = restarted.get_task(record.task_id)
+        recovered_root = restarted.get_node(record.root_node_id)
+        preserved_child = restarted.get_node(success_child.node_id)
+
+        assert recovered_task is not None
+        assert recovered_task.status == "in_progress"
+        assert recovered_task.metadata.get("recovery_notice") == "本任务遇到异常停止，已回退到稳定步骤继续。"
+        assert recovered_root is not None
+        assert recovered_root.status == "in_progress"
+        assert recovered_root.output == []
+        assert recovered_root.final_output == ""
+        assert recovered_root.failure_reason == ""
+        assert preserved_child is not None
+        assert preserved_child.status == "success"
+        assert restarted.get_node(in_progress_child.node_id) is None
+        assert restarted.get_node(nested_success.node_id) is None
+
+        runtime_state = restarted.log_service.read_runtime_state(record.task_id)
+        assert runtime_state is not None
+        assert runtime_state["active_node_ids"] == [record.root_node_id]
+        assert len(runtime_state["frames"]) == 1
+        assert runtime_state["frames"][0]["node_id"] == record.root_node_id
+        assert started == [record.task_id]
+        assert "Recovery: 本任务遇到异常停止，已回退到稳定步骤继续。" not in restarted.view_progress(record.task_id, mark_read=False)
+
+        before_child_ids = [node.node_id for node in restarted.store.list_children(record.root_node_id)]
+        results = await restarted.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=record.root_node_id,
+            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt")],
+            call_id="recovery-call",
+        )
+        after_child_ids = [node.node_id for node in restarted.store.list_children(record.root_node_id)]
+        root_after_spawn = restarted.get_node(record.root_node_id)
+        spawn_operations = dict((root_after_spawn.metadata or {}).get("spawn_operations") or {})
+        recovery_entry = spawn_operations["recovery-call"]["entries"][0]
+
+        assert len(results) == 1
+        assert before_child_ids == after_child_ids
+        assert recovery_entry["child_node_id"] == success_child.node_id
+        assert "child done" in results[0].node_output
+    finally:
+        await restarted.close()

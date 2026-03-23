@@ -56,6 +56,8 @@ from main.storage.sqlite_store import SQLiteTaskStore
 
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
 _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
+_TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
+_TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 
 
 class ResourceDeleteBlockedError(ValueError):
@@ -211,6 +213,7 @@ class MainRuntimeService:
                     continue
                 if bool(task.is_paused) or bool(runtime_state.get('paused')):
                     continue
+                self._recover_interrupted_task(task.task_id)
                 self.task_runner.start_background(task.task_id)
         if self.execution_mode == 'worker':
             self._start_worker_loops()
@@ -221,6 +224,140 @@ class MainRuntimeService:
             self._command_poller_task = asyncio.create_task(self._worker_command_loop(), name=f'main-runtime-command-poller:{self.worker_id or "worker"}')
         if self._worker_heartbeat_task is None or self._worker_heartbeat_task.done():
             self._worker_heartbeat_task = asyncio.create_task(self._worker_heartbeat_loop(), name=f'main-runtime-worker-heartbeat:{self.worker_id or "worker"}')
+
+    def _recover_interrupted_task(self, task_id: str) -> None:
+        task = self.store.get_task(task_id)
+        if task is None:
+            return
+        root = self.store.get_node(task.root_node_id)
+        if root is None:
+            self.log_service.mark_task_failed(task.task_id, reason='missing root node during recovery')
+            return
+
+        nodes = list(self.store.list_nodes(task.task_id) or [])
+        discard_ids = self._recovery_discard_node_ids(task.root_node_id, nodes)
+        if discard_ids:
+            self.store.delete_nodes(sorted(discard_ids))
+
+        for node in list(self.store.list_nodes(task.task_id) or []):
+            if node.node_id == task.root_node_id:
+                continue
+            self._sanitize_recovered_node(node)
+
+        root = self.store.get_node(task.root_node_id) or root
+        root_status = str(root.status or '').strip().lower()
+        if root_status != 'success':
+            root = self._reset_root_for_recovery(root)
+            self.store.upsert_node(root)
+
+        self.store.update_task(
+            task.task_id,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'in_progress',
+                    'pause_requested': False,
+                    'is_paused': False,
+                    'finished_at': None,
+                    'final_output': '',
+                    'final_output_ref': '',
+                    'failure_reason': '',
+                    'updated_at': now_iso(),
+                    'metadata': self._sanitize_recovered_task_metadata(
+                        record.metadata,
+                        preserve_final_acceptance=bool(root_status == 'success'),
+                    ),
+                }
+            ),
+        )
+
+        self.log_service.update_runtime_state(
+            task.task_id,
+            root_node_id=task.root_node_id,
+            paused=False,
+            pause_requested=False,
+            cancel_requested=bool(task.cancel_requested),
+            active_node_ids=[root.node_id],
+            runnable_node_ids=[root.node_id],
+            waiting_node_ids=[],
+            frames=[self.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')],
+            publish_snapshot=False,
+        )
+        self.log_service.refresh_task_view(task.task_id, mark_unread=True)
+
+    @staticmethod
+    def _recovery_discard_node_ids(root_node_id: str, nodes: list[NodeRecord]) -> set[str]:
+        children_by_parent: dict[str, list[str]] = {}
+        for node in list(nodes or []):
+            parent_id = str(node.parent_node_id or '').strip()
+            if parent_id:
+                children_by_parent.setdefault(parent_id, []).append(node.node_id)
+
+        discard_ids: set[str] = set()
+
+        def _discard_subtree(node_id: str) -> None:
+            if not str(node_id or '').strip() or node_id in discard_ids:
+                return
+            discard_ids.add(node_id)
+            for child_id in list(children_by_parent.get(node_id, [])):
+                _discard_subtree(child_id)
+
+        for node in list(nodes or []):
+            if node.node_id == root_node_id:
+                continue
+            if str(node.status or '').strip().lower() == 'success':
+                continue
+            _discard_subtree(node.node_id)
+        return discard_ids
+
+    def _sanitize_recovered_node(self, node: NodeRecord) -> None:
+        metadata = self._sanitize_recovered_node_metadata(dict(node.metadata or {}), clear_result_payload=False)
+        self.store.upsert_node(node.model_copy(update={'metadata': metadata, 'updated_at': now_iso()}))
+
+    def _reset_root_for_recovery(self, root: NodeRecord) -> NodeRecord:
+        metadata = self._sanitize_recovered_node_metadata(dict(root.metadata or {}), clear_result_payload=True)
+        return root.model_copy(
+            update={
+                'status': 'in_progress',
+                'input': root.prompt,
+                'input_ref': '',
+                'output': [],
+                'check_result': '',
+                'check_result_ref': '',
+                'final_output': '',
+                'final_output_ref': '',
+                'failure_reason': '',
+                'finished_at': None,
+                'updated_at': now_iso(),
+                'metadata': metadata,
+            }
+        )
+
+    @staticmethod
+    def _sanitize_recovered_node_metadata(metadata: dict[str, Any], *, clear_result_payload: bool) -> dict[str, Any]:
+        cleaned = dict(metadata or {})
+        cleaned.pop('spawn_operations', None)
+        cleaned.pop('execution_stages', None)
+        if clear_result_payload:
+            cleaned.pop('result_schema_version', None)
+            cleaned.pop('result_payload', None)
+        return cleaned
+
+    @staticmethod
+    def _sanitize_recovered_task_metadata(metadata: dict[str, Any], *, preserve_final_acceptance: bool) -> dict[str, Any]:
+        cleaned = dict(metadata or {})
+        cleaned.pop('final_execution_output', None)
+        cleaned[_TASK_RECOVERY_NOTICE_KEY] = _TASK_RECOVERY_NOTICE_TEXT
+        final_acceptance = normalize_final_acceptance_metadata(cleaned.get('final_acceptance'))
+        if final_acceptance.required or str(final_acceptance.prompt or '').strip():
+            cleaned['final_acceptance'] = {
+                'required': bool(final_acceptance.required),
+                'prompt': str(final_acceptance.prompt or ''),
+                'node_id': str(final_acceptance.node_id or '').strip() if preserve_final_acceptance else '',
+                'status': str(final_acceptance.status or 'pending').strip().lower() if preserve_final_acceptance else 'pending',
+            }
+        else:
+            cleaned.pop('final_acceptance', None)
+        return cleaned
 
     async def _worker_command_loop(self) -> None:
         while True:

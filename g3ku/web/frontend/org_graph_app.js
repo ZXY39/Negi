@@ -11,6 +11,9 @@ const TREE_SCALE_MIN = 0.12;
 const TREE_SCALE_MAX = 3.5;
 const TREE_SCALE_FACTOR = 1.12;
 const RESOURCE_PAGE_SIZES = [20, 50, 100];
+const TASK_DEPTH_PRESET_VALUES = Object.freeze([1, 2, 3, 4, 5]);
+const TASK_DEPTH_PRESET_MAX = TASK_DEPTH_PRESET_VALUES[TASK_DEPTH_PRESET_VALUES.length - 1];
+const TASK_DEPTH_CUSTOM_VALUE = "__custom__";
 const CEO_TOOL_OUTPUT_PREVIEW_LINES = 2;
 const CEO_TOOL_OUTPUT_PREVIEW_MAX_CHARS = 240;
 const CEO_TOOL_PROGRESS_MAX_LINES = 4;
@@ -61,6 +64,8 @@ const S = {
         maxDepth: 1,
         defaultMaxDepth: 1,
         hardMaxDepth: 4,
+        customMode: false,
+        customDraft: "",
         loading: false,
         saving: false,
         requestToken: 0,
@@ -199,6 +204,9 @@ const U = {
     taskGrid: document.getElementById("task-card-grid"),
     taskToolbar: document.getElementById("task-toolbar"),
     taskDepthSelect: document.getElementById("task-depth-select"),
+    taskDepthCustomWrap: document.getElementById("task-depth-custom-wrap"),
+    taskDepthCustomInput: document.getElementById("task-depth-custom-input"),
+    taskDepthCustomSave: document.getElementById("task-depth-custom-save"),
     taskDepthHint: document.getElementById("task-depth-hint"),
     taskPageSize: document.getElementById("task-page-size"),
     taskPageInfo: document.getElementById("task-page-info"),
@@ -455,6 +463,13 @@ function ceoSessionDisplayTime(session) {
 function normalizeInt(value, fallback = 0) {
     const next = Number(value);
     return Number.isFinite(next) ? Math.trunc(next) : Math.trunc(fallback);
+}
+
+function parseNonNegativeInteger(value) {
+    const trimmed = String(value ?? "").trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    const next = Number(trimmed);
+    return Number.isSafeInteger(next) ? next : null;
 }
 
 function countMatches(text, pattern) {
@@ -1100,16 +1115,19 @@ function applyTaskDefaultsPayload(payload = {}) {
             ? payload.taskDefaults
             : {};
     const defaultMaxDepth = Math.max(0, normalizeInt(runtime.default_max_depth ?? runtime.defaultMaxDepth, S.taskDefaults.defaultMaxDepth));
-    const hardMaxDepth = Math.max(defaultMaxDepth, normalizeInt(runtime.hard_max_depth ?? runtime.hardMaxDepth, S.taskDefaults.hardMaxDepth));
-    const maxDepth = clamp(
-        normalizeInt(taskDefaults.max_depth ?? taskDefaults.maxDepth, defaultMaxDepth),
-        0,
-        hardMaxDepth,
+    const maxDepth = Math.max(0, normalizeInt(taskDefaults.max_depth ?? taskDefaults.maxDepth, defaultMaxDepth));
+    const hardMaxDepth = Math.max(
+        defaultMaxDepth,
+        normalizeInt(runtime.hard_max_depth ?? runtime.hardMaxDepth, S.taskDefaults.hardMaxDepth),
+        TASK_DEPTH_PRESET_MAX,
+        maxDepth,
     );
     S.taskDefaults.scope = String(payload?.scope || S.taskDefaults.scope || "global").trim() || "global";
     S.taskDefaults.defaultMaxDepth = defaultMaxDepth;
     S.taskDefaults.hardMaxDepth = hardMaxDepth;
     S.taskDefaults.maxDepth = maxDepth;
+    S.taskDefaults.customMode = !TASK_DEPTH_PRESET_VALUES.includes(maxDepth);
+    S.taskDefaults.customDraft = S.taskDefaults.customMode ? String(maxDepth) : "";
     S.taskDefaults.loading = false;
     S.taskDefaults.saving = false;
     renderTaskDepthControl();
@@ -1117,26 +1135,41 @@ function applyTaskDefaultsPayload(payload = {}) {
 }
 
 function renderTaskDepthControl() {
-    if (!U.taskDepthSelect || !U.taskDepthHint) return;
+    if (!U.taskDepthSelect || !U.taskDepthHint || !U.taskDepthCustomWrap || !U.taskDepthCustomInput || !U.taskDepthCustomSave) return;
     const defaultMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.defaultMaxDepth, 1));
-    const hardMaxDepth = Math.max(defaultMaxDepth, normalizeInt(S.taskDefaults.hardMaxDepth, 4));
-    const currentMaxDepth = clamp(normalizeInt(S.taskDefaults.maxDepth, defaultMaxDepth), 0, hardMaxDepth);
+    const currentMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.maxDepth, defaultMaxDepth));
     const disabled = S.taskDefaults.loading || S.taskDefaults.saving;
+    const useCustomValue = S.taskDefaults.customMode || !TASK_DEPTH_PRESET_VALUES.includes(currentMaxDepth);
+    const customDraft = String(
+        useCustomValue
+            ? (S.taskDefaults.customDraft || currentMaxDepth)
+            : (S.taskDefaults.customDraft || "")
+    );
     const select = U.taskDepthSelect;
 
     select.innerHTML = "";
-    for (let depth = 0; depth <= hardMaxDepth; depth += 1) {
+    TASK_DEPTH_PRESET_VALUES.forEach((depth) => {
         const option = document.createElement("option");
         option.value = String(depth);
         option.textContent = `${depth} 层`;
-        if (depth === currentMaxDepth) option.selected = true;
+        option.selected = !useCustomValue && depth === currentMaxDepth;
         select.appendChild(option);
-    }
+    });
+    const customOption = document.createElement("option");
+    customOption.value = TASK_DEPTH_CUSTOM_VALUE;
+    customOption.textContent = "自定义";
+    customOption.selected = useCustomValue;
+    select.appendChild(customOption);
     select.disabled = disabled;
-    select.value = String(currentMaxDepth);
+    select.value = useCustomValue ? TASK_DEPTH_CUSTOM_VALUE : String(currentMaxDepth);
     select.dataset.scope = "global";
     buildResourceSelect(select);
     syncResourceSelectUI(select);
+
+    U.taskDepthCustomWrap.hidden = !useCustomValue;
+    U.taskDepthCustomInput.disabled = disabled;
+    U.taskDepthCustomSave.disabled = disabled;
+    U.taskDepthCustomInput.value = customDraft;
 
     if (S.taskDefaults.loading) {
         U.taskDepthHint.textContent = "正在加载全局任务树深度设置...";
@@ -1146,7 +1179,11 @@ function renderTaskDepthControl() {
         U.taskDepthHint.textContent = `正在保存，全局后续新任务将使用 ${currentMaxDepth} 层深度。`;
         return;
     }
-    U.taskDepthHint.textContent = `全局后续新任务会自动使用该深度，当前范围 0-${hardMaxDepth}。`;
+    if (useCustomValue) {
+        U.taskDepthHint.textContent = `全局后续新任务会自动使用 ${currentMaxDepth} 层深度。自定义值需为非负整数。`;
+        return;
+    }
+    U.taskDepthHint.textContent = `全局后续新任务会自动使用该深度，支持固定值 1-${TASK_DEPTH_PRESET_MAX}，也可填写自定义非负整数。`;
 }
 
 async function loadTaskDefaults() {
@@ -1170,7 +1207,7 @@ async function loadTaskDefaults() {
 
 async function saveTaskDefaultMaxDepth(value) {
     if (!U.taskDepthSelect) return;
-    const nextDepth = clamp(normalizeInt(value, S.taskDefaults.defaultMaxDepth), 0, Math.max(S.taskDefaults.defaultMaxDepth, S.taskDefaults.hardMaxDepth));
+    const nextDepth = Math.max(0, normalizeInt(value, S.taskDefaults.defaultMaxDepth));
     if (!S.taskDefaults.loading && !S.taskDefaults.saving && nextDepth === normalizeInt(S.taskDefaults.maxDepth, nextDepth)) {
         renderTaskDepthControl();
         return;
@@ -1189,6 +1226,21 @@ async function saveTaskDefaultMaxDepth(value) {
         renderTaskDepthControl();
         showToast({ title: "深度更新失败", text: e.message || "Unknown error", kind: "error" });
     }
+}
+
+async function submitCustomTaskDepth() {
+    if (!U.taskDepthCustomInput) return;
+    if (S.taskDefaults.loading || S.taskDefaults.saving) return;
+    const parsed = parseNonNegativeInteger(U.taskDepthCustomInput.value);
+    if (parsed === null) {
+        showToast({ title: "自定义深度无效", text: "请输入不为负数的整数。", kind: "error" });
+        U.taskDepthCustomInput.focus();
+        U.taskDepthCustomInput.select();
+        return;
+    }
+    S.taskDefaults.customDraft = String(parsed);
+    S.taskDefaults.customMode = !TASK_DEPTH_PRESET_VALUES.includes(parsed);
+    await saveTaskDefaultMaxDepth(parsed);
 }
 
 function taskCreatedSortValue(task) {
@@ -3121,7 +3173,7 @@ function renderModelRoleEditors() {
                         <label class="model-role-iterations-field">
                             <span class="model-role-iterations-label">最大轮数</span>
                             <input
-                                class="model-role-iterations-input"
+                                class="model-role-iterations-input spinless-number-input"
                                 type="number"
                                 min="2"
                                 step="1"
@@ -3254,7 +3306,7 @@ function renderModelDetail() {
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">重试次数</span>
-                                <input class="resource-search" type="number" min="0" step="1" name="retryCount" value="${esc(String(current?.retry_count ?? 0))}" placeholder="0">
+                                <input class="resource-search spinless-number-input" type="number" min="0" step="1" name="retryCount" value="${esc(String(current?.retry_count ?? 0))}" placeholder="0">
                             </label>
                         </div>
                     </section>
@@ -5653,7 +5705,7 @@ function countVisibleTreeNodes(root, predicate = null) {
     const walk = (node) => {
         if (!node) return;
         if (!predicate || predicate(node)) count += 1;
-        (Array.isArray(node.children) ? node.children : []).forEach(walk);
+        treeViewChildren(node).forEach(walk);
     };
     walk(root);
     return count;
@@ -5737,7 +5789,7 @@ function clearAgentSelection({ rerender = true } = {}) {
 function findTreeNode(node, nodeId) {
     if (!node) return null;
     if (String(node.node_id || "") === String(nodeId || "")) return node;
-    for (const child of (node.children || [])) {
+    for (const child of treeViewChildren(node)) {
         const found = findTreeNode(child, nodeId);
         if (found) return found;
     }
@@ -5826,13 +5878,44 @@ function truncateNodeTitle(text, maxChars = 20) {
 }
 
 function resolveNodeTitle(node, detail) {
+    const nodeKind = String(detail?.node_kind || node?.node_kind || "").trim().toLowerCase();
     const goal = String(detail?.goal || "").trim();
-    const fullTitle = goal || String(node?.title || node?.node_id || "").trim() || String(node?.node_id || "");
+    const rawTitle = goal || String(node?.title || node?.node_id || "").trim() || String(node?.node_id || "");
+    const acceptanceTitle = rawTitle.replace(/^accept\s*:\s*/i, "").trim();
+    const fullTitle = nodeKind === "acceptance"
+        ? (acceptanceTitle ? `检验 · ${acceptanceTitle}` : "检验")
+        : rawTitle;
     return {
-        goal: goal || fullTitle,
+        goal: nodeKind === "acceptance" ? fullTitle : (goal || fullTitle),
         fullTitle,
         title: truncateNodeTitle(fullTitle, 20),
     };
+}
+
+function isAcceptanceNodeKind(kind) {
+    return String(kind || "").trim().toLowerCase() === "acceptance";
+}
+
+function isInspectionActiveStatus(status) {
+    return ["queued", "running", "pending", "waiting", "in_progress"].includes(String(status || "").trim().toLowerCase());
+}
+
+function resolveTreeNodeStatusLabel(status, { kind = "", inspectionActive = false } = {}) {
+    if (inspectionActive || (isAcceptanceNodeKind(kind) && isInspectionActiveStatus(status))) {
+        return { visualState: "inspecting", displayState: "检验中" };
+    }
+    const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
+    return {
+        visualState: normalizedStatus,
+        displayState: normalizedStatus.toUpperCase(),
+    };
+}
+
+function treeViewChildren(node) {
+    return [
+        ...(Array.isArray(node?.inspectionNodes) ? node.inspectionNodes : []),
+        ...(Array.isArray(node?.children) ? node.children : []),
+    ];
 }
 
 function compactNodeHeading(node, maxChars = 72) {
@@ -6220,63 +6303,6 @@ function renderAcceptanceResult(text) {
     U.adAcceptance.textContent = String(text || "").trim() || "暂无验收结果";
 }
 
-function buildNodeRoundState(node) {
-    const rounds = rawNodeRounds(node).map((round) => ({
-        roundId: String(round.round_id || ""),
-        roundIndex: normalizeInt(round.round_index, 0),
-        label: String(round.label || "").trim() || `第 ${normalizeInt(round.round_index, 0)} 轮`,
-        isLatest: !!round.is_latest,
-        childCount: Array.isArray(round.children) ? round.children.length : Math.max(0, normalizeInt(round.child_node_ids?.length, 0)),
-        createdAt: String(round.created_at || ""),
-    }));
-    if (!rounds.length) {
-        return {
-            options: [],
-            selectedRoundId: "",
-            defaultRoundId: "",
-            summary: "当前节点无派生轮次",
-        };
-    }
-    const defaultRoundId = resolveDefaultRoundId(node);
-    const selectedRoundId = String(node?.selected_round_id || defaultRoundId || "");
-    const selectedRound = rounds.find((round) => round.roundId === selectedRoundId) || rounds[rounds.length - 1];
-    const selectionMode = selectedRound.roundId && selectedRound.roundId !== defaultRoundId ? "人工切换" : "默认最新";
-    return {
-        options: rounds,
-        selectedRoundId,
-        defaultRoundId,
-        summary: `当前轮次：${selectedRound.label}${selectedRound.isLatest ? "（最新）" : ""} · ${selectionMode} · 共 ${rounds.length} 轮`,
-    };
-}
-
-function buildExecutionTree(rawTree) {
-    if (!rawTree) return null;
-    const nodeRecords = Object.values(S.taskNodeDetails || {}).filter((item) => item && typeof item === "object");
-    const nodeMap = new Map(nodeRecords.map((item) => [String(item.node_id || ""), item]));
-    const walk = (node) => {
-        const detail = nodeMap.get(String(node.node_id || "")) || {};
-        const status = String(node.status || detail.status || "unknown").trim().toLowerCase() || "unknown";
-        const title = resolveNodeTitle(node, detail);
-        const roundState = buildNodeRoundState(node);
-        return {
-            node_id: node.node_id,
-            title: title.title,
-            fullTitle: title.fullTitle,
-            goal: title.goal,
-            kind: detail.node_kind || "execution",
-            state: status,
-            display_state: status.toUpperCase(),
-            executionTrace: buildNodeExecutionTrace(node, detail),
-            roundOptions: roundState.options,
-            selectedRoundId: roundState.selectedRoundId,
-            defaultRoundId: roundState.defaultRoundId,
-            roundSummary: roundState.summary,
-            children: Array.isArray(node.children) ? node.children.map(walk) : [],
-        };
-    };
-    return walk(rawTree);
-}
-
 function traceStatusLabel(status) {
     return ({
         info: "Info",
@@ -6425,23 +6451,35 @@ function buildExecutionTree(rawTree) {
     const walk = (node) => {
         const nodeId = String(node.node_id || "");
         const detail = nodeMap.get(nodeId) || {};
+        const kind = String(detail.node_kind || node.node_kind || "execution").trim().toLowerCase() || "execution";
         const status = String(node.status || detail.status || "unknown").trim().toLowerCase() || "unknown";
         const title = resolveNodeTitle(node, detail);
         const roundState = buildNodeRoundState(node);
+        const allChildren = Array.isArray(node.children) ? node.children.map(walk) : [];
+        const inspectionNodes = [];
+        const childNodes = [];
+        allChildren.forEach((child) => {
+            if (isAcceptanceNodeKind(child?.kind)) inspectionNodes.push(child);
+            else childNodes.push(child);
+        });
+        const inspectionActive = inspectionNodes.some((child) => isInspectionActiveStatus(child?.state || child?.visual_state));
+        const stateMeta = resolveTreeNodeStatusLabel(status, { kind, inspectionActive });
         return {
             node_id: node.node_id,
             title: title.title,
             fullTitle: title.fullTitle,
             goal: title.goal,
-            kind: detail.node_kind || "execution",
+            kind,
             state: status,
-            display_state: status.toUpperCase(),
+            visual_state: stateMeta.visualState,
+            display_state: stateMeta.displayState,
             executionTrace: buildNodeExecutionTrace(node, detail, liveFrameMap.get(nodeId) || null),
             roundOptions: roundState.options,
             selectedRoundId: roundState.selectedRoundId,
             defaultRoundId: roundState.defaultRoundId,
             roundSummary: roundState.summary,
-            children: Array.isArray(node.children) ? node.children.map(walk) : [],
+            inspectionNodes,
+            children: childNodes,
         };
     };
     return walk(rawTree);
@@ -6476,13 +6514,28 @@ function syncExecutionTreeSelection(previousNodeId, nextNodeId) {
     }
 }
 
+function buildTaskTreeRecoveryBubble(text) {
+    const bubble = document.createElement("div");
+    bubble.className = "task-tree-recovery-bubble";
+    bubble.setAttribute("role", "status");
+    bubble.setAttribute("aria-live", "polite");
+    bubble.textContent = String(text || "").trim();
+    return bubble;
+}
+
 function renderTree() {
     if (!S.tree) return;
+    const recoveryNotice = String(S.currentTask?.metadata?.recovery_notice || "").trim();
     const projectedTree = projectTaskTree(S.tree, S.treeRoundSelectionsByNodeId);
     syncTaskTreeHeaderState(projectedTree);
     S.treeView = buildExecutionTree(projectedTree);
     if (!S.treeView) {
-        U.tree.innerHTML = '<div class="empty-state">No nodes to display.</div>';
+        U.tree.innerHTML = "";
+        if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));
+        const emptyState = document.createElement("div");
+        emptyState.className = "empty-state";
+        emptyState.textContent = "No nodes to display.";
+        U.tree.appendChild(emptyState);
         setTaskSelectionEmptyVisible(false);
         return;
     }
@@ -6490,12 +6543,47 @@ function renderTree() {
     wrapper.className = "execution-tree";
     const rootList = document.createElement("ul");
     rootList.className = "execution-tree-list";
-    const walk = (node) => {
+    const handleTreeNodeClick = (node, event) => {
+        if (S.treePan.suppressClickNodeId && S.treePan.suppressClickNodeId === String(node.node_id || "")) {
+            S.treePan.suppressClickNodeId = null;
+            return;
+        }
+        event.stopPropagation();
+        const previousNodeId = String(S.selectedNodeId || "").trim();
+        const nextNodeId = String(node.node_id || "").trim();
+        if (!nextNodeId) return;
+        if (previousNodeId && previousNodeId !== nextNodeId) {
+            stashTaskDetailViewState({ nodeId: previousNodeId });
+        }
+        S.selectedNodeId = node.node_id;
+        setTaskSelectionEmptyVisible(false);
+        syncExecutionTreeSelection(previousNodeId, nextNodeId);
+        void showAgent(node, { preserveViewState: false });
+    };
+    const createTreeNodeButton = (node, { showStaticSubtreeHint = false, mergedBase = false, inspectionBlock = false } = {}) => {
         const title = String(node.title || node.node_id || "");
         const fullTitle = String(node.fullTitle || title);
-        const nodeStatus = String(node.state || "").trim().toLowerCase();
-        const displayState = String(node.display_state || node.state || "").toUpperCase();
+        const nodeStatus = String(node.visual_state || node.state || "").trim().toLowerCase();
+        const displayState = String(node.display_state || node.state || "").trim() || String(node.state || "").toUpperCase();
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `execution-tree-node${S.selectedNodeId === node.node_id ? " selected" : ""}`;
+        if (mergedBase) button.classList.add("execution-tree-node-base");
+        if (inspectionBlock) button.classList.add("is-inspection");
+        button.dataset.id = node.node_id;
+        button.dataset.kind = node.kind || "execution";
+        button.dataset.status = nodeStatus;
+        button.title = fullTitle;
+        button.setAttribute("aria-pressed", S.selectedNodeId === node.node_id ? "true" : "false");
+        button.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">暂无其他可切换子树</span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>`;
+        button.addEventListener("click", (event) => handleTreeNodeClick(node, event));
+        return button;
+    };
+    const walk = (node) => {
+        const fullTitle = String(node.fullTitle || node.title || node.node_id || "");
+        const nodeStatus = String(node.visual_state || node.state || "").trim().toLowerCase();
         const roundOptions = Array.isArray(node.roundOptions) ? node.roundOptions : [];
+        const inspectionNodes = Array.isArray(node.inspectionNodes) ? node.inspectionNodes : [];
         const visibleChildren = Array.isArray(node.children) ? node.children : [];
         const hasSwitchableSubtrees = roundOptions.length > 1;
         const showStaticSubtreeHint = !hasSwitchableSubtrees && visibleChildren.length > 0;
@@ -6504,33 +6592,11 @@ function renderTree() {
         item.dataset.status = nodeStatus;
         const stack = document.createElement("div");
         stack.className = "execution-tree-node-stack";
-        const el = document.createElement("button");
-        el.type = "button";
-        el.className = `execution-tree-node${S.selectedNodeId === node.node_id ? " selected" : ""}`;
-        el.dataset.id = node.node_id;
-        el.dataset.kind = node.kind || "execution";
-        el.dataset.status = nodeStatus;
-        el.title = fullTitle;
-        el.setAttribute("aria-pressed", S.selectedNodeId === node.node_id ? "true" : "false");
-        el.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">暂无其他可切换子树</span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.state || "")}">${esc(displayState)}</span></span>`;
-        el.addEventListener("click", (e) => {
-            if (S.treePan.suppressClickNodeId && S.treePan.suppressClickNodeId === String(node.node_id || "")) {
-                S.treePan.suppressClickNodeId = null;
-                return;
-            }
-            e.stopPropagation();
-            const previousNodeId = String(S.selectedNodeId || "").trim();
-            const nextNodeId = String(node.node_id || "").trim();
-            if (!nextNodeId) return;
-            if (previousNodeId && previousNodeId !== nextNodeId) {
-                stashTaskDetailViewState({ nodeId: previousNodeId });
-            }
-            S.selectedNodeId = node.node_id;
-            setTaskSelectionEmptyVisible(false);
-            syncExecutionTreeSelection(previousNodeId, nextNodeId);
-            void showAgent(node, { preserveViewState: false });
+        if (inspectionNodes.length) stack.classList.add("has-inspection");
+        inspectionNodes.forEach((inspectionNode) => {
+            stack.appendChild(createTreeNodeButton(inspectionNode, { inspectionBlock: true }));
         });
-        stack.appendChild(el);
+        stack.appendChild(createTreeNodeButton(node, { showStaticSubtreeHint, mergedBase: inspectionNodes.length > 0 }));
         if (hasSwitchableSubtrees) {
             const roundWrap = document.createElement("div");
             roundWrap.className = "execution-tree-node-rounds";
@@ -6573,6 +6639,7 @@ function renderTree() {
     wrapper.style.transformOrigin = "0 0";
     wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
     U.tree.innerHTML = "";
+    if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));
     U.tree.appendChild(wrapper);
     if (S.selectedNodeId) {
         const selected = findTreeNode(S.treeView, S.selectedNodeId);
@@ -6581,8 +6648,7 @@ function renderTree() {
             const selectedNodeId = String(selected.node_id || "").trim();
             const currentDetailNodeId = String(S.currentNodeDetail?.node_id || "").trim();
             void showAgent(selected, { preserveViewState: selectedNodeId !== "" && selectedNodeId === currentDetailNodeId });
-        }
-        else {
+        } else {
             S.selectedNodeId = null;
             setTaskSelectionEmptyVisible(true);
             hideAgent();
@@ -6739,8 +6805,8 @@ async function showAgent(node, { preserveViewState = true } = {}) {
     setTaskSelectionEmptyVisible(false);
     if (U.adRole) U.adRole.hidden = true;
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
-    U.adStatus.textContent = String(mergedNode.display_state || mergedNode.state || mergedNode.status || "").toUpperCase();
-    U.adStatus.dataset.status = mergedNode.state || mergedNode.status || node.state || "";
+    U.adStatus.textContent = String(mergedNode.display_state || mergedNode.state || mergedNode.status || "");
+    U.adStatus.dataset.status = mergedNode.visual_state || mergedNode.state || mergedNode.status || node.visual_state || node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
     renderExecutionTrace(mergedNode, { viewState });
     renderFinalOutput(mergedNode.executionTrace?.final_output || "");
@@ -6778,7 +6844,8 @@ function applyTaskPayload(payload) {
     U.tdTitle.textContent = payload.task.title || payload.task.task_id || "Loading...";
     U.tdStatus.textContent = taskStatusLabel(payload.task).toUpperCase();
     U.tdStatus.dataset.status = taskStatusKey(payload.task);
-    U.tdSummary.textContent = payload.task.user_request || payload.task.final_output || payload.progress?.text || "No summary";
+    const baseSummary = payload.task.user_request || payload.task.final_output || payload.progress?.text || "No summary";
+    U.tdSummary.textContent = baseSummary;
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
     if (S.tree) renderTree();
@@ -8591,7 +8658,26 @@ function bind() {
         }
     });
     U.taskDepthSelect?.addEventListener("change", (e) => {
-        void saveTaskDefaultMaxDepth(e.target.value);
+        const nextValue = String(e.target.value || "").trim();
+        if (nextValue === TASK_DEPTH_CUSTOM_VALUE) {
+            S.taskDefaults.customMode = true;
+            S.taskDefaults.customDraft = String(Math.max(0, normalizeInt(S.taskDefaults.maxDepth, S.taskDefaults.defaultMaxDepth)));
+            renderTaskDepthControl();
+            queueMicrotask(() => {
+                U.taskDepthCustomInput?.focus();
+                U.taskDepthCustomInput?.select();
+            });
+            return;
+        }
+        S.taskDefaults.customMode = false;
+        S.taskDefaults.customDraft = "";
+        void saveTaskDefaultMaxDepth(nextValue);
+    });
+    U.taskDepthCustomInput?.addEventListener("input", (e) => {
+        S.taskDefaults.customDraft = String(e.target.value ?? "");
+    });
+    U.taskDepthCustomSave?.addEventListener("click", () => {
+        void submitCustomTaskDepth();
     });
     U.taskPageSize?.addEventListener("change", (e) => setTaskPageSize(e.target.value));
     U.taskPagePrev?.addEventListener("click", () => setTaskPage(S.taskPage - 1));
