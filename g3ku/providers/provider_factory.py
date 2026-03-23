@@ -43,6 +43,25 @@ def _resolve_litellm_model(provider_id: str, model_id: str) -> str:
     return resolved
 
 
+def _require_non_empty_api_key(
+    *,
+    provider_id: str,
+    model_key: str,
+    config_id: str,
+    api_key: str,
+) -> str:
+    token = str(api_key or '').strip()
+    if token:
+        return token
+    raise ValueError(
+        "Missing API key for managed model binding.\n"
+        f"Model key: {model_key}\n"
+        f"Provider: {provider_id}\n"
+        f"LLM config id: {config_id or '<unknown>'}\n"
+        "Fix: set a non-empty API key for this model binding, or switch the role to a provider that does not require Authorization."
+    )
+
+
 def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTarget:
     provider_ref = str(model_key or '').strip()
     target = resolve_chat_target(config, provider_ref)
@@ -64,7 +83,16 @@ def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTar
         return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count)
 
     if provider_id == 'responses':
-        provider = ResponsesProvider(api_key=api_key, api_base=api_base or '', default_model=model_id)
+        provider = ResponsesProvider(
+            api_key=_require_non_empty_api_key(
+                provider_id=provider_id,
+                model_key=provider_ref,
+                config_id=str(getattr(target, 'config_id', '') or ''),
+                api_key=api_key,
+            ),
+            api_base=api_base or '',
+            default_model=model_id,
+        )
         return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count)
 
     if provider_id == 'openai_codex':

@@ -41,9 +41,14 @@ class ResponsesProvider(LLMProvider):
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
+        api_key = str(self.api_key or "").strip()
+        if not api_key:
+            raise ValueError(
+                "Missing API key for Responses provider; refusing to send an empty Authorization header."
+            )
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "OpenAI-Beta": "responses=experimental",
             "originator": "g3ku",
             "User-Agent": "g3ku (python)",

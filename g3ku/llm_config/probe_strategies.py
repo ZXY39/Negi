@@ -61,13 +61,21 @@ def _failure_result(
     )
 
 
+def _with_bearer_auth(headers: dict[str, str], api_key: Any) -> dict[str, str]:
+    next_headers = dict(headers)
+    token = str(api_key or "").strip()
+    if token:
+        next_headers["Authorization"] = f"Bearer {token}"
+    return next_headers
+
+
 def _build_openai_headers(config: NormalizedProviderConfig) -> dict[str, str]:
     headers = dict(config.headers)
-    api_key = str(config.auth.get("api_key", ""))
+    api_key = str(config.auth.get("api_key", "") or "").strip()
     use_auth_header = bool(config.parameters.get("auth_header", True))
     if use_auth_header:
-        headers["Authorization"] = f"Bearer {api_key}"
-    else:
+        headers = _with_bearer_auth(headers, api_key)
+    elif api_key:
         headers["x-api-key"] = api_key
     return headers
 
@@ -270,7 +278,7 @@ def _probe_dashscope_embedding(client: httpx.Client, config: NormalizedProviderC
         config.base_url,
         "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",
     )
-    headers = {**config.headers, "Authorization": f"Bearer {config.auth.get('api_key', '')}"}
+    headers = _with_bearer_auth(config.headers, config.auth.get("api_key", ""))
     payload = {
         "model": config.default_model,
         "input": {"contents": [{"text": "ping"}]},
@@ -292,7 +300,7 @@ def _probe_dashscope_embedding(client: httpx.Client, config: NormalizedProviderC
 
 def _probe_dashscope_rerank(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
     endpoint = _join_url(config.base_url, "/api/v1/services/rerank/text-rerank/text-rerank")
-    headers = {**config.headers, "Authorization": f"Bearer {config.auth.get('api_key', '')}"}
+    headers = _with_bearer_auth(config.headers, config.auth.get("api_key", ""))
     payload = {
         "model": config.default_model,
         "input": {"query": "ping", "documents": [{"text": "ping"}]},
