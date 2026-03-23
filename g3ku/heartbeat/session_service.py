@@ -10,7 +10,11 @@ from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
-from g3ku.runtime.web_ceo_sessions import normalize_ceo_metadata, update_ceo_session_after_turn
+from g3ku.runtime.web_ceo_sessions import (
+    clear_inflight_turn_snapshot,
+    normalize_ceo_metadata,
+    update_ceo_session_after_turn,
+)
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
 from main.service.task_terminal_callback import build_task_terminal_payload, normalize_task_terminal_payload
@@ -412,6 +416,28 @@ class WebSessionHeartbeatService:
             ),
         )
 
+    def _clear_preserved_inflight_turn(self, session_id: str, session: Any) -> str | None:
+        source: str | None = None
+        getter = getattr(session, "inflight_turn_snapshot", None)
+        if callable(getter):
+            try:
+                snapshot = getter()
+            except Exception:
+                snapshot = None
+            if isinstance(snapshot, dict):
+                raw_source = str(snapshot.get("source") or "").strip().lower()
+                if raw_source != "heartbeat":
+                    source = raw_source or "user"
+        clearer = getattr(session, "clear_preserved_inflight_turn", None)
+        if callable(clearer):
+            try:
+                clearer()
+            except Exception:
+                logger.debug("preserved inflight turn clear skipped for {}", session_id)
+        else:
+            clear_inflight_turn_snapshot(session_id)
+        return source
+
     def _persist_assistant_reply(self, session_id: str, *, text: str, task_ids: list[str], reason: str) -> None:
         if not self._session_exists(session_id):
             return
@@ -532,6 +558,9 @@ class WebSessionHeartbeatService:
             for event in events
             if str((event.payload or {}).get("task_id") or "").strip()
         ]
+        preserved_source = self._clear_preserved_inflight_turn(key, session)
+        if preserved_source:
+            self._publish_ceo(key, "ceo.turn.discard", {"source": preserved_source})
         self._persist_assistant_reply(key, text=output, task_ids=task_ids, reason=heartbeat_reason)
         self._publish_ceo(key, "ceo.reply.final", {"text": output, "source": "heartbeat"})
         event_ids = {event.event_id for event in events}

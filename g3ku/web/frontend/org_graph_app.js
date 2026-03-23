@@ -1126,8 +1126,8 @@ function applyTaskDefaultsPayload(payload = {}) {
     S.taskDefaults.defaultMaxDepth = defaultMaxDepth;
     S.taskDefaults.hardMaxDepth = hardMaxDepth;
     S.taskDefaults.maxDepth = maxDepth;
-    S.taskDefaults.customMode = !TASK_DEPTH_PRESET_VALUES.includes(maxDepth);
-    S.taskDefaults.customDraft = S.taskDefaults.customMode ? String(maxDepth) : "";
+    S.taskDefaults.customMode = false;
+    S.taskDefaults.customDraft = !TASK_DEPTH_PRESET_VALUES.includes(maxDepth) ? String(maxDepth) : "";
     S.taskDefaults.loading = false;
     S.taskDefaults.saving = false;
     renderTaskDepthControl();
@@ -1139,9 +1139,10 @@ function renderTaskDepthControl() {
     const defaultMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.defaultMaxDepth, 1));
     const currentMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.maxDepth, defaultMaxDepth));
     const disabled = S.taskDefaults.loading || S.taskDefaults.saving;
-    const useCustomValue = S.taskDefaults.customMode || !TASK_DEPTH_PRESET_VALUES.includes(currentMaxDepth);
+    const currentIsCustomValue = !TASK_DEPTH_PRESET_VALUES.includes(currentMaxDepth);
+    const editingCustomValue = !!S.taskDefaults.customMode;
     const customDraft = String(
-        useCustomValue
+        editingCustomValue
             ? (S.taskDefaults.customDraft || currentMaxDepth)
             : (S.taskDefaults.customDraft || "")
     );
@@ -1152,21 +1153,28 @@ function renderTaskDepthControl() {
         const option = document.createElement("option");
         option.value = String(depth);
         option.textContent = `${depth} 层`;
-        option.selected = !useCustomValue && depth === currentMaxDepth;
+        option.selected = !editingCustomValue && depth === currentMaxDepth;
         select.appendChild(option);
     });
+    if (currentIsCustomValue && !editingCustomValue) {
+        const currentOption = document.createElement("option");
+        currentOption.value = String(currentMaxDepth);
+        currentOption.textContent = `${currentMaxDepth} 层`;
+        currentOption.selected = true;
+        select.appendChild(currentOption);
+    }
     const customOption = document.createElement("option");
     customOption.value = TASK_DEPTH_CUSTOM_VALUE;
     customOption.textContent = "自定义";
-    customOption.selected = useCustomValue;
+    customOption.selected = editingCustomValue;
     select.appendChild(customOption);
     select.disabled = disabled;
-    select.value = useCustomValue ? TASK_DEPTH_CUSTOM_VALUE : String(currentMaxDepth);
+    select.value = editingCustomValue ? TASK_DEPTH_CUSTOM_VALUE : String(currentMaxDepth);
     select.dataset.scope = "global";
     buildResourceSelect(select);
     syncResourceSelectUI(select);
 
-    U.taskDepthCustomWrap.hidden = !useCustomValue;
+    U.taskDepthCustomWrap.hidden = !editingCustomValue;
     U.taskDepthCustomInput.disabled = disabled;
     U.taskDepthCustomSave.disabled = disabled;
     U.taskDepthCustomInput.value = customDraft;
@@ -1179,7 +1187,7 @@ function renderTaskDepthControl() {
         U.taskDepthHint.textContent = `正在保存，全局后续新任务将使用 ${currentMaxDepth} 层深度。`;
         return;
     }
-    if (useCustomValue) {
+    if (editingCustomValue) {
         U.taskDepthHint.textContent = `全局后续新任务会自动使用 ${currentMaxDepth} 层深度。自定义值需为非负整数。`;
         return;
     }
@@ -1895,6 +1903,32 @@ function discardActiveCeoTurn({ source = "" } = {}) {
     }, { scrollMode: "preserve" });
 }
 
+function hasRunningCeoToolStep(turn) {
+    return !!turn?.listEl?.querySelector?.(".interaction-step.running");
+}
+
+function discardPendingCeoTurns({ force = false } = {}) {
+    const removed = [];
+    for (let index = S.ceoPendingTurns.length - 1; index >= 0; index -= 1) {
+        const turn = S.ceoPendingTurns[index];
+        if (!turn || turn.finalized) {
+            S.ceoPendingTurns.splice(index, 1);
+            continue;
+        }
+        if (!force && hasRunningCeoToolStep(turn)) continue;
+        const [removedTurn] = S.ceoPendingTurns.splice(index, 1);
+        if (removedTurn) removed.push(removedTurn);
+    }
+    if (!removed.length) return false;
+    return mutateCeoFeed(() => {
+        removed.forEach((turn) => {
+            turn.finalized = true;
+            turn.el?.remove?.();
+        });
+        return true;
+    }, { scrollMode: "preserve" });
+}
+
 function ensureActiveCeoTurn({ source = "" } = {}) {
     const normalizedSource = normalizeCeoTurnSource(source);
     const existing = getActiveCeoTurn(normalizedSource);
@@ -2396,9 +2430,11 @@ function finalizeCeoTurn(text, meta = {}) {
     S.ceoPauseBusy = false;
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     syncCeoPrimaryButton();
-    const turn = pullActiveCeoTurn(normalizeCeoTurnSource(meta?.source || "user"));
+    const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
+    const turn = pullActiveCeoTurn(normalizedSource);
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
+        discardPendingCeoTurns({ force: normalizedSource === "heartbeat" });
         return;
     }
     mutateCeoFeed(() => {
@@ -2419,6 +2455,7 @@ function finalizeCeoTurn(text, meta = {}) {
         }
         icons();
     }, { scrollMode: "preserve" });
+    discardPendingCeoTurns({ force: normalizedSource === "heartbeat" });
 }
 
 function addNotice(notice, _bump = true) {

@@ -286,6 +286,12 @@ class RuntimeAgentSession:
             return copy.deepcopy(self._preserved_inflight_turn)
         return None
 
+    def clear_preserved_inflight_turn(self) -> None:
+        if self._preserved_inflight_turn is None:
+            return
+        self._preserved_inflight_turn = None
+        self._sync_persisted_inflight_turn()
+
     @staticmethod
     def _parse_progress_payload(content: Any) -> dict[str, Any] | None:
         if not isinstance(content, str):

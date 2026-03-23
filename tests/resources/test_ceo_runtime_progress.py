@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -130,6 +131,32 @@ class _FakeHeartbeatSession:
         _ = persist_transcript
         self.prompts.append(user_message)
         return SimpleNamespace(output=self._output)
+
+
+class _FakeHeartbeatFinalSession(_FakeHeartbeatSession):
+    def __init__(self, *, output: str = "Background task finished.") -> None:
+        super().__init__(output=output)
+        self._preserved_snapshot: dict[str, object] | None = {
+            "status": "paused",
+            "user_message": {"content": "Install the skill"},
+            "assistant_text": "Still working on it...",
+            "tool_events": [
+                {
+                    "status": "running",
+                    "tool_name": "skill-installer",
+                    "text": "install still running",
+                    "tool_call_id": "skill-installer:1",
+                }
+            ],
+        }
+        self.clear_calls = 0
+
+    def inflight_turn_snapshot(self):
+        return copy.deepcopy(self._preserved_snapshot)
+
+    def clear_preserved_inflight_turn(self) -> None:
+        self.clear_calls += 1
+        self._preserved_snapshot = None
 
 
 class _HeartbeatRecorder:
@@ -407,6 +434,29 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
     assert snapshot["user_message"]["content"] == "Install the weather skill"
     assert snapshot["assistant_text"] == "Still installing dependencies..."
     assert [item["tool_name"] for item in snapshot["tool_events"]] == ["skill-installer"]
+
+
+def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._preserved_inflight_turn = {
+        "status": "paused",
+        "user_message": {"content": "Install the weather skill"},
+    }
+    session._sync_persisted_inflight_turn()
+
+    assert session.inflight_turn_snapshot() is not None
+    assert web_ceo_sessions.read_inflight_turn_snapshot("web:shared") is not None
+
+    session.clear_preserved_inflight_turn()
+
+    assert session.inflight_turn_snapshot() is None
+    assert web_ceo_sessions.read_inflight_turn_snapshot("web:shared") is None
 
 
 def test_inflight_snapshot_skips_watchdog_progress_updates() -> None:
@@ -850,6 +900,52 @@ async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_retur
     assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
     assert "demo-terminal" in str(reloaded.messages[-1]["content"])
     assert "已完成" in str(reloaded.messages[-1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_final_reply_discards_preserved_user_turn(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-final-discard"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatFinalSession(output="Background install finished successfully.")
+    task_service = _TaskService()
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    payload = {
+        "task_id": "task:demo-terminal",
+        "session_id": session_id,
+        "title": "demo terminal task",
+        "status": "success",
+        "brief_text": "task finished successfully",
+        "finished_at": "2026-03-23T01:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00",
+    }
+    accepted = service.enqueue_task_terminal_payload(payload)
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert live_session.clear_calls == 1
+    assert len(task_service.registry.published) == 2
+    assert [envelope["type"] for _session, envelope in task_service.registry.published] == [
+        "ceo.turn.discard",
+        "ceo.reply.final",
+    ]
+    discard_session, discard_envelope = task_service.registry.published[0]
+    final_session, final_envelope = task_service.registry.published[1]
+    assert discard_session == session_id
+    assert discard_envelope["data"]["source"] == "user"
+    assert final_session == session_id
+    assert final_envelope["data"]["source"] == "heartbeat"
+    assert "Background install finished successfully." in str(final_envelope["data"]["text"])
 
 
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:
