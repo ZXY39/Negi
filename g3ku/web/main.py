@@ -4,10 +4,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 
-from g3ku.shells.web import ensure_web_runtime_services, get_agent, shutdown_web_runtime
+from g3ku.security import get_bootstrap_security_service
+from g3ku.shells.web import shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
 from g3ku.web.windows_asyncio import install_windows_connection_reset_filter
 from main.api import router as main_router
@@ -21,8 +22,6 @@ os.environ.setdefault('G3KU_TASK_RUNTIME_ROLE', 'web')
 async def lifespan(_app: FastAPI):
     restore_asyncio_filter = install_windows_connection_reset_filter()
     try:
-        agent = get_agent()
-        await ensure_web_runtime_services(agent)
         yield
     finally:
         await shutdown_web_runtime()
@@ -32,6 +31,23 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title='G3ku Web GUI', lifespan=lifespan)
 app.include_router(main_router, prefix='/api')
 app.include_router(runtime_router, prefix='/api')
+
+
+@app.middleware("http")
+async def bootstrap_lock_middleware(request: Request, call_next):
+    path = str(request.url.path or "")
+    is_api_path = path == "/api" or path.startswith("/api/")
+    if is_api_path and not path.startswith("/api/bootstrap"):
+        security = get_bootstrap_security_service()
+        if not security.is_unlocked():
+            return JSONResponse(
+                status_code=423,
+                content={
+                    "detail": "project_locked",
+                    "mode": security.status().get("mode"),
+                },
+            )
+    return await call_next(request)
 
 WEB_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = WEB_DIR / 'frontend'

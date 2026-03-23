@@ -25,7 +25,7 @@ permissions:
     - workspace
 settings:
   command_prefix:
-    - agent-browser
+    - C:\Users\MIKU\AppData\Roaming\npm\agent-browser.cmd
   default_timeout_seconds: 300
   auto_session: true
   default_session_name: g3ku-agent-browser
@@ -81,3 +81,4 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+

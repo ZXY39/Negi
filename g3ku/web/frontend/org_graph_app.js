@@ -188,6 +188,7 @@ const U = {
     viewTools: document.getElementById("view-tools"),
     viewModels: document.getElementById("view-models"),
     viewCommunications: document.getElementById("view-communications"),
+    viewSecurity: document.getElementById("view-security"),
     viewTaskDetails: document.getElementById("view-task-details"),
     modelHint: document.getElementById("sidebar-model-hint"),
     modelRefresh: document.getElementById("model-refresh-btn"),
@@ -4784,7 +4785,7 @@ function syncCeoCatalogPolling() {
 }
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, communications: U.viewCommunications, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, communications: U.viewCommunications, security: U.viewSecurity, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     S.view = navView;
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
@@ -4814,6 +4815,9 @@ function switchView(view) {
     if (view === "tools") void loadTools();
     if (view === "models") void loadModels();
     if (view === "communications") void loadCommunications();
+    if (view === "security" && window.G3kuBoot && typeof window.G3kuBoot.renderSecurityView === "function") {
+        window.G3kuBoot.renderSecurityView();
+    }
     syncCeoCatalogPolling();
 }
 
@@ -5197,6 +5201,15 @@ function bind() {
     syncCeoPrimaryButton();
 }
 
+let __g3kuAppInitialized = false;
+
+function maybeInit() {
+    if (__g3kuAppInitialized) return;
+    if (window.G3kuBoot && typeof window.G3kuBoot.isUnlocked === "function" && !window.G3kuBoot.isUnlocked()) return;
+    __g3kuAppInitialized = true;
+    init();
+}
+
 function init() {
     ensureTaskTokenUi();
     enhanceResourceSelects();
@@ -5223,7 +5236,8 @@ function init() {
     initCeoWs();
 }
 
-document.addEventListener("DOMContentLoaded", init);
+document.addEventListener("DOMContentLoaded", maybeInit);
+window.addEventListener("g3ku:boot-unlocked", maybeInit);
 
 
 

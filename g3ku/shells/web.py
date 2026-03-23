@@ -18,6 +18,7 @@ from g3ku.config.live_runtime import get_runtime_config
 from g3ku.runtime import SessionRuntimeBridge
 from g3ku.runtime import SessionRuntimeManager
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
+from g3ku.security import get_bootstrap_security_service
 from main.protocol import now_iso
 
 _global_agent: Optional[AgentLoop] = None
@@ -110,8 +111,10 @@ def debug_trace_enabled() -> bool:
 
 def get_agent() -> AgentLoop:
     global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
+    if not get_bootstrap_security_service().is_unlocked():
+        raise RuntimeError('project is locked')
     if not _global_agent:
-        config, revision, _changed = get_runtime_config(force=False)
+        config, revision, _changed = get_runtime_config(force=True)
         provider_name, model_name = config.get_role_model_target('ceo')
         provider = _make_provider(config, scope='ceo')
         middlewares = []

@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
+from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import get_agent
 from main.api.websocket_utils import (
     WebSocketChannelClosed,
@@ -40,6 +41,19 @@ async def tasks_websocket(websocket: WebSocket):
     await websocket.accept()
     requested_session_id = str(websocket.query_params.get('session_id') or 'all').strip() or 'all'
     after_seq = int(websocket.query_params.get('after_seq') or 0)
+    if not get_bootstrap_security_service().is_unlocked():
+        await websocket_send_json(
+            websocket,
+            build_envelope(
+                channel='task',
+                session_id=requested_session_id,
+                seq=after_seq,
+                type='error',
+                data={'code': 'project_locked'},
+            ),
+        )
+        await websocket_close(websocket, code=4423)
+        return
     service = _service()
     try:
         if service is None:
@@ -135,6 +149,20 @@ async def task_websocket(websocket: WebSocket, task_id: str):
     await websocket.accept()
     requested_session_id = str(websocket.query_params.get('session_id') or '').strip()
     after_seq = int(websocket.query_params.get('after_seq') or 0)
+    if not get_bootstrap_security_service().is_unlocked():
+        await websocket_send_json(
+            websocket,
+            build_envelope(
+                channel='task',
+                session_id=requested_session_id or 'web:shared',
+                task_id=task_id,
+                seq=after_seq,
+                type='error',
+                data={'code': 'project_locked'},
+            ),
+        )
+        await websocket_close(websocket, code=4423)
+        return
     service = _service()
     try:
         if service is None:

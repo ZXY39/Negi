@@ -14,9 +14,11 @@ from g3ku.llm_config.models import (
     ProviderConfigDraft,
     RuntimeTarget,
 )
+from g3ku.llm_config.export import to_generic_runtime_config
 from g3ku.llm_config.repositories import EncryptedConfigRepository
 from g3ku.llm_config.secret_store import EncryptedFileSecretStore
 from g3ku.llm_config.service import ConfigService, TemplateService
+from g3ku.security import get_bootstrap_security_service
 
 
 MASKED_SECRET_VALUE = "********"
@@ -29,7 +31,7 @@ def _store_root(workspace: Path | None = None) -> Path:
     return root / ".g3ku" / "llm-config"
 
 
-def _resolve_master_key(storage_root: Path) -> str:
+def _resolve_legacy_master_key(storage_root: Path) -> str | None:
     import os
 
     env_key = os.getenv("G3KU_LLM_MASTER_KEY", "").strip()
@@ -37,18 +39,26 @@ def _resolve_master_key(storage_root: Path) -> str:
         return env_key
     key_path = storage_root / "master.key"
     if key_path.exists():
-        return key_path.read_text(encoding="utf-8").strip()
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-    key = EncryptedFileSecretStore.generate_key()
-    key_path.write_text(key, encoding="utf-8")
-    return key
+        raw = key_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return raw
+        if isinstance(payload, dict):
+            return None
+        return raw
+    return None
 
 
 class LLMConfigFacade:
     def __init__(self, workspace: Path | None = None):
         self.workspace = (workspace or Path.cwd()).resolve()
         storage_root = _store_root(self.workspace)
-        secret_store = EncryptedFileSecretStore(_resolve_master_key(storage_root))
+        self.security = get_bootstrap_security_service(self.workspace)
+        legacy_key = _resolve_legacy_master_key(storage_root)
+        secret_store = EncryptedFileSecretStore(legacy_key) if legacy_key else None
         self.repository = EncryptedConfigRepository(storage_root, secret_store)
         self.template_service = TemplateService()
         self.config_service = ConfigService(self.repository, template_service=self.template_service)
@@ -71,14 +81,32 @@ class LLMConfigFacade:
         return [item.model_dump(mode="json") for item in self.repository.list_summaries()]
 
     def get_config_record(self, config_id: str, *, include_secrets: bool = False) -> dict[str, Any]:
-        return self.config_service.get_config(config_id, include_secrets=include_secrets).model_dump(mode="json")
+        record = self._hydrate_record_secrets(self.repository.get(config_id))
+        if not include_secrets:
+            auth = dict(record.auth)
+            api_key = str(auth.get("api_key", "") or "")
+            auth["api_key"] = "***" if api_key else ""
+            record = record.model_copy(update={"auth": auth, "headers": {}})
+        return record.model_dump(mode="json")
 
     def create_config_record(self, payload: dict[str, Any]) -> dict[str, Any]:
         draft = ProviderConfigDraft.model_validate(payload)
-        return self.config_service.save_draft(draft).model_dump(mode="json")
+        validation = self.config_service.validate_draft(draft)
+        if not validation.valid or validation.normalized_preview is None:
+            raise ValueError("Draft validation failed")
+        probe = self.config_service.probe_draft(draft)
+        if not probe.success:
+            raise ValueError(probe.message)
+        now = datetime.now(UTC)
+        normalized = validation.normalized_preview.model_copy(
+            update={"config_id": uuid4().hex, "created_at": now, "updated_at": now}
+        )
+        self.repository.save(self._sanitize_record_for_storage(normalized), last_probe_status=probe.status.value)
+        self._store_record_secrets(normalized)
+        return self.get_config_record(normalized.config_id, include_secrets=True)
 
     def update_config_record(self, config_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        current = self.repository.get(config_id)
+        current = self._hydrate_record_secrets(self.repository.get(config_id))
         merged = self._merge_draft(current, payload)
         validation = self.config_service.validate_draft(merged)
         if not validation.valid or validation.normalized_preview is None:
@@ -93,11 +121,13 @@ class LLMConfigFacade:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self.repository.save(updated, last_probe_status=probe.status.value)
-        return updated.model_dump(mode="json")
+        self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=probe.status.value)
+        self._store_record_secrets(updated)
+        return self.get_config_record(updated.config_id, include_secrets=True)
 
     def delete_config_record(self, config_id: str) -> None:
         self.repository.delete(config_id)
+        self.security.delete_overlay_prefix_all_realms(f"llm_config.{config_id}.")
 
     def list_bindings(self, config: Any) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -105,7 +135,7 @@ class LLMConfigFacade:
             config_id = str(getattr(binding, "llm_config_id", "") or "").strip()
             if not config_id:
                 continue
-            record = self.repository.get(config_id)
+            record = self._hydrate_record_secrets(self.repository.get(config_id))
             items.append(self._binding_payload(binding, record))
         return items
 
@@ -113,7 +143,7 @@ class LLMConfigFacade:
         binding = config.get_managed_model(model_key)
         if binding is None or not str(getattr(binding, "llm_config_id", "") or "").strip():
             raise ValueError(f"Unknown model key: {model_key}")
-        record = self.repository.get(binding.llm_config_id)
+        record = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
         return self._binding_payload(binding, record)
 
     def create_binding(self, config: Any, *, draft_payload: dict[str, Any], binding_payload: dict[str, Any]) -> dict[str, Any]:
@@ -125,8 +155,8 @@ class LLMConfigFacade:
             self.repository.get(config_id)
         else:
             draft = ProviderConfigDraft.model_validate(draft_payload)
-            summary = self.config_service.save_draft(draft)
-            config_id = summary.config_id
+            item = self.create_config_record(draft.model_dump(mode="python"))
+            config_id = str(item.get("config_id") or "").strip()
 
         config.models.catalog.append(
             ManagedModelConfig(
@@ -161,7 +191,7 @@ class LLMConfigFacade:
         if not any(key in draft_payload for key in config_fields):
             return self.get_binding(config, model_key)
 
-        current = self.repository.get(binding.llm_config_id)
+        current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
         merged = self._merge_draft(current, draft_payload)
         validation = self.config_service.validate_draft(merged)
         if not validation.valid or validation.normalized_preview is None:
@@ -176,7 +206,8 @@ class LLMConfigFacade:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self.repository.save(updated, last_probe_status=probe.status.value)
+        self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=probe.status.value)
+        self._store_record_secrets(updated)
         return self.get_binding(config, model_key)
 
     def set_binding_enabled(self, config: Any, model_key: str, enabled: bool) -> dict[str, Any]:
@@ -267,13 +298,13 @@ class LLMConfigFacade:
         )
 
     def export_runtime_config(self, config_id: str) -> GenericRuntimeConfig:
-        return self.config_service.export_config(config_id, include_secrets=True)
+        return to_generic_runtime_config(self._hydrate_record_secrets(self.repository.get(config_id)), include_secrets=True)
 
     def resolve_target(self, config: Any, model_key: str) -> RuntimeTarget:
         binding = config.get_managed_model(model_key)
         if binding is None or not str(getattr(binding, "llm_config_id", "") or "").strip():
             raise ValueError(f"Unknown model key: {model_key}")
-        record = self.repository.get(binding.llm_config_id)
+        record = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
         return self._runtime_target(
             model_key=model_key,
             record=record,
@@ -315,6 +346,46 @@ class LLMConfigFacade:
         if provider_id in {"dashscope_embedding", "dashscope_rerank"}:
             provider_id = "dashscope"
         return f"{provider_id}:{record.default_model}"
+
+    @staticmethod
+    def _llm_auth_overlay_key(config_id: str) -> str:
+        return f"llm_config.{config_id}.auth"
+
+    @staticmethod
+    def _llm_headers_overlay_key(config_id: str) -> str:
+        return f"llm_config.{config_id}.headers"
+
+    def _sanitize_record_for_storage(self, record: NormalizedProviderConfig) -> NormalizedProviderConfig:
+        auth = dict(record.auth)
+        auth["api_key"] = ""
+        return record.model_copy(update={"auth": auth, "headers": {}})
+
+    def _hydrate_record_secrets(self, record: NormalizedProviderConfig) -> NormalizedProviderConfig:
+        auth_value = self.security.get_overlay_value(self._llm_auth_overlay_key(record.config_id))
+        headers_value = self.security.get_overlay_value(self._llm_headers_overlay_key(record.config_id))
+        next_auth = dict(record.auth)
+        if isinstance(auth_value, dict):
+            next_auth = dict(auth_value)
+        next_headers = dict(record.headers)
+        if isinstance(headers_value, dict):
+            next_headers = dict(headers_value)
+        return record.model_copy(update={"auth": next_auth, "headers": next_headers})
+
+    def _store_record_secrets(self, record: NormalizedProviderConfig) -> None:
+        if not self.security.is_unlocked():
+            return
+        auth_payload = dict(record.auth)
+        headers_payload = dict(record.headers)
+        updates: dict[str, Any] = {}
+        if str(auth_payload.get("api_key", "") or "").strip():
+            updates[self._llm_auth_overlay_key(record.config_id)] = auth_payload
+        else:
+            updates[self._llm_auth_overlay_key(record.config_id)] = None
+        if headers_payload:
+            updates[self._llm_headers_overlay_key(record.config_id)] = headers_payload
+        else:
+            updates[self._llm_headers_overlay_key(record.config_id)] = None
+        self.security.set_overlay_values(updates)
 
     def _memory_binding_path(self) -> Path:
         return _store_root(self.workspace) / "memory_binding.json"

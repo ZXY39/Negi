@@ -11,6 +11,12 @@ from uuid import uuid4
 
 from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_ITERATIONS
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
+from g3ku.security import (
+    apply_config_secret_entries,
+    extract_config_secret_entries,
+    get_bootstrap_security_service,
+    strip_config_secret_entries,
+)
 
 
 def _project_config_path() -> Path:
@@ -470,7 +476,10 @@ def load_config(config_path: Path | None = None) -> Config:
     if changed:
         raw_data = migrated_llm
     changed = _ensure_role_iterations_defaults(raw_data) or changed
-    migrated = _migrate_config(deepcopy(raw_data))
+    security = get_bootstrap_security_service(Path.cwd())
+    migrated = _migrate_config(
+        apply_config_secret_entries(deepcopy(raw_data), security.current_overlay())
+    )
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(migrated, cfg)
     if changed or _raw_uses_inline_model_payload(raw_data):
@@ -485,6 +494,17 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
 
     _normalize_inline_model_bindings(config)
     data = _runtime_config_payload(config)
+    security = get_bootstrap_security_service(Path.cwd())
+    secret_entries = extract_config_secret_entries(data)
+    if security.is_unlocked():
+        clear_updates = {
+            key: None
+            for key in security.current_overlay().keys()
+            if str(key or "").startswith("config.")
+        }
+        clear_updates.update(secret_entries)
+        security.set_overlay_values(clear_updates)
+    data = strip_config_secret_entries(data)
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

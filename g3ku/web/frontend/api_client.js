@@ -124,6 +124,41 @@ class ApiClient {
         return this._request("DELETE", path, normalized);
     }
 
+    static async getBootstrapStatus() {
+        const data = await this.get("/api/bootstrap/status");
+        return data.item || null;
+    }
+
+    static async setupBootstrap(payload) {
+        const data = await this.post("/api/bootstrap/setup", payload || {});
+        return data.item || null;
+    }
+
+    static async unlockBootstrap(payload) {
+        const data = await this.post("/api/bootstrap/unlock", payload || {});
+        return data.item || null;
+    }
+
+    static async lockBootstrap() {
+        const data = await this.post("/api/bootstrap/lock", {});
+        return data.item || null;
+    }
+
+    static async renameBootstrapRealm(payload) {
+        const data = await this._request("PATCH", "/api/bootstrap/realm", { body: payload || {} });
+        return data.item || null;
+    }
+
+    static async createBootstrapRealm(payload) {
+        const data = await this.post("/api/bootstrap/realms", payload || {});
+        return data.item || null;
+    }
+
+    static async destroyAllBootstrapSecrets(payload) {
+        const data = await this.post("/api/bootstrap/destroy-all-secrets", payload || {});
+        return data.item || null;
+    }
+
     static getCeoWsUrl(sessionId = this.getActiveSessionId()) {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;

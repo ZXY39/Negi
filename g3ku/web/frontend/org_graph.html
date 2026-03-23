@@ -15,7 +15,47 @@
 </head>
 
 <body>
-    <div class="app-layout">
+    <div id="boot-shell" class="boot-shell">
+        <div class="boot-card">
+            <div class="boot-copy">
+                <h1 id="boot-title">项目解锁</h1>
+                <p id="boot-subtitle" class="subtitle">输入口令后才能进入项目主界面与启动后台能力。</p>
+            </div>
+            <div id="boot-banner" class="boot-banner" hidden></div>
+            <div id="boot-legacy-panel" class="boot-legacy-panel" hidden>
+                <h2>检测到旧版秘密数据</h2>
+                <p class="subtitle">启用新口令体系后，系统会先导出旧秘密并做本地备份，随后清空活动秘密来源。你需要在进入项目后手动重新录入秘密值。</p>
+                <label class="confirm-checkbox-row" for="boot-legacy-confirm">
+                    <input id="boot-legacy-confirm" type="checkbox">
+                    <span>我理解旧秘密不会自动迁移，并允许导出与重置活动秘密来源</span>
+                </label>
+                <pre id="boot-legacy-preview" class="boot-preview"></pre>
+            </div>
+            <form id="boot-setup-form" class="boot-form" hidden>
+                <label class="resource-field">
+                    <span class="resource-field-label">分区名称</span>
+                    <input id="boot-setup-display-name" class="resource-search" type="text" placeholder="例如 默认分区">
+                </label>
+                <label class="resource-field">
+                    <span class="resource-field-label">设置口令</span>
+                    <input id="boot-setup-password" class="resource-search" type="password" autocomplete="new-password">
+                </label>
+                <label class="resource-field">
+                    <span class="resource-field-label">确认口令</span>
+                    <input id="boot-setup-password-confirm" class="resource-search" type="password" autocomplete="new-password">
+                </label>
+                <button id="boot-setup-submit" class="btn-primary" type="submit">初始化并进入项目</button>
+            </form>
+            <form id="boot-unlock-form" class="boot-form" hidden>
+                <label class="resource-field">
+                    <span class="resource-field-label">输入口令</span>
+                    <input id="boot-unlock-password" class="resource-search" type="password" autocomplete="current-password">
+                </label>
+                <button id="boot-unlock-submit" class="btn-primary" type="submit">解锁项目</button>
+            </form>
+        </div>
+    </div>
+    <div id="app-layout" class="app-layout boot-hidden">
         <nav class="sidebar">
             <div class="brand">
                 <i data-lucide="layout-dashboard" class="brand-icon"></i>
@@ -45,6 +85,11 @@
             <button class="nav-item" data-view="communications" type="button">
                 <i data-lucide="radio-tower"></i>
                 <span>通信配置</span>
+            </button>
+
+            <button class="nav-item" data-view="security" type="button">
+                <i data-lucide="shield-check"></i>
+                <span>安全设置</span>
             </button>
 
             <div class="sidebar-spacer"></div>
@@ -499,6 +544,20 @@
                 </div>
             </section>
 
+            <section id="view-security" class="view-section" style="display: none;">
+                <header class="content-header">
+                    <h1>安全设置</h1>
+                    <p class="subtitle">管理当前已解锁分区、追加新口令分区，以及执行全局锁定或销毁全部秘密分区。</p>
+                </header>
+                <div class="resource-layout full-list-layout">
+                    <section class="resource-list-panel full-width-panel">
+                        <div id="security-panel" class="security-panel">
+                            <div class="empty-state">正在加载安全状态...</div>
+                        </div>
+                    </section>
+                </div>
+            </section>
+
             <div id="app-toast-viewport" class="app-toast-viewport" aria-live="polite" aria-atomic="true">
                 <div id="app-toast" class="app-toast" hidden>
                     <div class="app-toast-main">
@@ -555,6 +614,7 @@
     </div>
 
     <script src="api_client.js"></script>
+    <script src="org_graph_bootstrap.js"></script>
     <script src="org_graph_task_view.js"></script>
     <script src="org_graph_app.js"></script>
     <script src="org_graph_tasks.js"></script>

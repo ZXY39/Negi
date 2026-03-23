@@ -12,6 +12,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
+from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_ceo_session_catalog,
@@ -471,6 +472,13 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
 @router.websocket('/ws/ceo')
 async def ceo_websocket(websocket: WebSocket):
     await websocket.accept()
+    if not get_bootstrap_security_service().is_unlocked():
+        await websocket_send_json(
+            websocket,
+            build_envelope(channel='ceo', session_id='web:shared', type='error', data={'code': 'project_locked'}),
+        )
+        await websocket_close(websocket, code=4423)
+        return
     agent = get_agent()
     runtime_manager = get_runtime_manager(agent)
     transcript_store = getattr(agent, 'sessions', None)

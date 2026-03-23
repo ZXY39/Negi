@@ -1232,5 +1232,14 @@
   };
 
   refs();
-  document.addEventListener("DOMContentLoaded", () => { void bootstrap(); });
+  let llmBootstrapped = false;
+  function maybeBootstrap() {
+    if (llmBootstrapped) return;
+    if (window.G3kuBoot && typeof window.G3kuBoot.isUnlocked === "function" && !window.G3kuBoot.isUnlocked()) return;
+    llmBootstrapped = true;
+    void bootstrap();
+  }
+
+  document.addEventListener("DOMContentLoaded", maybeBootstrap);
+  window.addEventListener("g3ku:boot-unlocked", maybeBootstrap);
 })();
