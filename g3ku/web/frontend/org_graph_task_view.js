@@ -508,59 +508,10 @@ function roundTraceStatus(round) {
     return buildLiveSectionStatus(tools);
 }
 
-function renderExecutionStageRounds(stage) {
-    const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
-    if (!rounds.length) {
-        return renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次");
-    }
-    return rounds.map((round, index) => {
-        const title = `第 ${round.round_index || index + 1} 轮${round.budget_counted ? " · 计入预算" : ""}`;
-        const tools = Array.isArray(round.tools) ? round.tools : [];
-        const toolDetails = tools.length
-            ? tools.map((step, toolIndex) => renderTraceStep({
-                traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}:tool:${step.tool_call_id || toolIndex}`,
-                title: `工具 · ${step.tool_name || "tool"}`,
-                status: step.status || "info",
-                open: false,
-                bodyHtml: [
-                    renderTraceField("参数", step.arguments_text, "无参数"),
-                    renderTraceField("工具输出", step.output_text, step.status === "running" ? "等待工具输出…" : "暂无工具输出"),
-                ].join(""),
-            })).join("")
-            : renderTraceField("工具", "", "本轮暂无工具记录");
-        return renderTraceStep({
-            traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}`,
-            title: `${title}${round.created_at ? ` · ${formatCompactTime(round.created_at)}` : ""}`,
-            status: roundTraceStatus(round),
-            open: false,
-            bodyHtml: toolDetails,
-        });
-    }).join("");
-}
-
-function traceStatusLabel(status) {
-    return ({
-        info: "已记录",
-        running: "执行中",
-        success: "成功",
-        error: "失败",
-    }[String(status || "")] || "已记录");
-}
-
 function nodeFinalTraceStatus(node) {
     if (String(node?.state || "") === "in_progress") return "running";
     if (String(node?.state || "") === "failed") return "error";
     return "success";
-}
-
-function renderTraceField(label, value, emptyText = "暂无内容") {
-    const text = String(value || "").trim() || emptyText;
-    return `
-        <div class="task-trace-field">
-            <div class="task-trace-label">${esc(label)}</div>
-            <div class="code-block task-trace-code">${esc(text)}</div>
-        </div>
-    `;
 }
 
 function renderTraceStep({ traceKey = "", title, status = "info", open = false, bodyHtml = "" }) {
@@ -595,51 +546,6 @@ function resolveTraceStepOpenState(step, state, index) {
     }
     if (typeof traceItems[index]?.open === "boolean") return traceItems[index].open;
     return !!step.open;
-}
-
-function buildExecutionTraceSteps(trace, node) {
-    const initialPromptStep = {
-        traceKey: "initial_prompt",
-        title: "Initial Prompt",
-        status: "info",
-        open: false,
-        bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
-    };
-    if (Array.isArray(trace?.stages) && trace.stages.length) {
-        return [
-            initialPromptStep,
-            ...trace.stages.map((stage, index) => ({
-            traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
-            title: `${stage.mode || "自主执行"}${stage.created_at ? ` · ${formatCompactTime(stage.created_at)}` : ""}`,
-            status: stageTraceStatus(stage),
-            open: index === trace.stages.length - 1,
-            bodyHtml: [
-                renderTraceField("阶段总步骤数", String(stage.stage_total_steps || 0), "0"),
-                renderTraceField("状态", String(stage.status || "进行中"), "进行中"),
-                renderTraceField("阶段目标", stage.stage_goal, "暂无阶段目标"),
-                renderExecutionStageRounds(stage),
-            ].join(""),
-            })),
-        ];
-    }
-    return [
-        initialPromptStep,
-        ...trace.tool_steps.map((step, index) => ({
-            traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
-            title: `Tool - ${step.tool_name || "tool"}`,
-            status: step.status || "info",
-            open: false,
-            bodyHtml: [
-                renderTraceField("Arguments", step.arguments_text, "No arguments"),
-                renderTraceField(
-                    "Output",
-                    step.output_text,
-                    step.status === "running" ? "Waiting for tool output..." : "No tool output",
-                    { decodeEscapes: true },
-                ),
-            ].join(""),
-        })),
-    ];
 }
 
 function renderTraceMessage(value, emptyText = "暂无内容") {

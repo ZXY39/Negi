@@ -188,7 +188,6 @@ const U = {
     viewTools: document.getElementById("view-tools"),
     viewModels: document.getElementById("view-models"),
     viewCommunications: document.getElementById("view-communications"),
-    viewSecurity: document.getElementById("view-security"),
     viewTaskDetails: document.getElementById("view-task-details"),
     modelHint: document.getElementById("sidebar-model-hint"),
     modelRefresh: document.getElementById("model-refresh-btn"),
@@ -306,6 +305,7 @@ const U = {
     confirmCheckboxHint: document.getElementById("confirm-checkbox-hint"),
     confirmCancel: document.getElementById("confirm-cancel"),
     confirmAccept: document.getElementById("confirm-accept"),
+    projectExit: document.getElementById("project-exit-btn"),
 };
 
 const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -2931,11 +2931,53 @@ async function acceptConfirm() {
     try {
         await S.confirmState.onConfirm({ checked: !!U.confirmCheckbox?.checked });
         closeConfirm();
+    } catch (error) {
+        showToast({ title: "操作失败", text: error?.message || "Unknown error", kind: "error" });
     } finally {
         U.confirmAccept.disabled = false;
         U.confirmCancel.disabled = false;
         if (U.confirmCheckbox) U.confirmCheckbox.disabled = false;
     }
+}
+
+function finalizeProjectExit() {
+    try {
+        window.close();
+    } catch (error) {
+        void error;
+    }
+    window.setTimeout(() => {
+        try {
+            window.location.replace("about:blank");
+        } catch (error) {
+            window.location.href = "about:blank";
+        }
+    }, 120);
+}
+
+async function requestProjectExit() {
+    const payload = await ApiClient.getBootstrapExitCheck();
+    const hasRunning = !!payload?.has_running_work;
+    const summary = String(payload?.summary_text || "").trim();
+    openConfirm({
+        title: "确认退出项目？",
+        text: hasRunning ? `检测到${summary}。退出前请确认如何处理。` : "确认后会关闭项目服务与当前网页。",
+        confirmLabel: "退出项目",
+        confirmKind: "danger",
+        checkbox: hasRunning ? {
+            checked: false,
+            label: "停止正在进行的对话和任务",
+            hint: summary,
+        } : null,
+        returnFocus: U.projectExit,
+        onConfirm: async ({ checked }) => {
+            if (hasRunning && !checked) {
+                throw new Error("请先勾选“停止正在进行的对话和任务”。");
+            }
+            await ApiClient.exitBootstrap({ stop_running_work: !!checked });
+            finalizeProjectExit();
+        },
+    });
 }
 
 function modelScopeLabel(scope) {
@@ -4785,7 +4827,7 @@ function syncCeoCatalogPolling() {
 }
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, communications: U.viewCommunications, security: U.viewSecurity, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, communications: U.viewCommunications, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     S.view = navView;
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
@@ -4815,9 +4857,6 @@ function switchView(view) {
     if (view === "tools") void loadTools();
     if (view === "models") void loadModels();
     if (view === "communications") void loadCommunications();
-    if (view === "security" && window.G3kuBoot && typeof window.G3kuBoot.renderSecurityView === "function") {
-        window.G3kuBoot.renderSecurityView();
-    }
     syncCeoCatalogPolling();
 }
 
@@ -4835,6 +4874,7 @@ function toggleTheme() {
 
 function bind() {
     U.theme?.addEventListener("click", toggleTheme);
+    U.projectExit?.addEventListener("click", () => void requestProjectExit());
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
     U.taskTokenButton?.addEventListener("click", () => setTaskTokenStatsOpen(true));

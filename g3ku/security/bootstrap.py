@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -11,20 +10,18 @@ from pathlib import Path
 import shutil
 import threading
 from typing import Any
-from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
 
 
 MASTER_KEY_VERSION = 2
 UNLOCK_SCOPE = "global"
-DESTROY_CONFIRM_TEXT = "DESTROY ALL SECRET REALMS"
 LEGACY_EXPORT_PREFIX = "legacy-secret-export"
 MIGRATION_BACKUP_DIR = "security-migration-backups"
 REALM_OVERLAY_DIR = "secret-realms"
+DEFAULT_OVERLAY_FILENAME = "default.enc"
 SCONFIG = "config"
 SLLM = "llm_config"
-SCRT = "chinaBridge"
 
 
 def _now_iso() -> str:
@@ -41,6 +38,14 @@ def _master_key_path(workspace: Path) -> Path:
 
 def _overlay_root(workspace: Path) -> Path:
     return workspace / ".g3ku" / REALM_OVERLAY_DIR
+
+
+def _single_overlay_path(workspace: Path) -> Path:
+    return _overlay_root(workspace) / DEFAULT_OVERLAY_FILENAME
+
+
+def _legacy_realm_overlay_path(workspace: Path, realm_id: str) -> Path:
+    return _overlay_root(workspace) / f"{realm_id}.enc"
 
 
 def _config_path(workspace: Path) -> Path:
@@ -61,10 +66,6 @@ def _json_dump(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _realm_overlay_path(workspace: Path, realm_id: str) -> Path:
-    return _overlay_root(workspace) / f"{realm_id}.enc"
-
-
 def _fernet_from_key(key: str) -> Fernet:
     return Fernet(str(key).encode("utf-8"))
 
@@ -79,15 +80,6 @@ def _derive_password_key(password: str, *, salt: bytes, n: int, r: int, p: int) 
         dklen=32,
     )
     return base64.urlsafe_b64encode(derived).decode("utf-8")
-
-
-def _deep_get(payload: dict[str, Any], path: list[str]) -> Any:
-    cursor: Any = payload
-    for key in path:
-        if not isinstance(cursor, dict) or key not in cursor:
-            return None
-        cursor = cursor[key]
-    return cursor
 
 
 def _deep_set(payload: dict[str, Any], path: list[str], value: Any) -> None:
@@ -211,19 +203,12 @@ def apply_config_secret_entries(raw_data: dict[str, Any], secret_entries: dict[s
     return payload
 
 
-@dataclass(slots=True)
-class ActiveRealmContext:
-    realm_id: str
-    display_name: str
-    master_key: str
-
-
 class SecretOverlayStore:
     def __init__(self, workspace: Path):
         self.workspace = workspace.resolve()
 
-    def load(self, *, realm_id: str, master_key: str) -> dict[str, Any]:
-        path = _realm_overlay_path(self.workspace, realm_id)
+    def load(self, *, master_key: str) -> dict[str, Any]:
+        path = _single_overlay_path(self.workspace)
         if not path.exists():
             return {}
         try:
@@ -233,16 +218,16 @@ class SecretOverlayStore:
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    def save(self, *, realm_id: str, master_key: str, payload: dict[str, Any]) -> None:
-        path = _realm_overlay_path(self.workspace, realm_id)
+    def save(self, *, master_key: str, payload: dict[str, Any]) -> None:
+        path = _single_overlay_path(self.workspace)
         path.parent.mkdir(parents=True, exist_ok=True)
         encrypted = _fernet_from_key(master_key).encrypt(
             json.dumps(payload or {}, ensure_ascii=False, indent=2).encode("utf-8")
         )
         path.write_bytes(encrypted)
 
-    def delete(self, *, realm_id: str) -> None:
-        path = _realm_overlay_path(self.workspace, realm_id)
+    def delete(self) -> None:
+        path = _single_overlay_path(self.workspace)
         if path.exists():
             path.unlink()
 
@@ -251,50 +236,49 @@ class SecretOverlayStore:
         if root.exists():
             shutil.rmtree(root)
 
+    def load_legacy_realm(self, *, realm_id: str, master_key: str) -> dict[str, Any]:
+        path = _legacy_realm_overlay_path(self.workspace, realm_id)
+        if not path.exists():
+            return {}
+        try:
+            decrypted = _fernet_from_key(master_key).decrypt(path.read_bytes())
+            payload = json.loads(decrypted.decode("utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
 
 class BootstrapSecurityService:
     def __init__(self, workspace: Path | None = None):
         self.workspace = (workspace or Path.cwd()).resolve()
         self._lock = threading.RLock()
         self._overlay_store = SecretOverlayStore(self.workspace)
-        self._active: ActiveRealmContext | None = None
+        self._active_master_key: str | None = None
         self._overlay_cache: dict[str, Any] = {}
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            envelope = self._load_master_envelope()
-            legacy_detected = self.legacy_detected()
-            if self._active is not None:
+            if self._active_master_key is not None:
                 return {
                     "mode": "unlocked",
                     "unlock_scope": UNLOCK_SCOPE,
-                    "realm_count": len(list(envelope.get("realms") or [])) if isinstance(envelope, dict) else 0,
-                    "active_realm_display_name": self._active.display_name,
-                    "legacy_detected": legacy_detected,
+                    "legacy_detected": self.legacy_detected(),
                 }
-            if isinstance(envelope, dict) and list(envelope.get("realms") or []):
+            if self._has_configured_secret_key():
                 return {
                     "mode": "locked",
                     "unlock_scope": UNLOCK_SCOPE,
-                    "realm_count": len(list(envelope.get("realms") or [])),
-                    "active_realm_display_name": None,
-                    "legacy_detected": legacy_detected,
+                    "legacy_detected": self.legacy_detected(),
                 }
             return {
                 "mode": "setup",
                 "unlock_scope": UNLOCK_SCOPE,
-                "realm_count": 0,
-                "active_realm_display_name": None,
-                "legacy_detected": legacy_detected,
+                "legacy_detected": self.legacy_detected(),
             }
 
     def is_unlocked(self) -> bool:
         with self._lock:
-            return self._active is not None
-
-    def active_realm(self) -> ActiveRealmContext | None:
-        with self._lock:
-            return self._active
+            return self._active_master_key is not None
 
     def current_overlay(self) -> dict[str, Any]:
         with self._lock:
@@ -302,13 +286,13 @@ class BootstrapSecurityService:
 
     def get_overlay_value(self, key: str, default: Any = None) -> Any:
         with self._lock:
-            if not self._active:
+            if not self._active_master_key:
                 return default
             return deepcopy(self._overlay_cache.get(str(key or "").strip(), default))
 
     def set_overlay_values(self, updates: dict[str, Any]) -> None:
         with self._lock:
-            if self._active is None:
+            if self._active_master_key is None:
                 raise ValueError("project is locked")
             for key, value in dict(updates or {}).items():
                 normalized = str(key or "").strip()
@@ -322,133 +306,68 @@ class BootstrapSecurityService:
 
     def delete_overlay_keys(self, keys: list[str]) -> None:
         with self._lock:
-            if self._active is None:
+            if self._active_master_key is None:
                 raise ValueError("project is locked")
             for key in list(keys or []):
                 self._overlay_cache.pop(str(key or "").strip(), None)
             self._persist_active_overlay()
 
-    def delete_overlay_prefix_all_realms(self, prefix: str) -> None:
+    def delete_overlay_prefix(self, prefix: str) -> None:
         normalized = str(prefix or "").strip()
         if not normalized:
             return
         with self._lock:
-            envelope = self._load_master_envelope()
-            for realm in list((envelope or {}).get("realms") or []):
-                if not isinstance(realm, dict):
-                    continue
-                realm_id = str(realm.get("realm_id") or "").strip()
-                try:
-                    realm_key = self._unwrap_realm_master_key(realm=realm, password=None, allow_active=True)
-                except Exception:
-                    continue
-                if not realm_id or not realm_key:
-                    continue
-                payload = self._overlay_store.load(realm_id=realm_id, master_key=realm_key)
-                next_payload = {
-                    key: value
-                    for key, value in payload.items()
-                    if not str(key or "").strip().startswith(normalized)
-                }
-                self._overlay_store.save(realm_id=realm_id, master_key=realm_key, payload=next_payload)
-                if self._active is not None and self._active.realm_id == realm_id:
-                    self._overlay_cache = next_payload
+            if self._active_master_key is None:
+                return
+            self._overlay_cache = {
+                key: value
+                for key, value in self._overlay_cache.items()
+                if not str(key or "").startswith(normalized)
+            }
+            self._persist_active_overlay()
+
+    def delete_overlay_prefix_all_realms(self, prefix: str) -> None:
+        self.delete_overlay_prefix(prefix)
 
     def setup_initial_realm(
         self,
         *,
         password: str,
-        display_name: str,
+        display_name: str = "",
         confirm_legacy_reset: bool = False,
     ) -> dict[str, Any]:
+        _ = display_name
         with self._lock:
-            envelope = self._load_master_envelope()
-            if isinstance(envelope, dict) and list(envelope.get("realms") or []):
-                raise ValueError("secret realms already exist")
+            if self._has_configured_secret_key():
+                raise ValueError("secret key is already configured")
             if self.legacy_detected():
                 if not confirm_legacy_reset:
                     raise ValueError("legacy secrets detected; explicit reset confirmation is required")
                 self._migrate_legacy_state()
-            envelope = {
-                "version": MASTER_KEY_VERSION,
-                "unlock_scope": UNLOCK_SCOPE,
-                "realms": [],
-            }
-            realm = self._create_realm_entry(password=password, display_name=display_name)
-            envelope["realms"].append(realm)
-            self._write_master_envelope(envelope)
-            self._activate_realm(realm=realm, password=password)
+            envelope = self._create_single_envelope(password=password)
+            self._write_master_payload(envelope)
+            self._activate(master_key=self._unwrap_single_master_key(envelope=envelope, password=password))
             return self.status()
 
     def unlock(self, *, password: str) -> dict[str, Any]:
         with self._lock:
-            envelope = self._require_master_envelope()
-            for realm in list(envelope.get("realms") or []):
-                if not isinstance(realm, dict):
-                    continue
-                try:
-                    master_key = self._unwrap_realm_master_key(realm=realm, password=password)
-                except Exception:
-                    continue
-                self._active = ActiveRealmContext(
-                    realm_id=str(realm.get("realm_id") or "").strip(),
-                    display_name=str(realm.get("display_name") or "").strip() or "Secret Realm",
-                    master_key=master_key,
-                )
-                self._overlay_cache = self._overlay_store.load(
-                    realm_id=self._active.realm_id,
-                    master_key=self._active.master_key,
-                )
+            payload = self._read_master_payload()
+            if payload is None:
+                raise ValueError("secret key is not configured")
+            if self._is_single_envelope(payload):
+                self._activate(master_key=self._unwrap_single_master_key(envelope=payload, password=password))
                 return self.status()
-            raise ValueError("invalid password")
+            if self._is_multi_realm_payload(payload):
+                migrated = self._migrate_multi_realm_payload(payload=payload, password=password)
+                self._write_master_payload(migrated)
+                self._activate(master_key=self._unwrap_single_master_key(envelope=migrated, password=password))
+                return self.status()
+            raise ValueError("invalid secret key envelope")
 
     def lock(self) -> dict[str, Any]:
         with self._lock:
-            self._active = None
+            self._active_master_key = None
             self._overlay_cache = {}
-            return self.status()
-
-    def rename_current_realm(self, *, display_name: str) -> dict[str, Any]:
-        with self._lock:
-            active = self._require_active_realm()
-            envelope = self._require_master_envelope()
-            changed = False
-            for realm in list(envelope.get("realms") or []):
-                if str(realm.get("realm_id") or "").strip() != active.realm_id:
-                    continue
-                realm["display_name"] = str(display_name or "").strip() or active.display_name
-                realm["updated_at"] = _now_iso()
-                active.display_name = realm["display_name"]
-                changed = True
-                break
-            if not changed:
-                raise ValueError("active realm not found")
-            self._write_master_envelope(envelope)
-            return self.status()
-
-    def create_realm(self, *, password: str, display_name: str) -> dict[str, Any]:
-        with self._lock:
-            envelope = self._require_master_envelope()
-            realm = self._create_realm_entry(password=password, display_name=display_name)
-            envelope.setdefault("realms", []).append(realm)
-            self._write_master_envelope(envelope)
-            self._overlay_store.save(
-                realm_id=str(realm.get("realm_id") or ""),
-                master_key=self._unwrap_realm_master_key(realm=realm, password=password),
-                payload={},
-            )
-            return self.status()
-
-    def destroy_all_secrets(self, *, confirm_text: str) -> dict[str, Any]:
-        if str(confirm_text or "").strip() != DESTROY_CONFIRM_TEXT:
-            raise ValueError("confirmation text mismatch")
-        with self._lock:
-            self._active = None
-            self._overlay_cache = {}
-            self._overlay_store.delete_all()
-            master_key_path = _master_key_path(self.workspace)
-            if master_key_path.exists():
-                master_key_path.unlink()
             return self.status()
 
     def legacy_detected(self) -> bool:
@@ -459,27 +378,29 @@ class BootstrapSecurityService:
         with self._lock:
             return self._migrate_legacy_state(dry_run=True)
 
-    def _persist_active_overlay(self) -> None:
-        active = self._require_active_realm()
-        self._overlay_store.save(
-            realm_id=active.realm_id,
-            master_key=active.master_key,
-            payload=self._overlay_cache,
-        )
+    def _activate(self, *, master_key: str) -> None:
+        self._active_master_key = master_key
+        self._overlay_cache = self._overlay_store.load(master_key=master_key)
+        self._persist_active_overlay()
 
-    def _create_realm_entry(self, *, password: str, display_name: str) -> dict[str, Any]:
+    def _persist_active_overlay(self) -> None:
+        if self._active_master_key is None:
+            raise ValueError("project is locked")
+        self._overlay_store.save(master_key=self._active_master_key, payload=self._overlay_cache)
+
+    def _create_single_envelope(self, *, password: str, master_key: str | None = None) -> dict[str, Any]:
         clean_password = str(password or "")
-        if len(clean_password) < 1:
+        if not clean_password:
             raise ValueError("password is required")
         salt = os.urandom(16)
-        realm_master_key = Fernet.generate_key().decode("utf-8")
+        actual_master_key = str(master_key or Fernet.generate_key().decode("utf-8"))
         kdf = {"name": "scrypt", "n": 16384, "r": 8, "p": 1}
         derived_key = _derive_password_key(clean_password, salt=salt, n=kdf["n"], r=kdf["r"], p=kdf["p"])
-        wrapped = _fernet_from_key(derived_key).encrypt(realm_master_key.encode("utf-8"))
+        wrapped = _fernet_from_key(derived_key).encrypt(actual_master_key.encode("utf-8"))
         now = _now_iso()
         return {
-            "realm_id": uuid4().hex,
-            "display_name": str(display_name or "").strip() or "Secret Realm",
+            "version": MASTER_KEY_VERSION,
+            "unlock_scope": UNLOCK_SCOPE,
             "salt_b64": base64.b64encode(salt).decode("ascii"),
             "kdf": kdf,
             "wrapped_master_key_b64": base64.b64encode(wrapped).decode("ascii"),
@@ -487,31 +408,45 @@ class BootstrapSecurityService:
             "updated_at": now,
         }
 
-    def _activate_realm(self, *, realm: dict[str, Any], password: str) -> None:
-        master_key = self._unwrap_realm_master_key(realm=realm, password=password)
-        self._active = ActiveRealmContext(
-            realm_id=str(realm.get("realm_id") or "").strip(),
-            display_name=str(realm.get("display_name") or "").strip() or "Secret Realm",
-            master_key=master_key,
+    def _unwrap_single_master_key(self, *, envelope: dict[str, Any], password: str) -> str:
+        kdf = envelope.get("kdf") if isinstance(envelope.get("kdf"), dict) else {}
+        salt_b64 = str(envelope.get("salt_b64") or "").strip()
+        wrapped_b64 = str(envelope.get("wrapped_master_key_b64") or "").strip()
+        if not salt_b64 or not wrapped_b64:
+            raise ValueError("invalid secret key envelope")
+        salt = base64.b64decode(salt_b64.encode("ascii"))
+        wrapped = base64.b64decode(wrapped_b64.encode("ascii"))
+        derived_key = _derive_password_key(
+            str(password or ""),
+            salt=salt,
+            n=int(kdf.get("n") or 16384),
+            r=int(kdf.get("r") or 8),
+            p=int(kdf.get("p") or 1),
         )
-        self._overlay_cache = self._overlay_store.load(
-            realm_id=self._active.realm_id,
-            master_key=self._active.master_key,
-        )
-        self._persist_active_overlay()
+        try:
+            return _fernet_from_key(derived_key).decrypt(wrapped).decode("utf-8")
+        except InvalidToken as exc:
+            raise ValueError("invalid password") from exc
 
-    def _unwrap_realm_master_key(
-        self,
-        *,
-        realm: dict[str, Any],
-        password: str | None,
-        allow_active: bool = False,
-    ) -> str:
-        realm_id = str(realm.get("realm_id") or "").strip()
-        if allow_active and self._active is not None and self._active.realm_id == realm_id:
-            return self._active.master_key
-        if password is None:
-            raise ValueError("password is required")
+    def _migrate_multi_realm_payload(self, *, payload: dict[str, Any], password: str) -> dict[str, Any]:
+        for realm in list(payload.get("realms") or []):
+            if not isinstance(realm, dict):
+                continue
+            try:
+                master_key = self._unwrap_legacy_realm_master_key(realm=realm, password=password)
+            except Exception:
+                continue
+            overlay_payload = self._overlay_store.load_legacy_realm(
+                realm_id=str(realm.get("realm_id") or "").strip(),
+                master_key=master_key,
+            )
+            single = self._create_single_envelope(password=password, master_key=master_key)
+            self._overlay_store.delete_all()
+            self._overlay_store.save(master_key=master_key, payload=overlay_payload)
+            return single
+        raise ValueError("invalid password")
+
+    def _unwrap_legacy_realm_master_key(self, *, realm: dict[str, Any], password: str) -> str:
         kdf = realm.get("kdf") if isinstance(realm.get("kdf"), dict) else {}
         salt_b64 = str(realm.get("salt_b64") or "").strip()
         wrapped_b64 = str(realm.get("wrapped_master_key_b64") or "").strip()
@@ -529,7 +464,7 @@ class BootstrapSecurityService:
         except InvalidToken as exc:
             raise ValueError("invalid password") from exc
 
-    def _load_master_envelope(self) -> dict[str, Any] | None:
+    def _read_master_payload(self) -> dict[str, Any] | None:
         path = _master_key_path(self.workspace)
         if not path.exists():
             return None
@@ -537,30 +472,31 @@ class BootstrapSecurityService:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return None
-        if not isinstance(payload, dict):
-            return None
-        if int(payload.get("version") or 0) != MASTER_KEY_VERSION:
-            return None
-        if str(payload.get("unlock_scope") or "").strip() != UNLOCK_SCOPE:
-            return None
-        realms = payload.get("realms")
-        if not isinstance(realms, list):
-            return None
-        return payload
+        return payload if isinstance(payload, dict) else None
 
-    def _write_master_envelope(self, payload: dict[str, Any]) -> None:
+    def _write_master_payload(self, payload: dict[str, Any]) -> None:
         _json_dump(_master_key_path(self.workspace), payload)
 
-    def _require_master_envelope(self) -> dict[str, Any]:
-        payload = self._load_master_envelope()
-        if payload is None:
-            raise ValueError("secret realms are not configured")
-        return payload
+    def _has_configured_secret_key(self) -> bool:
+        payload = self._read_master_payload()
+        return bool(payload and (self._is_single_envelope(payload) or self._is_multi_realm_payload(payload)))
 
-    def _require_active_realm(self) -> ActiveRealmContext:
-        if self._active is None:
-            raise ValueError("project is locked")
-        return self._active
+    @staticmethod
+    def _is_single_envelope(payload: dict[str, Any]) -> bool:
+        return (
+            int(payload.get("version") or 0) == MASTER_KEY_VERSION
+            and str(payload.get("unlock_scope") or "").strip() == UNLOCK_SCOPE
+            and bool(str(payload.get("salt_b64") or "").strip())
+            and bool(str(payload.get("wrapped_master_key_b64") or "").strip())
+        )
+
+    @staticmethod
+    def _is_multi_realm_payload(payload: dict[str, Any]) -> bool:
+        return (
+            int(payload.get("version") or 0) == MASTER_KEY_VERSION
+            and str(payload.get("unlock_scope") or "").strip() == UNLOCK_SCOPE
+            and isinstance(payload.get("realms"), list)
+        )
 
     def _legacy_master_key_present(self) -> bool:
         path = _master_key_path(self.workspace)
@@ -570,7 +506,7 @@ class BootstrapSecurityService:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return bool(path.read_text(encoding="utf-8").strip())
-        return not (isinstance(payload, dict) and int(payload.get("version") or 0) == MASTER_KEY_VERSION)
+        return not isinstance(payload, dict)
 
     def _legacy_config_secrets_present(self) -> bool:
         return bool(extract_config_secret_entries(_json_load(_config_path(self.workspace), default={})))
@@ -669,6 +605,7 @@ class BootstrapSecurityService:
             plain_repo._write_index(index_entries)
         if master_path.exists():
             master_path.unlink()
+        self._overlay_store.delete_all()
         return {
             "legacy_detected": True,
             "export_path": str(export_path),
@@ -694,9 +631,7 @@ def get_bootstrap_security_service(workspace: Path | None = None) -> BootstrapSe
 
 
 __all__ = [
-    "ActiveRealmContext",
     "BootstrapSecurityService",
-    "DESTROY_CONFIRM_TEXT",
     "MASTER_KEY_VERSION",
     "SecretOverlayStore",
     "UNLOCK_SCOPE",

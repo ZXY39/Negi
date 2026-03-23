@@ -139,23 +139,13 @@ class ApiClient {
         return data.item || null;
     }
 
-    static async lockBootstrap() {
-        const data = await this.post("/api/bootstrap/lock", {});
+    static async getBootstrapExitCheck() {
+        const data = await this.get("/api/bootstrap/exit-check");
         return data.item || null;
     }
 
-    static async renameBootstrapRealm(payload) {
-        const data = await this._request("PATCH", "/api/bootstrap/realm", { body: payload || {} });
-        return data.item || null;
-    }
-
-    static async createBootstrapRealm(payload) {
-        const data = await this.post("/api/bootstrap/realms", payload || {});
-        return data.item || null;
-    }
-
-    static async destroyAllBootstrapSecrets(payload) {
-        const data = await this.post("/api/bootstrap/destroy-all-secrets", payload || {});
+    static async exitBootstrap(payload) {
+        const data = await this.post("/api/bootstrap/exit", payload || {});
         return data.item || null;
     }
 

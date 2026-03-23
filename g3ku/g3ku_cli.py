@@ -12,8 +12,6 @@ import webbrowser
 from pathlib import Path
 
 import typer
-import uvicorn
-
 from g3ku.config.loader import ensure_startup_config_ready, load_config
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_PATH,
@@ -241,11 +239,13 @@ def start(
             )
         elif with_worker and reload:
             typer.echo("[g3ku] worker auto-start is disabled when --reload is enabled; run `python -m g3ku worker` separately.")
-        uvicorn.run(
-            "g3ku.web.main:app",
+        from g3ku.web.main import run_server
+
+        run_server(
             host=host,
             port=resolved_port,
             reload=reload,
+            log_level='info',
         )
     finally:
         _stop_worker_process(worker_process)

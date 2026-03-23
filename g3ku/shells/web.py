@@ -382,11 +382,10 @@ async def shutdown_web_runtime() -> None:
 
 
 def run_web_shell(*, host: str, port: int, reload: bool, debug: bool, set_debug_mode) -> None:
-    import uvicorn
+    from g3ku.web.main import run_server
 
     set_debug_mode(debug)
-    uvicorn.run(
-        'g3ku.web.main:app',
+    run_server(
         host=host,
         port=port,
         reload=reload,

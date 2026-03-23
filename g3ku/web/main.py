@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
+from g3ku.web.server_control import request_server_shutdown, set_server_instance
 from g3ku.web.windows_asyncio import install_windows_connection_reset_filter
 from main.api import router as main_router
 
@@ -97,7 +98,20 @@ async def serve_frontend_file(full_path: str):
 
 
 def run():
-    uvicorn.run('g3ku.web.main:app', host='127.0.0.1', port=3000, reload=False)
+    run_server(host='127.0.0.1', port=3000, reload=False, log_level='info')
+
+
+def run_server(*, host: str, port: int, reload: bool, log_level: str = 'info') -> None:
+    if reload:
+        uvicorn.run('g3ku.web.main:app', host=host, port=port, reload=True, log_level=log_level)
+        return
+    config = uvicorn.Config('g3ku.web.main:app', host=host, port=port, reload=False, log_level=log_level)
+    server = uvicorn.Server(config)
+    set_server_instance(server)
+    try:
+        server.run()
+    finally:
+        set_server_instance(None)
 
 
 if __name__ == '__main__':
