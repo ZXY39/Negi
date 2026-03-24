@@ -17,6 +17,8 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
+from main.service.task_stall_callback import normalize_task_stall_payload
+from main.service.task_stall_notifier import stalled_minutes_since, stall_bucket_minutes
 from main.service.task_terminal_callback import build_task_terminal_payload, normalize_task_terminal_payload
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
@@ -87,6 +89,30 @@ class WebSessionHeartbeatService:
             source="main_runtime",
             reason="task_terminal",
             dedupe_key=str(normalized_payload.get("dedupe_key") or f"task-terminal:{task_id}:{status}").strip(),
+            payload=dict(normalized_payload),
+            delay_seconds=0.0,
+        )
+        if event is None:
+            return False
+        if self._started:
+            self._wake.request(session_id, delay_s=0.25)
+        return True
+
+    def enqueue_task_stall_payload(self, payload: dict[str, Any] | None) -> bool:
+        normalized_payload = normalize_task_stall_payload(payload)
+        session_id = str(normalized_payload.get("session_id") or "").strip()
+        task_id = str(normalized_payload.get("task_id") or "").strip()
+        bucket_minutes = int(normalized_payload.get("bucket_minutes") or 0)
+        if not session_id or not task_id or bucket_minutes <= 0:
+            return False
+        event = self._events.enqueue(
+            session_id=session_id,
+            source="main_runtime",
+            reason="task_stall",
+            dedupe_key=str(
+                normalized_payload.get("dedupe_key")
+                or f"task-stall:{task_id}:{bucket_minutes}:{normalized_payload.get('last_visible_output_at') or ''}"
+            ).strip(),
             payload=dict(normalized_payload),
             delay_seconds=0.0,
         )
@@ -230,6 +256,93 @@ class WebSessionHeartbeatService:
             refreshed.append(event)
         return refreshed
 
+    def _refresh_task_stall_events(
+        self,
+        events: list[SessionHeartbeatEvent],
+    ) -> tuple[list[SessionHeartbeatEvent], set[str]]:
+        service = self._main_task_service
+        refreshed: list[SessionHeartbeatEvent] = []
+        discarded_event_ids: set[str] = set()
+        grouped: dict[str, list[SessionHeartbeatEvent]] = {}
+        for event in events:
+            if str(event.reason or "").strip().lower() != "task_stall":
+                refreshed.append(event)
+                continue
+            task_id = str((event.payload or {}).get("task_id") or "").strip()
+            if not task_id:
+                discarded_event_ids.add(event.event_id)
+                continue
+            grouped.setdefault(task_id, []).append(event)
+        for task_id, bucket_events in grouped.items():
+            bucket_events.sort(
+                key=lambda item: (
+                    int((item.payload or {}).get("bucket_minutes") or 0),
+                    str(item.created_at or ""),
+                    str(item.event_id or ""),
+                ),
+                reverse=True,
+            )
+            latest = bucket_events[0]
+            discarded_event_ids.update(event.event_id for event in bucket_events[1:])
+            task = service.get_task(task_id) if service is not None and hasattr(service, "get_task") else None
+            if task is None:
+                discarded_event_ids.add(latest.event_id)
+                continue
+            if str(getattr(task, "status", "") or "").strip().lower() != "in_progress":
+                discarded_event_ids.add(latest.event_id)
+                continue
+            if bool(getattr(task, "is_paused", False)) or bool(getattr(task, "pause_requested", False)):
+                discarded_event_ids.add(latest.event_id)
+                continue
+            if bool(getattr(task, "cancel_requested", False)):
+                discarded_event_ids.add(latest.event_id)
+                continue
+            runtime_state = getattr(getattr(service, "log_service", None), "read_runtime_state", lambda _task_id: None)(task_id) or {}
+            last_visible_output_at = str(
+                runtime_state.get("last_visible_output_at")
+                or (latest.payload or {}).get("last_visible_output_at")
+                or getattr(task, "created_at", "")
+                or ""
+            ).strip()
+            current_bucket = stall_bucket_minutes(last_visible_output_at)
+            payload_bucket = int((latest.payload or {}).get("bucket_minutes") or 0)
+            if current_bucket <= 0 or current_bucket < payload_bucket:
+                discarded_event_ids.add(latest.event_id)
+                continue
+            detail = service.get_task_detail_payload(task_id, mark_read=False) if hasattr(service, "get_task_detail_payload") else {}
+            origin_session_id = (
+                str(service._task_origin_session_id(task) or "").strip()
+                if hasattr(service, "_task_origin_session_id")
+                else str(getattr(task, "session_id", "") or "").strip()
+            ) or "web:shared"
+            latest.payload = normalize_task_stall_payload(
+                {
+                    **dict(latest.payload or {}),
+                    "task_id": task_id,
+                    "session_id": str((latest.payload or {}).get("session_id") or origin_session_id).strip() or "web:shared",
+                    "title": str((latest.payload or {}).get("title") or getattr(task, "title", "") or task_id).strip() or task_id,
+                    "stalled_minutes": stalled_minutes_since(last_visible_output_at),
+                    "bucket_minutes": current_bucket,
+                    "last_visible_output_at": last_visible_output_at,
+                    "brief_text": str((latest.payload or {}).get("brief_text") or getattr(task, "brief_text", "") or "").strip(),
+                    "latest_node_summary": (
+                        service._task_stall_latest_node_summary(detail)
+                        if hasattr(service, "_task_stall_latest_node_summary")
+                        else str((latest.payload or {}).get("latest_node_summary") or "").strip()
+                    ),
+                    "runtime_summary_excerpt": (
+                        service._task_stall_runtime_summary(detail)
+                        if hasattr(service, "_task_stall_runtime_summary")
+                        else str((latest.payload or {}).get("runtime_summary_excerpt") or "").strip()
+                    ),
+                }
+            )
+            if not latest.payload:
+                discarded_event_ids.add(latest.event_id)
+                continue
+            refreshed.append(latest)
+        return refreshed, discarded_event_ids
+
     def _requeue_running_background_events(self, session_id: str, events: list[SessionHeartbeatEvent]) -> None:
         for event in events:
             if str(event.reason or "").strip().lower() != "tool_background":
@@ -270,6 +383,7 @@ class WebSessionHeartbeatService:
 
     def _build_prompt(self, events: list[SessionHeartbeatEvent]) -> str:
         has_tool_background = any(str(event.reason or "").strip().lower() == "tool_background" for event in events)
+        has_task_stall = any(str(event.reason or "").strip().lower() == "task_stall" for event in events)
         lines = [
             "This is a background heartbeat. Do not explain internal mechanics.",
             f"If no user-facing update is needed, reply with exactly {HEARTBEAT_OK}.",
@@ -282,6 +396,14 @@ class WebSessionHeartbeatService:
                     "Do not call wait_tool_execution in this heartbeat turn.",
                     "Only call stop_tool_execution if you are certain the background execution should be terminated.",
                     f"If the tool is still running and no user-visible update is needed, reply with exactly {HEARTBEAT_OK}.",
+                ]
+            )
+        if has_task_stall:
+            lines.extend(
+                [
+                    "For task_stall events, first inspect the task with task_progress(task_id).",
+                    "If the task appears stuck and must be stopped, you may call stop_tool_execution with the task_id.",
+                    "After any stop decision, explain the likely cause and the next follow-up action.",
                 ]
             )
         heartbeat_text = self._read_heartbeat_text()
@@ -315,6 +437,25 @@ class WebSessionHeartbeatService:
                 lines.append(f"- Background tool {tool_name} ({execution_id}) reached a terminal state")
                 lines.append(f"  Status: {status}")
                 lines.append(f"  Summary: {summary}")
+                continue
+            if reason == "task_stall":
+                task_id = str(payload.get("task_id") or "").strip()
+                title = str(payload.get("title") or task_id or "task").strip() or "task"
+                stalled_minutes = self._int_value(payload.get("stalled_minutes"))
+                bucket_minutes = self._int_value(payload.get("bucket_minutes"))
+                brief_text = str(payload.get("brief_text") or "").strip() or "No task summary."
+                latest_node_summary = str(payload.get("latest_node_summary") or "").strip() or "No latest node summary."
+                runtime_excerpt = str(payload.get("runtime_summary_excerpt") or "").strip() or "No runtime summary."
+                last_visible_output_at = str(payload.get("last_visible_output_at") or "").strip() or "unknown"
+                lines.append(f"- Task {title} ({task_id}) may be stalled")
+                lines.append(f"  Silent for: {stalled_minutes} min")
+                lines.append(f"  Trigger bucket: {bucket_minutes} min")
+                lines.append(f"  Last visible output at: {last_visible_output_at}")
+                lines.append(f"  Brief: {brief_text}")
+                lines.append(f"  Latest node: {latest_node_summary}")
+                lines.append(f"  Runtime: {runtime_excerpt}")
+                lines.append("  Suggested first step: task_progress(task_id)")
+                lines.append("  If needed: stop_tool_execution(task_id)")
                 continue
             title = str(payload.get("title") or payload.get("task_id") or "task").strip() or "task"
             task_id = str(payload.get("task_id") or "").strip()
@@ -379,6 +520,31 @@ class WebSessionHeartbeatService:
                 store(dedupe_key, delivered_at=delivered_at)
             except Exception:
                 logger.debug("task terminal outbox ack skipped for {}", dedupe_key)
+
+    @staticmethod
+    def _task_stall_events(events: list[SessionHeartbeatEvent]) -> list[SessionHeartbeatEvent]:
+        return [
+            event
+            for event in list(events or [])
+            if str(event.reason or "").strip().lower() == "task_stall"
+        ]
+
+    def _ack_task_stall_events(self, events: list[SessionHeartbeatEvent]) -> None:
+        stall_events = self._task_stall_events(events)
+        if not stall_events:
+            return
+        store = getattr(getattr(self._main_task_service, "store", None), "mark_task_stall_outbox_delivered", None)
+        if not callable(store):
+            return
+        delivered_at = now_iso()
+        for event in stall_events:
+            dedupe_key = str(event.dedupe_key or "").strip()
+            if not dedupe_key:
+                continue
+            try:
+                store(dedupe_key, delivered_at=delivered_at)
+            except Exception:
+                logger.debug("task stall outbox ack skipped for {}", dedupe_key)
 
     def _serialize_tool_event(self, event: AgentEvent) -> dict[str, Any] | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
@@ -494,6 +660,13 @@ class WebSessionHeartbeatService:
         if not events:
             return next_delay
         events = await self._refresh_tool_background_events(events)
+        events, discarded_task_stall_ids = self._refresh_task_stall_events(events)
+        if discarded_task_stall_ids:
+            discarded_events = self._events.pop_many(key, event_ids=discarded_task_stall_ids)
+            self._ack_task_stall_events(discarded_events)
+            events = [event for event in events if event.event_id not in discarded_task_stall_ids]
+        if not events:
+            return self._events.next_delay(key)
         reasons = sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events})
         heartbeat_reason = reasons[0] if len(reasons) == 1 else "mixed"
         user_input = UserInputMessage(
@@ -541,14 +714,16 @@ class WebSessionHeartbeatService:
 
         if not self._session_exists(key):
             event_ids = {event.event_id for event in events}
-            self._events.pop_many(key, event_ids=event_ids)
+            popped = self._events.pop_many(key, event_ids=event_ids)
             self._requeue_running_background_events(key, events)
+            self._ack_task_stall_events(popped)
             self.clear_session(key)
             return None
         if not output or output == HEARTBEAT_OK:
             event_ids = {event.event_id for event in events}
-            self._events.pop_many(key, event_ids=event_ids)
+            popped = self._events.pop_many(key, event_ids=event_ids)
             self._requeue_running_background_events(key, events)
+            self._ack_task_stall_events(popped)
             next_delay = self._events.next_delay(key)
             self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
             return next_delay
@@ -564,8 +739,9 @@ class WebSessionHeartbeatService:
         self._persist_assistant_reply(key, text=output, task_ids=task_ids, reason=heartbeat_reason)
         self._publish_ceo(key, "ceo.reply.final", {"text": output, "source": "heartbeat"})
         event_ids = {event.event_id for event in events}
-        self._events.pop_many(key, event_ids=event_ids)
+        popped = self._events.pop_many(key, event_ids=event_ids)
         self._requeue_running_background_events(key, events)
         self._ack_task_terminal_events(events)
+        self._ack_task_stall_events(popped)
         next_delay = self._events.next_delay(key)
         return next_delay

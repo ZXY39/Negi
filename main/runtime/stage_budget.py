@@ -48,13 +48,10 @@ def visible_tools_for_stage_iteration(
     transition_required: bool,
     stage_tool_name: str = STAGE_TOOL_NAME,
 ) -> dict[str, Any]:
-    if has_active_stage and not transition_required:
-        return dict(tools or {})
-    return {
-        name: tool
-        for name, tool in dict(tools or {}).items()
-        if str(name or "").strip() == str(stage_tool_name or "").strip()
-    }
+    _ = has_active_stage, transition_required, stage_tool_name
+    # Keep all tools visible to the model so it can plan against the real capability set.
+    # Stage rules are enforced at execution time via `stage_gate_error_for_tool`.
+    return dict(tools or {})
 
 
 def stage_gate_error_for_tool(

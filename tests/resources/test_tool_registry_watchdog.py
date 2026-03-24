@@ -42,8 +42,7 @@ class _SlowCompleteTool(Tool):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("actor_role", ["ceo", "execution", "inspection"])
-async def test_tool_registry_langchain_tool_hands_off_long_tool_for_watchdog_enabled_roles(actor_role: str) -> None:
+async def test_tool_registry_langchain_tool_hands_off_long_tool_for_direct_ceo_path() -> None:
     registry = ToolRegistry()
     registry.register(_SlowCompleteTool())
     heartbeat = _HeartbeatRecorder()
@@ -59,7 +58,7 @@ async def test_tool_registry_langchain_tool_hands_off_long_tool_for_watchdog_ena
 
     token = registry.push_runtime_context(
         {
-            "actor_role": actor_role,
+            "actor_role": "ceo",
             "loop": loop,
             "tool_watchdog": {
                 "poll_interval_seconds": 0.01,
@@ -71,7 +70,7 @@ async def test_tool_registry_langchain_tool_hands_off_long_tool_for_watchdog_ena
             },
             "on_progress": _on_progress,
             "emit_lifecycle": True,
-            "session_key": f"web:test-watchdog-{actor_role}",
+            "session_key": "web:test-watchdog",
         }
     )
     try:
@@ -89,7 +88,7 @@ async def test_tool_registry_langchain_tool_hands_off_long_tool_for_watchdog_ena
 
     assert len(heartbeat.terminal_calls) == 1
     session_id, terminal_payload = heartbeat.terminal_calls[0]
-    assert session_id == f"web:test-watchdog-{actor_role}"
+    assert session_id == "web:test-watchdog"
     assert terminal_payload["status"] == "completed"
     assert terminal_payload["execution_id"] == payload["execution_id"]
     assert terminal_payload["tool_name"] == "slow_complete"
@@ -108,7 +107,7 @@ async def test_tool_registry_langchain_tool_hands_off_long_tool_for_watchdog_ena
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_bypasses_watchdog_for_unknown_roles() -> None:
+async def test_tool_registry_bypasses_watchdog_for_non_ceo_roles() -> None:
     registry = ToolRegistry()
     registry.register(_SlowCompleteTool())
     heartbeat = _HeartbeatRecorder()
@@ -120,7 +119,7 @@ async def test_tool_registry_bypasses_watchdog_for_unknown_roles() -> None:
 
     token = registry.push_runtime_context(
         {
-            "actor_role": "worker",
+            "actor_role": "execution",
             "loop": loop,
             "tool_watchdog": {
                 "poll_interval_seconds": 0.01,
@@ -128,7 +127,7 @@ async def test_tool_registry_bypasses_watchdog_for_unknown_roles() -> None:
             },
             "tool_snapshot_supplier": lambda: {
                 "status": "running",
-                "assistant_text": "Unsupported actor roles should never detach this tool",
+                "assistant_text": "Execution node should never detach this tool",
             },
             "session_key": "web:test-no-watchdog",
         }

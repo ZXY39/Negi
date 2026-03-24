@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -38,6 +39,10 @@ def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
     return f'{text[: max_chars - 3].rstrip()}...'
 
 
+def _precise_now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec='microseconds')
+
+
 _EXECUTION_STAGE_METADATA_KEY = 'execution_stages'
 _EXECUTION_STAGE_TOOL_NAME = STAGE_TOOL_NAME
 _EXECUTION_STAGE_MODE_SELF = '自主执行'
@@ -61,6 +66,7 @@ class TaskLogService:
         self._content_store = content_store
         self._snapshot_payload_builder = None
         self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
+        self._task_visible_output_listeners: list[Callable[[str, str], None]] = []
         self._task_locks: dict[str, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
         self._projection_service = TaskProjectionService(store=store, tree_builder=tree_builder)
@@ -74,6 +80,10 @@ class TaskLogService:
     def add_task_terminal_listener(self, listener: Callable[[TaskRecord], None]) -> None:
         if callable(listener):
             self._task_terminal_listeners.append(listener)
+
+    def add_task_visible_output_listener(self, listener: Callable[[str, str], None]) -> None:
+        if callable(listener):
+            self._task_visible_output_listeners.append(listener)
 
     def _task_lock(self, task_id: str) -> threading.RLock:
         key = str(task_id or '').strip()
@@ -165,6 +175,8 @@ class TaskLogService:
                 task.task_id,
                 root_node_id=task.root_node_id,
                 paused=False,
+                last_visible_output_at=_precise_now_iso(),
+                last_stall_notice_bucket_minutes=0,
                 active_node_ids=[root.node_id],
                 runnable_node_ids=[root.node_id],
                 waiting_node_ids=[],
@@ -218,6 +230,7 @@ class TaskLogService:
         with self._task_lock(task_id):
             current = self._store.get_node(node_id)
             call_index = len(list(getattr(current, 'output', []) or [])) + 1 if current is not None else 1
+            changed_at = now_iso()
             tracked_usage = bool(getattr(getattr(current, 'token_usage', None), 'tracked', False))
             delta_usage = None
             delta_usage_by_model: list[Any] = []
@@ -240,10 +253,10 @@ class TaskLogService:
                         content=text,
                         content_ref=ref,
                         tool_calls=list(tool_calls or []),
-                        created_at=now_iso(),
+                        created_at=changed_at,
                     )
                 )
-                update: dict[str, Any] = {'output': output, 'updated_at': now_iso()}
+                update: dict[str, Any] = {'output': output, 'updated_at': changed_at}
                 if delta_usage is not None and bool(getattr(record.token_usage, 'tracked', False)):
                     update['token_usage'] = merge_token_usage_records([record.token_usage, delta_usage], tracked=True)
                     update['token_usage_by_model'] = merge_token_usage_by_model(
@@ -277,10 +290,12 @@ class TaskLogService:
                             request_message_chars=request_message_chars,
                         ),
                     )
+                self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
             return updated
 
     def update_node_check_result(self, task_id: str, node_id: str, check_result: str) -> NodeRecord | None:
         with self._task_lock(task_id):
+            changed_at = now_iso()
             text, ref = self._summarize_content(
                 check_result,
                 task_id=task_id,
@@ -290,7 +305,7 @@ class TaskLogService:
             )
             updated = self._store.update_node(
                 node_id,
-                lambda record: record.model_copy(update={'check_result': text, 'check_result_ref': ref, 'updated_at': now_iso()}),
+                lambda record: record.model_copy(update={'check_result': text, 'check_result_ref': ref, 'updated_at': changed_at}),
             )
             self.refresh_task_view(task_id, mark_unread=True)
             task = self._store.get_task(task_id)
@@ -300,6 +315,7 @@ class TaskLogService:
                     event_type='task.node.updated',
                     data={'task_id': task_id, 'node_id': node_id},
                 )
+                self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
             return updated
 
     def update_node_status(
@@ -312,6 +328,7 @@ class TaskLogService:
         failure_reason: str = '',
     ) -> NodeRecord | None:
         with self._task_lock(task_id):
+            changed_at = now_iso()
             final_text, final_ref = self._summarize_content(
                 final_output,
                 task_id=task_id,
@@ -334,8 +351,8 @@ class TaskLogService:
                         'final_output': final_text or record.final_output,
                         'final_output_ref': final_ref or record.final_output_ref,
                         'failure_reason': failure_text or record.failure_reason,
-                        'finished_at': now_iso() if status in {'success', 'failed'} else record.finished_at,
-                        'updated_at': now_iso(),
+                        'finished_at': changed_at if status in {'success', 'failed'} else record.finished_at,
+                        'updated_at': changed_at,
                     }
                 ),
             )
@@ -360,6 +377,7 @@ class TaskLogService:
                             event_type='task.node.updated',
                             data={'task_id': task_id, 'node_id': propagated_node_id},
                         )
+                self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
             return updated
 
     @staticmethod
@@ -1010,6 +1028,8 @@ class TaskLogService:
                 'paused': bool(task.is_paused),
                 'pause_requested': bool(task.pause_requested),
                 'cancel_requested': bool(task.cancel_requested),
+                'last_visible_output_at': _precise_now_iso(),
+                'last_stall_notice_bucket_minutes': 0,
                 'active_node_ids': [],
                 'runnable_node_ids': [],
                 'waiting_node_ids': [],
@@ -1436,6 +1456,11 @@ class TaskLogService:
     @classmethod
     def _sanitize_runtime_state(cls, payload: dict[str, Any]) -> dict[str, Any]:
         state = dict(payload or {})
+        state['last_visible_output_at'] = str(state.get('last_visible_output_at') or '').strip()
+        try:
+            state['last_stall_notice_bucket_minutes'] = max(0, int(state.get('last_stall_notice_bucket_minutes') or 0))
+        except (TypeError, ValueError):
+            state['last_stall_notice_bucket_minutes'] = 0
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
 
@@ -1484,5 +1509,16 @@ class TaskLogService:
         for listener in list(self._task_terminal_listeners):
             try:
                 listener(task)
+            except Exception:
+                continue
+
+    def _notify_task_visible_output(self, task_id: str, *, occurred_at: str) -> None:
+        task_key = str(task_id or '').strip()
+        timestamp = str(occurred_at or '').strip() or _precise_now_iso()
+        if not task_key:
+            return
+        for listener in list(self._task_visible_output_listeners):
+            try:
+                listener(task_key, occurred_at=timestamp)
             except Exception:
                 continue

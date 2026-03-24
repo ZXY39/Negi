@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -7,10 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.agent.rag_memory import G3kuHybridStore
+from g3ku.agent.rag_memory import G3kuHybridStore, _load_workspace_dashscope_settings
 from g3ku.providers.openai_codex_provider import _convert_messages
 from g3ku.resources import ResourceManager
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
+from g3ku.security import get_bootstrap_security_service
 
 
 class _CloseSpy:
@@ -338,6 +340,34 @@ def test_g3ku_hybrid_store_releases_owner_lock_after_last_reference(tmp_path, mo
         assert calls["released"] == 1
     finally:
         G3kuHybridStore._dense_backend_registry.clear()
+
+
+def test_load_workspace_dashscope_settings_reads_api_key_from_security_overlay(tmp_path):
+    workspace = tmp_path / "workspace"
+    config_dir = workspace / ".g3ku"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "dashscope": {
+                        "apiKey": "",
+                        "apiBase": "https://dashscope.aliyuncs.com",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    security = get_bootstrap_security_service(workspace)
+    security.setup_initial_realm(password="test-password")
+    security.set_overlay_values({"config.providers.dashscope.apiKey": "overlay-key"})
+
+    api_key, api_base = _load_workspace_dashscope_settings(workspace)
+
+    assert api_key == "overlay-key"
+    assert api_base == "https://dashscope.aliyuncs.com"
 
 
 

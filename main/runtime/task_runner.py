@@ -10,16 +10,19 @@ from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 
 
 class TaskRunner:
-    def __init__(self, *, store, log_service, node_runner) -> None:
+    def __init__(self, *, store, log_service, node_runner, stall_notifier=None) -> None:
         self._store = store
         self._log_service = log_service
         self._node_runner = node_runner
         self._active_tasks: dict[str, asyncio.Task[None]] = {}
+        self._stall_notifier = stall_notifier
 
     def start_background(self, task_id: str) -> None:
         task = self._active_tasks.get(task_id)
         if task is not None and not task.done():
             return
+        if self._stall_notifier is not None and hasattr(self._stall_notifier, 'start_task'):
+            self._stall_notifier.start_task(task_id)
         self._active_tasks[task_id] = asyncio.create_task(self.run_task(task_id), name=f'main-task:{task_id}')
 
     async def run_task(self, task_id: str) -> None:
@@ -95,6 +98,12 @@ class TaskRunner:
                     )
                 else:
                     self._log_service.refresh_task_view(task_id, mark_unread=True)
+            latest = self._store.get_task(task_id)
+            if self._stall_notifier is not None and latest is not None:
+                if bool(getattr(latest, 'is_paused', False)) or bool(getattr(latest, 'pause_requested', False)):
+                    self._stall_notifier.pause_task(task_id)
+                elif str(getattr(latest, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                    self._stall_notifier.terminal_task(latest)
             self._active_tasks.pop(task_id, None)
 
     async def _run_final_acceptance_if_needed(self, task_id: str) -> NodeFinalResult:
@@ -253,12 +262,16 @@ class TaskRunner:
         task_record = self._store.get_task(task_id)
         if task_record is not None:
             self._log_service.request_cancel(task_id)
+        if self._stall_notifier is not None and hasattr(self._stall_notifier, 'cancel_requested'):
+            self._stall_notifier.cancel_requested(task_id)
         active = self._active_tasks.get(task_id)
         if active is not None and not active.done():
             active.cancel()
 
     async def pause(self, task_id: str) -> None:
         self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+        if self._stall_notifier is not None and hasattr(self._stall_notifier, 'pause_task'):
+            self._stall_notifier.pause_task(task_id)
         active = self._active_tasks.get(task_id)
         if active is not None and not active.done():
             active.cancel()
@@ -270,6 +283,8 @@ class TaskRunner:
         if task_record is None:
             return
         self._log_service.set_pause_state(task_id, pause_requested=False, is_paused=False)
+        if self._stall_notifier is not None and hasattr(self._stall_notifier, 'reset_visible_output'):
+            self._stall_notifier.reset_visible_output(task_id)
         self.start_background(task_id)
 
     async def close(self) -> None:

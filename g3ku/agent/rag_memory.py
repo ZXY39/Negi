@@ -37,6 +37,7 @@ from g3ku.llm_config.runtime_resolver import (
     resolve_memory_embedding_target,
     resolve_memory_rerank_target,
 )
+from g3ku.security import apply_config_secret_entries, get_bootstrap_security_service
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
 
 try:
@@ -315,6 +316,12 @@ def _load_workspace_dashscope_settings(workspace: Path) -> tuple[str, str | None
         raw_data = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return env_key, env_base
+
+    try:
+        security = get_bootstrap_security_service(workspace)
+        raw_data = apply_config_secret_entries(raw_data, security.current_overlay())
+    except Exception:
+        pass
 
     providers = raw_data.get("providers", {})
     if not isinstance(providers, dict):

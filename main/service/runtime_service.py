@@ -55,6 +55,16 @@ from main.service.task_terminal_callback import (
     resolve_task_terminal_callback_token,
     resolve_task_terminal_callback_url,
 )
+from main.service.task_stall_callback import (
+    normalize_task_stall_payload,
+    resolve_task_stall_callback_token,
+    resolve_task_stall_callback_url,
+)
+from main.service.task_stall_notifier import (
+    TaskStallNotifier,
+    stalled_minutes_since,
+    stall_bucket_minutes,
+)
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -150,6 +160,9 @@ class MainRuntimeService:
             registry=self.registry,
             content_store=self.content_store,
         )
+        self.task_stall_notifier = TaskStallNotifier(service=self)
+        self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
+        self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
         self.query_service = TaskQueryService(store=self.store, file_store=self.file_store, log_service=self.log_service)
         self.log_service.set_snapshot_payload_builder(lambda task_id: self.get_task_detail_payload(task_id, mark_read=False))
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
@@ -184,12 +197,18 @@ class MainRuntimeService:
             max_parallel_child_pipelines=max_parallel_child_pipelines,
             context_enricher=self._enrich_node_messages,
         )
-        self.task_runner = TaskRunner(store=self.store, log_service=self.log_service, node_runner=self.node_runner)
+        self.task_runner = TaskRunner(
+            store=self.store,
+            log_service=self.log_service,
+            node_runner=self.node_runner,
+            stall_notifier=self.task_stall_notifier,
+        )
         self._started = False
         self._runtime_loop = None
         self._command_poller_task: asyncio.Task[Any] | None = None
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         if self.execution_mode == 'worker':
             self.log_service.add_task_terminal_listener(self._enqueue_task_terminal_callback)
 
@@ -219,9 +238,11 @@ class MainRuntimeService:
                     continue
                 self._recover_interrupted_task(task.task_id)
                 self.task_runner.start_background(task.task_id)
+            self.task_stall_notifier.bootstrap_running_tasks()
         if self.execution_mode == 'worker':
             self._start_worker_loops()
             self._schedule_pending_task_terminal_callbacks()
+            self._schedule_pending_task_stall_callbacks()
 
     def _start_worker_loops(self) -> None:
         if self._command_poller_task is None or self._command_poller_task.done():
@@ -789,6 +810,10 @@ class MainRuntimeService:
         if hasattr(self, '_react_loop') and self._react_loop is not None:
             setattr(self._react_loop, '_tool_execution_manager', None)
 
+    @staticmethod
+    def _stall_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec='microseconds')
+
     def _enqueue_task_terminal_callback(self, task: TaskRecord) -> None:
         if self.execution_mode != 'worker':
             return
@@ -811,6 +836,198 @@ class MainRuntimeService:
             logger.exception('failed to persist task terminal outbox for {}', dedupe_key)
             return
         self._schedule_task_terminal_delivery(dedupe_key)
+
+    def emit_task_stall(self, payload: dict[str, Any] | None) -> bool:
+        normalized = normalize_task_stall_payload(payload)
+        if not normalized:
+            return False
+        if self.execution_mode == 'worker':
+            self._enqueue_task_stall_callback(normalized)
+            return True
+        loop = getattr(self, '_runtime_loop', None)
+        heartbeat = getattr(loop, 'web_session_heartbeat', None) if loop is not None else None
+        if heartbeat is None or not hasattr(heartbeat, 'enqueue_task_stall_payload'):
+            return False
+        return bool(heartbeat.enqueue_task_stall_payload(normalized))
+
+    def build_task_stall_payload(
+        self,
+        task_id: str,
+        *,
+        bucket_minutes: int,
+        last_visible_output_at: str | None = None,
+    ) -> dict[str, Any]:
+        task = self.get_task(task_id)
+        if task is None:
+            return {}
+        origin_session_id = self._task_origin_session_id(task)
+        if not origin_session_id.startswith('web:'):
+            return {}
+        if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
+            return {}
+        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
+            return {}
+        if bool(getattr(task, 'cancel_requested', False)):
+            return {}
+        runtime_state = self.log_service.read_runtime_state(task.task_id) or {}
+        visible_at = str(last_visible_output_at or runtime_state.get('last_visible_output_at') or task.created_at or '').strip()
+        minute_seconds = float(getattr(self.task_stall_notifier, 'minute_seconds', 60.0) or 60.0)
+        current_bucket = stall_bucket_minutes(visible_at, minute_seconds=minute_seconds)
+        if current_bucket <= 0:
+            return {}
+        active_bucket = max(current_bucket, max(0, int(bucket_minutes or 0)))
+        stalled_minutes = max(
+            stalled_minutes_since(visible_at, minute_seconds=minute_seconds),
+            active_bucket,
+        )
+        detail = self.get_task_detail_payload(task.task_id, mark_read=False) or {}
+        return normalize_task_stall_payload(
+            {
+                'task_id': task.task_id,
+                'session_id': origin_session_id,
+                'title': str(getattr(task, 'title', '') or task.task_id).strip() or task.task_id,
+                'stalled_minutes': stalled_minutes,
+                'bucket_minutes': active_bucket,
+                'last_visible_output_at': visible_at,
+                'brief_text': str(getattr(task, 'brief_text', '') or '').strip(),
+                'latest_node_summary': self._task_stall_latest_node_summary(detail),
+                'runtime_summary_excerpt': self._task_stall_runtime_summary(detail),
+            }
+        )
+
+    @staticmethod
+    def _task_stall_latest_node_summary(detail: dict[str, Any]) -> str:
+        progress = detail.get('progress') if isinstance(detail.get('progress'), dict) else {}
+        latest_node = progress.get('latest_node') if isinstance(progress.get('latest_node'), dict) else {}
+        if not latest_node:
+            return ''
+        title = str(latest_node.get('title') or latest_node.get('node_id') or 'node').strip() or 'node'
+        status = str(latest_node.get('status') or 'in_progress').strip() or 'in_progress'
+        output = str(latest_node.get('output') or latest_node.get('output_excerpt') or '').strip()
+        text = f'{title} [{status}]'
+        if output:
+            text = f'{text}: {output}'
+        return text[:240]
+
+    @staticmethod
+    def _task_stall_runtime_summary(detail: dict[str, Any]) -> str:
+        progress = detail.get('progress') if isinstance(detail.get('progress'), dict) else {}
+        live_state = progress.get('live_state') if isinstance(progress.get('live_state'), dict) else {}
+        frames = [item for item in list(live_state.get('frames') or []) if isinstance(item, dict)]
+        parts: list[str] = []
+        for frame in frames[:3]:
+            node_id = str(frame.get('node_id') or '').strip() or 'node'
+            phase = str(frame.get('phase') or '').strip() or 'waiting'
+            tool_calls = [item for item in list(frame.get('tool_calls') or []) if isinstance(item, dict)]
+            child_pipelines = [item for item in list(frame.get('child_pipelines') or []) if isinstance(item, dict)]
+            running_tools = sum(
+                1
+                for item in tool_calls
+                if str(item.get('status') or '').strip().lower() in {'queued', 'running'}
+            )
+            running_children = sum(
+                1
+                for item in child_pipelines
+                if str(item.get('status') or '').strip().lower() in {'queued', 'running'}
+            )
+            summary = f'{node_id} phase={phase}'
+            if tool_calls:
+                summary = f'{summary} tools={running_tools}/{len(tool_calls)}'
+            if child_pipelines:
+                summary = f'{summary} children_running={running_children}/{len(child_pipelines)}'
+            parts.append(summary)
+        return '; '.join(parts)[:320]
+
+    def _enqueue_task_stall_callback(self, payload: dict[str, Any]) -> None:
+        if self.execution_mode != 'worker':
+            return
+        normalized = normalize_task_stall_payload(payload)
+        if not normalized:
+            return
+        dedupe_key = str(normalized.get('dedupe_key') or '').strip()
+        if not dedupe_key:
+            return
+        created_at = str(normalized.get('last_visible_output_at') or now_iso()).strip() or now_iso()
+        try:
+            self.store.put_task_stall_outbox(
+                dedupe_key=dedupe_key,
+                task_id=str(normalized.get('task_id') or '').strip(),
+                session_id=str(normalized.get('session_id') or '').strip() or 'web:shared',
+                created_at=created_at,
+                payload=normalized,
+            )
+        except Exception:
+            logger.exception('failed to persist task stall outbox for {}', dedupe_key)
+            return
+        self._schedule_task_stall_delivery(dedupe_key)
+
+    def _schedule_pending_task_stall_callbacks(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        for entry in self.store.list_pending_task_stall_outbox(limit=500):
+            dedupe_key = str(entry.get('dedupe_key') or '').strip()
+            if dedupe_key:
+                self._schedule_task_stall_delivery(dedupe_key)
+
+    def _schedule_task_stall_delivery(self, dedupe_key: str) -> None:
+        key = str(dedupe_key or '').strip()
+        if self.execution_mode != 'worker' or not key:
+            return
+        current = self._task_stall_delivery_tasks.get(key)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._deliver_task_stall_outbox(key), name=f'main-runtime-task-stall:{key}')
+        self._task_stall_delivery_tasks[key] = task
+        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_stall_delivery_task(stored_key, done_task))
+
+    def _clear_task_stall_delivery_task(self, dedupe_key: str, done_task: asyncio.Task[Any]) -> None:
+        current = self._task_stall_delivery_tasks.get(dedupe_key)
+        if current is done_task:
+            self._task_stall_delivery_tasks.pop(dedupe_key, None)
+
+    async def _deliver_task_stall_outbox(self, dedupe_key: str) -> None:
+        retry_delays = [0.0, 0.5, 2.0, 5.0]
+        for delay_seconds in retry_delays:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            entry = self.store.get_task_stall_outbox(dedupe_key)
+            if not entry:
+                return
+            if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+                return
+            payload = dict(entry.get('payload') or {})
+            callback_url = resolve_task_stall_callback_url(workspace=Path.cwd())
+            if not callback_url:
+                self.store.mark_task_stall_outbox_attempt(
+                    dedupe_key,
+                    attempted_at=now_iso(),
+                    error_text='task_stall_callback_url_unavailable',
+                )
+                return
+            headers: dict[str, str] = {}
+            callback_token = resolve_task_stall_callback_token(workspace=Path.cwd())
+            if callback_token:
+                headers['x-g3ku-internal-token'] = callback_token
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    response = await client.post(callback_url, json=payload, headers=headers)
+                if 200 <= int(response.status_code or 0) < 300:
+                    self.store.mark_task_stall_outbox_delivered(dedupe_key, delivered_at=now_iso())
+                    return
+                error_text = f'task_stall_callback_http_{int(response.status_code or 0)}'
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_text = str(exc or 'task_stall_callback_failed').strip() or 'task_stall_callback_failed'
+            self.store.mark_task_stall_outbox_attempt(
+                dedupe_key,
+                attempted_at=now_iso(),
+                error_text=error_text,
+            )
 
     def _schedule_pending_task_terminal_callbacks(self) -> None:
         if self.execution_mode != 'worker':
@@ -2124,6 +2341,13 @@ class MainRuntimeService:
         if delivery_tasks:
             await asyncio.gather(*delivery_tasks, return_exceptions=True)
         self._task_terminal_delivery_tasks.clear()
+        stall_delivery_tasks = [task for task in self._task_stall_delivery_tasks.values() if task is not None and not task.done()]
+        for task in stall_delivery_tasks:
+            task.cancel()
+        if stall_delivery_tasks:
+            await asyncio.gather(*stall_delivery_tasks, return_exceptions=True)
+        self._task_stall_delivery_tasks.clear()
+        await self.task_stall_notifier.close()
         if self.execution_mode == 'worker' and self.worker_id:
             self.store.upsert_worker_status(
                 worker_id=self.worker_id,

@@ -298,6 +298,9 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             for entry in main_task_service.store.list_pending_task_terminal_outbox(limit=500):
                 payload = dict(entry.get('payload') or {})
                 heartbeat.enqueue_task_terminal_payload(payload)
+            for entry in main_task_service.store.list_pending_task_stall_outbox(limit=500):
+                payload = dict(entry.get('payload') or {})
+                heartbeat.enqueue_task_stall_payload(payload)
     await _ensure_china_bridge_services(runtime_agent)
 
 

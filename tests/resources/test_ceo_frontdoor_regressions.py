@@ -382,6 +382,61 @@ async def test_ceo_frontdoor_runner_binds_session_stable_prompt_cache_key(monkey
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_exposes_ordinary_tools_before_first_stage(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder([LLMResponse(content='done', finish_reason='stop')])
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    await runner.run_turn(user_input=SimpleNamespace(content='use tools if needed'), session=session)
+
+    tool_names = [
+        str(((item or {}).get('function') or {}).get('name') or '').strip()
+        for item in list(backend.calls[0].get('tools') or [])
+    ]
+    assert 'submit_next_stage' in tool_names
+    assert 'filesystem' in tool_names
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_context(monkeypatch, tmp_path) -> None:
     class _CaptureRuntimeTool(Tool):
         def __init__(self) -> None:

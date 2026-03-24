@@ -8,6 +8,7 @@ from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.agent.tools.base import Tool
 from main.protocol import now_iso
 from main.runtime.internal_tools import SubmitNextStageTool
+from main.runtime.stage_budget import STAGE_TOOL_NAME, visible_tools_for_stage_iteration
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -120,6 +121,27 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
         assert exhausted_spawn.startswith('Error: current stage budget is exhausted')
     finally:
         await service.close()
+
+
+def test_stage_visibility_keeps_all_tools_visible_before_stage_and_after_budget() -> None:
+    tools = {
+        STAGE_TOOL_NAME: _StaticTool(STAGE_TOOL_NAME),
+        'ordinary_tool': _StaticTool('ordinary_tool'),
+    }
+
+    before_stage = visible_tools_for_stage_iteration(
+        tools,
+        has_active_stage=False,
+        transition_required=False,
+    )
+    exhausted_stage = visible_tools_for_stage_iteration(
+        tools,
+        has_active_stage=True,
+        transition_required=True,
+    )
+
+    assert set(before_stage) == {STAGE_TOOL_NAME, 'ordinary_tool'}
+    assert set(exhausted_stage) == {STAGE_TOOL_NAME, 'ordinary_tool'}
 
 
 @pytest.mark.asyncio

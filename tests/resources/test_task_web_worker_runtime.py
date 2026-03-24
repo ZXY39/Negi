@@ -19,6 +19,7 @@ from main.models import normalize_final_acceptance_metadata
 from main.monitoring.models import TaskProjectionMetaRecord
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
+from main.service.task_stall_callback import normalize_task_stall_payload
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_TOKEN_ENV,
     normalize_task_terminal_payload,
@@ -41,6 +42,7 @@ def _build_app() -> FastAPI:
 class _HeartbeatRecorder:
     def __init__(self) -> None:
         self.payloads: list[dict[str, object]] = []
+        self.stall_payloads: list[dict[str, object]] = []
         self.started = 0
         self._dedupe_keys: set[str] = set()
 
@@ -55,6 +57,16 @@ class _HeartbeatRecorder:
         if dedupe_key:
             self._dedupe_keys.add(dedupe_key)
         self.payloads.append(normalized)
+        return True
+
+    def enqueue_task_stall_payload(self, payload: dict[str, object] | None) -> bool:
+        normalized = dict(payload or {})
+        dedupe_key = str(normalized.get("dedupe_key") or "").strip()
+        if dedupe_key and dedupe_key in self._dedupe_keys:
+            return False
+        if dedupe_key:
+            self._dedupe_keys.add(dedupe_key)
+        self.stall_payloads.append(normalized)
         return True
 
 
@@ -157,6 +169,61 @@ def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp
     assert len(heartbeat.payloads) == 1
 
 
+def test_internal_task_stall_callback_persists_pending_outbox_and_dedupes(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    heartbeat = _HeartbeatRecorder()
+    payload = normalize_task_stall_payload(
+        {
+            "task_id": "task:demo",
+            "session_id": "web:demo",
+            "title": "demo",
+            "bucket_minutes": 10,
+            "stalled_minutes": 12,
+            "last_visible_output_at": now_iso(),
+            "brief_text": "stalled",
+            "latest_node_summary": "node waiting for output",
+            "runtime_summary_excerpt": "root phase=waiting_tool_results tools=1/1",
+        }
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.internal_rest.get_web_heartbeat_service", lambda _agent=None: heartbeat)
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+
+    client = TestClient(_build_app())
+    response = client.post(
+        "/api/internal/task-stall",
+        json=payload,
+        headers={"x-g3ku-internal-token": "secret-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["duplicate"] is False
+
+    duplicate = client.post(
+        "/api/internal/task-stall",
+        json=payload,
+        headers={"x-g3ku-internal-token": "secret-token"},
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["duplicate"] is True
+
+    entry = service.store.get_task_stall_outbox(str(payload.get("dedupe_key") or ""))
+    assert entry is not None
+    assert entry["delivery_state"] == "pending"
+    assert len(heartbeat.stall_payloads) == 1
+
+
 @pytest.mark.asyncio
 async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
@@ -194,6 +261,48 @@ async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(
     assert entry["delivery_state"] == "pending"
     assert heartbeat.started == 1
     assert heartbeat.payloads == [payload]
+
+
+@pytest.mark.asyncio
+async def test_ensure_web_runtime_services_replays_pending_task_stall_outbox(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    heartbeat = _HeartbeatRecorder()
+    payload = normalize_task_stall_payload(
+        {
+            "task_id": "task:replay-stall",
+            "session_id": "web:replay",
+            "title": "replay",
+            "bucket_minutes": 20,
+            "stalled_minutes": 24,
+            "last_visible_output_at": now_iso(),
+            "brief_text": "stalled",
+            "latest_node_summary": "latest node",
+            "runtime_summary_excerpt": "runtime excerpt",
+        }
+    )
+    service.store.put_task_stall_outbox(
+        dedupe_key=str(payload.get("dedupe_key") or ""),
+        task_id=str(payload.get("task_id") or ""),
+        session_id=str(payload.get("session_id") or ""),
+        created_at=str(payload.get("last_visible_output_at") or now_iso()),
+        payload=payload,
+    )
+    monkeypatch.setattr(web_shell, "get_web_heartbeat_service", lambda _agent=None: heartbeat)
+
+    await web_shell.ensure_web_runtime_services(SimpleNamespace(main_task_service=service))
+
+    entry = service.store.get_task_stall_outbox(str(payload.get("dedupe_key") or ""))
+    assert entry is not None
+    assert entry["delivery_state"] == "pending"
+    assert heartbeat.started == 1
+    assert heartbeat.stall_payloads == [payload]
 
 
 @pytest.mark.asyncio
@@ -264,6 +373,39 @@ def test_worker_task_terminal_listener_persists_outbox_and_schedules_delivery(tm
     pending = service.store.list_pending_task_terminal_outbox(limit=10)
     assert len(pending) == 1
     assert pending[0]["task_id"] == "task:demo"
+    assert scheduled == [pending[0]["dedupe_key"]]
+
+
+def test_worker_task_stall_emit_persists_outbox_and_schedules_delivery(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    scheduled: list[str] = []
+    service._schedule_task_stall_delivery = lambda dedupe_key: scheduled.append(str(dedupe_key))
+    payload = normalize_task_stall_payload(
+        {
+            "task_id": "task:demo-stall",
+            "session_id": "web:demo",
+            "title": "demo",
+            "bucket_minutes": 5,
+            "stalled_minutes": 6,
+            "last_visible_output_at": now_iso(),
+            "brief_text": "stalled",
+            "latest_node_summary": "node summary",
+            "runtime_summary_excerpt": "runtime summary",
+        }
+    )
+
+    service.emit_task_stall(payload)
+
+    pending = service.store.list_pending_task_stall_outbox(limit=10)
+    assert len(pending) == 1
+    assert pending[0]["task_id"] == "task:demo-stall"
     assert scheduled == [pending[0]["dedupe_key"]]
 
 
