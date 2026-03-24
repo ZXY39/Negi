@@ -1601,11 +1601,18 @@ function applyCeoState(state = {}, meta = {}) {
     const source = String(meta?.source || state?.source || "").trim().toLowerCase();
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
+    const activeTurn = source ? getActiveCeoTurn(source) : getActiveCeoTurn();
+    const hadTurnContext = !!activeTurn || !!S.ceoTurnActive;
     S.ceoTurnActive = running;
     if (patchCeoSessionRuntimeState(activeSessionId(), running)) renderCeoSessions();
     if (!running) S.ceoPauseBusy = false;
-    if (running && !(source === "heartbeat" && !getActiveCeoTurn())) {
-        ensureActiveCeoTurn({ source });
+    if (running) {
+        if (activeTurn) {
+            if (source) activeTurn.source = normalizeCeoTurnSource(source);
+        } else if (hadTurnContext && source !== "heartbeat") {
+            // Ignore stale running snapshots that arrive after the turn already finished.
+            ensureActiveCeoTurn({ source });
+        }
     }
     if (paused) finalizePausedCeoTurn();
     syncCeoSessionActions();
@@ -1849,6 +1856,18 @@ function renderCeoSnapshot(messages = [], inflightTurn = null) {
     restoreCeoInflightTurn(inflightTurn);
 }
 
+function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    const status = String(snapshot.status || "").trim().toLowerCase();
+    const assistantText = String(snapshot.assistant_text || "").trim();
+    const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
+    return !!assistantText
+        || toolEvents.length > 0
+        || !!normalizeCeoInteractionTrace(snapshot.interaction_trace)
+        || status === "paused"
+        || status === "error";
+}
+
 function normalizeCeoInteractionTrace(trace = null) {
     if (!trace || typeof trace !== "object") return null;
     const stages = (Array.isArray(trace?.stages) ? trace.stages : [])
@@ -2015,6 +2034,7 @@ function patchCeoInflightTurn(snapshot = null) {
     const status = String(snapshot.status || "").trim().toLowerCase();
     const existingTurn = getActiveCeoTurn(source);
     if (status === "paused" && !existingTurn) return false;
+    if (!existingTurn && !ceoInflightTurnHasVisibleAssistantState(snapshot)) return false;
     const turn = existingTurn || ensureActiveCeoTurn({ source });
     if (!turn?.textEl || !turn?.flowEl) return false;
     mutateCeoFeed(() => {

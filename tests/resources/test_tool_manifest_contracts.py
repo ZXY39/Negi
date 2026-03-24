@@ -79,6 +79,8 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         'message',
         'model_config',
         'task_fetch_cn',
+        'task_failed_nodes_cn',
+        'task_node_detail_cn',
         'task_progress_cn',
         'task_summary_cn',
     ]:

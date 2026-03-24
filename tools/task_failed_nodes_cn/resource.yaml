@@ -1,0 +1,32 @@
+schema_version: 1
+kind: tool
+display_name: "查询失败节点"
+name: task_failed_nodes
+description: 按任务 id 返回当前任务树中的失败节点 id 列表。
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: 当前版本表示仓库内置实现；更新时需同步代码、参数契约和资源描述。
+  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文档不单独视为版本升级。
+  source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    任务id:
+      type: string
+      description: 目标任务 id。
+  required: [任务id]
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: true

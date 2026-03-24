@@ -311,6 +311,32 @@ class _MainTaskService:
     def get_tasks(self, session_id: str, task_type: int) -> str:
         return f'list:{session_id}:{task_type}'
 
+    def failed_node_ids(self, task_id: str) -> str:
+        return f'failed:{task_id}'
+
+    def node_detail(self, task_id: str, node_id: str):
+        return {
+            'ok': True,
+            'task_id': task_id,
+            'node_id': node_id,
+            'item': {'task_id': task_id, 'node_id': node_id, 'status': 'failed'},
+            'artifact_count': 1,
+            'artifacts': [
+                {
+                    'artifact_id': 'artifact:demo',
+                    'task_id': task_id,
+                    'node_id': node_id,
+                    'kind': 'report',
+                    'title': 'Demo Artifact',
+                    'path': 'D:/demo.md',
+                    'mime_type': 'text/markdown',
+                    'preview_text': 'demo',
+                    'created_at': '2026-03-25T00:00:00',
+                    'ref': 'artifact:artifact:demo',
+                }
+            ],
+        }
+
     def view_progress(self, task_id: str, *, mark_read: bool = True) -> str:
         return f'progress:{task_id}:{mark_read}'
 
@@ -790,7 +816,7 @@ async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    for name in ('task_summary_cn', 'task_fetch_cn', 'task_progress_cn'):
+    for name in ('task_summary_cn', 'task_fetch_cn', 'task_failed_nodes_cn', 'task_node_detail_cn', 'task_progress_cn'):
         shutil.copytree(REPO_ROOT / 'tools' / name, workspace / 'tools' / name)
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
@@ -800,13 +826,39 @@ async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
     try:
         summary_tool = manager.get_tool('task_summary')
         fetch_tool = manager.get_tool('task_list')
+        failed_nodes_tool = manager.get_tool('task_failed_nodes')
+        node_detail_tool = manager.get_tool('task_node_detail')
         progress_tool = manager.get_tool('task_progress')
 
         assert summary_tool is not None
         assert fetch_tool is not None
+        assert failed_nodes_tool is not None
+        assert node_detail_tool is not None
         assert progress_tool is not None
         assert await summary_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}) == 'summary:web:shared'
         assert await fetch_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}, **{'任务类型': 4}) == 'list:web:shared:4'
+        assert await failed_nodes_tool.execute(**{'任务id': 'task:demo'}) == 'failed:task:demo'
+        assert json.loads(await node_detail_tool.execute(**{'任务id': 'task:demo', '节点id': 'node:demo'})) == {
+            'ok': True,
+            'task_id': 'task:demo',
+            'node_id': 'node:demo',
+            'item': {'task_id': 'task:demo', 'node_id': 'node:demo', 'status': 'failed'},
+            'artifact_count': 1,
+            'artifacts': [
+                {
+                    'artifact_id': 'artifact:demo',
+                    'task_id': 'task:demo',
+                    'node_id': 'node:demo',
+                    'kind': 'report',
+                    'title': 'Demo Artifact',
+                    'path': 'D:/demo.md',
+                    'mime_type': 'text/markdown',
+                    'preview_text': 'demo',
+                    'created_at': '2026-03-25T00:00:00',
+                    'ref': 'artifact:artifact:demo',
+                }
+            ],
+        }
         assert await progress_tool.execute(**{'任务id': 'task:demo'}) == 'progress:task:demo:True'
     finally:
         manager.close()
@@ -1528,6 +1580,8 @@ async def test_task_retrospective_skill_is_discovered_and_visible_only_to_ceo(tm
     shutil.copytree(REPO_ROOT / 'skills' / 'task-retrospective', workspace / 'skills' / 'task-retrospective')
     shutil.copytree(REPO_ROOT / 'tools' / 'task_summary_cn', workspace / 'tools' / 'task_summary_cn')
     shutil.copytree(REPO_ROOT / 'tools' / 'task_fetch_cn', workspace / 'tools' / 'task_fetch_cn')
+    shutil.copytree(REPO_ROOT / 'tools' / 'task_failed_nodes_cn', workspace / 'tools' / 'task_failed_nodes_cn')
+    shutil.copytree(REPO_ROOT / 'tools' / 'task_node_detail_cn', workspace / 'tools' / 'task_node_detail_cn')
     shutil.copytree(REPO_ROOT / 'tools' / 'task_progress_cn', workspace / 'tools' / 'task_progress_cn')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())

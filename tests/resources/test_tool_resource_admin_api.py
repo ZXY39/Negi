@@ -450,6 +450,106 @@ def test_main_runtime_service_normalizes_short_task_id_for_lookup_and_progress()
     assert progress == 'progress:task:demo:False'
 
 
+def test_main_runtime_service_normalizes_short_task_id_for_failed_node_lookup():
+    captured: dict[str, str] = {}
+
+    class _QueryService:
+        def failed_node_ids(self, task_id: str):
+            captured['failed_task_id'] = task_id
+            return ['node:1', 'node:2']
+
+    class _LogService:
+        def ensure_task_projection(self, task_id: str) -> None:
+            captured['projection_task_id'] = task_id
+
+    service = object.__new__(MainRuntimeService)
+    service.query_service = _QueryService()
+    service.log_service = _LogService()
+
+    result = service.failed_node_ids('demo')
+
+    assert captured['projection_task_id'] == 'task:demo'
+    assert captured['failed_task_id'] == 'task:demo'
+    assert result == '- node:1\n- node:2'
+
+
+def test_main_runtime_service_node_detail_includes_matching_artifacts():
+    captured: dict[str, str] = {}
+
+    class _Store:
+        def list_artifacts(self, task_id: str):
+            captured['artifacts_task_id'] = task_id
+            return [
+                SimpleNamespace(
+                    artifact_id='artifact:1',
+                    task_id=task_id,
+                    node_id='node:demo',
+                    kind='report',
+                    title='Artifact One',
+                    path='D:/artifact-one.md',
+                    mime_type='text/markdown',
+                    preview_text='one',
+                    created_at='2026-03-25T00:00:00',
+                    model_dump=lambda mode='json': {
+                        'artifact_id': 'artifact:1',
+                        'task_id': task_id,
+                        'node_id': 'node:demo',
+                        'kind': 'report',
+                        'title': 'Artifact One',
+                        'path': 'D:/artifact-one.md',
+                        'mime_type': 'text/markdown',
+                        'preview_text': 'one',
+                        'created_at': '2026-03-25T00:00:00',
+                    },
+                ),
+                SimpleNamespace(
+                    artifact_id='artifact:2',
+                    task_id=task_id,
+                    node_id='node:other',
+                    kind='report',
+                    title='Artifact Two',
+                    path='D:/artifact-two.md',
+                    mime_type='text/markdown',
+                    preview_text='two',
+                    created_at='2026-03-25T00:00:01',
+                    model_dump=lambda mode='json': {
+                        'artifact_id': 'artifact:2',
+                        'task_id': task_id,
+                        'node_id': 'node:other',
+                        'kind': 'report',
+                        'title': 'Artifact Two',
+                        'path': 'D:/artifact-two.md',
+                        'mime_type': 'text/markdown',
+                        'preview_text': 'two',
+                        'created_at': '2026-03-25T00:00:01',
+                    },
+                ),
+            ]
+
+    class _Task:
+        task_id = 'task:demo'
+
+    service = object.__new__(MainRuntimeService)
+    service.store = _Store()
+    service.get_task = lambda task_id: _Task() if task_id == 'task:demo' else None
+    service.get_node_detail_payload = lambda task_id, node_id: {
+        'ok': True,
+        'task_id': task_id,
+        'node_id': node_id,
+        'item': {'task_id': task_id, 'node_id': node_id, 'status': 'failed'},
+    }
+
+    result = service.node_detail('demo', 'node:demo')
+
+    assert isinstance(result, dict)
+    assert captured['artifacts_task_id'] == 'task:demo'
+    assert result['task_id'] == 'task:demo'
+    assert result['node_id'] == 'node:demo'
+    assert result['artifact_count'] == 1
+    assert result['artifacts'][0]['artifact_id'] == 'artifact:1'
+    assert result['artifacts'][0]['ref'] == 'artifact:artifact:1'
+
+
 @pytest.mark.asyncio
 async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     captured: dict[str, object] = {}
@@ -1749,6 +1849,8 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         'load_tool_context',
         'create_async_task_cn',
         'task_fetch_cn',
+        'task_failed_nodes_cn',
+        'task_node_detail_cn',
         'task_progress_cn',
         'task_summary_cn',
     )
@@ -1869,6 +1971,8 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         'load_tool_context',
         'create_async_task_cn',
         'task_fetch_cn',
+        'task_failed_nodes_cn',
+        'task_node_detail_cn',
         'task_progress_cn',
         'task_summary_cn',
     )
@@ -1906,7 +2010,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         assert 'create_async_task' in manager.tool_instances()
         after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in after
-        assert {'task_list', 'task_progress', 'task_summary'}.issubset(set(after))
+        assert {'task_list', 'task_failed_nodes', 'task_node_detail', 'task_progress', 'task_summary'}.issubset(set(after))
     finally:
         await service.close()
         manager.close()
@@ -1926,6 +2030,8 @@ async def test_core_tool_admin_endpoints_block_disable_delete_and_ceo_removal(tm
         'load_tool_context',
         'create_async_task_cn',
         'task_fetch_cn',
+        'task_failed_nodes_cn',
+        'task_node_detail_cn',
         'task_progress_cn',
         'task_summary_cn',
     )

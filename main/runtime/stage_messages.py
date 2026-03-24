@@ -8,9 +8,9 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
     active = gate.get('active_stage') if isinstance(gate.get('active_stage'), dict) else None
     if not isinstance(active, dict):
         return (
-            'You do not have an active CEO stage. '
-            'If you need any tool, first call `submit_next_stage` with a concise `stage_goal` and '
-            'a `tool_round_budget` between 1 and 10. If no tool is needed, you may reply directly.'
+            '你当前没有处于有效的 CEO 阶段. '
+            '如需使用任何工具，请先调用 `submit_next_stage` 并传入简洁的 `stage_goal` 和 1 到 10 的 `tool_round_budget`。'
+            '如不需要使用工具，可以直接回复。'
         )
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
@@ -25,6 +25,25 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
         f'Active CEO stage goal: {goal}. '
         f'Ordinary tool rounds used: {used}/{budget}. '
         'Any tool use in this turn must directly serve this active stage goal.'
+    )
+
+
+def build_ceo_stage_result_block_message(stage_gate: dict[str, Any] | None) -> str:
+    gate = dict(stage_gate or {})
+    active = gate.get('active_stage') if isinstance(gate.get('active_stage'), dict) else None
+    if not isinstance(active, dict):
+        return ''
+    if not bool(gate.get('transition_required')):
+        return ''
+    used = int(active.get('tool_rounds_used') or 0)
+    budget = int(active.get('tool_round_budget') or 0)
+    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
+    return (
+        f'Current CEO stage budget is exhausted: {used}/{budget}. '
+        f'Stage goal: {goal}. '
+        'Do not finish yet. First summarize the completed progress for this stage and call '
+        '`submit_next_stage` to create the next CEO stage; after that, continue working or deliver '
+        'the final answer from the new stage.'
     )
 
 

@@ -132,12 +132,16 @@ class WebFetchTool:
         extract_main_content: bool = True,
         include_raw_html: bool = False,
         use_cache: bool = True,
-        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        timeout_ms: int = int(_DEFAULT_TIMEOUT_SECONDS * 1000),
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         normalized_url = _normalize_url(url)
         _assert_url_is_safe(normalized_url)
         max_chars = max(500, min(int(max_chars), _MAX_TEXT_CHARS))
-        timeout_seconds = max(1.0, min(float(timeout_seconds), 30.0))
+        if timeout_seconds is None:
+            effective_timeout_seconds = max(1.0, min(float(timeout_ms) / 1000.0, 30.0))
+        else:
+            effective_timeout_seconds = max(1.0, min(float(timeout_seconds), 30.0))
 
         cache_key = _cache_key(normalized_url, max_chars, extract_main_content, include_raw_html)
         if use_cache:
@@ -147,11 +151,11 @@ class WebFetchTool:
                 return cached
 
         result = await self._fetch_once(
-            normalized_url,
+            url=normalized_url,
             max_chars=max_chars,
             extract_main_content=extract_main_content,
             include_raw_html=include_raw_html,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=effective_timeout_seconds,
         )
         result["cache"] = {"hit": False, "mode": "write-through" if use_cache else "disabled"}
         if use_cache:

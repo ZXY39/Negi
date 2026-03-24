@@ -895,7 +895,7 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
     assert acceptance.node_id in [item["node_id"] for item in child_item["children"]]
 
 
-def test_failed_acceptance_node_marks_execution_child_failed(tmp_path: Path):
+def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -944,12 +944,103 @@ def test_failed_acceptance_node_marks_execution_child_failed(tmp_path: Path):
     latest_child = service.get_node(child.node_id)
 
     assert latest_child is not None
-    assert latest_child.status == "failed"
+    assert latest_child.status == "success"
     assert latest_child.final_output == "child done"
-    assert latest_child.failure_reason == "child acceptance failed"
+    assert latest_child.failure_reason == ""
+    assert latest_child.check_result == "child acceptance failed"
 
 
-def test_failed_final_acceptance_node_marks_root_failed(tmp_path: Path):
+def test_failed_node_ids_follow_projection_tree_for_failed_acceptance(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+    )
+    service.log_service.update_node_status(
+        record.task_id,
+        child.node_id,
+        status="success",
+        final_output="child done",
+    )
+
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=child,
+        goal="accept:child goal",
+        acceptance_prompt="检查 child 输出。",
+        parent_node_id=child.node_id,
+    )
+    service.log_service.update_node_status(
+        record.task_id,
+        acceptance.node_id,
+        status="failed",
+        final_output="child acceptance failed",
+        failure_reason="child acceptance failed",
+    )
+
+    assert service.failed_node_ids(record.task_id) == f'- {acceptance.node_id}'
+
+
+def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    matching = service.artifact_store.create_text_artifact(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        kind="report",
+        title="Root Artifact",
+        content="root artifact content",
+    )
+    service.artifact_store.create_text_artifact(
+        task_id=record.task_id,
+        node_id="node:other",
+        kind="report",
+        title="Other Artifact",
+        content="other artifact content",
+    )
+
+    payload = service.node_detail(record.task_id, root.node_id)
+
+    assert isinstance(payload, dict)
+    assert payload["ok"] is True
+    assert payload["task_id"] == record.task_id
+    assert payload["node_id"] == root.node_id
+    assert payload["item"]["node_id"] == root.node_id
+    assert payload["artifact_count"] == 1
+    assert payload["artifacts"][0]["artifact_id"] == matching.artifact_id
+    assert payload["artifacts"][0]["node_id"] == root.node_id
+    assert payload["artifacts"][0]["ref"] == f'artifact:{matching.artifact_id}'
+
+
+def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -1014,14 +1105,52 @@ def test_failed_final_acceptance_node_marks_root_failed(tmp_path: Path):
 
     assert latest_task is not None
     assert latest_root is not None
-    assert latest_root.status == "failed"
+    assert latest_root.status == "success"
     assert latest_root.final_output == "root deliverable"
-    assert latest_root.failure_reason == "final acceptance failed"
+    assert latest_root.failure_reason == ""
+    assert latest_root.check_result == "final acceptance failed"
     assert latest_task.status == "failed"
     assert latest_task.failure_reason == "final acceptance failed"
     assert final_acceptance is not None
     assert final_acceptance.status == "failed"
     assert latest_task.metadata.get("final_execution_output") == "root deliverable"
+
+
+def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=root,
+        goal=f"最终验收:{root.goal}",
+        acceptance_prompt="检查最终结果是否满足要求。",
+        parent_node_id=root.node_id,
+        metadata={"final_acceptance": True},
+    )
+
+    tree_root = service.log_service._tree_builder.build_tree(task, service.store.list_nodes(record.task_id))
+    payload = service.log_service._compact_tree_payload(tree_root)
+
+    assert payload is not None
+    auxiliary_children = payload["auxiliary_children"]
+    assert [item["node_id"] for item in auxiliary_children] == [acceptance.node_id]
+    assert auxiliary_children[0]["node_kind"] == "acceptance"
 
 
 def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: Path):

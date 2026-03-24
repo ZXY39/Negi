@@ -98,6 +98,7 @@ class ReActToolLoop:
         last_contract_violations: list[str] = []
         message_history = list(messages or [])
         orphan_tool_result_strikes = 0
+        repair_overlay_text: str | None = None
         while attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
@@ -113,10 +114,15 @@ class ReActToolLoop:
             )
             tool_schemas = [tool.to_schema() for tool in visible_tools.values()]
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
+            overlay_parts = [
+                build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
+                repair_overlay_text,
+            ]
             request_messages = self._apply_temporary_system_overlay(
                 model_messages,
-                overlay_text=build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
+                overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
             )
+            repair_overlay_text = None
             allowed_content_refs = self._collect_content_refs(request_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
             tool_history = analyze_tool_call_history(request_messages)
@@ -309,25 +315,17 @@ class ReActToolLoop:
                     self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
                     return result
                 last_contract_violations = list(contract_violations)
-                violation_message = {
-                    'role': 'user',
-                    'content': self._result_contract_violation_message(
-                        contract_violations,
-                        node_kind=node.node_kind,
-                    ),
-                }
-                message_history.append(violation_message)
+                repair_overlay_text = self._result_contract_violation_message(
+                    contract_violations,
+                    node_kind=node.node_kind,
+                )
                 continue
 
             if str(response.finish_reason or '').strip().lower() == 'error':
                 error_text = str(getattr(response, 'error_text', None) or response.content or 'model response failed').strip() or 'model response failed'
                 raise RuntimeError(error_text)
 
-            protocol_message = {
-                'role': 'user',
-                'content': self._result_protocol_message(node_kind=node.node_kind),
-            }
-            message_history.append(protocol_message)
+            repair_overlay_text = self._result_protocol_message(node_kind=node.node_kind)
 
         if last_contract_violations:
             raise RuntimeError('result contract violation: ' + '; '.join(last_contract_violations))
@@ -843,13 +841,26 @@ class ReActToolLoop:
     @staticmethod
     def _result_protocol_message(*, node_kind: str = 'execution') -> str:
         guidance = ReActToolLoop._result_repair_guidance(node_kind=node_kind)
+        normalized_kind = str(node_kind or '').strip().lower()
+        if normalized_kind == 'acceptance':
+            return (
+                f'Your previous reply was not valid result JSON for schema v{RESULT_SCHEMA_VERSION}. '
+                'Reply with only one JSON object using exactly these keys: '
+                '{"status":"success|failed","delivery_status":"final|partial|blocked","summary":"...",'
+                '"answer":"...","evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
+                '"remaining_work":["..."],"blocking_reason":"..."}. '
+                'Do not use Markdown. '
+                f'{guidance}'
+            )
         return (
             f'Your previous reply was not valid result JSON for schema v{RESULT_SCHEMA_VERSION}. '
-            'Reply with only one JSON object using exactly these keys: '
+            'If you are ending the node now, reply with only one JSON object using exactly these keys: '
             '{"status":"success|failed","delivery_status":"final|partial|blocked","summary":"...",'
             '"answer":"...","evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
             '"remaining_work":["..."],"blocking_reason":"..."}. '
-            'Do not use Markdown. '
+            'If the task is not complete yet, do not emit prose or a premature result JSON; continue with tool calls, '
+            'stage transitions, or child-node actions instead. '
+            'Do not use Markdown when you do return the final JSON. '
             f'{guidance}'
         )
 
@@ -857,9 +868,19 @@ class ReActToolLoop:
     def _result_contract_violation_message(violations: list[str], *, node_kind: str = 'execution') -> str:
         bullet_text = '; '.join(str(item or '').strip() for item in violations if str(item or '').strip()) or 'result contract violation'
         guidance = ReActToolLoop._result_repair_guidance(node_kind=node_kind)
+        normalized_kind = str(node_kind or '').strip().lower()
+        if normalized_kind == 'acceptance':
+            return (
+                f'Your previous reply produced parseable JSON but violated result schema v{RESULT_SCHEMA_VERSION}: {bullet_text}. '
+                'Fix every violation and reply with only one JSON object. '
+                'Do not claim success unless the deliverable is fully complete. '
+                f'{guidance}'
+            )
         return (
             f'Your previous reply produced parseable JSON but violated result schema v{RESULT_SCHEMA_VERSION}: {bullet_text}. '
-            'Fix every violation and reply with only one JSON object. '
+            'If you are ending the node now, fix every violation and reply with only one JSON object. '
+            'If the task is not actually complete yet, do not force another premature result JSON; continue with tool '
+            'calls, stage transitions, or child-node actions instead. '
             'Do not claim success unless the deliverable is fully complete. '
             f'{guidance}'
         )
@@ -875,7 +896,7 @@ class ReActToolLoop:
             )
         return (
             'Do not use delivery_status="partial" for execution nodes. '
-            'If the task is not actually complete yet, continue working instead of ending early. '
+            'If the task is not actually complete yet, continue working with tool calls or stage transitions instead of emitting more result JSON. '
             'Only return failed+blocked when you are truly blocked under the current permissions, environment, and tools.'
         )
 

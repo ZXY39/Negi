@@ -265,6 +265,19 @@ def test_execution_result_protocol_message_avoids_partial_guidance() -> None:
     assert 'failed+partial' not in message
     assert 'delivery_status="partial"' in message
     assert 'failed+blocked' in message
+    assert 'If you are ending the node now' in message
+    assert 'If the task is not complete yet' in message
+
+
+def test_execution_result_contract_violation_message_keeps_workflow_open() -> None:
+    message = ReActToolLoop._result_contract_violation_message(
+        ['summary must not be empty'],
+        node_kind='execution',
+    )
+
+    assert 'Fix every violation and reply with only one JSON object.' not in message
+    assert 'If you are ending the node now' in message
+    assert 'do not force another premature result JSON' in message
 
 
 def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only() -> None:
@@ -277,3 +290,53 @@ def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only
     assert 'delivery_status="partial"' in message
     assert 'failed+final' in message
     assert 'failed+blocked' in message
+
+
+@pytest.mark.asyncio
+async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> None:
+    calls: list[list[dict[str, object]]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._responses = [
+                LLMResponse(
+                    content='not json yet',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='{"status":"failed","delivery_status":"blocked","summary":"done","answer":"","evidence":[],"remaining_work":[],"blocking_reason":"done"}',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+            ]
+
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get('messages') or [])])
+            return self._responses.pop(0)
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-1'),
+        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-1","goal":"demo"}'},
+        ],
+        tools={},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
+        max_iterations=3,
+    )
+
+    assert result.status == 'failed'
+    assert len(calls) == 2
+    second_request = calls[1]
+    assert second_request[0]['role'] == 'system'
+    assert 'If you are ending the node now' in str(second_request[0]['content'])
+    assert not any(
+        message.get('role') == 'user' and 'If you are ending the node now' in str(message.get('content') or '')
+        for message in second_request
+    )

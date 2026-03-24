@@ -32,7 +32,7 @@ from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, build_session_prompt_cache_key
 from main.runtime.react_loop import RepeatedActionCircuitBreaker
 from main.runtime.stage_budget import STAGE_TOOL_NAME, stage_gate_error_for_tool, visible_tools_for_stage_iteration
-from main.runtime.stage_messages import build_ceo_stage_overlay
+from main.runtime.stage_messages import build_ceo_stage_overlay, build_ceo_stage_result_block_message
 
 
 class _DirectProviderChatBackend:
@@ -679,6 +679,10 @@ class CeoFrontDoorRunner:
 
             text = self._content_text(getattr(response, "content", ""))
             if text.strip():
+                stage_block_message = build_ceo_stage_result_block_message(self._stage_gate(interaction_trace))
+                if stage_block_message:
+                    message_history.append({"role": "user", "content": stage_block_message})
+                    continue
                 interaction_trace["final_output"] = text.strip()
                 interaction_trace = finalize_active_stage(
                     interaction_trace,

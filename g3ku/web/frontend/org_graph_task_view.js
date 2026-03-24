@@ -565,7 +565,7 @@ function renderExecutionStageRounds(stage) {
     return rounds.map((round, index) => {
         const title = round.budget_counted
             ? `第 ${round.round_index || index + 1} 轮`
-            : "补充信息";
+            : "派生节点";
         const tools = Array.isArray(round.tools) ? round.tools : [];
         const toolDetails = tools.length
             ? tools.map((step, toolIndex) => renderTraceStep({

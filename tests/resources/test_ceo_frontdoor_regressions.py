@@ -437,6 +437,113 @@ async def test_ceo_frontdoor_runner_exposes_ordinary_tools_before_first_stage(mo
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_blocks_final_text_when_stage_budget_is_exhausted(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'inspect files', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='tool-1',
+                        name='filesystem',
+                        arguments={'path': 'README.md'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='因为本阶段预算已耗尽，所以我先停在这里。',
+                finish_reason='stop',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-2',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'summarize findings', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(content='done after next stage', finish_reason='stop'),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='use tools if needed'), session=session)
+
+    assert output == 'done after next stage'
+    assert len(backend.calls) == 5
+    blocked_messages = list(backend.calls[3].get('messages') or [])
+    assert any(
+        str(item.get('role') or '') == 'user'
+        and 'Do not finish yet.' in str(item.get('content') or '')
+        and 'submit_next_stage' in str(item.get('content') or '')
+        for item in blocked_messages
+    )
+    trace = getattr(session, '_interaction_trace', None)
+    assert trace is not None
+    stages = list(trace.get('stages') or [])
+    assert [stage.get('stage_id') for stage in stages] == ['ceo-stage-1', 'ceo-stage-2']
+    assert stages[0]['tool_round_budget'] == 1
+    assert stages[0]['tool_rounds_used'] == 1
+    assert stages[1]['tool_round_budget'] == 1
+    assert stages[1]['status'] == 'completed'
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_context(monkeypatch, tmp_path) -> None:
     class _CaptureRuntimeTool(Tool):
         def __init__(self) -> None:

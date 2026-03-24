@@ -21,6 +21,7 @@ class TaskTreeBuilder:
                 node_id=node.node_id,
                 parent_node_id=node.parent_node_id,
                 depth=int(node.depth or 0),
+                node_kind=str(node.node_kind or 'execution'),
                 status=node.status,
                 title=node.goal or node.node_id,
                 input=node.input,

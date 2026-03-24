@@ -402,22 +402,27 @@ class TaskLogService:
         ).strip()
         accepted_node = self._store.get_node(accepted_node_id) if accepted_node_id else None
 
-        if normalized_status == 'failed' and accepted_node is not None:
-            failure_text = self._acceptance_failure_text(acceptance_node)
+        if accepted_node is not None:
+            acceptance_text = self._acceptance_failure_text(acceptance_node)
+            check_text, check_ref = self._summarize_content(
+                acceptance_text,
+                task_id=task_id,
+                node_id=accepted_node.node_id,
+                display_name=f'check-result:{accepted_node.node_id}',
+                source_kind='node_check_result',
+            )
 
             def _mutate(record: NodeRecord) -> NodeRecord:
                 update: dict[str, Any] = {
-                    'status': 'failed',
                     'updated_at': now_iso(),
-                    'finished_at': now_iso(),
                 }
-                if failure_text:
-                    update['failure_reason'] = failure_text
+                if check_text:
+                    update['check_result'] = check_text
+                    update['check_result_ref'] = check_ref or record.check_result_ref
                 return record.model_copy(update=update)
 
             normalized_parent_kind = str(getattr(accepted_node, 'node_kind', '') or '').strip().lower()
-            normalized_parent_status = str(getattr(accepted_node, 'status', '') or '').strip().lower()
-            if normalized_parent_kind == 'execution' and normalized_parent_status != 'failed':
+            if normalized_parent_kind == 'execution':
                 updated_parent = self._store.update_node(accepted_node.node_id, _mutate)
                 if updated_parent is not None:
                     accepted_node = updated_parent

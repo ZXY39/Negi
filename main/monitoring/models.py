@@ -27,6 +27,7 @@ class TaskTreeNode(Model):
     node_id: str
     parent_node_id: str | None = None
     depth: int = 0
+    node_kind: str = 'execution'
     status: NodeStatus = 'in_progress'
     title: str = ''
     input: str = ''

@@ -24,8 +24,9 @@
   - 返回 `success` 时，`delivery_status` 固定为 `"final"`
   - 返回 `failed` 时，`delivery_status` 固定为 `"blocked"`
 - 执行节点不应使用 `delivery_status="partial"`；如果还有明确下一步，就继续推进，而不是结束节点。
+- “最终只输出 JSON”只约束你在决定结束当前节点时的终局回复格式，不约束中间回合；如果任务尚未完成，你应继续调用工具、切换阶段或派生子节点，而不是把自己理解成“本轮不能再用工具”。
 
-- 你的最终回复必须是一个精确符合以下形状的单个 JSON 对象：
+- 当且仅当你准备结束当前节点时，你的最终回复必须是一个精确符合以下形状的单个 JSON 对象：
   {
     "status": "success" | "failed",
     "delivery_status": "final" | "blocked",

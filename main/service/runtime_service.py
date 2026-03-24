@@ -2161,6 +2161,30 @@ class MainRuntimeService:
             'item': detail.model_dump(mode='json'),
         }
 
+    def node_detail(self, task_id: str, node_id: str) -> dict[str, Any] | str:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return f'Error: Task not found: {normalized_task_id}'
+
+        payload = self.get_node_detail_payload(normalized_task_id, node_id)
+        if payload is None:
+            return f'Error: Node not found: {node_id}'
+
+        artifacts = [
+            {
+                **artifact.model_dump(mode='json'),
+                'ref': f'artifact:{artifact.artifact_id}',
+            }
+            for artifact in self.list_artifacts(normalized_task_id)
+            if str(getattr(artifact, 'node_id', '') or '').strip() == str(node_id or '').strip()
+        ]
+        return {
+            **payload,
+            'artifact_count': len(artifacts),
+            'artifacts': artifacts,
+        }
+
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
         task_id = self.normalize_task_id(task_id)
         return self.store.list_artifacts(task_id)
@@ -2319,6 +2343,16 @@ class MainRuntimeService:
             return '无匹配任务。'
         return '\n'.join(f'- {item.task_id}：{item.brief}' for item in items)
 
+    def failed_node_ids(self, task_id: str) -> str:
+        task_id = self.normalize_task_id(task_id)
+        self.log_service.ensure_task_projection(task_id)
+        failed_node_ids = self.query_service.failed_node_ids(task_id)
+        if failed_node_ids is None:
+            return f'Error: Task not found: {task_id}'
+        if not failed_node_ids:
+            return '无失败节点。'
+        return '\n'.join(f'- {node_id}' for node_id in failed_node_ids)
+
     def view_progress(self, task_id: str, *, mark_read: bool = True) -> str:
         task_id = self.normalize_task_id(task_id)
         payload = self.query_service.view_progress(task_id, mark_read=mark_read)
@@ -2457,6 +2491,64 @@ class ViewTaskProgressTool(Tool):
         await self._service.startup()
         task_id = str(kwargs.get('任务id') or '').strip()
         return self._service.view_progress(task_id, mark_read=True)
+
+
+class TaskFailedNodesTool(Tool):
+    def __init__(self, service: MainRuntimeService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return 'task_failed_nodes'
+
+    @property
+    def description(self) -> str:
+        return '按任务 id 返回当前任务树中的失败节点 id 列表。'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {'任务id': {'type': 'string', 'description': '目标任务 id。'}},
+            'required': ['任务id'],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        await self._service.startup()
+        task_id = str(kwargs.get('任务id') or '').strip()
+        return self._service.failed_node_ids(task_id)
+
+
+class TaskNodeDetailTool(Tool):
+    def __init__(self, service: MainRuntimeService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return 'task_node_detail'
+
+    @property
+    def description(self) -> str:
+        return '按任务 id 和节点 id 返回节点详情及关联工件列表。'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                '任务id': {'type': 'string', 'description': '目标任务 id。'},
+                '节点id': {'type': 'string', 'description': '目标节点 id。'},
+            },
+            'required': ['任务id', '节点id'],
+        }
+
+    async def execute(self, **kwargs: Any) -> dict[str, Any] | str:
+        await self._service.startup()
+        task_id = str(kwargs.get('任务id') or '').strip()
+        node_id = str(kwargs.get('节点id') or '').strip()
+        return self._service.node_detail(task_id, node_id)
+
+
 class CreateAsyncTaskTool(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service

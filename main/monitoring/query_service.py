@@ -114,6 +114,29 @@ class TaskQueryService:
             text=text,
         )
 
+    def failed_node_ids(self, task_id: str) -> list[str] | None:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        root = self._projection_root(task)
+        if root is None:
+            return []
+
+        failed_node_ids: list[str] = []
+
+        def _walk(node: TaskTreeNodeSummary | None) -> None:
+            if node is None:
+                return
+            node_id = str(getattr(node, 'node_id', '') or '').strip()
+            status = str(getattr(node, 'status', 'in_progress') or 'in_progress').strip()
+            if node_id and status == 'failed':
+                failed_node_ids.append(node_id)
+            for child in list(getattr(node, 'children', []) or []):
+                _walk(child)
+
+        _walk(root)
+        return failed_node_ids
+
     def get_task_snapshot(self, task_id: str, *, mark_read: bool = True) -> dict[str, Any] | None:
         progress = self.view_progress(task_id, mark_read=mark_read)
         if progress is None:
