@@ -11,6 +11,8 @@ INLINE_CHAR_LIMIT = 1200
 INLINE_LINE_LIMIT = 60
 DEFAULT_OPEN_LINES = 80
 MAX_OPEN_LINES = 200
+INLINE_OPEN_RESULT_CHAR_LIMIT = 16000
+INLINE_OPEN_RESULT_LINE_LIMIT = 260
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
 _HEAD_PREVIEW_LINES = 6
@@ -157,6 +159,41 @@ def _extract_origin_ref(value: Any) -> str:
     return refs[0] if refs else ""
 
 
+def _parsed_json_payload(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
+    normalized = str(source_kind or "").strip().lower()
+    if normalized not in {"tool_result:content", "tool_result:filesystem"}:
+        return False
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return False
+    excerpt = str(payload.get("excerpt") or "").strip()
+    if not excerpt:
+        return False
+    if payload.get("start_line") in {None, ""} or payload.get("end_line") in {None, ""}:
+        return False
+    serialized = _stringify(payload)
+    return (
+        len(serialized) <= INLINE_OPEN_RESULT_CHAR_LIMIT
+        and _line_count(serialized) <= INLINE_OPEN_RESULT_LINE_LIMIT
+        and _line_count(excerpt) <= MAX_OPEN_LINES
+    )
+
+
 def _looks_like_react_node_payload(value: Any, *, runtime: dict[str, Any] | None = None) -> bool:
     payload: dict[str, Any] | None = None
     if isinstance(value, dict):
@@ -279,6 +316,8 @@ class ContentNavigationService:
             return envelope
         text = _stringify(value)
         if not text:
+            return None
+        if not force and _should_keep_inline_tool_result(value, source_kind=source_kind):
             return None
         if not force and len(text) <= INLINE_CHAR_LIMIT and _line_count(text) <= INLINE_LINE_LIMIT:
             return None

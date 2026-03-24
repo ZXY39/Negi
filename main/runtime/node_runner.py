@@ -35,6 +35,12 @@ ACCEPTANCE_REF_GUIDANCE = (
     'If more detail is needed, use content.search first and then content.open for targeted reads. '
     'Do not request the full document body.'
 )
+ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE = (
+    'Evidence consistency check: when the child output or evidence notes cite concrete identifiers '
+    'such as function, method, class, field, config key, CLI command, or search keyword names, '
+    'verify that those identifiers actually appear in the cited file lines or a targeted reopened local slice. '
+    'If the cited identifiers drift from the cited source, reject the deliverable with failed+final.'
+)
 CORE_REQUIREMENT_NOTICE_TEMPLATE = '注意：你正在完成的任务是核心需求【{core_requirement}】的细分任务之一，不要做与核心需求或细分任务无关的事。'
 CORE_REQUIREMENT_NOTICE_PATTERN = re.compile(
     r'^注意：你正在完成的任务是核心需求【.*】的细分任务之一，不要做与核心需求或细分任务无关的事。$'
@@ -1084,6 +1090,7 @@ class NodeRunner:
         )
         if node_output_ref or result_payload_ref:
             prompt = f'{prompt}\n{ACCEPTANCE_REF_GUIDANCE}\n'
+        prompt = f'{prompt}\n{ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE}\n'
         return self._inject_core_requirement_notice(prompt, core_requirement)
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:

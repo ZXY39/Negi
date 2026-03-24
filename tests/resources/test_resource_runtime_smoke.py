@@ -1439,6 +1439,37 @@ def test_prepare_messages_for_model_uses_compact_content_refs(tmp_path: Path):
     store.close()
 
 
+def test_externalize_for_message_keeps_open_excerpt_inline(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+
+    file_path = tmp_path / 'demo.txt'
+    file_path.write_text('\n'.join(f'line-{index:03d}' for index in range(1, 161)), encoding='utf-8')
+    opened = navigator.open(path=str(file_path), start_line=40, end_line=120)
+
+    rendered = navigator.externalize_for_message(
+        json.dumps(opened, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='tool-open',
+        source_kind='tool_result:filesystem',
+        compact=True,
+    )
+
+    assert parse_content_envelope(rendered) is None
+    payload = json.loads(str(rendered))
+    assert payload['start_line'] == 40
+    assert payload['end_line'] == 120
+    assert 'line-040' in payload['excerpt']
+    assert 'line-120' in payload['excerpt']
+
+    store.close()
+
+
 @pytest.mark.asyncio
 async def test_memory_search_reads_manifest_settings(tmp_path: Path):
     workspace = tmp_path / 'workspace'
