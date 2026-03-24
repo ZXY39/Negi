@@ -595,7 +595,7 @@ class MainRuntimeConfig(Base):
 
 
 class ChinaBridgeConfig(Base):
-    enabled: bool = False
+    enabled: bool = True
     bind_host: str = "0.0.0.0"
     public_port: int = 18889
     control_host: str = "127.0.0.1"

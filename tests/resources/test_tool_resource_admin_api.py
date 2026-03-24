@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from g3ku.resources import ResourceManager
+from g3ku.security import get_bootstrap_security_service
 from g3ku.session.manager import Session
 from main.api import admin_rest
 from main.governance.resource_filter import list_effective_tool_names
@@ -373,6 +374,51 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
 
     assert len(visible) == 1
     assert [action.action_id for action in visible[0].actions] == ['describe']
+
+
+def test_main_runtime_service_keeps_unavailable_tool_family_visible_for_context_lookup():
+    family = ToolFamilyRecord(
+        tool_id='agent_browser',
+        display_name='Agent Browser',
+        description='Browser automation via the upstream CLI.',
+        primary_executor_name='agent_browser',
+        enabled=True,
+        available=False,
+        callable=True,
+        source_path='tools/agent_browser',
+        actions=[
+            ToolActionRecord(action_id='browse', label='Browse', allowed_roles=['ceo'], executor_names=['agent_browser']),
+            ToolActionRecord(
+                action_id='internal_only',
+                label='Internal Only',
+                agent_visible=False,
+                allowed_roles=['ceo'],
+                executor_names=['agent_browser'],
+            ),
+        ],
+        metadata={'warnings': ['missing required bins']},
+    )
+
+    class _Registry:
+        def list_tool_families(self):
+            return [family]
+
+    class _PolicyEngine:
+        def evaluate_tool_action(self, *, subject, tool_id: str, action_id: str):
+            _ = subject, tool_id, action_id
+            return SimpleNamespace(allowed=False, reason_code='resource_disabled')
+
+    service = object.__new__(MainRuntimeService)
+    service.resource_registry = _Registry()
+    service.policy_engine = _PolicyEngine()
+    service.list_effective_tool_names = lambda **kwargs: []
+    service._subject = lambda **kwargs: SimpleNamespace(**kwargs)
+
+    visible = service.list_visible_tool_families(actor_role='ceo', session_id='web:shared')
+
+    assert len(visible) == 1
+    assert visible[0].tool_id == 'agent_browser'
+    assert [action.action_id for action in visible[0].actions] == ['browse']
 
 
 def test_main_runtime_service_normalizes_short_task_id_for_lookup_and_progress():
@@ -1272,6 +1318,7 @@ def test_china_bridge_channel_test_reports_disabled_or_validated(tmp_path: Path,
     workspace.mkdir(parents=True, exist_ok=True)
     _write_runtime_config(workspace)
     monkeypatch.chdir(workspace)
+    get_bootstrap_security_service(workspace).setup_initial_realm(password='test-password')
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -1574,6 +1621,58 @@ async def test_admin_endpoints_expose_builtin_agent_browser_fields(tmp_path: Pat
         assert payload['tool_type'] == 'internal'
         assert payload['callable'] is True
         assert '## 安装' in payload['content']
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'agent_browser', 'load_tool_context')
+
+    import shutil
+    import g3ku.resources.registry as registry_module
+
+    original_which = shutil.which
+    monkeypatch.setattr(
+        registry_module.shutil,
+        'which',
+        lambda name: None if name == 'agent-browser' else original_which(name),
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        visible_names = set(service.list_effective_tool_names(actor_role='ceo', session_id='web:shared'))
+        visible_families = {
+            item.tool_id
+            for item in service.list_visible_tool_families(actor_role='ceo', session_id='web:shared')
+        }
+
+        assert 'agent_browser' not in visible_names
+        assert 'agent_browser' in visible_families
+
+        payload = service.load_tool_context(actor_role='ceo', session_id='web:shared', tool_id='agent_browser')
+        assert payload['ok'] is True
+        assert payload['tool_id'] == 'agent_browser'
+        assert payload['callable'] is True
+        assert payload['available'] is False
+        assert payload['warnings'] == ['missing required bins']
+        assert '# agent_browser' in payload['content']
     finally:
         await service.close()
         manager.close()

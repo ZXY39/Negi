@@ -109,6 +109,18 @@ def _base_fields(default_base_url: str, default_model: str, api_key_default: str
     ]
 
 
+def _api_mode_options(default_api_mode: ProtocolAdapter) -> list[TemplateFieldOption]:
+    if default_api_mode in {
+        ProtocolAdapter.OPENAI_COMPLETIONS,
+        ProtocolAdapter.OPENAI_RESPONSES,
+    }:
+        return [
+            option(ProtocolAdapter.OPENAI_COMPLETIONS.value, "OpenAI Completions"),
+            option(ProtocolAdapter.OPENAI_RESPONSES.value, "OpenAI Responses"),
+        ]
+    return [option(default_api_mode.value, default_api_mode.value)]
+
+
 def build_openai_compatible_template(
     *,
     provider_id: str,
@@ -172,10 +184,7 @@ def build_openai_compatible_template(
                 required=False,
                 advanced=True,
                 default=default_api_mode.value,
-                options=[
-                    option(ProtocolAdapter.OPENAI_COMPLETIONS.value, "OpenAI Completions"),
-                    option(ProtocolAdapter.OPENAI_RESPONSES.value, "OpenAI Responses"),
-                ],
+                options=_api_mode_options(default_api_mode),
             ),
         ]
     )

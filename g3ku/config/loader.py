@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime
+from importlib.resources import files as resource_files
 import json
 from pathlib import Path
 from typing import Any
@@ -44,30 +45,81 @@ def get_data_dir() -> Path:
     return get_data_path()
 
 
+def _bundled_example_config_text() -> tuple[str, str] | None:
+    try:
+        resource = resource_files("g3ku") / "templates" / "config.example.json"
+    except Exception:
+        return None
+    if not resource.is_file():
+        return None
+    return resource.read_text(encoding="utf-8"), "bundled:g3ku/templates/config.example.json"
+
+
+def _read_example_config_text(example_path: Path | None = None) -> tuple[str, str]:
+    if example_path is not None:
+        path = Path(example_path)
+        try:
+            return path.read_text(encoding="utf-8"), str(path)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Required config example file not found: {path}. "
+                f"Create {get_example_config_path()} or restore the bundled config example."
+            ) from exc
+
+    project_example = get_example_config_path()
+    if project_example.exists():
+        return project_example.read_text(encoding="utf-8"), str(project_example)
+
+    bundled = _bundled_example_config_text()
+    if bundled is not None:
+        return bundled
+
+    raise FileNotFoundError(
+        "Required config example file not found. "
+        f"Checked project-local path {project_example} and bundled template g3ku/templates/config.example.json."
+    )
+
+
+def _load_json_text(raw: str, source: str) -> dict[str, Any]:
+    if not raw.strip():
+        raise ValueError(f"Required config file is empty: {source}. Populate {get_config_path()} before starting g3ku.")
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse JSON config from {source}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Config root must be a JSON object: {source}")
+    return data
+
+
 def ensure_startup_config_ready(config_path: Path | None = None) -> bool:
     """Apply safe first-start bootstrap tweaks before loading runtime config.
 
-    If the project config file does not exist but a checked-in example file
-    does, bootstrap the config by copying the example.  The user still needs
-    to fill in real API keys before LLM features will work.
+    If the project config file does not exist, bootstrap it from a project-local
+    `.g3ku/config.example.json` when present, otherwise fall back to the bundled
+    example shipped inside the package. The user still needs to fill in real API
+    keys before LLM features will work.
     """
     path = Path(config_path) if config_path is not None else get_config_path()
     if not path.exists():
-        example_path = get_example_config_path()
-        if example_path.exists():
-            import shutil
+        try:
+            raw_example, source = _read_example_config_text()
+        except FileNotFoundError:
+            return False
+        _load_json_text(raw_example, source)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw_example.rstrip() + "\n", encoding="utf-8")
+        from loguru import logger
 
-            path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(example_path, path)
-            from loguru import logger
-
-            logger.info(
-                "Config bootstrapped from example: {}. "
-                "Please configure your API keys before using LLM features.",
-                path,
-            )
-            return True
-        return False
+        logger.info(
+            "Config bootstrapped from example: {} -> {}. "
+            "Please configure your API keys before using LLM features.",
+            source,
+            path,
+        )
+        return True
     return False
 
 
@@ -79,19 +131,7 @@ def _load_json_file(path: Path) -> dict[str, Any]:
             f"Required config file not found: {path}. Create {get_config_path()} before starting g3ku."
         ) from exc
 
-    if not raw.strip():
-        raise ValueError(
-            f"Required config file is empty: {path}. Populate {get_config_path()} before starting g3ku."
-        )
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Failed to parse JSON config from {path}: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise ValueError(f"Config root must be a JSON object: {path}")
-    return data
+    return _load_json_text(raw, str(path))
 
 
 def _path_exists(data: dict[str, Any], path: tuple[str, ...]) -> bool:
@@ -456,9 +496,9 @@ def _ensure_role_iterations_defaults(raw_data: dict[str, Any]) -> bool:
 
 
 def build_project_config_from_example(example_path: Path | None = None) -> Config:
-    """Build a strict project config from the checked-in example file."""
-    path = example_path or get_example_config_path()
-    return Config.model_validate(_migrate_config(_load_json_file(path)))
+    """Build a strict project config from a project-local or bundled example file."""
+    raw, source = _read_example_config_text(example_path)
+    return Config.model_validate(_migrate_config(_load_json_text(raw, source)))
 
 
 def load_config(config_path: Path | None = None) -> Config:

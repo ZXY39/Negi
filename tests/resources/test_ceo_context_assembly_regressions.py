@@ -63,13 +63,23 @@ def _skill(skill_id: str, description: str) -> SimpleNamespace:
     return SimpleNamespace(skill_id=skill_id, display_name=skill_id, description=description)
 
 
-def _family(tool_id: str, description: str, *, callable: bool = True, install_dir: str = '') -> SimpleNamespace:
+def _family(
+    tool_id: str,
+    description: str,
+    *,
+    callable: bool = True,
+    available: bool = True,
+    install_dir: str = '',
+    metadata: dict[str, object] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         tool_id=tool_id,
         display_name=tool_id,
         description=description,
         callable=callable,
+        available=available,
         install_dir=install_dir,
+        metadata=dict(metadata or {}),
         actions=[SimpleNamespace(executor_names=[tool_id])],
     )
 
@@ -133,3 +143,36 @@ async def test_ceo_context_assembly_dedupes_prompt_inventory_against_targeted_re
     assert result.trace['retrieval_scope']['deduped_skill_ids'] == ['demo_skill']
     assert result.trace['retrieval_scope']['deduped_tool_ids'] == ['external_browser']
     assert [item['tool_id'] for item in result.trace['external_tools']] == ['external_search']
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_lists_unavailable_callable_tools_as_context_resources() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response='')
+    service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='please fix the browser automation tool before using it',
+        exposure={
+            'skills': [],
+            'tool_families': [
+                _family(
+                    'agent_browser',
+                    'Browser automation via the upstream CLI.',
+                    callable=True,
+                    available=False,
+                    metadata={'warnings': ['missing required bins']},
+                ),
+            ],
+            'tool_names': ['filesystem', 'load_tool_context'],
+        },
+        persisted_session=None,
+    )
+
+    assert 'load_tool_context(tool_id="agent_browser")' in result.system_prompt
+    assert '`agent_browser`' in result.system_prompt
+    assert 'missing required bins' in result.system_prompt
+    assert [item['tool_id'] for item in result.trace['external_tools']] == ['agent_browser']
+    assert result.trace['external_tools'][0]['available'] is False
+    assert result.trace['external_tools'][0]['callable'] is True

@@ -84,6 +84,7 @@ include = [
     "g3ku/web/frontend/**/*.css",
     "g3ku/web/frontend/**/*.js",
     "g3ku/templates/**/*.md",
+    "g3ku/templates/**/*.json",
     "subsystems/**/*",
     "skills/**/*",
     "tools/**/*",

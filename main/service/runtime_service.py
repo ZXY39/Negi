@@ -966,24 +966,43 @@ class MainRuntimeService:
         families = []
         for family in self.resource_registry.list_tool_families():
             callable_family = bool(getattr(family, 'callable', True))
-            actions = [
-                action
-                for action in family.actions
-                if (
-                    self.policy_engine.evaluate_tool_action(
-                        subject=subject,
-                        tool_id=family.tool_id,
-                        action_id=action.action_id,
-                    ).allowed
-                    and (
-                        not callable_family
-                        or bool(set(action.executor_names) & visible_names)
-                    )
+            actions = []
+            for action in family.actions:
+                decision = self.policy_engine.evaluate_tool_action(
+                    subject=subject,
+                    tool_id=family.tool_id,
+                    action_id=action.action_id,
                 )
-            ]
+                if decision.allowed and (
+                    not callable_family
+                    or bool(set(action.executor_names) & visible_names)
+                ):
+                    actions.append(action)
+                    continue
+                if self._should_expose_unavailable_tool_action(
+                    actor_role=actor_role,
+                    family=family,
+                    action=action,
+                ):
+                    actions.append(action)
             if actions:
                 families.append(family.model_copy(update={'actions': actions}))
         return families
+
+    @staticmethod
+    def _should_expose_unavailable_tool_action(*, actor_role: str, family: Any, action: Any) -> bool:
+        if bool(getattr(family, 'available', True)):
+            return False
+        if not bool(getattr(family, 'enabled', True)):
+            return False
+        if not bool(getattr(action, 'agent_visible', True)):
+            return False
+        allowed_roles = {
+            str(role or '').strip()
+            for role in list(getattr(action, 'allowed_roles', []) or [])
+            if str(role or '').strip()
+        }
+        return str(actor_role or '').strip() in allowed_roles
 
     def _visible_tool_family_map(self, *, actor_role: str, session_id: str) -> dict[str, Any]:
         mapping: dict[str, Any] = {}
@@ -1064,6 +1083,9 @@ class MainRuntimeService:
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
             'callable': toolskill.get('callable'),
+            'available': toolskill.get('available'),
+            'warnings': list(toolskill.get('warnings') or []),
+            'errors': list(toolskill.get('errors') or []),
         }
 
     def load_tool_context_v2(
@@ -1106,6 +1128,9 @@ class MainRuntimeService:
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
             'callable': toolskill.get('callable'),
+            'available': toolskill.get('available'),
+            'warnings': list(toolskill.get('warnings') or []),
+            'errors': list(toolskill.get('errors') or []),
         }
 
     def list_skill_resources(self) -> list[Any]:
@@ -1698,6 +1723,9 @@ class MainRuntimeService:
             'tool_type': tool_type,
             'install_dir': install_dir,
             'callable': callable_flag,
+            'available': bool(getattr(family, 'available', getattr(descriptor, 'available', True))),
+            'warnings': list(getattr(family, 'metadata', {}).get('warnings') or []),
+            'errors': list(getattr(family, 'metadata', {}).get('errors') or []),
         }
 
     def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:

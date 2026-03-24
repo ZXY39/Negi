@@ -1,0 +1,177 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": ".",
+      "runtime": "langgraph",
+      "maxTokens": 8192,
+      "temperature": 0.1,
+      "maxToolIterations": 40,
+      "memoryWindow": 100,
+      "reasoningEffort": "high"
+    },
+    "roleIterations": {
+      "ceo": 40,
+      "execution": 16,
+      "inspection": 16
+    },
+    "multiAgent": {
+      "orchestratorModelKey": null
+    }
+  },
+  "models": {
+    "catalog": [
+      {
+        "key": "gpt-5.4",
+        "providerModel": "responses:gpt-5.4",
+        "apiKey": "replace-me",
+        "apiBase": "https://api.openai.com/v1",
+        "extraHeaders": null,
+        "enabled": true,
+        "maxTokens": 8192,
+        "temperature": 0.1,
+        "reasoningEffort": "high",
+        "retryOn": [
+          "network",
+          "429",
+          "5xx"
+        ],
+        "retryCount": 3,
+        "description": "Replace the placeholder binding before production use."
+      },
+      {
+        "key": "gpt-5.2",
+        "providerModel": "responses:gpt-5.2",
+        "apiKey": "replace-me",
+        "apiBase": "https://api.openai.com/v1",
+        "extraHeaders": null,
+        "enabled": true,
+        "maxTokens": 8192,
+        "temperature": 0.1,
+        "reasoningEffort": "high",
+        "retryOn": [
+          "network",
+          "429",
+          "5xx"
+        ],
+        "retryCount": 10,
+        "description": ""
+      },
+      {
+        "key": "subagent gpt-5.4",
+        "providerModel": "responses:gpt-5.4",
+        "apiKey": "replace-me",
+        "apiBase": "https://api.openai.com/v1",
+        "extraHeaders": null,
+        "enabled": true,
+        "maxTokens": 8192,
+        "temperature": 0.1,
+        "reasoningEffort": "high",
+        "retryOn": [
+          "network",
+          "429",
+          "5xx"
+        ],
+        "retryCount": 3,
+        "description": ""
+      }
+    ],
+    "roles": {
+      "ceo": [
+        "gpt-5.4",
+        "gpt-5.2"
+      ],
+      "execution": [
+        "subagent gpt-5.4",
+        "gpt-5.2"
+      ],
+      "inspection": [
+        "subagent gpt-5.4",
+        "gpt-5.2"
+      ]
+    }
+  },
+  "providers": {
+    "responses": {
+      "apiKey": "",
+      "apiBase": null,
+      "extraHeaders": null
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790,
+    "heartbeat": {
+      "enabled": true,
+      "intervalS": 1800
+    }
+  },
+  "toolSecrets": {},
+  "resources": {
+    "enabled": true,
+    "skillsDir": "skills",
+    "toolsDir": "tools",
+    "manifestName": "resource.yaml",
+    "reload": {
+      "enabled": true,
+      "pollIntervalMs": 1000,
+      "debounceMs": 400,
+      "lazyReloadOnAccess": true,
+      "keepLastGoodVersion": true
+    },
+    "locks": {
+      "lockDir": ".g3ku/resource-locks",
+      "logicalDeleteGuard": true,
+      "windowsFsLock": true
+    },
+    "statePath": ".g3ku/resources.state.json"
+  },
+  "mainRuntime": {
+    "enabled": true,
+    "storePath": ".g3ku/main-runtime/runtime.sqlite3",
+    "filesBaseDir": ".g3ku/main-runtime/tasks",
+    "artifactDir": ".g3ku/main-runtime/artifacts",
+    "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
+    "defaultMaxDepth": 1,
+    "hardMaxDepth": 4
+  },
+  "chinaBridge": {
+    "enabled": true,
+    "bindHost": "0.0.0.0",
+    "publicPort": 18889,
+    "controlHost": "127.0.0.1",
+    "controlPort": 18989,
+    "controlToken": "",
+    "autoStart": true,
+    "nodeBin": "node",
+    "npmClient": "pnpm",
+    "stateDir": ".g3ku/china-bridge",
+    "logLevel": "info",
+    "sendProgress": true,
+    "sendToolHints": true,
+    "channels": {
+      "qqbot": {
+        "enabled": false,
+        "accounts": {}
+      },
+      "dingtalk": {
+        "enabled": false,
+        "accounts": {},
+        "clientId": "",
+        "clientSecret": "",
+        "allowFrom": []
+      },
+      "wecom": {
+        "enabled": false,
+        "accounts": {}
+      },
+      "wecomApp": {
+        "enabled": false,
+        "accounts": {}
+      },
+      "feishuChina": {
+        "enabled": false,
+        "accounts": {}
+      }
+    }
+  }
+}

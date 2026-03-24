@@ -38,6 +38,10 @@ class CeoPromptBuilder:
             'or the injected `G3KU_PROJECT_PYTHON` env var instead of assuming bare `python` '
             'points at the correct interpreter.'
         )
+        resource_context_guidance = (
+            '- 对于不会直接出现在函数工具列表里的工具资源，包括已注册的外置工具和当前不可用的工具，'
+            '先用 `load_tool_context` 读取安装、排障、更新和使用说明，再决定是否修复或继续调用。'
+        )
         base = self._read_prompt('ceo_frontdoor.md', self._default_prompt())
         base = self._normalize_frontdoor_prompt(base)
         if 'core_requirement' not in base:
@@ -48,6 +52,8 @@ class CeoPromptBuilder:
             base = f'{base}\n{exec_runtime_guidance}'
         if 'same Python environment as the current G3KU process' not in base:
             base = f'{base}\n{project_python_guidance}'
+        if '当前不可用的工具' not in base:
+            base = f'{base}\n{resource_context_guidance}'
         inventory = self._skill_inventory(skills)
         if inventory:
             return f'{base}\n\n## 当前对主 Agent 可见的 Skills\n\n{inventory}'
