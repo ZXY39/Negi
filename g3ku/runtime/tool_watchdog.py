@@ -45,6 +45,11 @@ class DetachedToolExecution:
 
 
 DEFAULT_WAIT_WINDOWS_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0, 600.0)
+_WATCHDOG_ENABLED_ACTOR_ROLES = frozenset({"ceo", "execution", "inspection"})
+_WATCHDOG_ROLE_ALIASES = {
+    "acceptance": "inspection",
+    "checker": "inspection",
+}
 
 
 class ToolExecutionManager:
@@ -269,7 +274,10 @@ def runtime_context_value(runtime_context: Any, key: str, default: Any = None) -
 
 def actor_role_allows_watchdog(runtime_context: Any) -> bool:
     role = str(runtime_context_value(runtime_context, "actor_role", "") or "").strip().lower()
-    return role == "ceo"
+    if not role:
+        return False
+    role = _WATCHDOG_ROLE_ALIASES.get(role, role)
+    return role in _WATCHDOG_ENABLED_ACTOR_ROLES
 
 
 def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:

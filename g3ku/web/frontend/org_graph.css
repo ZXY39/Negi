@@ -1026,7 +1026,7 @@ textarea {
     max-width: calc(100vw - 48px);
     height: min(82vh, calc(100dvh - 48px));
     max-height: calc(100dvh - 48px);
-    transform: translate3d(-50%, -48%, 0) scale(0.985);
+    transform: translate(-50%, calc(-50% + 8px));
     opacity: 0;
     pointer-events: none;
     overflow: hidden;
@@ -1037,7 +1037,7 @@ textarea {
 .detail-drawer.project-detail-drawer.is-open {
     opacity: 1;
     pointer-events: auto;
-    transform: translate3d(-50%, -50%, 0) scale(1);
+    transform: translate(-50%, -50%);
 }
 
 .detail-drawer.project-detail-drawer .panel-header {
@@ -2715,7 +2715,7 @@ textarea {
     width: min(1120px, calc(100vw - 48px));
     max-height: calc(100dvh - 48px);
     min-height: 0;
-    transform: translate(-50%, -48%) scale(0.98);
+    transform: translate(-50%, calc(-50% + 8px));
     opacity: 0;
     pointer-events: none;
     overflow: hidden;
@@ -2727,7 +2727,7 @@ textarea {
 .llm-editor-panel.is-open {
     opacity: 1;
     pointer-events: auto;
-    transform: translate(-50%, -50%) scale(1);
+    transform: translate(-50%, -50%);
 }
 
 .llm-routes-panel {
@@ -4437,7 +4437,8 @@ textarea {
     left: 50%;
     width: min(980px, calc(100vw - 48px));
     max-height: calc(100dvh - 48px);
-    transform: translate3d(-50%, -48%, 0) scale(0.985);
+    /* Avoid scale/3d transforms here: they blur modal text on Windows/Chromium. */
+    transform: translate(-50%, calc(-50% + 8px));
     opacity: 0;
     pointer-events: none;
     overflow: hidden;
@@ -4447,16 +4448,13 @@ textarea {
     box-shadow: 0 18px 48px -24px rgba(2, 6, 23, 0.58), 0 0 0 1px color-mix(in srgb, var(--brand-primary) 14%, transparent);
     transition: opacity 140ms ease, transform 160ms ease;
     z-index: 96;
-    contain: layout paint;
-    will-change: transform, opacity;
-    backface-visibility: hidden;
 }
 
 .detail-drawer.is-open,
 .model-detail-dialog.is-open {
     opacity: 1;
     pointer-events: auto;
-    transform: translate3d(-50%, -50%, 0) scale(1);
+    transform: translate(-50%, -50%);
 }
 
 .detail-drawer .resource-detail-shell,
@@ -5479,12 +5477,12 @@ textarea {
     bottom: auto;
     width: min(760px, calc(100vw - 32px));
     max-height: min(78vh, 820px);
-    transform: translate(-50%, -48%) scale(0.98);
+    transform: translate(-50%, calc(-50% + 8px));
     z-index: 98;
 }
 
 .task-token-modal.is-open {
-    transform: translate(-50%, -50%) scale(1);
+    transform: translate(-50%, -50%);
 }
 
 /* Token 模态窗口：backdrop 不模糊，仅半透明遮罩 */

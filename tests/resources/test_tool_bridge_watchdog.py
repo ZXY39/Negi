@@ -56,21 +56,21 @@ class _LoopStub:
 
 
 @pytest.mark.asyncio
-async def test_tool_execution_bridge_bypasses_watchdog_for_non_ceo_roles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_tool_execution_bridge_bypasses_watchdog_for_unknown_roles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import g3ku.runtime.tool_bridge as tool_bridge_module
 
     async def _forbidden_watchdog(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("non-CEO tool bridge path must not call run_tool_with_watchdog")
+        raise AssertionError("unsupported tool bridge roles must not call run_tool_with_watchdog")
 
     monkeypatch.setattr(tool_bridge_module, "run_tool_with_watchdog", _forbidden_watchdog)
 
     loop = _LoopStub(tmp_path)
     bridge = ToolExecutionBridge(loop)
     runtime_context = SimpleNamespace(
-        actor_role="execution",
-        session_key="web:test-execution",
+        actor_role="worker",
+        session_key="web:test-worker",
         channel="web",
-        chat_id="test-execution",
+        chat_id="test-worker",
         message_id=None,
         iteration=1,
         on_progress=None,
@@ -91,7 +91,12 @@ async def test_tool_execution_bridge_bypasses_watchdog_for_non_ceo_roles(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_tool_execution_bridge_uses_watchdog_for_ceo_roles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("actor_role", ["ceo", "execution", "inspection"])
+async def test_tool_execution_bridge_uses_watchdog_for_enabled_roles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    actor_role: str,
+) -> None:
     import g3ku.runtime.tool_bridge as tool_bridge_module
 
     calls: list[dict[str, str]] = []
@@ -112,10 +117,10 @@ async def test_tool_execution_bridge_uses_watchdog_for_ceo_roles(tmp_path: Path,
     loop = _LoopStub(tmp_path)
     bridge = ToolExecutionBridge(loop)
     runtime_context = SimpleNamespace(
-        actor_role="ceo",
-        session_key="web:test-ceo",
+        actor_role=actor_role,
+        session_key=f"web:test-{actor_role}",
         channel="web",
-        chat_id="test-ceo",
+        chat_id=f"test-{actor_role}",
         message_id=None,
         iteration=1,
         on_progress=None,
@@ -131,6 +136,6 @@ async def test_tool_execution_bridge_uses_watchdog_for_ceo_roles(tmp_path: Path,
         emit_progress=False,
     )
 
-    assert calls == [{"tool_name": "immediate_tool", "actor_role": "ceo"}]
+    assert calls == [{"tool_name": "immediate_tool", "actor_role": actor_role}]
     assert result.content == "done"
     assert result.status == "success"
