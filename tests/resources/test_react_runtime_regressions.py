@@ -8,7 +8,6 @@ import pytest
 from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse
-from g3ku.runtime.ceo_async_task_guard import GUARD_OVERLAY_MARKER, maybe_build_execution_overlay
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
 
@@ -250,14 +249,13 @@ def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
         {'role': 'system', 'content': 'base system'},
         {'role': 'user', 'content': 'base user'},
     ]
-    overlay = maybe_build_execution_overlay(iteration=21, can_spawn_children=True)
+    overlay = 'temporary system overlay'
 
     request_messages = loop._apply_temporary_system_overlay(base_messages, overlay_text=overlay)
 
     assert base_messages[0]['content'] == 'base system'
     assert request_messages[0]['role'] == 'system'
-    assert '当前你已调用20轮工具' in str(request_messages[0]['content'])
-    assert f'{GUARD_OVERLAY_MARKER}\n' in str(request_messages[0]['content'])
+    assert request_messages[0]['content'] == overlay
     assert request_messages[1:] == base_messages
 
 

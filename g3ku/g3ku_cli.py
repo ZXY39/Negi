@@ -5,14 +5,13 @@ import asyncio
 import json
 import os
 import secrets
-import signal
-import subprocess
-import sys
 import webbrowser
 from pathlib import Path
 
 import typer
 from g3ku.config.loader import ensure_startup_config_ready, load_config
+from g3ku.security import BOOTSTRAP_MASTER_KEY_ENV, get_bootstrap_security_service
+from g3ku.web.worker_control import WEB_AUTO_WORKER_ENV
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_PATH,
     TASK_TERMINAL_CALLBACK_TOKEN_ENV,
@@ -149,6 +148,9 @@ async def _run_worker_runtime() -> None:
     from g3ku.config.loader import load_config
 
     os.environ["G3KU_TASK_RUNTIME_ROLE"] = "worker"
+    master_key = str(os.environ.pop(BOOTSTRAP_MASTER_KEY_ENV, "")).strip()
+    if master_key:
+        get_bootstrap_security_service(Path.cwd()).activate_with_master_key(master_key=master_key)
     ensure_startup_config_ready()
     config = load_config()
     sync_workspace_templates(config.workspace_path)
@@ -166,21 +168,6 @@ async def _run_worker_runtime() -> None:
         await agent.close_mcp()
 
 
-def _stop_worker_process(process: subprocess.Popen | None) -> None:
-    if process is None:
-        return
-    if process.poll() is not None:
-        return
-    try:
-        process.terminate()
-        process.wait(timeout=5)
-    except Exception:
-        try:
-            process.kill()
-        except Exception:
-            pass
-
-
 @app.callback()
 def _main() -> None:
     """G3ku command group."""
@@ -194,7 +181,7 @@ def start(
     log_enabled: bool = typer.Option(False, "--log", "-log", help="Render main-agent user/prompt/answer logs."),
     open_browser: bool = typer.Option(False, "--open", help="Open the app URL in the default browser."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the resolved actions without starting the server."),
-    with_worker: bool = typer.Option(True, "--worker/--no-worker", help="Start the task worker alongside the web server."),
+    with_worker: bool = typer.Option(True, "--worker/--no-worker", help="Auto-start the task worker after unlock."),
 ) -> None:
     """Start the unified G3ku web app.
 
@@ -223,21 +210,18 @@ def start(
         return
 
     _acquire_start_lock(root, port=resolved_port)
-    worker_process: subprocess.Popen | None = None
     callback_token = secrets.token_urlsafe(24)
     callback_url = f"http://127.0.0.1:{resolved_port}{TASK_TERMINAL_CALLBACK_PATH}"
     os.environ[TASK_TERMINAL_CALLBACK_URL_ENV] = callback_url
     os.environ[TASK_TERMINAL_CALLBACK_TOKEN_ENV] = callback_token
     save_task_terminal_callback_config(workspace=root, url=callback_url, token=callback_token)
+    if with_worker and not reload:
+        os.environ[WEB_AUTO_WORKER_ENV] = "1"
+        typer.echo("[g3ku] task worker will auto-start after project unlock")
+    else:
+        os.environ.pop(WEB_AUTO_WORKER_ENV, None)
     try:
-        if with_worker and not reload:
-            worker_env = os.environ.copy()
-            worker_process = subprocess.Popen(
-                [sys.executable, "-m", "g3ku", "worker"],
-                cwd=str(root),
-                env=worker_env,
-            )
-        elif with_worker and reload:
+        if with_worker and reload:
             typer.echo("[g3ku] worker auto-start is disabled when --reload is enabled; run `python -m g3ku worker` separately.")
         from g3ku.web.main import run_server
 
@@ -248,7 +232,6 @@ def start(
             log_level='info',
         )
     finally:
-        _stop_worker_process(worker_process)
         _release_start_lock()
 
 

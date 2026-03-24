@@ -1225,6 +1225,62 @@ def test_llm_memory_binding_update_refreshes_runtime(monkeypatch):
     }
 
 
+def test_llm_memory_binding_partial_update_keeps_unspecified_side(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _StubFacade:
+        def get_memory_binding(self):
+            return SimpleNamespace(
+                embedding_config_id='cfg-embedding-old',
+                rerank_config_id='cfg-rerank-old',
+            )
+
+        def set_memory_binding(self, *, embedding_config_id: str | None, rerank_config_id: str | None):
+            captured['embedding_config_id'] = embedding_config_id
+            captured['rerank_config_id'] = rerank_config_id
+            return SimpleNamespace(
+                model_dump=lambda mode='json': {
+                    'embedding_config_id': embedding_config_id,
+                    'embedding_provider_model': 'dashscope:qwen3-vl-embedding',
+                    'rerank_config_id': rerank_config_id,
+                    'rerank_provider_model': 'dashscope:qwen3-vl-rerank',
+                }
+            )
+
+    class _StubManager:
+        def __init__(self):
+            self.facade = _StubFacade()
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/llm/memory',
+        json={
+            'embedding_config_id': 'cfg-embedding-new',
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()['item']['embedding_config_id'] == 'cfg-embedding-new'
+    assert response.json()['item']['rerank_config_id'] == 'cfg-rerank-old'
+    assert captured == {
+        'embedding_config_id': 'cfg-embedding-new',
+        'rerank_config_id': 'cfg-rerank-old',
+        'force': True,
+        'reason': 'admin_llm_memory_update',
+    }
+
+
 def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

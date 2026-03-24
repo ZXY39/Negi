@@ -13,9 +13,6 @@ Set-StrictMode -Version Latest
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venvPython = Join-Path $scriptDir ".venv\Scripts\python.exe"
-$logsDir = Join-Path $scriptDir ".g3ku\logs"
-$workerOutLog = Join-Path $logsDir "worker.out.log"
-$workerErrLog = Join-Path $logsDir "worker.err.log"
 $rootPattern = [regex]::Escape($scriptDir)
 
 function Get-G3kuManagedPythonProcesses {
@@ -66,19 +63,6 @@ function Assert-StartPreconditions {
     }
 }
 
-function Show-WorkerFailureLogs {
-    if (Test-Path $workerOutLog) {
-        Write-Host ""
-        Write-Host "[g3ku] Worker stdout:" -ForegroundColor Yellow
-        Get-Content $workerOutLog -Tail 80
-    }
-    if (Test-Path $workerErrLog) {
-        Write-Host ""
-        Write-Host "[g3ku] Worker stderr:" -ForegroundColor Yellow
-        Get-Content $workerErrLog -Tail 80
-    }
-}
-
 if ($ForceRestart) {
     Write-Host "[g3ku] Force-restarting existing g3ku web/worker processes..." -ForegroundColor Yellow
     Stop-G3kuManagedPythonProcesses
@@ -86,17 +70,7 @@ if ($ForceRestart) {
 
 Assert-StartPreconditions
 
-New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
-
-if (Test-Path $workerOutLog) {
-    Remove-Item $workerOutLog -Force
-}
-if (Test-Path $workerErrLog) {
-    Remove-Item $workerErrLog -Force
-}
-
-$workerArgs = @("-m", "g3ku.g3ku_cli", "worker")
-$webArgs = @("-m", "g3ku.g3ku_cli", "start", "--no-worker", "--host", $BindHost, "--port", "$Port")
+$webArgs = @("-m", "g3ku.g3ku_cli", "start", "--host", $BindHost, "--port", "$Port")
 
 if ($PromptLog) {
     $webArgs += "--log"
@@ -109,45 +83,18 @@ if ($Reload) {
 }
 
 Write-Host "[g3ku] Project root: $scriptDir"
-Write-Host "[g3ku] Starting worker..."
-Write-Host "[g3ku] Worker logs: $workerOutLog"
-
-$workerProcess = Start-Process `
-    -FilePath $venvPython `
-    -ArgumentList $workerArgs `
-    -WorkingDirectory $scriptDir `
-    -RedirectStandardOutput $workerOutLog `
-    -RedirectStandardError $workerErrLog `
-    -PassThru
-
-Start-Sleep -Seconds 3
-$workerProcess.Refresh()
-if ($workerProcess.HasExited) {
-    Show-WorkerFailureLogs
-    throw "[g3ku] Worker exited immediately with code $($workerProcess.ExitCode)."
-}
-
-Write-Host "[g3ku] Worker PID: $($workerProcess.Id)"
+Write-Host "[g3ku] Task worker will start after project unlock."
 Write-Host "[g3ku] Starting web server on http://${BindHost}:$Port ..."
 
-$webExitCode = 0
-try {
-    & $venvPython @webArgs
-    $webExitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
-} finally {
-    if (-not $KeepWorker) {
-        try {
-            $workerProcess.Refresh()
-            if (-not $workerProcess.HasExited) {
-                Write-Host "[g3ku] Stopping worker PID $($workerProcess.Id)..." -ForegroundColor Yellow
-                Stop-Process -Id $workerProcess.Id -Force -ErrorAction Stop
-            }
-        } catch {
-            Write-Warning "[g3ku] Failed to stop worker PID $($workerProcess.Id): $($_.Exception.Message)"
-        }
-    } else {
-        Write-Host "[g3ku] KeepWorker enabled; worker PID $($workerProcess.Id) left running." -ForegroundColor Yellow
-    }
+if ($KeepWorker) {
+    $env:G3KU_WEB_KEEP_WORKER = "1"
+    Write-Host "[g3ku] KeepWorker enabled; web-managed worker will be left running when the web server exits." -ForegroundColor Yellow
+} else {
+    Remove-Item Env:G3KU_WEB_KEEP_WORKER -ErrorAction SilentlyContinue
 }
+
+$webExitCode = 0
+& $venvPython @webArgs
+$webExitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
 
 exit $webExitCode

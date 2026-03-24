@@ -193,6 +193,15 @@ def _build_app() -> FastAPI:
     return app
 
 
+@pytest.fixture(autouse=True)
+def _unlock_websocket_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_bootstrap_security_service",
+        lambda: SimpleNamespace(is_unlocked=lambda: True),
+    )
+
+
 def _mock_workspace(monkeypatch, workspace: Path) -> None:
     monkeypatch.setattr(websocket_ceo, "workspace_path", lambda: workspace)
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: workspace)
@@ -436,6 +445,84 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
     assert [item["tool_name"] for item in snapshot["tool_events"]] == ["skill-installer"]
 
 
+@pytest.mark.asyncio
+async def test_runtime_agent_session_pause_emits_single_pause_ack_and_snapshot(monkeypatch) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    started = asyncio.Event()
+    turn_task_ref: dict[str, asyncio.Task[object] | None] = {"task": None}
+
+    class _BlockingRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session
+            await on_progress(
+                "skill-installer started",
+                event_kind="tool_start",
+                event_data={"tool_name": "skill-installer"},
+            )
+            started.set()
+            await asyncio.Future()
+
+    async def _cancel_session_tasks(_session_key: str) -> int:
+        task = turn_task_ref.get("task")
+        if task is None:
+            return 0
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return 1
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        multi_agent_runner=_BlockingRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:pause-dedupe", channel="web", chat_id="pause-dedupe")
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+    turn_task = asyncio.create_task(
+        session.prompt(UserInputMessage(content="Please pause me"), persist_transcript=False)
+    )
+    turn_task_ref["task"] = turn_task
+
+    await started.wait()
+    await session.pause()
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn_task
+
+    pause_acks = [
+        event for event in events
+        if event.type == "control_ack" and str(event.payload.get("action") or "") == "pause"
+    ]
+    paused_snapshots = [
+        event for event in events
+        if event.type == "state_snapshot"
+        and str((event.payload.get("state") or {}).get("status") or "") == "paused"
+    ]
+
+    assert len(pause_acks) == 1
+    assert len(paused_snapshots) == 1
+
+
 def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     session = RuntimeAgentSession(
@@ -597,7 +684,12 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
 
         ws.send_json({"type": "client.user_message", "text": "Install the skill"})
 
-        messages = [ws.receive_json(), ws.receive_json(), ws.receive_json()]
+        messages = []
+        for _ in range(6):
+            payload = ws.receive_json()
+            messages.append(payload)
+            if payload.get("type") == "ceo.reply.final":
+                break
 
     final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
     assert len(final_events) == 1

@@ -1753,9 +1753,12 @@ function restoreCeoInflightTurn(snapshot = null) {
         addMsg(text, "user", { attachments, scrollMode: "preserve" });
     }
     const status = String(snapshot.status || "").trim().toLowerCase();
+    if (normalizeCeoInteractionTrace(snapshot.interaction_trace)) {
+        patchCeoInflightTurn(snapshot);
+    }
     const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
     const assistantText = String(snapshot.assistant_text || "").trim();
-    const needsAssistantTurn = toolEvents.length > 0 || status === "paused" || status === "error" || (!isHeartbeat && status === "running");
+    const needsAssistantTurn = !!normalizeCeoInteractionTrace(snapshot.interaction_trace) || toolEvents.length > 0 || status === "paused" || status === "error" || (!isHeartbeat && status === "running");
     const turn = needsAssistantTurn ? ensureActiveCeoTurn({ source }) : null;
     if (turn?.textEl && assistantText) {
         turn.textEl.innerHTML = renderMarkdown(assistantText);
@@ -1774,6 +1777,34 @@ function restoreCeoInflightTurn(snapshot = null) {
 }
 
 function renderPersistedCeoAssistantTurn(item = {}) {
+    const interactionTrace = normalizeCeoInteractionTrace(item?.interaction_trace);
+    if (interactionTrace) {
+        const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
+        if (!turn) {
+            addMsg(String(item?.content || ""), "system", { markdown: true, scrollMode: "preserve" });
+            return;
+        }
+        S.ceoPendingTurns.push(turn);
+        mutateCeoFeed(() => {
+            const content = String(item?.content || "");
+            if (turn.textEl) {
+                turn.textEl.innerHTML = renderMarkdown(content);
+                turn.textEl.classList.remove("pending");
+                turn.textEl.classList.add("markdown-content");
+            }
+            renderCeoTraceIntoTurn(turn, interactionTrace);
+            updateCeoTurnMeta(turn, `${interactionTrace.stages.length} 个阶段`);
+            turn.flowEl.hidden = false;
+            turn.flowEl.open = false;
+            icons();
+        }, { scrollMode: "preserve" });
+        const activeIndex = findActiveCeoTurnIndex("history");
+        if (activeIndex >= 0) {
+            S.ceoPendingTurns.splice(activeIndex, 1);
+        }
+        turn.finalized = true;
+        return;
+    }
     const toolEvents = Array.isArray(item?.tool_events) ? item.tool_events : [];
     const content = String(item?.content || "");
     if (!toolEvents.length) {
@@ -1816,6 +1847,193 @@ function renderCeoSnapshot(messages = [], inflightTurn = null) {
         }
     });
     restoreCeoInflightTurn(inflightTurn);
+}
+
+function normalizeCeoInteractionTrace(trace = null) {
+    if (!trace || typeof trace !== "object") return null;
+    const stages = (Array.isArray(trace?.stages) ? trace.stages : [])
+        .map((stage, index) => normalizeExecutionStageTrace(stage, index))
+        .filter((stage) => stage && (stage.stage_goal || stage.rounds.length));
+    if (!stages.length) return null;
+    return {
+        stages,
+        final_output: String(trace?.final_output || "").trim(),
+    };
+}
+
+function ceoTraceStatus(value = "") {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (["running", "active", "queued", "pending"].includes(normalized)) return "running";
+    if (["success", "completed", "final"].includes(normalized)) return "success";
+    if (["error", "failed", "blocked"].includes(normalized)) return "error";
+    return stageTraceStatus({ status: value });
+}
+
+function captureCeoTraceViewState(turn) {
+    const traceItems = turn?.listEl instanceof HTMLElement
+        ? Array.from(turn.listEl.querySelectorAll(".task-trace-step")).map((step, index) => ({
+            index,
+            key: String(step.dataset.traceKey || "").trim(),
+            title: String(step.querySelector(".interaction-step-title")?.textContent || "").trim(),
+            open: !!step.open,
+            defaultOpen: String(step.dataset.defaultOpen || "").trim().toLowerCase() === "true",
+        }))
+        : [];
+    return { traceItems };
+}
+
+function applyCeoTraceViewState(traceList, traceItems) {
+    if (!(traceList instanceof HTMLElement) || !Array.isArray(traceItems) || !traceItems.length) return;
+    const keyState = new Map();
+    const titleState = new Map();
+    traceItems.forEach((item) => {
+        if (item?.key && !keyState.has(item.key)) keyState.set(item.key, item);
+        if (item?.title && !titleState.has(item.title)) titleState.set(item.title, item);
+    });
+    Array.from(traceList.querySelectorAll(".task-trace-step")).forEach((step, index) => {
+        const traceKey = String(step.dataset.traceKey || "").trim();
+        const title = String(step.querySelector(".interaction-step-title")?.textContent || "").trim();
+        const previous = keyState.get(traceKey) || titleState.get(title) || traceItems[index];
+        if (!previous || typeof previous.open !== "boolean") return;
+        const previousDefaultOpen = typeof previous.defaultOpen === "boolean" ? previous.defaultOpen : previous.open;
+        const currentDefaultOpen = String(step.dataset.defaultOpen || "").trim().toLowerCase() === "true";
+        step.open = previous.open !== previousDefaultOpen ? previous.open : currentDefaultOpen;
+    });
+}
+
+function applyCeoTraceDescriptors(root, descriptors = []) {
+    if (!(root instanceof HTMLElement)) return;
+    (Array.isArray(descriptors) ? descriptors : []).forEach((descriptor) => {
+        const traceKey = String(descriptor?.traceKey || "").trim();
+        if (!traceKey) return;
+        const selector = `.task-trace-step[data-trace-key="${String(traceKey).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
+        const step = root.querySelector(selector);
+        if (!(step instanceof HTMLElement)) return;
+        if (descriptor.startedAt) step.dataset.startedAt = descriptor.startedAt;
+        else delete step.dataset.startedAt;
+        if (descriptor.finishedAt) step.dataset.finishedAt = descriptor.finishedAt;
+        else delete step.dataset.finishedAt;
+        if (Number.isFinite(Number(descriptor.elapsedSeconds))) {
+            step.dataset.elapsedSeconds = String(Number(descriptor.elapsedSeconds));
+        } else {
+            delete step.dataset.elapsedSeconds;
+        }
+        step.dataset.traceStatus = String(descriptor.status || "").trim();
+    });
+}
+
+function buildCeoTraceBundle(trace = null) {
+    const normalized = normalizeCeoInteractionTrace(trace);
+    if (!normalized) return { html: "", descriptors: [], stageCount: 0 };
+    const descriptors = [];
+    const html = normalized.stages.map((stage, stageIndex) => {
+        const stageKey = `ceo:stage:${stage.stage_id || stage.stage_index || stageIndex + 1}`;
+        const roundsHtml = (Array.isArray(stage.rounds) ? stage.rounds : []).map((round, roundIndex) => {
+            const roundKey = `${stageKey}:round:${round.round_id || round.round_index || roundIndex + 1}`;
+            const toolsHtml = (Array.isArray(round.tools) ? round.tools : []).map((tool, toolIndex) => {
+                const toolKey = `${roundKey}:tool:${tool.tool_call_id || toolIndex}`;
+                descriptors.push({
+                    traceKey: toolKey,
+                    status: ceoTraceStatus(tool.status),
+                    startedAt: String(tool.started_at || ""),
+                    finishedAt: String(tool.finished_at || ""),
+                    elapsedSeconds: tool.elapsed_seconds,
+                });
+                return renderTraceStep({
+                    traceKey: toolKey,
+                    title: `工具 · ${tool.tool_name || "tool"}`,
+                    status: ceoTraceStatus(tool.status),
+                    open: false,
+                    showRuntime: true,
+                    bodyHtml: [
+                        renderTraceField("参数", tool.arguments_text, "无参数"),
+                        renderTraceField("工具输出", tool.output_text, tool.status === "running" ? "等待工具输出..." : "暂无工具输出"),
+                    ].join(""),
+                });
+            }).join("") || renderTraceField("工具", "", "本轮暂无工具记录");
+            const roundStatus = buildLiveSectionStatus(round.tools || []);
+            descriptors.push({
+                traceKey: roundKey,
+                status: roundStatus,
+                startedAt: String(round.created_at || ""),
+                finishedAt: "",
+                elapsedSeconds: null,
+            });
+            const roundTitle = round.budget_counted
+                ? `第 ${round.round_index || roundIndex + 1} 轮`
+                : `第 ${round.round_index || roundIndex + 1} 轮（不计预算）`;
+            return renderTraceStep({
+                traceKey: roundKey,
+                title: `${roundTitle}${round.created_at ? ` · ${formatCompactTime(round.created_at)}` : ""}`,
+                status: roundStatus,
+                open: false,
+                showRuntime: false,
+                bodyHtml: toolsHtml,
+            });
+        }).join("") || renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次");
+        const stageStatus = ceoTraceStatus(stage.status);
+        descriptors.push({
+            traceKey: stageKey,
+            status: stageStatus,
+            startedAt: String(stage.created_at || ""),
+            finishedAt: String(stage.finished_at || ""),
+            elapsedSeconds: null,
+        });
+        const stageLabel = stage.stage_goal || `阶段 ${stage.stage_index || stageIndex + 1}`;
+        return renderTraceStep({
+            traceKey: stageKey,
+            title: stageLabel,
+            status: stageStatus,
+            open: stageStatus === "running",
+            showRuntime: false,
+            bodyHtml: roundsHtml,
+        });
+    }).join("");
+    return { html, descriptors, stageCount: normalized.stages.length };
+}
+
+function renderCeoTraceIntoTurn(turn, trace = null) {
+    if (!turn?.listEl || !turn?.flowEl) return false;
+    const bundle = buildCeoTraceBundle(trace);
+    const previousViewState = captureCeoTraceViewState(turn);
+    turn.listEl.innerHTML = bundle.html;
+    applyCeoTraceDescriptors(turn.listEl, bundle.descriptors);
+    applyCeoTraceViewState(turn.listEl, previousViewState.traceItems);
+    turn.steps = bundle.stageCount;
+    turn.hasError = bundle.descriptors.some((descriptor) => descriptor?.status === "error");
+    turn.flowEl.hidden = bundle.stageCount <= 0;
+    trimCeoToolSteps(turn);
+    refreshLiveDurationBadges();
+    icons();
+    return bundle.stageCount > 0;
+}
+
+function patchCeoInflightTurn(snapshot = null) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    const trace = normalizeCeoInteractionTrace(snapshot.interaction_trace);
+    const source = String(snapshot.source || "").trim().toLowerCase() || "user";
+    const status = String(snapshot.status || "").trim().toLowerCase();
+    const existingTurn = getActiveCeoTurn(source);
+    if (status === "paused" && !existingTurn) return false;
+    const turn = existingTurn || ensureActiveCeoTurn({ source });
+    if (!turn?.textEl || !turn?.flowEl) return false;
+    mutateCeoFeed(() => {
+        const assistantText = String(snapshot.assistant_text || "").trim();
+        if (assistantText) {
+            turn.textEl.innerHTML = renderMarkdown(assistantText);
+            turn.textEl.classList.remove("pending");
+            turn.textEl.classList.add("markdown-content");
+        }
+        const hasTrace = renderCeoTraceIntoTurn(turn, trace);
+        const stage = snapshot.stage && typeof snapshot.stage === "object" ? snapshot.stage : null;
+        const summaryText = stage
+            ? `${String(stage.stage_goal || "").trim() || "当前阶段"} · ${Number(stage.tool_rounds_used || 0)}/${Number(stage.tool_round_budget || 0)} 轮`
+            : (hasTrace ? "阶段进行中" : "等待工具开始...");
+        updateCeoTurnMeta(turn, summaryText);
+        turn.flowEl.open = hasTrace;
+        icons();
+    }, { scrollMode: "preserve" });
+    return true;
 }
 
 function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
@@ -1905,7 +2123,7 @@ function discardActiveCeoTurn({ source = "" } = {}) {
 }
 
 function hasRunningCeoToolStep(turn) {
-    return !!turn?.listEl?.querySelector?.(".interaction-step.running");
+    return !!turn?.listEl?.querySelector?.(".interaction-step.running, .task-trace-step.running");
 }
 
 function discardPendingCeoTurns({ force = false } = {}) {
@@ -2217,7 +2435,7 @@ function toggleCeoToolStepOutput(item) {
 
 function trimCeoToolSteps(turn) {
     if (!turn?.listEl) return;
-    const items = [...turn.listEl.querySelectorAll(".interaction-step")];
+    const items = Array.from(turn.listEl.children).filter((item) => item instanceof HTMLElement);
     const hiddenCount = Math.max(0, items.length - CEO_TOOL_STEP_MAX);
     items.forEach((item, index) => {
         const shouldHide = !turn.historyExpanded && index < hiddenCount;
@@ -2302,12 +2520,18 @@ function formatElapsedDuration(totalSeconds) {
 function resolveRuntimeSeconds(element) {
     if (!(element instanceof HTMLElement)) return null;
     const explicitElapsed = Number.parseFloat(String(element.dataset.elapsedSeconds || ""));
-    if (Number.isFinite(explicitElapsed) && explicitElapsed >= 0) return explicitElapsed;
+    const status = String(element.dataset.stepState || element.dataset.traceStatus || "").trim().toLowerCase();
     const startedAt = parseIsoTimestamp(element.dataset.startedAt || "");
     if (startedAt === null) return null;
     const finishedAt = parseIsoTimestamp(element.dataset.finishedAt || "");
-    const end = finishedAt !== null ? finishedAt : Date.now();
-    return Math.max(0, Math.floor((end - startedAt) / 1000));
+    const liveElapsed = Math.max(0, Math.floor(((finishedAt !== null ? finishedAt : Date.now()) - startedAt) / 1000));
+    if (status === "running" && finishedAt === null) {
+        return Number.isFinite(explicitElapsed) && explicitElapsed >= 0
+            ? Math.max(explicitElapsed, liveElapsed)
+            : liveElapsed;
+    }
+    if (Number.isFinite(explicitElapsed) && explicitElapsed >= 0) return explicitElapsed;
+    return liveElapsed;
 }
 
 function updateRuntimeBadge(element, runtimeEl, { runningPrefix = "已运行 ", donePrefix = "耗时 " } = {}) {
@@ -2443,8 +2667,12 @@ function finalizeCeoTurn(text, meta = {}) {
         turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
+        const finalTrace = normalizeCeoInteractionTrace(meta?.interaction_trace);
+        if (finalTrace) {
+            renderCeoTraceIntoTurn(turn, finalTrace);
+        }
         if (turn.steps > 0) {
-            const hasRunningStep = !!turn.listEl?.querySelector?.(".interaction-step.running");
+            const hasRunningStep = hasRunningCeoToolStep(turn);
             turn.flowEl.hidden = false;
             turn.flowEl.open = false;
             updateCeoTurnMeta(
@@ -3759,7 +3987,7 @@ async function handleModelRoleEditorAction() {
         syncRoleIterationDraftsFromInputs({ requireValid: true });
     } catch (e) {
         S.modelCatalog.error = e.message || "save failed";
-        hint(`妯″瀷閰嶇疆閿欒锛?{S.modelCatalog.error}`, true);
+        hint(`模型配置错误：${S.modelCatalog.error}`, true);
         return;
     }
     if (!S.modelCatalog.rolesDirty) {
@@ -4456,7 +4684,15 @@ function initCeoWs() {
         if (payload.type === "snapshot.ceo") renderCeoSnapshot(payload.data?.messages || [], payload.data?.inflight_turn || null);
         if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {}, payload.data || {});
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
-        if (payload.type === "ceo.agent.tool") appendCeoToolEvent(payload.data || {});
+        if (payload.type === "ceo.turn.patch") patchCeoInflightTurn(payload.data?.inflight_turn || null);
+        if (payload.type === "ceo.agent.tool") {
+            const activeTurn = getActiveCeoTurn();
+            const hasStructuredTrace = !!activeTurn?.listEl?.querySelector?.(".task-trace-step");
+            if (!hasStructuredTrace) {
+                if (!activeTurn && !S.ceoTurnActive) return;
+                appendCeoToolEvent(payload.data || {});
+            }
+        }
         if (payload.type === "ceo.error") handleCeoError(payload.data || {});
         if (payload.type === "ceo.reply.final") finalizeCeoTurn(payload.data?.text || "", payload.data || {});
         if (payload.type === "ceo.turn.discard") discardActiveCeoTurn({ source: payload.data?.source || "" });
@@ -4979,7 +5215,7 @@ function bind() {
             renderModelCatalog();
         } catch (error) {
             S.modelCatalog.error = error.message || "save failed";
-            hint(`妯″瀷閰嶇疆閿欒锛?{S.modelCatalog.error}`, true);
+            hint(`模型配置错误：${S.modelCatalog.error}`, true);
         }
     });
     U.modelRoleEditors?.addEventListener("dragstart", (e) => {

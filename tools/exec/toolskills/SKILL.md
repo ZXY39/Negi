@@ -2,6 +2,8 @@
 
 执行 shell 命令并返回结构化结果。`exec` 不会再把未指定的 `working_dir` 绑定到工作区；只有你显式传入 `working_dir` 时，才会切换目录。
 
+以下规则是对 `TOOLS.md` 中 `exec` 摘要说明的补充展开。
+
 ## 使用原则
 
 - 优先使用更专用的工具。只有在 `filesystem` / `content` 不能直接完成任务时再使用 `exec`。

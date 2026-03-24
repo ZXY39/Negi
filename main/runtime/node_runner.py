@@ -24,8 +24,9 @@ from main.models import (
     normalize_final_acceptance_metadata,
     normalize_result_payload,
 )
-from main.prompts import EXECUTION_STAGE_POLICY_PROMPT, load_prompt
+from main.prompts import load_prompt
 from main.runtime.internal_tools import SpawnChildNodesTool, SubmitNextStageTool
+from main.runtime.stage_messages import build_execution_stage_result_block_message
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -140,7 +141,7 @@ class NodeRunner:
             node_id=node_id,
             node_kind=latest.node_kind,
         )
-        if self._react_loop._execution_stage_result_block_message(
+        if build_execution_stage_result_block_message(
             node_kind=latest.node_kind,
             stage_gate=stage_gate,
         ):
@@ -269,8 +270,6 @@ class NodeRunner:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
         prompt = load_prompt(system_name).strip()
         environment_guidance = self._environment_context_guidance(node=node)
-        if node.node_kind == KIND_EXECUTION:
-            return f'{prompt}\n\n{EXECUTION_STAGE_POLICY_PROMPT}\n\n{environment_guidance}'
         return f'{prompt}\n\n{environment_guidance}'
 
     def _execution_stage_payload(self, *, task, node: NodeRecord) -> dict[str, Any]:

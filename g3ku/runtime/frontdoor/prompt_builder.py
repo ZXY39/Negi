@@ -1,23 +1,12 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from g3ku.runtime.project_environment import current_project_environment
 
 
-FRONTDOOR_DEDUPLICATION_MARKERS = (
-    '并要求下游执行节点继续评估是否需要派生子节点',
-    '优先评估是否应先拆解任务并派生子节点',
-)
-
-CORE_REQUIREMENT_GUIDANCE = """- 当你决定调用 `create_async_task` 时，必须先将用户需求提炼为一句高度概括核心需求的句子，并通过 `core_requirement` 参数显式传入；该概括会沿任务树传播到所有下游子节点。
-- `core_requirement` 只能是一句高度概括核心需求的句子，不能等于 `task` 内容，不能复制 `task` 的大段原文，也不能只是把 `task` 稍作改写后原样重复。
-- 如果你还不能把需求稳定地压缩成一句核心需求概括，就不要调用 `create_async_task`；先继续理解和整理需求，再生成 `core_requirement`。"""
-
-FAILURE_CONTINUATION_GUIDANCE = """- 对同一核心需求保持连续拥有，直到任务完成、被明确外部阻塞且没有清晰可执行的下一步，或用户提出其他要求为止；不要把“继续不继续”默认抛回给用户。
-- 如果某个任务失败，你必须先判断失败是否已经暴露出仍在同一 `core_requirement` 范围内的明确下一步。
-- 只要存在明确、可执行、且仍在原始核心需求范围内的下一步，你就必须自动创建新任务续跑，不等用户催。
-- 任务失败也可能来自最终验收未通过；这时你仍然必须判断验收理由是否已经暴露出明确下一步。若有，继续自动续跑；若没有，或继续推进需要用户新的决定、授权、凭据、安装许可、外部资源，才可以不续跑并向用户说明原因。"""
+_PROMPT_TEMPLATE_VARIABLE = re.compile(r'{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}')
 
 
 class CeoPromptBuilder:
@@ -27,97 +16,32 @@ class CeoPromptBuilder:
 
     def build(self, *, skills: list) -> str:
         project_environment = current_project_environment(workspace_root=getattr(self._loop, 'workspace', None))
-        exec_runtime_guidance = (
-            '- `exec` on Windows always runs in PowerShell. Prefer PowerShell-compatible commands such as '
-            '`Get-ChildItem`, `Get-Location`, `Get-Content`, or aliases like `ls` / `pwd`; do not assume '
-            'Unix shell builtins such as `true`, `false`, bash heredocs, or `rg` are available.'
+        prompt = self._read_prompt('ceo_frontdoor.md')
+        return self._render_prompt(
+            prompt,
+            {
+                'project_python_hint': project_environment.get('project_python_hint') or 'python',
+                'skill_inventory': self._skill_inventory(skills),
+            },
         )
-        project_python_guidance = (
-            '- `exec` inherits the same Python environment as the current G3KU process. '
-            f"When exact interpreter choice matters, prefer `{project_environment.get('project_python_hint') or 'python'}` "
-            'or the injected `G3KU_PROJECT_PYTHON` env var instead of assuming bare `python` '
-            'points at the correct interpreter.'
-        )
-        resource_context_guidance = (
-            '- 对于不会直接出现在函数工具列表里的工具资源，包括已注册的外置工具和当前不可用的工具，'
-            '先用 `load_tool_context` 读取安装、排障、更新和使用说明，再决定是否修复或继续调用。'
-        )
-        base = self._read_prompt('ceo_frontdoor.md', self._default_prompt())
-        base = self._normalize_frontdoor_prompt(base)
-        if 'core_requirement' not in base:
-            base = f'{base}\n{CORE_REQUIREMENT_GUIDANCE}'
-        if '自动创建新任务续跑' not in base:
-            base = f'{base}\n{FAILURE_CONTINUATION_GUIDANCE}'
-        if 'PowerShell-compatible commands' not in base:
-            base = f'{base}\n{exec_runtime_guidance}'
-        if 'same Python environment as the current G3KU process' not in base:
-            base = f'{base}\n{project_python_guidance}'
-        if '当前不可用的工具' not in base:
-            base = f'{base}\n{resource_context_guidance}'
-        inventory = self._skill_inventory(skills)
-        if inventory:
-            return f'{base}\n\n## 当前对主 Agent 可见的 Skills\n\n{inventory}'
-        return base
+
+    def _read_prompt(self, name: str) -> str:
+        path = self._repo_prompt_dir / name
+        return path.read_text(encoding='utf-8').strip()
 
     @staticmethod
-    def _normalize_frontdoor_prompt(prompt: str) -> str:
-        lines = []
-        for line in prompt.splitlines():
-            if any(marker in line for marker in FRONTDOOR_DEDUPLICATION_MARKERS):
-                continue
-            lines.append(line)
-        return '\n'.join(lines).strip()
+    def _render_prompt(prompt: str, context: dict[str, str]) -> str:
+        def replace(match: re.Match[str]) -> str:
+            key = match.group(1)
+            if key not in context:
+                raise KeyError(f'Unknown CEO prompt template variable: {key}')
+            return str(context[key])
 
-    def _read_prompt(self, name: str, fallback: str) -> str:
-        path = self._repo_prompt_dir / name
-        if path.exists():
-            return path.read_text(encoding='utf-8').strip()
-        return fallback
+        return _PROMPT_TEMPLATE_VARIABLE.sub(replace, prompt).strip()
 
     @staticmethod
     def _skill_inventory(skills: list) -> str:
-        if not skills:
-            return '- 当前没有对主 Agent 可见的 Skill。'
-        lines = []
-        for skill in skills:
-            lines.append(f'- {skill.skill_id}: {skill.description or skill.display_name}')
-        return '\n'.join(lines)
-
-    @staticmethod
-    def _default_prompt() -> str:
-        return """你是系统唯一的主 Agent，稳定角色标识为 `G3KU`，也是唯一直接面向用户的前门。
-先理解用户意图，再在以下三种处理方式中选择一种：
-- 直接回答：用于闲聊等不需要工具、也不需要后台任务的请求。
-- 主 Agent 自行执行：任务简单，但需要使用当前对主 Agent 可见的工具或 Skill。
-- 创建异步任务：任务较长、较复杂、需要后台持续推进，且应支持暂停、恢复和查询进度。
-
-规则：
-- 复杂任务优先通过 `create_async_task`（创建异步任务）处理，不要把本应后台执行的复杂任务留在当前会话里长时间执行。
-- 当待处理内容明显过多时，必须优先评估是否创建异步任务，例如：需要分析多篇论文、多个项目或目录、跨多个结果集合并结论，或工具返回结果过多且仅靠 grep / 少量检索不足以完成判断。
-- 在决定调用 `create_async_task` 前，先结合可见工具或常识评估工作量，至少考虑：目标文件数量和体量、查询范围是否宽、是否跨多个目录或项目、预计处理时间是否较长、是否需要汇总多批结果。
-
-调用 `create_async_task`（创建异步任务）时：
-- 任务说明必须写清目标范围、关键线索和目标产出，避免无边界描述或模糊候选列表。
-- 给下游 agent 或节点写说明时，不要粘贴文件全文、长摘录或大段工具结果；只提供文件路径、目录路径、`artifact:` / content 引用、搜索关键词、已知行号范围和目标产出，让它们自行读取原始内容。
-- 必须先提炼一句高度概括核心需求的 `core_requirement`；该概括会沿任务树传播到所有下游子节点。
-- `core_requirement` 只能概括核心需求，不能等于 `task` 内容，不能复制 `task` 大段原文，也不能只是轻微改写后重复。
-- 如果还不能稳定提炼出 `core_requirement`，就不要调用 `create_async_task`；先继续理解和整理需求。
-- 还必须判断最终结果是否需要最终验收。
-- 只有在任务范围广、跨多文件或多结果集合并、依赖复杂推理、需要一致性复核，或结论会被上游直接当作最终结论继续使用时，才设置 `requires_final_acceptance=true`，并同时提供明确的 `final_acceptance_prompt`。
-- 对于单点读取、窄范围抽取、机械格式转换、直接工具结果转述、低复杂度短链路任务，设置 `requires_final_acceptance=false`。
-
-查询任务时：
-- 查询任务概况，优先使用 `task_summary`（任务汇总工具）。
-- 查询任务列表，使用 `task_list`（获取任务）。
-- 用户已给出任务 id 时，使用 `task_progress`（查看任务进度工具）查询具体任务进度。
-- 用户未给出任务 id 时，先用 `task_list`（获取任务）查看 `任务类型=4` 的未读任务；如无未读，再按需要查看 `任务类型=2` 或 `任务类型=1`。
-- `task_progress`（查看任务进度工具）只用于获取任务状态和树状图，不要把它当作完整日志或完整文档读取工具。
-- 处理任务控制请求时，先区分 `task_id` 和后台工具 `execution_id`：`task_progress` 面向异步任务，`wait_tool_execution` 只面向后台工具执行。
-- 用户要求取消或停止异步任务且提供的是 `task_id` 时，不要把它误当成后台工具 `execution_id`；如需兜底，可调用 `stop_tool_execution`，系统会在识别到该标识实际是 `task_id` 时自动改为取消对应异步任务。
-
-工具规则：
-- `artifact:` / content 引用一律使用 `content.ref` 读取，不要传给 `filesystem.path`；例如 `task_progress`（查看任务进度工具）或其他工具输出里的这类引用都按此处理。
-- `filesystem.path`、`content.path` 和 `exec.working_dir` 按各自工具契约使用绝对本地路径；若开启 `restrict_to_workspace`，则必须留在工作区内。
-- 不要假设自己拥有不可见的工具或 Skill。
-- 已注册的外置工具不会直接出现在函数工具列表里；如果系统提示里出现“当前已注册的外置工具”，先用 `load_tool_context` 读取其安装、更新和使用说明。
-- 如果需要工具，优先直接调用工具，而不是只做口头解释。"""
+        return '\n'.join(
+            f'- {skill.skill_id}: {skill.description or skill.display_name}'
+            for skill in skills
+        )

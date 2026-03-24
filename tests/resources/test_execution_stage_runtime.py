@@ -179,7 +179,7 @@ async def test_stage_round_counts_once_and_spawn_promotes_stage_mode_in_trace(tm
 
 
 @pytest.mark.asyncio
-async def test_ref_based_content_reads_do_not_consume_stage_budget(tmp_path: Path):
+async def test_ref_based_content_reads_now_consume_stage_budget(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -218,13 +218,13 @@ async def test_ref_based_content_reads_do_not_consume_stage_budget(tmp_path: Pat
         snapshot = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
         active = dict(snapshot.get('active_stage') or {})
         assert active['stage_id'] == stage['stage_id']
-        assert active['tool_rounds_used'] == 0
+        assert active['tool_rounds_used'] == 1
 
         detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
         assert detail is not None
         rounds = detail['item']['execution_trace']['stages'][0]['rounds']
         assert len(rounds) == 1
-        assert rounds[0]['budget_counted'] is False
+        assert rounds[0]['budget_counted'] is True
     finally:
         await service.close()
 

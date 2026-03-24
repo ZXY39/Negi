@@ -6,9 +6,10 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
+from loguru import logger
 
 from g3ku.security import get_bootstrap_security_service
-from g3ku.shells.web import shutdown_web_runtime
+from g3ku.shells.web import ensure_web_runtime_services, shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
 from g3ku.web.server_control import request_server_shutdown, set_server_instance
 from g3ku.web.windows_asyncio import install_windows_connection_reset_filter
@@ -23,6 +24,12 @@ os.environ.setdefault('G3KU_TASK_RUNTIME_ROLE', 'web')
 async def lifespan(_app: FastAPI):
     restore_asyncio_filter = install_windows_connection_reset_filter()
     try:
+        security = get_bootstrap_security_service()
+        if security.is_unlocked():
+            try:
+                await ensure_web_runtime_services()
+            except Exception as exc:
+                logger.warning('web runtime init on startup skipped: {}', exc)
         yield
     finally:
         await shutdown_web_runtime()

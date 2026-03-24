@@ -19,6 +19,7 @@ from g3ku.runtime import SessionRuntimeBridge
 from g3ku.runtime import SessionRuntimeManager
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.security import get_bootstrap_security_service
+from g3ku.web.worker_control import ensure_managed_task_worker, shutdown_managed_task_worker
 from main.protocol import now_iso
 
 _global_agent: Optional[AgentLoop] = None
@@ -289,6 +290,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
     main_task_service = getattr(runtime_agent, 'main_task_service', None)
     if main_task_service is not None:
         await main_task_service.startup()
+        await ensure_managed_task_worker(main_task_service)
     heartbeat = get_web_heartbeat_service(agent)
     if heartbeat is not None:
         await heartbeat.start()
@@ -374,6 +376,11 @@ async def shutdown_web_runtime() -> None:
             await main_task_service.close()
         except Exception:
             logger.debug('main task service close skipped during shutdown')
+
+    try:
+        await shutdown_managed_task_worker()
+    except Exception:
+        logger.debug('managed task worker stop skipped during shutdown')
 
     try:
         await agent.close_mcp()

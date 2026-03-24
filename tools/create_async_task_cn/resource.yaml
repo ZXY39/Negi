@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "创建异步任务"
 name: create_async_task
-description: 把用户需求转交为后台异步任务。调用时必须提供一句高度概括核心需求的 core_requirement，并可按需声明最终结果是否需要验收。
+description: 把用户需求转交为后台异步任务。调用时必须提供一句高度概括核心需求的 core_requirement，并可按需声明最终结果是否需要最终验收。
 source:
   type: ''
   url: ''
@@ -10,7 +10,7 @@ source:
 current_version:
   summary: 当前版本表示仓库内置实现；更新时需同步代码、参数契约和资源描述。
   compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文案不单独视为版本升级。
-  source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
+  source_of_truth: 以当前目录下的 resource.yaml、仓库内置实现与 toolskills 自然语言说明共同为准；对 agent 的使用理解优先看本文件与 toolskills。
 requires:
   tools: []
   bins: []
@@ -23,7 +23,7 @@ parameters:
   properties:
     task:
       type: string
-      description: 用户的原始需求。
+      description: 用户的原始需求。若任务工作量大，应在说明中写明拆分维度，并显式建议执行节点优先评估拆解/派生子节点。
     core_requirement:
       type: string
       description: CEO 对用户需求的核心需求概括。只能是一句高度概括核心需求的句子；不能等于 task 内容，不能复制 task 的大段原文。该句子会沿任务树传播到所有下游子节点。

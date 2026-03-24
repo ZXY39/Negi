@@ -58,6 +58,15 @@ class _HeartbeatRecorder:
         return True
 
 
+@pytest.fixture(autouse=True)
+def _unlock_task_websocket_runtime(monkeypatch):
+    class _Security:
+        def is_unlocked(self) -> bool:
+            return True
+
+    monkeypatch.setattr("main.api.websocket_task.get_bootstrap_security_service", lambda: _Security())
+
+
 def _mark_worker_online(service: MainRuntimeService, *, active_task_count: int = 0) -> None:
     service.store.upsert_worker_status(
         worker_id="worker:test",
@@ -185,6 +194,36 @@ async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(
     assert entry["delivery_state"] == "pending"
     assert heartbeat.started == 1
     assert heartbeat.payloads == [payload]
+
+
+@pytest.mark.asyncio
+async def test_ensure_web_runtime_services_starts_managed_worker(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    heartbeat = _HeartbeatRecorder()
+    worker_calls: list[MainRuntimeService] = []
+
+    async def _ensure_worker(current_service) -> bool:
+        worker_calls.append(current_service)
+        return True
+
+    async def _skip_china(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr(web_shell, "get_web_heartbeat_service", lambda _agent=None: heartbeat)
+    monkeypatch.setattr(web_shell, "ensure_managed_task_worker", _ensure_worker)
+    monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _skip_china)
+
+    await web_shell.ensure_web_runtime_services(SimpleNamespace(main_task_service=service))
+
+    assert worker_calls == [service]
+    assert heartbeat.started == 1
 
 
 def test_worker_task_terminal_listener_persists_outbox_and_schedules_delivery(tmp_path: Path):

@@ -120,7 +120,7 @@ class RuntimeBootstrapBridge:
             default_cfg = type(cfg)()
             if cfg.model_dump(mode='python') != default_cfg.model_dump(mode='python'):
                 logger.warning(
-                    'agents.multiAgent settings are deprecated and ignored; top-level split mode is disabled. Use ?????? for complex work.'
+                    'agents.multiAgent settings are deprecated and ignored; top-level split mode is disabled. Use orggraph_create_project for complex work.'
                 )
         self._loop.multi_agent_runner = CeoFrontDoorRunner(loop=self._loop)
 

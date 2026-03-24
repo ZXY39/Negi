@@ -366,6 +366,52 @@
     return section;
   }
 
+  function setMemorySectionValidationError(section, message, field = "json") {
+    if (!section) return;
+    section.validation = {
+      valid: false,
+      errors: [{ field, code: "invalid", message: String(message || "Validation failed.") }],
+    };
+    section.probe = null;
+  }
+
+  function prepareMemorySectionDraft(sectionKey) {
+    const section = syncMemorySectionText(sectionKey);
+    if (!section) {
+      return { section: null, draft: null, message: "Section not found." };
+    }
+    if (!trim(section.jsonText)) {
+      const message = `${section.label || sectionKey} JSON is empty.`;
+      setMemorySectionValidationError(section, message);
+      return { section, draft: null, message };
+    }
+    try {
+      const draft = parseMemoryDraftJson(
+        section.jsonText || "",
+        section.providerId || "",
+        section.capability,
+        section.label || sectionKey
+      );
+      section.providerId = trim(draft.provider_id);
+      section.providerModel = providerModelFromDraft(draft);
+      section.templateProviderId = defaultMemoryTemplateProviderId(section.capability, section.providerId);
+      return { section, draft, message: "" };
+    } catch (error) {
+      const message = error?.message || `${section.label || sectionKey} JSON is invalid.`;
+      setMemorySectionValidationError(section, message);
+      return { section, draft: null, message };
+    }
+  }
+
+  async function persistMemorySectionDraft(section, draft) {
+    if (!section || !draft) return null;
+    const config = trim(section.configId)
+      ? await ApiClient.updateLlmConfig(section.configId, draft)
+      : await ApiClient.createLlmConfig(draft);
+    section.configId = trim(config?.config_id || section.configId);
+    return config;
+  }
+
   async function handleMemoryTemplateChange(sectionKey) {
     const section = llmState().editor.memory?.[sectionKey];
     if (!section) return;
@@ -385,14 +431,15 @@
 
   function canSaveMemoryEditor() {
     const memory = llmState().editor.memory;
+    const hasEmbeddingDraft = !!trim(memory?.embedding?.jsonText);
+    const hasRerankDraft = !!trim(memory?.rerank?.jsonText);
     return Boolean(
       memory
       && !memory.loading
       && !trim(memory.error)
       && !trim(memory.embedding.error)
       && !trim(memory.rerank.error)
-      && trim(memory.embedding.jsonText)
-      && trim(memory.rerank.jsonText)
+      && (hasEmbeddingDraft || hasRerankDraft)
     );
   }
 
@@ -1081,6 +1128,108 @@
     }
   }
 
+  async function handleMemorySavePartial() {
+    const state = llmState();
+    if (!canSaveMemoryEditor()) {
+      throw new Error(
+        state.editor.memory?.error
+        || state.editor.memory?.embedding?.error
+        || state.editor.memory?.rerank?.error
+        || "Memory model config is not ready."
+      );
+    }
+    // Persist current textarea edits into state before any rerender happens.
+    syncMemorySectionText("embedding");
+    syncMemorySectionText("rerank");
+    state.saving = true;
+    renderAll();
+    try {
+      const results = [];
+      const bindingPayload = {};
+      for (const sectionKey of ["embedding", "rerank"]) {
+        const prepared = prepareMemorySectionDraft(sectionKey);
+        const section = prepared.section;
+        const label = section?.label || capabilityLabel(sectionKey);
+        if (!section || !prepared.draft) {
+          results.push({ sectionKey, label, saved: false, message: prepared.message || `${label} is invalid.` });
+          continue;
+        }
+        showToast({
+          title: "Testing",
+          text: `Testing ${label} connection...`,
+          kind: "info",
+          persistent: true,
+        });
+        const ok = await probeMemoryDraft(sectionKey, prepared.draft);
+        if (!ok) {
+          results.push({ sectionKey, label, saved: false, message: draftFailureMessage(section) });
+          continue;
+        }
+        try {
+          showToast({
+            title: "Saving",
+            text: `Saving ${label} config...`,
+            kind: "info",
+            persistent: true,
+          });
+          await persistMemorySectionDraft(section, prepared.draft);
+          if (trim(section.configId)) {
+            bindingPayload[`${sectionKey}_config_id`] = section.configId;
+          }
+          results.push({ sectionKey, label, saved: true, message: `${label} saved.` });
+        } catch (error) {
+          const message = error?.message || `${label} save failed.`;
+          section.probe = { success: false, message };
+          results.push({ sectionKey, label, saved: false, message });
+        }
+      }
+
+      const savedItems = results.filter((item) => item.saved);
+      const failedItems = results.filter((item) => !item.saved);
+
+      if (Object.keys(bindingPayload).length) {
+        const updatedBinding = await ApiClient.updateLlmMemoryModels(bindingPayload);
+        if (updatedBinding) {
+          const embeddingSection = state.editor.memory?.embedding;
+          const rerankSection = state.editor.memory?.rerank;
+          if (embeddingSection && Object.prototype.hasOwnProperty.call(bindingPayload, "embedding_config_id")) {
+            embeddingSection.configId = trim(updatedBinding.embedding_config_id || embeddingSection.configId);
+            embeddingSection.providerModel = trim(updatedBinding.embedding_provider_model || embeddingSection.providerModel);
+          }
+          if (rerankSection && Object.prototype.hasOwnProperty.call(bindingPayload, "rerank_config_id")) {
+            rerankSection.configId = trim(updatedBinding.rerank_config_id || rerankSection.configId);
+            rerankSection.providerModel = trim(updatedBinding.rerank_provider_model || rerankSection.providerModel);
+          }
+        }
+      }
+
+      if (!savedItems.length) {
+        throw new Error(failedItems.map((item) => `${item.label}: ${item.message}`).join("; ") || "No memory configs were saved.");
+      }
+
+      if (!failedItems.length) {
+        showToast({
+          title: "Save Complete",
+          text: "Memory model settings updated.",
+          kind: "success",
+        });
+        closeEditor();
+        await loadAll();
+        return;
+      }
+
+      showToast({
+        title: "Partial Save",
+        text: `Saved: ${savedItems.map((item) => item.label).join(", ")}. Pending: ${failedItems.map((item) => `${item.label} (${item.message})`).join("; ")}`,
+        kind: "info",
+      });
+      await loadAll();
+    } finally {
+      state.saving = false;
+      renderAll();
+    }
+  }
+
   async function handleDelete() {
     const binding = currentBinding();
     if (!binding) return;
@@ -1171,7 +1320,7 @@
       if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "save-memory") { void handleMemorySave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "save-memory") { void handleMemorySavePartial().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
     });
     llmState().eventsBound = true;

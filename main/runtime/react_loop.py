@@ -18,6 +18,15 @@ from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with
 from main.errors import TaskPausedError
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION
 from main.runtime.chat_backend import build_stable_prompt_cache_key
+from main.runtime.stage_budget import (
+    STAGE_TOOL_NAME,
+    stage_gate_error_for_tool,
+    visible_tools_for_stage_iteration,
+)
+from main.runtime.stage_messages import (
+    build_execution_stage_overlay,
+    build_execution_stage_result_block_message,
+)
 from main.protocol import now_iso
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:artifact:[A-Za-z0-9_-]+')
@@ -28,7 +37,6 @@ _COMPACT_HISTORY_KEEP_RECENT = 12
 _COMPACT_HISTORY_MAX_STEPS = 12
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
-_STAGE_TOOL_NAME = 'submit_next_stage'
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
 _RESULT_REQUIRED_KEYS = (
     'status',
@@ -107,7 +115,7 @@ class ReActToolLoop:
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
             request_messages = self._apply_temporary_system_overlay(
                 model_messages,
-                overlay_text=self._execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
+                overlay_text=build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
             )
             allowed_content_refs = self._collect_content_refs(request_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
@@ -169,7 +177,7 @@ class ReActToolLoop:
                 control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response_tool_calls)
                 for call in response_tool_calls:
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
-                    if call.name not in self._CONTROL_TOOL_NAMES and call.name != _STAGE_TOOL_NAME:
+                    if call.name not in self._CONTROL_TOOL_NAMES and call.name != STAGE_TOOL_NAME:
                         breaker.register(signature)
                 if self._should_record_execution_stage_round(
                     node_kind=node.node_kind,
@@ -284,7 +292,7 @@ class ReActToolLoop:
 
             parsed = self._parse_final_result(str(response.content or ''))
             if parsed is not None:
-                stage_block_message = self._execution_stage_result_block_message(
+                stage_block_message = build_execution_stage_result_block_message(
                     node_kind=node.node_kind,
                     stage_gate=stage_gate,
                 )
@@ -342,13 +350,12 @@ class ReActToolLoop:
             return dict(tools or {})
         if not bool(stage_gate.get('enabled')):
             return dict(tools or {})
-        if bool(stage_gate.get('has_active_stage')) and not bool(stage_gate.get('transition_required')):
-            return dict(tools or {})
-        return {
-            name: tool
-            for name, tool in dict(tools or {}).items()
-            if str(name or '').strip() == _STAGE_TOOL_NAME
-        }
+        return visible_tools_for_stage_iteration(
+            tools,
+            has_active_stage=bool(stage_gate.get('has_active_stage')),
+            transition_required=bool(stage_gate.get('transition_required')),
+            stage_tool_name=STAGE_TOOL_NAME,
+        )
 
     @staticmethod
     def _execution_stage_frame_payload(*, node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Any]:
@@ -372,41 +379,6 @@ class ReActToolLoop:
         }
 
     @staticmethod
-    def _execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any]) -> str | None:
-        if str(node_kind or '').strip().lower() != 'execution':
-            return None
-        if not bool(stage_gate.get('enabled')):
-            return None
-        active = stage_gate.get('active_stage') if isinstance(stage_gate, dict) else None
-        if not isinstance(active, dict):
-            return (
-                '当前没有活动阶段。你必须先调用 `submit_next_stage` 创建第一个阶段，'
-                '填写清晰的 `stage_goal` 和 1 到 10 的 `tool_round_budget`，'
-                '并在 `stage_goal` 中说明哪些工作优先派生子节点、哪些工作由当前节点自行完成。'
-            )
-        used = int(active.get('tool_rounds_used') or 0)
-        budget = int(active.get('tool_round_budget') or 0)
-        goal = str(active.get('stage_goal') or '').strip() or '(empty)'
-        mode = str(active.get('mode') or '').strip() or '自主执行'
-        status = str(active.get('status') or '').strip() or '进行中'
-        if bool(stage_gate.get('transition_required')):
-            completed = list(stage_gate.get('completed_stages') or []) if isinstance(stage_gate, dict) else []
-            previous = completed[-1] if completed else {}
-            previous_budget = int((previous or {}).get('tool_round_budget') or 0)
-            return (
-                f'当前阶段【{mode}】已达到工具轮次预算 {used}/{budget}，阶段目标是：{goal}。'
-                '你现在必须先总结当前阶段并调用 `submit_next_stage` 创建下一阶段；'
-                f'创建下一阶段时要结合总目标和已完成阶段结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
-                '如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 10；'
-                '在此之前不能继续使用普通工具，也不能继续派生子节点。'
-            )
-        return (
-            f'当前阶段【{mode} | {status}】目标：{goal}。'
-            f'当前普通工具轮次使用 {used}/{budget}。'
-            '除创建新阶段外，其余所有思考、工具调用和派生行为都必须只服务于当前阶段目标。'
-        )
-
-    @staticmethod
     def _should_record_execution_stage_round(*, node_kind: str, stage_gate: dict[str, Any], response_tool_calls: list[dict[str, Any]]) -> bool:
         if str(node_kind or '').strip().lower() != 'execution':
             return False
@@ -415,25 +387,7 @@ class ReActToolLoop:
         if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
             return False
         names = [str(item.get('name') or '').strip() for item in list(response_tool_calls or []) if str(item.get('name') or '').strip()]
-        return any(name != _STAGE_TOOL_NAME for name in names)
-
-    @staticmethod
-    def _execution_stage_result_block_message(*, node_kind: str, stage_gate: dict[str, Any]) -> str:
-        if str(node_kind or '').strip().lower() != 'execution':
-            return ''
-        if not bool(stage_gate.get('enabled')):
-            return ''
-        if not bool(stage_gate.get('has_active_stage')):
-            return (
-                '当前节点还没有创建第一个阶段。请先调用 `submit_next_stage` 创建阶段，'
-                '再继续推进，不要直接结束节点。'
-            )
-        if bool(stage_gate.get('transition_required')):
-            return (
-                '当前阶段预算已经耗尽。请先总结当前阶段并调用 `submit_next_stage` 创建下一阶段，'
-                '之后再继续推进或交付结果。'
-            )
-        return ''
+        return any(name != STAGE_TOOL_NAME for name in names)
 
     @staticmethod
     def _execution_prompt_cache_key(*, model_messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]], model_refs: list[str]) -> str:
@@ -454,7 +408,7 @@ class ReActToolLoop:
         runtime_context: dict[str, Any],
         prior_overflow_signatures: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        if any(str(getattr(call, 'name', '') or '').strip() == _STAGE_TOOL_NAME for call in list(response_tool_calls or [])) and len(list(response_tool_calls or [])) != 1:
+        if any(str(getattr(call, 'name', '') or '').strip() == STAGE_TOOL_NAME for call in list(response_tool_calls or [])) and len(list(response_tool_calls or [])) != 1:
             return [
                 {
                     'index': index,
@@ -655,7 +609,7 @@ class ReActToolLoop:
         if node_kind != 'execution':
             return ''
         normalized_tool_name = str(tool_name or '').strip()
-        if normalized_tool_name in self._CONTROL_TOOL_NAMES or normalized_tool_name == _STAGE_TOOL_NAME:
+        if normalized_tool_name in self._CONTROL_TOOL_NAMES or normalized_tool_name == STAGE_TOOL_NAME:
             return ''
         if bool(runtime_context.get('stage_turn_granted')):
             return ''
@@ -666,11 +620,12 @@ class ReActToolLoop:
         )
         if not bool(stage_gate.get('enabled')):
             return ''
-        if not bool(stage_gate.get('has_active_stage')):
-            return 'no active stage; call submit_next_stage before using other tools'
-        if bool(stage_gate.get('transition_required')):
-            return 'current stage budget is exhausted; call submit_next_stage before using other tools'
-        return ''
+        return stage_gate_error_for_tool(
+            normalized_tool_name,
+            has_active_stage=bool(stage_gate.get('has_active_stage')),
+            transition_required=bool(stage_gate.get('transition_required')),
+            stage_tool_name=STAGE_TOOL_NAME,
+        )
 
     @classmethod
     def _overflowed_search_signatures(cls, messages: list[dict[str, Any]]) -> set[str]:

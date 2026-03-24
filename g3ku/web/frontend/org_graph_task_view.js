@@ -514,15 +514,15 @@ function nodeFinalTraceStatus(node) {
     return "success";
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", open = false, bodyHtml = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", open = false, bodyHtml = "", showRuntime = true }) {
     return `
-        <details class="interaction-step task-trace-step ${esc(status)}" data-trace-key="${esc(traceKey)}"${open ? " open" : ""}>
+        <details class="interaction-step task-trace-step ${esc(status)}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
                 <span class="interaction-step-lead">
                     <span class="interaction-step-title">${esc(title)}</span>
                 </span>
                 <span class="interaction-step-side">
-                    <span class="task-trace-runtime" hidden></span>
+                    ${showRuntime ? '<span class="task-trace-runtime" hidden></span>' : ''}
                     <span class="interaction-step-status">${esc(traceStatusLabel(status))}</span>
                 </span>
             </summary>

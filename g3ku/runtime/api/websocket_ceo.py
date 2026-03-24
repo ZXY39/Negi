@@ -12,6 +12,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
+from g3ku.runtime.frontdoor.interaction_trace import normalize_interaction_trace
 from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
@@ -272,11 +273,18 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
 def _build_inflight_turn_snapshot(session: Any, session_id: str) -> dict[str, Any] | None:
     getter = getattr(session, 'inflight_turn_snapshot', None)
     if not callable(getter):
-        return read_inflight_turn_snapshot(session_id)
-    snapshot = getter()
-    if isinstance(snapshot, dict):
-        return snapshot
-    return read_inflight_turn_snapshot(session_id)
+        snapshot = read_inflight_turn_snapshot(session_id)
+    else:
+        snapshot = getter()
+        if not isinstance(snapshot, dict):
+            snapshot = read_inflight_turn_snapshot(session_id)
+    if not isinstance(snapshot, dict):
+        return None
+    interaction_trace = snapshot.get('interaction_trace')
+    if isinstance(interaction_trace, dict):
+        snapshot = dict(snapshot)
+        snapshot['interaction_trace'] = normalize_interaction_trace(interaction_trace)
+    return snapshot
 
 
 @router.post('/ceo/uploads')
@@ -387,6 +395,13 @@ def _normalize_snapshot_tool_events(raw_events: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _normalize_snapshot_interaction_trace(raw_trace: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_trace, dict):
+        return None
+    normalized = normalize_interaction_trace(raw_trace)
+    return normalized if normalized.get('stages') else None
+
+
 def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for raw in list(messages or []):
@@ -403,7 +418,8 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
                 content = raw_text.strip()
         attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
         tool_events = _normalize_snapshot_tool_events(raw.get('tool_events')) if role == 'assistant' else []
-        if not content and not attachments and not tool_events:
+        interaction_trace = _normalize_snapshot_interaction_trace(raw.get('interaction_trace')) if role == 'assistant' else None
+        if not content and not attachments and not tool_events and interaction_trace is None:
             continue
         item = {'role': role, 'content': content}
         timestamp = raw.get('timestamp')
@@ -413,6 +429,8 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             item['attachments'] = attachments
         if tool_events:
             item['tool_events'] = tool_events
+        if interaction_trace is not None:
+            item['interaction_trace'] = interaction_trace
         items.append(item)
     return items
 
@@ -469,6 +487,13 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
     return text != _HEARTBEAT_OK
 
 
+def _serialize_interaction_trace(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    normalized = normalize_interaction_trace(value)
+    return normalized if normalized.get('stages') else None
+
+
 @router.websocket('/ws/ceo')
 async def ceo_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -501,15 +526,18 @@ async def ceo_websocket(websocket: WebSocket):
         is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
     )
     if requested_session_id and find_ceo_session_catalog_item(requested_catalog, requested_session_id) is None:
-        try:
-            await websocket_send_json(
-                websocket,
-                build_envelope(channel='ceo', session_id=requested_session_id, type='error', data={'code': 'session_not_found'}),
-            )
-            await websocket_close(websocket, code=4404)
-        except WebSocketChannelClosed:
+        if str(requested_session_id or '').strip().startswith('web:'):
+            create_web_ceo_session(transcript_store, session_id=requested_session_id)
+        else:
+            try:
+                await websocket_send_json(
+                    websocket,
+                    build_envelope(channel='ceo', session_id=requested_session_id, type='error', data={'code': 'session_not_found'}),
+                )
+                await websocket_close(websocket, code=4404)
+            except WebSocketChannelClosed:
+                return
             return
-        return
     session_id = requested_session_id or fallback_session_id
     session_path = transcript_store.get_path(session_id)
     is_channel_session = _is_channel_session_id(session_id)
@@ -570,6 +598,10 @@ async def ceo_websocket(websocket: WebSocket):
         except RuntimeError:
             return
 
+    async def _push_turn_patch() -> None:
+        inflight_turn = _build_inflight_turn_snapshot(session, session_id)
+        await _push_stream_event('ceo.turn.patch', {'inflight_turn': inflight_turn})
+
     def _current_session_is_running() -> bool:
         status = str(getattr(session.state, 'status', '') or '').strip().lower()
         return bool(getattr(session.state, 'is_running', False)) or status == 'running'
@@ -608,6 +640,11 @@ async def ceo_websocket(websocket: WebSocket):
         if event.type == 'control_ack':
             payload = dict(event.payload or {})
             await _push_stream_event('ceo.control_ack', payload)
+            action = str(payload.get('action') or '').strip().lower()
+            accepted = payload.get('accepted')
+            should_push_patch = not (action == 'pause' and accepted is not False)
+            if should_push_patch:
+                await _push_turn_patch()
             _publish_ceo_session_patch(
                 agent=agent,
                 transcript_store=transcript_store,
@@ -620,6 +657,9 @@ async def ceo_websocket(websocket: WebSocket):
         if event.type == 'state_snapshot':
             state = dict((event.payload or {}).get('state') or {})
             await _push_stream_event('ceo.state', {'state': state})
+            status = str(state.get('status') or '').strip().lower()
+            if status != 'paused':
+                await _push_turn_patch()
             _publish_ceo_session_patch(
                 agent=agent,
                 transcript_store=transcript_store,
@@ -634,7 +674,14 @@ async def ceo_websocket(websocket: WebSocket):
             if not _should_forward_message_end(payload):
                 return
             text = str(payload.get('text') or '').strip()
-            await _push_stream_event('ceo.reply.final', {'text': text})
+            await _push_stream_event(
+                'ceo.reply.final',
+                {
+                    'text': text,
+                    'interaction_trace': _serialize_interaction_trace(payload.get('interaction_trace')),
+                    'stage': dict(payload.get('stage') or {}) if isinstance(payload.get('stage'), dict) else None,
+                },
+            )
             persisted = transcript_store.get_or_create(session_id)
             _publish_ceo_session_patch(
                 agent=agent,
@@ -650,9 +697,9 @@ async def ceo_websocket(websocket: WebSocket):
         if not _should_forward_tool_event(session_id=session_id, event=event):
             return
         serialized = _serialize_tool_event(event)
-        if serialized is None:
-            return
-        await _push_stream_event('ceo.agent.tool', serialized)
+        await _push_turn_patch()
+        if serialized is not None:
+            await _push_stream_event('ceo.agent.tool', serialized)
 
     unsubscribe = session.subscribe(relay_session_event)
     sender_task = asyncio.create_task(sender(queue))

@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from g3ku.content import ContentNavigationService, parse_content_envelope
+from g3ku.content import ContentNavigationService
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
@@ -18,6 +18,11 @@ from main.models import (
     TaskRecord,
     normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
+)
+from main.runtime.stage_budget import (
+    STAGE_TOOL_NAME,
+    response_tool_calls_count_against_stage_budget,
+    tool_call_counts_against_stage_budget,
 )
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.projection_service import TaskProjectionService
@@ -34,7 +39,7 @@ def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
 
 
 _EXECUTION_STAGE_METADATA_KEY = 'execution_stages'
-_EXECUTION_STAGE_TOOL_NAME = 'submit_next_stage'
+_EXECUTION_STAGE_TOOL_NAME = STAGE_TOOL_NAME
 _EXECUTION_STAGE_MODE_SELF = '自主执行'
 _EXECUTION_STAGE_MODE_WITH_CHILDREN = '包含派生'
 _EXECUTION_STAGE_STATUS_ACTIVE = '进行中'
@@ -46,9 +51,6 @@ _NON_BUDGET_EXECUTION_TOOLS = {
     'wait_tool_execution',
     'stop_tool_execution',
 }
-
-_NON_BUDGET_REF_CONTENT_ACTIONS = {'describe', 'open', 'search', 'head', 'tail'}
-
 
 class TaskLogService:
     def __init__(self, *, store, file_store: TaskFileStore, tree_builder: TaskTreeBuilder, registry=None, content_store: ContentNavigationService | None = None):
@@ -593,29 +595,9 @@ class TaskLogService:
         payload = (node.metadata or {}).get(_EXECUTION_STAGE_METADATA_KEY) if node is not None and isinstance(node.metadata, dict) else {}
         return normalize_execution_stage_metadata(payload)
 
-    @staticmethod
-    def _normalize_content_ref_value(value: Any) -> str:
-        envelope = parse_content_envelope(value)
-        if envelope is not None:
-            return str(envelope.ref or '').strip()
-        return str(value or '').strip()
-
     @classmethod
     def _tool_call_counts_against_stage_budget(cls, tool_call: dict[str, Any]) -> bool:
-        tool_name = str((tool_call or {}).get('name') or '').strip()
-        if not tool_name:
-            return False
-        if tool_name in _NON_BUDGET_EXECUTION_TOOLS:
-            return False
-        if tool_name != 'content':
-            return True
-        arguments = dict((tool_call or {}).get('arguments') or {}) if isinstance((tool_call or {}).get('arguments'), dict) else {}
-        action = str(arguments.get('action') or '').strip().lower()
-        ref = cls._normalize_content_ref_value(arguments.get('ref'))
-        path = str(arguments.get('path') or '').strip()
-        if action in _NON_BUDGET_REF_CONTENT_ACTIONS and ref and not path:
-            return False
-        return True
+        return tool_call_counts_against_stage_budget(tool_call, extra_non_budget_tools=_NON_BUDGET_EXECUTION_TOOLS)
 
     @staticmethod
     def _active_execution_stage(state: ExecutionStageState) -> ExecutionStageRecord | None:
@@ -797,7 +779,10 @@ class TaskLogService:
             if not visible_calls:
                 return None
             tool_names = [str(item.get('name') or '').strip() for item in visible_calls if str(item.get('name') or '').strip()]
-            counts_budget = any(self._tool_call_counts_against_stage_budget(item) for item in visible_calls)
+            counts_budget = response_tool_calls_count_against_stage_budget(
+                visible_calls,
+                extra_non_budget_tools=_NON_BUDGET_EXECUTION_TOOLS,
+            )
             next_round = ExecutionStageRound(
                 round_id=new_stage_round_id(),
                 round_index=len(list(active.rounds or [])) + 1,

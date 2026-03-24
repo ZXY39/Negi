@@ -45,6 +45,10 @@ from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_runner import TaskRunner
 from main.service.event_registry import TaskEventRegistry
+from main.service.create_async_task_contract import (
+    CREATE_ASYNC_TASK_DESCRIPTION,
+    build_create_async_task_parameters,
+)
 from main.service.task_terminal_callback import (
     build_task_terminal_payload,
     normalize_task_terminal_payload,
@@ -2239,32 +2243,11 @@ class CreateAsyncTaskTool(Tool):
 
     @property
     def description(self) -> str:
-        return '把用户需求转交为后台异步任务；主 agent 不可直接使用派生子节点。对于工作量大的任务，应在 task 说明中显式要求执行节点优先评估拆解并派生子节点。调用时必须提供一句高度概括核心需求的 core_requirement，且其内容不能等于 task 原文。必要时可同时声明最终结果是否需要验收。'
+        return CREATE_ASYNC_TASK_DESCRIPTION
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                'task': {
-                    'type': 'string',
-                    'description': '用户的原始需求。若任务工作量大，应在说明中写明拆分维度，并显式建议执行节点优先评估拆解/派生子节点。',
-                },
-                'core_requirement': {
-                    'type': 'string',
-                    'description': 'CEO 对用户需求的核心需求概括。只能是一句高度概括核心需求的句子；不能等于 task 内容，不能复制 task 的大段原文。该句子会沿任务树传播到所有下游子节点。',
-                },
-                'requires_final_acceptance': {
-                    'type': 'boolean',
-                    'description': '是否需要在 root execution 完成后再做最终验收。',
-                },
-                'final_acceptance_prompt': {
-                    'type': 'string',
-                    'description': '最终验收提示词。仅当 requires_final_acceptance=true 时必填。',
-                },
-            },
-            'required': ['task', 'core_requirement'],
-        }
+        return build_create_async_task_parameters()
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         errors = super().validate_params(params)

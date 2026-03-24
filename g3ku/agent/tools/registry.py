@@ -81,7 +81,7 @@ class ToolRegistry:
             normalized = {k: v for k, v in params.items() if v is not None}
             errors = tool.validate_params(normalized)
             if errors:
-                await self._emit_progress(f"[tool:{name}] 鍙傛暟鏍￠獙澶辫触: {'; '.join(errors)}")
+                await self._emit_progress(f"[tool:{name}] 参数校验失败: {'; '.join(errors)}")
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
 
             runtime_context = self._runtime_context.get() or {}
@@ -105,7 +105,7 @@ class ToolRegistry:
                 runtime_context=runtime_context,
             )
             if isinstance(result, str) and result.startswith("Error"):
-                await self._emit_progress(f"[tool:{name}] 鎵ц澶辫触: {result}")
+                await self._emit_progress(f"[tool:{name}] 执行失败: {result}")
                 if callback and emit_lifecycle:
                     try:
                         await self._emit_runtime_event(
@@ -127,7 +127,7 @@ class ToolRegistry:
                     pass
             return result
         except Exception as e:
-            await self._emit_progress(f"[tool:{name}] 鎵ц寮傚父: {e}")
+            await self._emit_progress(f"[tool:{name}] 执行异常: {e}")
             runtime_context = self._runtime_context.get() or {}
             callback = runtime_context.get("on_progress")
             if callback and runtime_context.get("emit_lifecycle"):

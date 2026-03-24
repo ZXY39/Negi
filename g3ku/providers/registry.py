@@ -141,7 +141,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
     ),
 
-    # VolcEngine (鐏北寮曟搸): OpenAI-compatible gateway
+    # VolcEngine (火山引擎): OpenAI-compatible gateway
     ProviderSpec(
         name="volcengine",
         keywords=("volcengine", "volces", "ark"),

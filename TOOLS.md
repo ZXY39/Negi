@@ -18,6 +18,10 @@
 
 - 运行 shell 命令
 - 默认使用进程当前目录；只有显式传入 `working_dir` 时才会切换目录，且应提供绝对路径
+- 不要假设 Bash、Unix heredoc 或 `rg` 一定可用；命令语法必须匹配当前节点拿到的 OS / shell 环境信息
+- 命令会继承当前 G3KU 进程的 Python 环境；如需调用 Python，优先使用运行时提供的项目解释器提示，或读取 `G3KU_PROJECT_PYTHON`
+- 结果过长时，优先查看 `stdout_ref` / `stderr_ref`，再用 `content.search` 和 `content.open` 做局部定位
+- 更完整的 `exec` 使用细则见 `tools/exec/toolskills/SKILL.md`
 - `timeout`、`PATH` 补充、`restrict_to_workspace` 和 `enable_safety_guard` 都来自 `tools/exec/resource.yaml -> settings`
 - 默认不启用命令安全守卫；如需恢复拦截，可在 `tools/exec/resource.yaml -> settings` 中设置 `enable_safety_guard: true`
 

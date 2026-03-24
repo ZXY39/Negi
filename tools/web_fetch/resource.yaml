@@ -70,11 +70,13 @@ parameters:
       minimum: 500
       maximum: 20000
       default: 6000
+      description: Maximum characters of readable text to keep.
     timeout_ms:
       type: integer
       minimum: 1000
       maximum: 30000
       default: 10000
+      description: Network timeout in milliseconds.
 returns:
   type: object
   properties:

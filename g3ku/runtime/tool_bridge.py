@@ -324,11 +324,6 @@ class ToolExecutionBridge:
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "tool_name": tool_name,
-                "ceo_async_task_guard_state": runtime_context_value(
-                    runtime_context,
-                    "ceo_async_task_guard_state",
-                    inherited_runtime.get("ceo_async_task_guard_state"),
-                ),
                 "skip_tool_registry_watchdog": True,
                 "cancel_token": getattr(runtime_context, "cancel_token", None),
                 "tool_snapshot_supplier": runtime_context_value(runtime_context, "tool_snapshot_supplier", inherited_runtime.get("tool_snapshot_supplier")),
@@ -460,11 +455,6 @@ class ToolExecutionBridge:
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "tool_name": tool_name,
-                "ceo_async_task_guard_state": runtime_context_value(
-                    runtime_context,
-                    "ceo_async_task_guard_state",
-                    inherited_runtime.get("ceo_async_task_guard_state"),
-                ),
                 "skip_tool_registry_watchdog": True,
                 "cancel_token": getattr(runtime_context, "cancel_token", None) if runtime_context else None,
                 "tool_snapshot_supplier": runtime_context_value(runtime_context, "tool_snapshot_supplier", inherited_runtime.get("tool_snapshot_supplier")),

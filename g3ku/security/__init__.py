@@ -1,4 +1,5 @@
 from .bootstrap import (
+    BOOTSTRAP_MASTER_KEY_ENV,
     BootstrapSecurityService,
     MASTER_KEY_VERSION,
     SecretOverlayStore,
@@ -10,6 +11,7 @@ from .bootstrap import (
 )
 
 __all__ = [
+    "BOOTSTRAP_MASTER_KEY_ENV",
     "BootstrapSecurityService",
     "MASTER_KEY_VERSION",
     "SecretOverlayStore",

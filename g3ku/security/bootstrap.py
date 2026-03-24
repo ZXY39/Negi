@@ -16,6 +16,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 MASTER_KEY_VERSION = 2
 UNLOCK_SCOPE = "global"
+BOOTSTRAP_MASTER_KEY_ENV = "G3KU_BOOTSTRAP_MASTER_KEY"
 LEGACY_EXPORT_PREFIX = "legacy-secret-export"
 MIGRATION_BACKUP_DIR = "security-migration-backups"
 REALM_OVERLAY_DIR = "secret-realms"
@@ -280,6 +281,12 @@ class BootstrapSecurityService:
         with self._lock:
             return self._active_master_key is not None
 
+    def active_master_key(self) -> str | None:
+        with self._lock:
+            if self._active_master_key is None:
+                return None
+            return str(self._active_master_key)
+
     def current_overlay(self) -> dict[str, Any]:
         with self._lock:
             return deepcopy(self._overlay_cache)
@@ -363,6 +370,14 @@ class BootstrapSecurityService:
                 self._activate(master_key=self._unwrap_single_master_key(envelope=migrated, password=password))
                 return self.status()
             raise ValueError("invalid secret key envelope")
+
+    def activate_with_master_key(self, *, master_key: str) -> dict[str, Any]:
+        clean_key = str(master_key or "").strip()
+        if not clean_key:
+            raise ValueError("master_key is required")
+        with self._lock:
+            self._activate(master_key=clean_key)
+            return self.status()
 
     def lock(self) -> dict[str, Any]:
         with self._lock:
@@ -631,6 +646,7 @@ def get_bootstrap_security_service(workspace: Path | None = None) -> BootstrapSe
 
 
 __all__ = [
+    "BOOTSTRAP_MASTER_KEY_ENV",
     "BootstrapSecurityService",
     "MASTER_KEY_VERSION",
     "SecretOverlayStore",

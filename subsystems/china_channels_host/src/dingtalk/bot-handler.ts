@@ -415,7 +415,7 @@ async function* streamFromGateway(params: {
  * 解析钉钉原始消息为标准化的消息上下文
  * 
  * @param raw 钉钉原始消息对象
- * @returns 解析后的消息上下�?
+ * @returns 解析后的消息上下文
  * 
  * Requirements: 4.1, 4.2, 4.3, 4.4
  */
@@ -428,20 +428,20 @@ export function parseDingtalkMessage(raw: DingtalkRawMessage): DingtalkMessageCo
   let content = "";
   
   if (raw.msgtype === "text" && raw.text?.content) {
-    // 文本消息：提�?text.content
+    // 文本消息：提取 text.content
     content = raw.text.content.trim();
   } else if (raw.msgtype === "audio") {
-    // 音频消息：提取语音识别文�?content.recognition
+    // 音频消息：提取语音识别文本 content.recognition
     const recognition = resolveAudioRecognition(raw);
     if (recognition) {
       content = recognition;
     }
   }
   
-  // 检查是�?@提及了机器人
+  // 检查是否 @提及了机器人
   const mentionedBot = resolveMentionedBot(raw);
   
-  // 使用 Stream 消息 ID（如果可用），确保去重稳�?
+  // 使用 Stream 消息 ID（如果可用），确保去重稳定
   const messageId = raw.streamMessageId ?? `${raw.conversationId}_${Date.now()}`;
   
   const senderId =
@@ -476,8 +476,8 @@ function resolveMentionedBot(raw: DingtalkRawMessage): boolean {
 }
 
 /**
- * 入站消息上下�?
- * 用于传递给 Moltbot 核心的标准化上下�?
+ * 入站消息上下文
+ * 用于传递给 Moltbot 核心的标准化上下文
  */
 export interface InboundContext {
   /** 消息正文 */
@@ -492,33 +492,33 @@ export interface InboundContext {
   BodyForCommands?: string;
   /** 发送方标识 */
   From: string;
-  /** 接收方标�?*/
+  /** 接收方标识 */
   To: string;
-  /** 会话�?*/
+  /** 会话键 */
   SessionKey: string;
   /** 账户 ID */
   AccountId: string;
   /** 聊天类型 */
   ChatType: "direct" | "group";
-  /** 群组主题（群聊时�?*/
+  /** 群组主题（群聊时） */
   GroupSubject?: string;
-  /** 发送者名�?*/
+  /** 发送者名称 */
   SenderName?: string;
-  /** 发送�?ID */
+  /** 发送者 ID */
   SenderId: string;
-  /** 渠道提供�?*/
+  /** 渠道提供方 */
   Provider: "dingtalk";
   /** 消息 ID */
   MessageSid: string;
-  /** 时间�?*/
+  /** 时间戳 */
   Timestamp: number;
-  /** 是否�?@提及 */
+  /** 是否被 @提及 */
   WasMentioned: boolean;
-  /** 命令是否已授�?*/
+  /** 命令是否已授权 */
   CommandAuthorized: boolean;
   /** 原始渠道 */
   OriginatingChannel: "dingtalk";
-  /** 原始接收�?*/
+  /** 原始接收方 */
   OriginatingTo: string;
   /** 钉钉会话 ID（群聊/单聊） */
   ConversationId?: string;
@@ -529,15 +529,15 @@ export interface InboundContext {
   
   // ===== 媒体相关字段 (Requirements 7.1-7.8) =====
   
-  /** 单个媒体文件的本地绝对路�?*/
+  /** 单个媒体文件的本地绝对路径 */
   MediaPath?: string;
-  /** 单个媒体文件�?MIME 类型 (�?"image/jpeg") */
+  /** 单个媒体文件的 MIME 类型 (如 "image/jpeg") */
   MediaType?: string;
-  /** 多个媒体文件的本地绝对路径数�?(用于 richText 消息) */
+  /** 多个媒体文件的本地绝对路径数组 (用于 richText 消息) */
   MediaPaths?: string[];
-  /** 多个媒体文件�?MIME 类型数组 (用于 richText 消息) */
+  /** 多个媒体文件的 MIME 类型数组 (用于 richText 消息) */
   MediaTypes?: string[];
-  /** 原始文件�?(用于 file 消息) */
+  /** 原始文件名 (用于 file 消息) */
   FileName?: string;
   /** 文件大小（字节）(用于 file 消息) */
   FileSize?: number;
@@ -546,12 +546,12 @@ export interface InboundContext {
 }
 
 /**
- * 构建入站消息上下�?
+ * 构建入站消息上下文
  * 
- * @param ctx 解析后的消息上下�?
- * @param sessionKey 会话�?
+ * @param ctx 解析后的消息上下文
+ * @param sessionKey 会话键
  * @param accountId 账户 ID
- * @returns 入站消息上下�?
+ * @returns 入站消息上下文
  * 
  * Requirements: 6.4
  */
@@ -562,7 +562,7 @@ export function buildInboundContext(
 ): InboundContext {
   const isGroup = ctx.chatType === "group";
   
-  // 构建 From �?To 标识
+  // 构建 From / To 标识
   const from = isGroup
     ? `dingtalk:group:${ctx.conversationId}`
     : `dingtalk:${ctx.senderId}`;
@@ -789,12 +789,12 @@ async function handleAICardStreaming(params: {
 }
 
 /**
- * 构建文件上下文消�?
+ * 构建文件上下文消息
  * 
- * 根据文件类型返回对应的中文描述文�?
+ * 根据文件类型返回对应的中文描述文本
  * 
  * @param msgType 消息类型 (picture, video, audio, file)
- * @param fileName 文件名（可选，用于 file 类型�?
+ * @param fileName 文件名（可选，用于 file 类型）
  * @returns 消息正文描述
  * 
  * Requirements: 9.5
@@ -811,18 +811,18 @@ export function buildFileContextMessage(
     case "video":
       return "[视频]";
     case "file": {
-      // 根据文件扩展名确定文件类�?
+      // 根据文件扩展名确定文件类型
       const displayName = fileName ?? "未知文件";
       
       if (fileName) {
-        // 使用 resolveFileCategory 来确定文件类�?
+        // 使用 resolveFileCategory 来确定文件类型
         const category = resolveFileCategory("application/octet-stream", fileName);
         
         switch (category) {
           case "document":
             return `[文档: ${displayName}]`;
           case "archive":
-            return `[压缩�? ${displayName}]`;
+            return `[压缩包: ${displayName}]`;
           case "code":
             return `[代码文件: ${displayName}]`;
           default:
@@ -863,7 +863,7 @@ export async function handleDingtalkMessage(params: {
     enableAICard = false,
   } = params;
   
-  // 创建日志�?
+  // 创建日志器
   const logger: Logger = createLogger("dingtalk", {
     log: params.log,
     error: params.error,
@@ -902,7 +902,7 @@ export async function handleDingtalkMessage(params: {
     return { ...file, path: finalPath };
   };
   
-  // 策略检�?
+  // 策略检查
   if (isGroup) {
     const groupPolicy = channelCfg?.groupPolicy ?? "open";
     const groupAllowFrom = channelCfg?.groupAllowFrom ?? [];
@@ -952,13 +952,13 @@ export async function handleDingtalkMessage(params: {
     return;
   }
   
-  // ===== 媒体消息处理变量 (�?try 块外声明以便 catch 块访�? =====
+  // ===== 媒体消息处理变量 (在 try 块外声明以便 catch 块访问) =====
   let downloadedMedia: DownloadedFile | null = null;
   let downloadedRichTextImages: DownloadedFile[] = [];
   let extractedFileInfo: ExtractedFileInfo | null = null;
   
   try {
-    // 获取完整�?Moltbot 运行时（包含 core API�?
+    // 获取完整的 Moltbot 运行时（包含 core API）
     const core = getDingtalkRuntime();
     const coreRecord = core as Record<string, unknown>;
     const coreChannel = coreRecord?.channel as Record<string, unknown> | undefined;
@@ -994,7 +994,7 @@ export async function handleDingtalkMessage(params: {
     });
     
     // ===== 媒体消息处理 (Requirements 9.1, 9.2, 9.4, 9.6) =====
-    // 用于存储下载的媒体文件信�?
+    // 用于存储下载的媒体文件信息
     let mediaBody: string | null = null;
     let richTextParseResult: ReturnType<typeof parseRichTextMessage> = null;
     
@@ -1049,7 +1049,7 @@ export async function handleDingtalkMessage(params: {
         richTextParseResult = parseRichTextMessage(raw);
         
         if (richTextParseResult && channelCfg?.clientId && channelCfg?.clientSecret) {
-          // 检查是否有图片需要下�?(Requirement 3.6)
+          // 检查是否有图片需要下载 (Requirement 3.6)
           if (richTextParseResult.imageCodes.length > 0) {
             // 获取 access token
             const accessToken = await getAccessToken(channelCfg.clientId, channelCfg.clientSecret);
@@ -1109,7 +1109,7 @@ export async function handleDingtalkMessage(params: {
       }
     }
     
-    // 构建入站上下�?
+    // 构建入站上下文
     const inboundCtx = buildInboundContext(
       ctx,
       (route as Record<string, unknown>)?.sessionKey as string,
@@ -1124,7 +1124,7 @@ export async function handleDingtalkMessage(params: {
       inboundCtx.MediaPath = downloadedMedia.path;
       inboundCtx.MediaType = downloadedMedia.contentType;
       
-      // 设置消息正文为媒体描�?
+      // 设置消息正文为媒体描述
       if (mediaBody) {
         inboundCtx.Body = mediaBody;
         inboundCtx.RawBody = mediaBody;
@@ -1141,13 +1141,13 @@ export async function handleDingtalkMessage(params: {
         }
       }
       
-      // 音频消息的语音识别文�?
+      // 音频消息的语音识别文本
       if (extractedFileInfo?.msgType === "audio" && extractedFileInfo.recognition) {
         inboundCtx.Transcript = extractedFileInfo.recognition;
       }
     }
     
-    // 设置 richText 消息的媒体字�?(Requirements 7.3, 7.4)
+    // 设置 richText 消息的媒体字段 (Requirements 7.3, 7.4)
     if (downloadedRichTextImages.length > 0) {
       inboundCtx.MediaPaths = downloadedRichTextImages.map(f => f.path);
       inboundCtx.MediaTypes = downloadedRichTextImages.map(f => f.contentType);
@@ -1159,15 +1159,15 @@ export async function handleDingtalkMessage(params: {
         inboundCtx.CommandBody = mediaBody;
       }
     } else if (richTextParseResult && richTextParseResult.textParts.length > 0) {
-      // 纯文�?richText 消息 (Requirement 3.6)
-      // 不设�?MediaPath/MediaType，只设置 Body
+      // 纯文本 richText 消息 (Requirement 3.6)
+      // 不设置 MediaPath/MediaType，只设置 Body
       const textBody = richTextParseResult.textParts.join("\n");
       inboundCtx.Body = textBody;
       inboundCtx.RawBody = textBody;
       inboundCtx.CommandBody = textBody;
     }
 
-    // 如果�?finalizeInboundContext，使用它
+    // 如果有 finalizeInboundContext，使用它
     const finalizeInboundContext = replyApi?.finalizeInboundContext as
       | ((ctx: InboundContext) => InboundContext)
       | undefined;
