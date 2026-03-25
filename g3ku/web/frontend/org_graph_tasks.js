@@ -239,10 +239,29 @@ function renderTasks() {
         }
         return updateTaskToolbar();
     }
+    const nextTaskMetricSnapshot = {};
     meta.items.forEach((task) => {
-        const selected = S.selectedTaskIds.has(task.task_id);
+        const taskId = String(task?.task_id || "");
+        const selected = S.selectedTaskIds.has(taskId);
         const statusKey = taskStatusKey(task);
         const tokenUsage = taskTokenUsage(task);
+        const previousMetrics = S.taskMetricSnapshot?.[taskId] || null;
+        const metricItems = [
+            { key: "input_tokens", label: "输入", value: tokenUsage.tracked ? tokenUsage.input_tokens : null },
+            { key: "output_tokens", label: "输出", value: tokenUsage.tracked ? tokenUsage.output_tokens : null },
+            { key: "cache_hit_tokens", label: "缓存命中", value: tokenUsage.tracked ? tokenUsage.cache_hit_tokens : null },
+        ];
+        nextTaskMetricSnapshot[taskId] = tokenUsage.tracked ? {
+            input_tokens: Number(tokenUsage.input_tokens || 0),
+            output_tokens: Number(tokenUsage.output_tokens || 0),
+            cache_hit_tokens: Number(tokenUsage.cache_hit_tokens || 0),
+        } : null;
+        const metricsMarkup = metricItems.map((item) => {
+            const hasValue = Number.isFinite(item.value);
+            const previousValue = previousMetrics && Number.isFinite(previousMetrics[item.key]) ? previousMetrics[item.key] : null;
+            const isIncreasing = previousValue !== null && hasValue && item.value > previousValue;
+            return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
+        }).join("");
         const cardActions = taskCardActions(task);
         const el = document.createElement("div");
         el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
@@ -254,16 +273,16 @@ function renderTasks() {
                         <span class="status-badge" data-status="${esc(statusKey)}">${esc(taskStatusLabel(task))}</span>
                         <span class="pc-task-id-chip">
                             <span class="pc-task-id-label">Task</span>
-                            <span class="pc-task-id-value">${esc(task.task_id)}</span>
+                            <span class="pc-task-id-value">${esc(taskId)}</span>
                         </span>
-                                            <button class="icon-btn pc-copy-btn" type="button" title="复制任务 ID" aria-label="复制任务 ID">
+                        <button class="icon-btn pc-copy-btn" type="button" title="复制任务 ID" aria-label="复制任务 ID">
                             <i data-lucide="copy"></i>
                         </button>
                     </div>
                 </div>
                 ${cardActions.length ? `
-                    <div class="pc-card-menu-shell toolbar-dropdown" data-task-menu="${esc(task.task_id)}">
-                        <button class="icon-btn pc-card-menu-trigger" type="button" data-task-menu-toggle="${esc(task.task_id)}" title="\u66f4\u591a\u64cd\u4f5c" aria-label="\u66f4\u591a\u64cd\u4f5c" aria-haspopup="menu" aria-expanded="false" ${S.taskBusy ? "disabled" : ""}>
+                    <div class="pc-card-menu-shell toolbar-dropdown" data-task-menu="${esc(taskId)}">
+                        <button class="icon-btn pc-card-menu-trigger" type="button" data-task-menu-toggle="${esc(taskId)}" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false" ${S.taskBusy ? "disabled" : ""}>
                             <i data-lucide="more-horizontal"></i>
                         </button>
                         <div class="toolbar-menu pc-card-menu" role="menu" hidden>
@@ -272,48 +291,45 @@ function renderTasks() {
                     </div>
                 ` : ""}
             </div>
-            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" title="${esc(task.title || task.task_id)}">${esc(task.title || task.task_id)}</h3></div></div>
-            <div class="pc-created-at"><span class="pc-field-label">\u521b\u5efa\u65f6\u95f4</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
-            <div class="pc-metrics">
-                <div class="pc-metric"><span class="pc-metric-label">\u8f93\u5165</span><strong class="pc-metric-value">${esc(tokenUsage.tracked ? formatTokenCount(tokenUsage.input_tokens) : "--")}</strong></div>
-                <div class="pc-metric"><span class="pc-metric-label">\u8f93\u51fa</span><strong class="pc-metric-value">${esc(tokenUsage.tracked ? formatTokenCount(tokenUsage.output_tokens) : "--")}</strong></div>
-                <div class="pc-metric"><span class="pc-metric-label">\u7f13\u5b58\u547d\u4e2d</span><strong class="pc-metric-value">${esc(tokenUsage.tracked ? formatTokenCount(tokenUsage.cache_hit_tokens) : "--")}</strong></div>
-            </div>
+            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
+            <div class="pc-created-at"><span class="pc-field-label">创建时间</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
+            <div class="pc-metrics">${metricsMarkup}</div>
         `;
         const toggle = el.querySelector(".project-select-toggle");
         const checkbox = el.querySelector(".project-select-checkbox");
         toggle?.addEventListener("click", (e) => e.stopPropagation());
         checkbox?.addEventListener("change", (e) => {
             e.stopPropagation();
-            if (e.target.checked) S.selectedTaskIds.add(task.task_id);
-            else S.selectedTaskIds.delete(task.task_id);
+            if (e.target.checked) S.selectedTaskIds.add(taskId);
+            else S.selectedTaskIds.delete(taskId);
             renderTasks();
         });
         el.querySelector(".pc-copy-btn")?.addEventListener("click", async (e) => {
             e.stopPropagation();
-            await copyTaskId(task.task_id);
+            await copyTaskId(taskId);
         });
         const menuTrigger = el.querySelector("[data-task-menu-toggle]");
         menuTrigger?.addEventListener("click", (e) => {
             e.stopPropagation();
             const shell = menuTrigger.closest(".pc-card-menu-shell");
             const isOpen = !!shell?.classList.contains("is-open");
-            setTaskCardMenuOpen(task.task_id, !isOpen, { restoreFocus: isOpen });
+            setTaskCardMenuOpen(taskId, !isOpen, { restoreFocus: isOpen });
         });
         el.querySelectorAll("[data-task-card-action]").forEach((btn) => btn.addEventListener("click", async (e) => {
             e.stopPropagation();
             closeTaskCardMenus();
-            await runTaskAction(task.task_id, btn.dataset.taskCardAction, { returnFocus: menuTrigger || btn });
+            await runTaskAction(taskId, btn.dataset.taskCardAction, { returnFocus: menuTrigger || btn });
         }));
         el.addEventListener("click", () => {
             if (S.multiSelectMode) {
-                toggleTaskSelection(task.task_id);
+                toggleTaskSelection(taskId);
                 return;
             }
-            void openTask(task.task_id);
+            void openTask(taskId);
         });
         U.taskGrid.appendChild(el);
     });
+    S.taskMetricSnapshot = nextTaskMetricSnapshot;
     updateTaskToolbar();
     icons();
 }

@@ -5369,10 +5369,10 @@ textarea {
 }
 
 .pc-card-menu-trigger {
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
-    min-height: 40px;
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
+    min-height: 30px;
     flex-shrink: 0;
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
     background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%);
@@ -5470,6 +5470,39 @@ textarea {
     white-space: nowrap;
 }
 
+.pc-metric.is-increasing {
+    border-color: color-mix(in srgb, var(--brand-primary) 46%, var(--border-color));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+}
+
+.pc-metric-value.is-increasing {
+    animation: pc-token-increase 620ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    transform-origin: left center;
+    will-change: transform, color;
+}
+
+@keyframes pc-token-increase {
+    0% {
+        transform: scale(1);
+        color: var(--text-primary);
+    }
+
+    35% {
+        transform: scale(1.08);
+        color: var(--brand-primary);
+    }
+
+    100% {
+        transform: scale(1);
+        color: var(--text-primary);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pc-metric-value.is-increasing {
+        animation: none;
+    }
+}
 .pc-summary {
     display: -webkit-box;
     -webkit-line-clamp: 2;

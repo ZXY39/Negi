@@ -100,6 +100,7 @@ const S = {
     taskPage: 1,
     taskPageSize: RESOURCE_PAGE_SIZES[0],
     taskGridSignature: "",
+    taskMetricSnapshot: {},
     confirmState: null,
     toastState: { timeoutId: null, intervalId: null, remaining: 0 },
     openResourceSelectId: "",
