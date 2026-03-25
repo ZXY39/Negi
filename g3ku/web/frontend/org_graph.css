@@ -5454,6 +5454,7 @@ textarea {
     border-radius: 14px;
     background: color-mix(in srgb, var(--bg-panel) 86%, var(--brand-primary) 8%);
     min-width: 0;
+    align-items: flex-start;
 }
 
 .pc-metric-label {
@@ -5462,12 +5463,15 @@ textarea {
 }
 
 .pc-metric-value {
-    font-size: 0.98rem;
+    display: block;
+    max-width: 100%;
+    font-size: clamp(0.88rem, 0.82rem + 0.18vw, 0.98rem);
     color: var(--text-primary);
-    line-height: 1.2;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.15;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-variant-numeric: tabular-nums;
 }
 
 .pc-metric.is-increasing {
