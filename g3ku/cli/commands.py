@@ -21,9 +21,13 @@ from rich.table import Table
 from rich.text import Text
 
 from g3ku import __logo__, __version__
+from g3ku.china_bridge.registry import china_channel_attr, china_channel_ids
 from g3ku.config.schema import Config
 from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
+from g3ku.runtime.bootstrap_factory import make_agent_loop as _runtime_make_agent_loop
+from g3ku.runtime.bootstrap_factory import make_provider as _runtime_make_provider
 from g3ku.utils.helpers import resolve_path_in_workspace, sync_workspace_templates
+from g3ku.web.launcher import run_worker_runtime
 
 app = typer.Typer(
     name="g3ku",
@@ -254,15 +258,13 @@ def onboard(
     console.print("     Get one at: https://openrouter.ai/keys")
     console.print("  2. Chat: [cyan]g3ku agent -m \"Hello!\"[/cyan]")
     if project:
-        console.print("  3. Commit [cyan].g3ku/config.json[/cyan] and [cyan]memory/[/cyan] for cross-machine sync")
+        console.print("  3. Keep [cyan].g3ku/[/cyan], [cyan]memory/[/cyan], and [cyan]sessions/[/cyan] local; they contain private runtime state")
     console.print("\n[dim]Need QQ / 钉钉 / 企微 / 飞书接入？使用 `g3ku china-bridge doctor` 检查子系统状态。[/dim]")
 
 def _make_provider(config: Config, *, scope: str = "ceo"):
     """Create the configured BaseChatModel for a runtime scope."""
-    from g3ku.providers.chatmodels import build_chat_model
-
     try:
-        return build_chat_model(config, role=scope)
+        return _runtime_make_provider(config, scope=scope)
     except (ValueError, RuntimeError) as exc:
         console.print("[red]Configuration error:[/red]")
         console.print(str(exc))
@@ -287,12 +289,7 @@ def _memory_startup_self_check(config: Config) -> None:
         return
 
     mode = str(mem_cfg.mode or "legacy").lower()
-    if mode != "rag":
-        console.print(
-            f"[red]Memory self-check alert:[/red] tools/memory_runtime mode='{mode}', expected 'rag'."
-        )
-    else:
-        console.print("[green]Memory self-check:[/green] mode=rag")
+    console.print(f"[green]Memory self-check:[/green] mode={mode}")
 
     def _provider_from_model(value: str) -> str | None:
         model = str(value or "").strip()
@@ -331,13 +328,13 @@ def _memory_startup_self_check(config: Config) -> None:
         "dashscope": ["DASHSCOPE_API_KEY"],
         "zhipu": ["ZHIPU_API_KEY"],
     }
-    if mode == "rag" and not _provider_has_key(provider_id):
+    if mode in {"rag", "dual"} and not _provider_has_key(provider_id):
         console.print(
             "[yellow]Memory self-check warning:[/yellow] embedding provider "
             f"'{provider_id}' has no API key configured. Dense retrieval may fallback to sparse-only."
         )
     rerank_provider = _provider_from_model(str(getattr(memory_binding, "rerank_provider_model", "") or ""))
-    if mode == "rag" and rerank_provider and not _provider_has_key(rerank_provider):
+    if mode in {"rag", "dual"} and rerank_provider and not _provider_has_key(rerank_provider):
         console.print(
             "[yellow]Memory self-check warning:[/yellow] rerank provider "
             f"'{rerank_provider}' has no API key configured. Rerank stage will be skipped."
@@ -354,76 +351,35 @@ def _make_agent_loop(
     session_manager=None,
 ):
     """Create the configured agent runtime (LangGraph-only)."""
-    runtime = (config.agents.defaults.runtime or "langgraph").lower()
-    if runtime != "langgraph":
-        console.print("[red]Configuration error:[/red]")
-        console.print(
-            "Original field: agents.defaults.runtime\n"
-            f"Current value: {runtime!r}\n"
-            "New supported value: 'langgraph' only."
-        )
-        raise typer.Exit(1)
-
-    from g3ku.agent.loop import AgentLoop
-
-    try:
-        from g3ku.agent.middleware import build_middlewares
-    except ModuleNotFoundError:
-        if config.agents.defaults.middlewares:
-            console.print("[red]Configuration error:[/red]")
-            console.print(
-                "Runtime middleware requires optional langchain dependency. "
-                "Install project extras before enabling middlewares."
-            )
-            raise typer.Exit(1)
-        middlewares = []
-    else:
-        try:
-            middlewares = build_middlewares(config.agents.defaults.middlewares)
-        except ValueError as exc:
-            console.print("[red]Configuration error:[/red]")
-            console.print(str(exc))
-            raise typer.Exit(1) from exc
-
     _memory_startup_self_check(config)
-
-    provider_name, model_id = config.get_scope_model_target("ceo")
-
-    return AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=model_id,
-        provider_name=provider_name,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.get_role_max_iterations('ceo'),
-        memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
-        multi_agent_config=config.agents.multi_agent,
-        app_config=config,
-        resource_config=config.resources,
-        cron_service=cron_service,
-        session_manager=session_manager,
-        channels_config=config.china_bridge,
-        debug_mode=debug_mode,
-        middlewares=middlewares,
-    )
+    try:
+        return _runtime_make_agent_loop(
+            config,
+            bus,
+            provider,
+            debug_mode=debug_mode,
+            cron_service=cron_service,
+            session_manager=session_manager,
+        )
+    except (ValueError, RuntimeError) as exc:
+        console.print("[red]Configuration error:[/red]")
+        console.print(str(exc))
+        raise typer.Exit(1) from exc
 
 
 # ============================================================================
-# Gateway / Server
+# Web / Server
 # ============================================================================
 
 
 @app.command()
 def web(
-    host: str = typer.Option("127.0.0.1", "--host", help="Web UI host"),
-    port: int = typer.Option(3000, "--port", "-p", help="Web UI port"),
+    host: str | None = typer.Option(None, "--host", help="Web bind host. Defaults to web.host from project config."),
+    port: int | None = typer.Option(None, "--port", "-p", help="Web bind port. Defaults to web.port from project config."),
     reload: bool = typer.Option(False, "--reload/--no-reload", help="Enable auto-reload"),
     debug: bool = typer.Option(False, "--debug/--no-debug", help="Enable full backend debug trace logs."),
 ):
-    """Start g3ku Web UI (compatible alias of `g3ku-web`)."""
+    """Start g3ku Web UI."""
     from g3ku.shells.web import run_web_shell
 
     run_web_shell(
@@ -436,33 +392,9 @@ def web(
 
 
 @app.command()
-def gateway(
-    port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    debug: bool = typer.Option(False, "--debug/--no-debug", help="Enable full backend debug trace logs."),
-):
-    """Start the g3ku gateway."""
-    from g3ku.shells.gateway import run_gateway_shell
-
-    run_gateway_shell(
-        port=port,
-        verbose=verbose,
-        debug=debug,
-        console=console,
-        logo_text=_logo(),
-        make_provider=_make_provider,
-        make_agent_loop=_make_agent_loop,
-        set_debug_mode=_set_debug_mode,
-        sync_workspace_templates=sync_workspace_templates,
-    )
-
-
-@app.command()
 def worker():
     """Start the background task worker."""
-    from g3ku.g3ku_cli import _run_worker_runtime
-
-    asyncio.run(_run_worker_runtime())
+    asyncio.run(run_worker_runtime())
 
 
 
@@ -548,15 +480,15 @@ def china_bridge_doctor():
     table.add_row("status", "ok" if status_path.exists() else "warn", str(status_path))
     table.add_row("public_port", "ok", str(config.china_bridge.public_port))
     table.add_row("control_port", "ok", str(config.china_bridge.control_port))
-    for channel_name in ("qqbot", "dingtalk", "wecom", "wecom_app", "feishu_china"):
-        payload = getattr(config.china_bridge.channels, channel_name)
-        table.add_row(f"channel:{channel_name}", "ok" if payload.enabled else "warn", str(payload.enabled))
+    for channel_id in china_channel_ids():
+        payload = getattr(config.china_bridge.channels, china_channel_attr(channel_id))
+        table.add_row(f"channel:{channel_id}", "ok" if payload.enabled else "warn", str(payload.enabled))
     console.print(table)
 
 
 @china_bridge_app.command("restart")
 def china_bridge_restart():
-    """Terminate the running node host by PID so the gateway supervisor can restart it."""
+    """Terminate the running node host by PID so the web runtime can restart it."""
     from g3ku.config.loader import load_config
 
     config = load_config()
@@ -877,6 +809,7 @@ def cron_run(
 
     from g3ku.bus.queue import MessageBus
     from g3ku.config.loader import get_data_dir, load_config
+    from g3ku.cron.runtime_dispatch import dispatch_cron_job
     from g3ku.cron.service import CronService
     from g3ku.cron.types import CronJob
     logger.disable("g3ku")
@@ -892,22 +825,25 @@ def cron_run(
     result_holder = []
     runtime_manager = SessionRuntimeManager(agent_loop)
     runtime_bridge = SessionRuntimeBridge(runtime_manager)
+    task_registrar = getattr(agent_loop, "_register_active_task", None)
 
     async def on_job(job: CronJob) -> str | None:
-        result = await runtime_bridge.prompt(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
+        response = await dispatch_cron_job(
+            job,
+            runtime_bridge=runtime_bridge,
+            session_manager=getattr(agent_loop, "sessions", None),
+            register_task=task_registrar if callable(task_registrar) else None,
         )
-        response = str(result.output or "")
-        result_holder.append(response)
+        result_holder.append(str(response or ""))
         return response
 
     service.on_job = on_job
 
     async def run():
-        return await service.run_job(job_id, force=force)
+        try:
+            return await service.run_job(job_id, force=force)
+        finally:
+            await agent_loop.close_mcp()
 
     if asyncio.run(run()):
         console.print("[green]闁翠焦褰?green] Job executed")

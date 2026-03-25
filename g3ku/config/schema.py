@@ -82,14 +82,36 @@ class FeishuChinaCompatConfig(ChinaCompatConfig):
     webhook_path: str | None = None
     mode: str | None = None
 
+
+class WecomKfCompatConfig(ChinaCompatConfig):
+    corp_id: str | None = None
+    corp_secret: str | None = None
+    token: str | None = None
+    encoding_aes_key: str | None = None
+    open_kf_id: str | None = None
+    webhook_path: str | None = None
+    mode: str | None = None
+
+
+class WechatMpCompatConfig(ChinaCompatConfig):
+    app_id: str | None = None
+    app_secret: str | None = None
+    token: str | None = None
+    encoding_aes_key: str | None = None
+    webhook_path: str | None = None
+    mode: str | None = None
+
+
 class ChinaBridgeChannelsConfig(Base):
     """China channel configs hosted by the internal Node communication subsystem."""
 
     qqbot: QQBotCompatConfig = Field(default_factory=QQBotCompatConfig)
     dingtalk: ChinaCompatConfig = Field(default_factory=ChinaCompatConfig)
     wecom: WecomCompatConfig = Field(default_factory=WecomCompatConfig)
-    wecom_app: WecomAppCompatConfig = Field(default_factory=WecomAppCompatConfig)
-    feishu_china: FeishuChinaCompatConfig = Field(default_factory=FeishuChinaCompatConfig)
+    wecom_app: WecomAppCompatConfig = Field(default_factory=WecomAppCompatConfig, alias="wecom-app")
+    wecom_kf: WecomKfCompatConfig = Field(default_factory=WecomKfCompatConfig, alias="wecom-kf")
+    wechat_mp: WechatMpCompatConfig = Field(default_factory=WechatMpCompatConfig, alias="wechat-mp")
+    feishu_china: FeishuChinaCompatConfig = Field(default_factory=FeishuChinaCompatConfig, alias="feishu-china")
 
 
 
@@ -408,8 +430,8 @@ class ProvidersConfig(Base):
     responses: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Responses (/v1/responses)
 
 
-class GatewayConfig(Base):
-    """Gateway/server configuration."""
+class WebConfig(Base):
+    """Web server configuration."""
 
     host: str = "0.0.0.0"
     port: int = 18790
@@ -456,8 +478,8 @@ class MemoryEmbeddingConfig(Base):
 class MemoryIsolationConfig(Base):
     """Namespace isolation controls."""
 
-    mode: Literal["session", "channel", "global"] = "session"
-    namespace_template: list[str] = Field(default_factory=lambda: ["memory", "{channel}", "{chat_id}"])
+    mode: Literal["session", "channel", "global"] = "global"
+    namespace_template: list[str] = Field(default_factory=lambda: ["memory", "global"])
 
 
 class MemoryGuardConfig(Base):
@@ -608,7 +630,7 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
-    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
     tool_secrets: dict[str, dict[str, Any]] = Field(default_factory=dict)
     resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
     main_runtime: MainRuntimeConfig = Field(default_factory=MainRuntimeConfig)

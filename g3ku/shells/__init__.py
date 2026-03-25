@@ -1,6 +1,5 @@
-"""Shell entrypoint namespace for CLI, web, and gateway surfaces."""
+"""Shell entrypoint namespace for CLI and web surfaces."""
 from g3ku.shells.cli import run_agent_shell
-from g3ku.shells.gateway import run_gateway_shell
 from g3ku.shells.memory_cli import build_memory_app
 from g3ku.shells.provider_cli import build_provider_app
 from g3ku.shells.resource_cli import build_resource_app
@@ -14,6 +13,5 @@ __all__ = [
     "get_agent",
     "get_runtime_manager",
     "run_agent_shell",
-    "run_gateway_shell",
     "run_web_shell",
 ]

@@ -11,9 +11,23 @@
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
-      "@openclaw-china/shared": ["./src/shared/index.ts"]
+      "@openclaw-china/shared": ["./src/vendor/shared/index.ts"]
     }
   },
-  "include": ["src/**/*.ts"],
+  "include": [
+    "src/*.ts",
+    "src/qqbot/channel.ts",
+    "src/dingtalk/channel.ts",
+    "src/wecom/channel.ts",
+    "src/wecom/monitor.ts",
+    "src/wecom-app/channel.ts",
+    "src/wecom-app/monitor.ts",
+    "src/wecom-kf/channel.ts",
+    "src/wecom-kf/webhook.ts",
+    "src/wechat-mp/channel.ts",
+    "src/wechat-mp/webhook.ts",
+    "src/feishu-china/channel.ts",
+    "src/vendor/**/*.ts"
+  ],
   "exclude": ["src/**/*.test.ts"]
 }

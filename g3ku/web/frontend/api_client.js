@@ -697,12 +697,11 @@ class ApiClient {
     }
 
     static async updateChinaChannel(channelId, payload) {
-        const data = await this.put(`/api/china-bridge/channels/${encodeURIComponent(channelId)}`, payload || {});
-        return data.item || null;
+        return this.put(`/api/china-bridge/channels/${encodeURIComponent(channelId)}`, payload || {});
     }
 
-    static async testChinaChannel(channelId) {
-        return this.post(`/api/china-bridge/channels/${encodeURIComponent(channelId)}/test`, {});
+    static async testChinaChannel(channelId, payload = {}) {
+        return this.post(`/api/china-bridge/channels/${encodeURIComponent(channelId)}/test`, payload || {});
     }
 }
 

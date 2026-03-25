@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "snapshot": "openclaw-china-2026.3.22",
+    "source_path": "D:/zxy/project/openclaw-china-2026.3.22"
+  },
+  "channels": [
+    {
+      "id": "qqbot",
+      "python_attr": "qqbot",
+      "legacy_keys": ["qqbot"],
+      "label": "QQ Bot",
+      "description": "腾讯 QQ 官方机器人通道",
+      "maintenance_status": "active",
+      "supports_accounts": true,
+      "probe_strategy": "qqbot",
+      "secret_fields": ["clientSecret", "token", "accounts"],
+      "template_json": {
+        "appId": "your-qq-app-id",
+        "clientSecret": "your-qq-client-secret",
+        "markdownSupport": true,
+        "defaultAccount": "default",
+        "accounts": {
+          "default": {
+            "appId": "your-qq-app-id",
+            "clientSecret": "your-qq-client-secret"
+          }
+        }
+      }
+    },
+    {
+      "id": "dingtalk",
+      "python_attr": "dingtalk",
+      "legacy_keys": ["dingtalk"],
+      "label": "DingTalk",
+      "description": "钉钉机器人与流式接入通道",
+      "maintenance_status": "active",
+      "supports_accounts": true,
+      "probe_strategy": "dingtalk",
+      "secret_fields": ["clientSecret", "token", "accounts"],
+      "template_json": {
+        "clientId": "your-dingtalk-client-id",
+        "clientSecret": "your-dingtalk-client-secret",
+        "enableAICard": false,
+        "gatewayToken": "your-dingtalk-gateway-token",
+        "defaultAccount": "default",
+        "accounts": {
+          "default": {
+            "clientId": "your-dingtalk-client-id",
+            "clientSecret": "your-dingtalk-client-secret"
+          }
+        }
+      }
+    },
+    {
+      "id": "wecom",
+      "python_attr": "wecom",
+      "legacy_keys": ["wecom"],
+      "label": "WeCom",
+      "description": "企业微信智能机器人通道",
+      "maintenance_status": "active",
+      "supports_accounts": true,
+      "probe_strategy": "wecom",
+      "secret_fields": ["secret", "token", "encodingAESKey", "accounts"],
+      "template_json": {
+        "mode": "ws",
+        "botId": "your-wecom-bot-id",
+        "secret": "your-wecom-bot-secret",
+        "token": "your-wecom-webhook-token",
+        "encodingAESKey": "your-wecom-encoding-aes-key",
+        "webhookPath": "/wecom",
+        "defaultAccount": "default",
+        "accounts": {
+          "default": {
+            "mode": "ws",
+            "botId": "your-wecom-bot-id",
+            "secret": "your-wecom-bot-secret"
+          }
+        }
+      }
+    },
+    {
+      "id": "wecom-app",
+      "python_attr": "wecom_app",
+      "legacy_keys": ["wecomApp", "wecom_app", "wecom-app"],
+      "label": "WeCom App",
+      "description": "企业微信自建应用通道",
+      "maintenance_status": "active",
+      "supports_accounts": true,
+      "probe_strategy": "wecom-app",
+      "secret_fields": ["token", "encodingAESKey", "corpSecret", "accounts"],
+      "template_json": {
+        "token": "your-wecom-app-token",
+        "encodingAESKey": "your-wecom-app-encoding-aes-key",
+        "webhookPath": "/wecom-app",
+        "corpId": "your-wecom-corp-id",
+        "corpSecret": "your-wecom-corp-secret",
+        "agentId": 1000001,
+        "defaultAccount": "default",
+        "accounts": {
+          "default": {
+            "token": "your-wecom-app-token",
+            "encodingAESKey": "your-wecom-app-encoding-aes-key",
+            "corpId": "your-wecom-corp-id",
+            "corpSecret": "your-wecom-corp-secret",
+            "agentId": 1000001
+          }
+        }
+      }
+    },
+    {
+      "id": "wecom-kf",
+      "python_attr": "wecom_kf",
+      "legacy_keys": ["wecomKf", "wecom_kf", "wecom-kf"],
+      "label": "WeCom KF",
+      "description": "企业微信客服通道",
+      "maintenance_status": "active",
+      "supports_accounts": true,
+      "probe_strategy": "wecom-kf",
+      "secret_fields": ["token", "encodingAESKey", "corpSecret", "accounts"],
+      "template_json": {
+        "token": "your-wecom-kf-token",
+        "encodingAESKey": "your-wecom-kf-encoding-aes-key",
+        "corpId": "your-wecom-corp-id",
+        "corpSecret": "your-wecom-kf-corp-secret",
+        "openKfId": "your-open-kf-id",
+        "webhookPath": "/wecom-kf",
+        "welcomeText": "你好，这里是 G3ku 客服助手。",
+        "defaultAccount": "default",
+        "accounts": {
+          "default": {
+            "token": "your-wecom-kf-token",
+            "encodingAESKey": "your-wecom-kf-encoding-aes-key",
+            "corpId": "your-wecom-corp-id",
+            "corpSecret": "your-wecom-kf-corp-secret",
+            "openKfId": "your-open-kf-id"
+          }
+        }
+      }
+    },
+    {
+      "id": "wechat-mp",
+      "python_attr": "wechat_mp",
+      "legacy_keys": ["wechatMp", "wechat_mp", "wechat-mp"],
+      "label": "WeChat MP",
+      "description": "微信公众号通道",
+      "maintenance_status": "active",
+      "supports_accounts": true,
+      "probe_strategy": "wechat-mp",
+      "secret_fields": ["appSecret", "token", "encodingAESKey", "accounts"],
+      "template_json": {
+        "appId": "your-wechat-mp-app-id",
+        "appSecret": "your-wechat-mp-app-secret",
+        "token": "your-wechat-mp-token",
+        "encodingAESKey": "your-wechat-mp-encoding-aes-key",
+        "webhookPath": "/wechat-mp",
+        "messageMode": "safe",
+        "replyMode": "passive",
+        "activeDeliveryMode": "merged",
+        "renderMarkdown": true,
+        "welcomeText": "你好，这里是 G3ku 公众号助手。",
+        "defaultAccount": "default",
+        "accounts": {
+          "default": {
+            "appId": "your-wechat-mp-app-id",
+            "appSecret": "your-wechat-mp-app-secret",
+            "token": "your-wechat-mp-token",
+            "encodingAESKey": "your-wechat-mp-encoding-aes-key"
+          }
+        }
+      }
+    },
+    {
+      "id": "feishu-china",
+      "python_attr": "feishu_china",
+      "legacy_keys": ["feishuChina", "feishu_china", "feishu-china"],
+      "label": "Feishu",
+      "description": "飞书 / Lark 中国版通道",
+      "maintenance_status": "frozen",
+      "supports_accounts": false,
+      "probe_strategy": "feishu-china",
+      "secret_fields": ["appSecret", "token", "accounts"],
+      "template_json": {
+        "appId": "your-feishu-app-id",
+        "appSecret": "your-feishu-app-secret",
+        "connectionMode": "websocket",
+        "sendMarkdownAsCard": true,
+        "replyFinalOnly": false
+      }
+    }
+  ]
+}

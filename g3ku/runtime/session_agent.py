@@ -693,7 +693,7 @@ class RuntimeAgentSession:
                             kind="persistence_warning",
                             text="Session transcript persistence failed; response is still available in-memory.",
                         )
-                    if getattr(self._loop, "memory_manager", None) is not None and self._loop._use_rag_memory():
+                    if getattr(self._loop, "memory_manager", None) is not None:
                         try:
                             await self._loop.memory_manager.ingest_turn(
                                 session_key=self._state.session_key,
@@ -709,7 +709,7 @@ class RuntimeAgentSession:
                                 "message_delta",
                                 channel="analysis",
                                 kind="persistence_warning",
-                                text="RAG memory ingest failed; turn history is still available in session transcript.",
+                                text="Memory ingest failed; turn history is still available in session transcript.",
                             )
                     if persisted_session is not None and getattr(self._loop, "commit_service", None) is not None:
                         try:
@@ -725,7 +725,7 @@ class RuntimeAgentSession:
                                 "message_delta",
                                 channel="analysis",
                                 kind="persistence_warning",
-                                text="RAG memory commit pipeline failed; new turns remain available in session transcript.",
+                                text="Memory commit pipeline failed; new turns remain available in session transcript.",
                             )
                 stage_snapshot = self.current_stage_snapshot()
                 await self._emit(

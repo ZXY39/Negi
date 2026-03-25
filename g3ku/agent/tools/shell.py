@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,8 @@ class ExecTool(Tool):
         timeout: int = 60,
         working_dir: str | None = None,
         workspace_root: str | None = None,
+        temp_root: str | None = None,
+        externaltools_root: str | None = None,
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
@@ -30,6 +33,8 @@ class ExecTool(Tool):
         self.timeout = timeout
         self.working_dir = working_dir
         self.workspace_root = workspace_root
+        self.temp_root = temp_root
+        self.externaltools_root = externaltools_root
         self.deny_patterns = deny_patterns or [
             r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
             r"\bdel\s+/[fq]\b",              # del /f, del /q
@@ -76,6 +81,17 @@ class ExecTool(Tool):
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
         cwd = self._resolve_cwd(working_dir)
+        policy_error = self._enforce_command_path_policy(command, cwd)
+        if policy_error:
+            return self._build_payload(
+                status="error",
+                exit_code=None,
+                command=command,
+                stdout_text="",
+                stderr_text=policy_error,
+                runtime=runtime,
+                error=policy_error,
+            )
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return self._build_payload(
@@ -164,6 +180,91 @@ class ExecTool(Tool):
         finally:
             self._notify_resource_change(resource_state, runtime=runtime, trigger="tool:exec")
 
+    def _enforce_command_path_policy(self, command: str, cwd: str) -> str | None:
+        workspace_root = self._workspace_root()
+        temp_root = self._temp_root()
+        externaltools_root = self._externaltools_root()
+        tools_root = self._tools_root()
+        cwd_path = Path(cwd).expanduser().resolve()
+
+        if self._is_within_any_root(cwd_path, self._legacy_temp_roots()):
+            return (
+                f"Error: working_dir {cwd_path} is blocked. Use {temp_root} for temporary content instead of legacy tmp directories."
+            )
+        if self._is_system_temp_path(cwd_path) and not self._is_within_workspace(cwd_path, temp_root):
+            return (
+                f"Error: working_dir {cwd_path} is blocked. Use {temp_root} for temporary content instead of the system temp directory."
+            )
+
+        normalized = self._normalize_command(command)
+        if self._mentions_legacy_temp_token(normalized) or self._command_references_any_root(command, self._legacy_temp_roots()):
+            return f"Error: tmp paths are blocked. Use {temp_root} for downloads, caches, logs, and other temporary content."
+        if self._mentions_system_temp_token(normalized) or self._command_references_system_temp(command, temp_root=temp_root):
+            return f"Error: system temp paths are blocked. Use {temp_root} for downloads, caches, logs, and other temporary content."
+
+        if self._matches_any(
+            command,
+            [
+                r"\bwinget\s+install\b",
+                r"\bchoco\s+install\b",
+                r"\bscoop\s+install\b",
+                r"\bapt(?:-get)?\s+install\b",
+                r"\byum\s+install\b",
+                r"\bdnf\s+install\b",
+                r"\bpacman\s+-S\b",
+                r"\bbrew\s+install\b",
+                r"\bpipx\s+install\b",
+                r"\buv\s+tool\s+install\b",
+                r"\bcargo\s+install\b",
+                r"\bgo\s+install\b",
+                r"\bnpm\s+(?:install|i)\s+-g\b",
+                r"\bpnpm\s+add\s+-g\b",
+                r"\byarn\s+global\s+add\b",
+            ],
+        ):
+            return (
+                f"Error: global tool installs are blocked. Install third-party tools under {externaltools_root} and keep tools/ for registration only."
+            )
+
+        managed_transfer = self._matches_any(
+            command,
+            [
+                r"\bcurl(?:\.exe)?\b",
+                r"\bwget\b",
+                r"\binvoke-webrequest\b",
+                r"\bstart-bitstransfer\b",
+                r"\bgit\s+clone\b",
+                r"\bexpand-archive\b",
+                r"\bunzip\b",
+                r"\b7z(?:\.exe)?\s+[ex]\b",
+                r"\btar\b.*(?:\s-x|\s-xf|\s--extract\b)",
+                r"\b(?:python|py)\s+-m\s+venv\b",
+                r"\bvirtualenv\b",
+                r"\buv\s+venv\b",
+            ],
+        )
+        if not managed_transfer:
+            return None
+
+        if self._mentions_relative_tools_token(normalized) or self._command_references_any_root(command, [tools_root]):
+            return (
+                f"Error: tools/ is registration-only. Download, extract, and install real third-party tool payloads under {externaltools_root} instead."
+            )
+
+        if self._has_managed_target(command):
+            return None
+
+        if self._is_within_workspace(cwd_path, temp_root) or self._is_within_workspace(cwd_path, externaltools_root):
+            return None
+
+        if self._is_within_workspace(cwd_path, workspace_root):
+            return (
+                f"Error: download, extract, clone, and local tool setup commands must use {temp_root} or {externaltools_root}, "
+                f"either via working_dir or an explicit target path."
+            )
+
+        return None
+
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""
         if not self.enable_safety_guard:
@@ -201,12 +302,19 @@ class ExecTool(Tool):
 
     def _build_subprocess_env(self, *, runtime: dict[str, Any], cwd: str) -> dict[str, str]:
         env = os.environ.copy()
-        temp_dir = str(runtime.get("temp_dir") or env.get("G3KU_TMP_DIR") or "").strip()
-        if temp_dir:
-            env["G3KU_TMP_DIR"] = temp_dir
-            env["TMPDIR"] = temp_dir
-            env["TMP"] = temp_dir
-            env["TEMP"] = temp_dir
+        temp_dir = str(self._temp_root())
+        externaltools_dir = str(self._externaltools_root())
+        Path(temp_dir).mkdir(parents=True, exist_ok=True)
+        Path(externaltools_dir).mkdir(parents=True, exist_ok=True)
+        runtime_temp_dir = str(runtime.get("temp_dir") or env.get("G3KU_TMP_DIR") or "").strip()
+        if runtime_temp_dir:
+            env["G3KU_RUNTIME_TEMP_DIR"] = runtime_temp_dir
+        env["G3KU_TMP_DIR"] = temp_dir
+        env["G3KU_TEMP_DIR"] = temp_dir
+        env["G3KU_EXTERNAL_TOOLS_DIR"] = externaltools_dir
+        env["TMPDIR"] = temp_dir
+        env["TMP"] = temp_dir
+        env["TEMP"] = temp_dir
         return apply_project_environment(
             env,
             runtime=resolve_project_environment(
@@ -250,6 +358,28 @@ class ExecTool(Tool):
     def _workspace_root(self) -> Path:
         return Path(self.workspace_root or self.working_dir or os.getcwd()).expanduser().resolve()
 
+    def _temp_root(self) -> Path:
+        configured = str(self.temp_root or "").strip()
+        if configured:
+            return Path(configured).expanduser().resolve()
+        return self._workspace_root() / "temp"
+
+    def _externaltools_root(self) -> Path:
+        configured = str(self.externaltools_root or "").strip()
+        if configured:
+            return Path(configured).expanduser().resolve()
+        return self._workspace_root() / "externaltools"
+
+    def _tools_root(self) -> Path:
+        return self._workspace_root() / "tools"
+
+    def _legacy_temp_roots(self) -> list[Path]:
+        workspace_root = self._workspace_root()
+        return [
+            workspace_root / "tmp",
+            workspace_root / ".g3ku" / "tmp",
+        ]
+
     @staticmethod
     def _is_within_workspace(path: Path, workspace_root: Path) -> bool:
         try:
@@ -257,6 +387,102 @@ class ExecTool(Tool):
             return True
         except ValueError:
             return False
+
+    @classmethod
+    def _is_within_any_root(cls, path: Path, roots: list[Path]) -> bool:
+        return any(cls._is_within_workspace(path, root) for root in roots)
+
+    @staticmethod
+    def _system_temp_roots() -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for raw in (
+            tempfile.gettempdir(),
+            os.environ.get("TMP"),
+            os.environ.get("TEMP"),
+            os.environ.get("TMPDIR"),
+        ):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            try:
+                resolved = Path(text).expanduser().resolve()
+            except Exception:
+                continue
+            key = str(resolved).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(resolved)
+        return candidates
+
+    @classmethod
+    def _is_system_temp_path(cls, path: Path) -> bool:
+        resolved = path.expanduser().resolve()
+        return cls._is_within_any_root(resolved, cls._system_temp_roots())
+
+    @staticmethod
+    def _normalize_command(command: str) -> str:
+        return str(command or "").lower().replace("/", "\\")
+
+    @staticmethod
+    def _matches_any(command: str, patterns: list[str]) -> bool:
+        return any(re.search(pattern, command, flags=re.IGNORECASE) for pattern in patterns)
+
+    @staticmethod
+    def _mentions_relative_tools_token(normalized_command: str) -> bool:
+        return bool(re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?tools(?:\\|$)", normalized_command))
+
+    @staticmethod
+    def _mentions_legacy_temp_token(normalized_command: str) -> bool:
+        return bool(
+            re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?tmp(?:\\|$)", normalized_command)
+            or re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?\.g3ku\\tmp(?:\\|$)", normalized_command)
+        )
+
+    @staticmethod
+    def _mentions_system_temp_token(normalized_command: str) -> bool:
+        return bool(
+            re.search(r"%temp%", normalized_command)
+            or re.search(r"%tmp%", normalized_command)
+            or re.search(r"\$env:temp\b", normalized_command)
+            or re.search(r"\$env:tmp\b", normalized_command)
+            or re.search(r"\$tmpdir\b", normalized_command)
+            or re.search(r"/tmp(?:/|$)", str(normalized_command or ""))
+        )
+
+    @staticmethod
+    def _mentions_managed_target_token(normalized_command: str) -> bool:
+        return bool(
+            re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?temp(?:\\|$)", normalized_command)
+            or re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?externaltools(?:\\|$)", normalized_command)
+        )
+
+    def _command_references_any_root(self, command: str, roots: list[Path]) -> bool:
+        for raw in self._extract_absolute_paths(command):
+            try:
+                path = Path(raw.strip()).expanduser().resolve()
+            except Exception:
+                continue
+            if self._is_within_any_root(path, roots):
+                return True
+        return False
+
+    def _command_references_system_temp(self, command: str, *, temp_root: Path) -> bool:
+        for raw in self._extract_absolute_paths(command):
+            try:
+                path = Path(raw.strip()).expanduser().resolve()
+            except Exception:
+                continue
+            if self._is_system_temp_path(path) and not self._is_within_workspace(path, temp_root):
+                return True
+        return False
+
+    def _has_managed_target(self, command: str) -> bool:
+        normalized = self._normalize_command(command)
+        if self._mentions_managed_target_token(normalized):
+            return True
+        return self._command_references_any_root(command, [self._temp_root(), self._externaltools_root()])
 
     @staticmethod
     def _extract_absolute_paths(command: str) -> list[str]:

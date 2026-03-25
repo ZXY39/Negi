@@ -5,8 +5,19 @@ from typing import Any
 
 import json
 import shutil
+import httpx
 from fastapi import APIRouter, Body, HTTPException, Query
 
+from g3ku.china_bridge.registry import (
+    china_channel_aliases,
+    china_channel_attr,
+    china_channel_ids,
+    china_channel_maintenance_status,
+    china_channel_spec,
+    china_channel_template,
+    list_china_channel_specs,
+    normalize_china_channel_id as normalize_registry_channel_id,
+)
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.schema import Config
 from g3ku.config.model_manager import ModelManager, VALID_SCOPES
@@ -14,80 +25,16 @@ from g3ku.shells.web import get_agent, refresh_web_agent_runtime
 
 router = APIRouter()
 
-CHINA_CHANNEL_SPECS: tuple[dict[str, Any], ...] = (
-    {
-        'id': 'qqbot',
-        'config_key': 'qqbot',
-        'attr': 'qqbot',
-        'label': 'QQ Bot',
-        'description': '腾讯 QQ 官方机器人通道',
-        'requirements': (
-            ('appId', ('appId', 'app_id')),
-            ('clientSecret / token', ('clientSecret', 'client_secret', 'token')),
-        ),
-    },
-    {
-        'id': 'dingtalk',
-        'config_key': 'dingtalk',
-        'attr': 'dingtalk',
-        'label': '钉钉',
-        'description': '钉钉机器人与流式接入通道',
-        'requirements': (
-            ('clientId', ('clientId', 'client_id')),
-            ('clientSecret / token', ('clientSecret', 'client_secret', 'token')),
-        ),
-    },
-    {
-        'id': 'wecom',
-        'config_key': 'wecom',
-        'attr': 'wecom',
-        'label': '企业微信机器人',
-        'description': '企业微信智能机器人通道',
-        'requirements': (
-            ('botId / receiveId', ('botId', 'bot_id', 'receiveId', 'receive_id')),
-            ('secret / token', ('secret', 'token', 'encodingAesKey', 'encoding_aes_key')),
-        ),
-    },
-    {
-        'id': 'wecomApp',
-        'config_key': 'wecomApp',
-        'attr': 'wecom_app',
-        'label': '企业微信应用',
-        'description': '企业微信自建应用通道',
-        'requirements': (
-            ('corpId', ('corpId', 'corp_id')),
-            ('corpSecret', ('corpSecret', 'corp_secret')),
-            ('agentId', ('agentId', 'agent_id')),
-        ),
-    },
-    {
-        'id': 'feishuChina',
-        'config_key': 'feishuChina',
-        'attr': 'feishu_china',
-        'label': '飞书',
-        'description': '飞书 / Lark 中国版通道',
-        'requirements': (
-            ('appId', ('appId', 'app_id')),
-            ('appSecret / token', ('appSecret', 'app_secret', 'token')),
-        ),
-    },
-)
+CHINA_CHANNEL_SPECS: tuple[dict[str, Any], ...] = tuple(list_china_channel_specs())
+CHINA_CHANNEL_INDEX: dict[str, dict[str, Any]] = {item['id']: item for item in CHINA_CHANNEL_SPECS}
+CHINA_CHANNEL_ALIASES = china_channel_aliases()
 
-CHINA_CHANNEL_INDEX: dict[str, dict[str, Any]] = {
-    item['id']: item
-    for item in CHINA_CHANNEL_SPECS
-}
-CHINA_CHANNEL_ALIASES = {
-    'qqbot': 'qqbot',
-    'dingtalk': 'dingtalk',
-    'wecom': 'wecom',
-    'wecomapp': 'wecomApp',
-    'wecom_app': 'wecomApp',
-    'wecom-app': 'wecomApp',
-    'feishuchina': 'feishuChina',
-    'feishu_china': 'feishuChina',
-    'feishu-china': 'feishuChina',
-}
+CHINA_PROBE_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+QQBOT_ACCESS_TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken'
+QQBOT_GATEWAY_URL = 'https://api.sgroup.qq.com/gateway'
+DINGTALK_ACCESS_TOKEN_URL = 'https://api.dingtalk.com/v1.0/oauth2/accessToken'
+WECOM_ACCESS_TOKEN_URL = 'https://qyapi.weixin.qq.com/cgi-bin/gettoken'
+FEISHU_APP_ACCESS_TOKEN_URL = 'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal'
 
 
 
@@ -163,17 +110,17 @@ def _normalized_main_runtime_default_depth(cfg: Config, payload: dict[str, Any] 
 
 
 def _normalize_china_channel_id(channel_id: str) -> str:
-    raw = str(channel_id or '').strip()
-    key = raw.replace('-', '_').lower()
-    normalized = CHINA_CHANNEL_ALIASES.get(key)
-    if normalized is None:
+    try:
+        return normalize_registry_channel_id(channel_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail='china_channel_not_found')
-    return normalized
 
 
 def _china_channel_spec(channel_id: str) -> dict[str, Any]:
-    normalized = _normalize_china_channel_id(channel_id)
-    return CHINA_CHANNEL_INDEX[normalized]
+    try:
+        return china_channel_spec(channel_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail='china_channel_not_found')
 
 
 def _china_bridge_status_payload() -> dict[str, Any] | None:
@@ -276,53 +223,386 @@ def _channel_missing_requirements(channel_id: str, payload: dict[str, Any]) -> l
             )
             for section in sections
         ) else ['mode=ws 需 botId + secret；mode=webhook 需 token + encodingAESKey']
-    if channel_id == 'wecomApp':
+    if channel_id == 'wecom-app':
         return [] if any(
             _channel_section_has_all(section, ('token',), ('encodingAESKey', 'encoding_aes_key'))
             for section in sections
         ) else ['token', 'encodingAESKey']
-    if channel_id == 'feishuChina':
+    if channel_id == 'wecom-kf':
+        return [] if any(
+            _channel_section_has_all(section, ('corpId', 'corp_id'), ('token',), ('encodingAESKey', 'encoding_aes_key'))
+            for section in sections
+        ) else ['corpId', 'token', 'encodingAESKey']
+    if channel_id == 'wechat-mp':
+        return [] if any(
+            _channel_section_has_all(section, ('appId', 'app_id'), ('token',))
+            and (
+                _channel_mode_value(section, 'safe') == 'plain'
+                or _channel_section_has_all(section, ('encodingAESKey', 'encoding_aes_key'))
+            )
+            for section in sections
+        ) else ['appId', 'token', 'safe/compat 模式还需 encodingAESKey']
+    if channel_id == 'feishu-china':
         return [] if any(
             _channel_section_has_all(section, ('appId', 'app_id'), ('appSecret', 'app_secret'))
             for section in sections
         ) else ['appId', 'appSecret']
-    spec = _china_channel_spec(channel_id)
-    missing: list[str] = []
-    for label, candidates in spec.get('requirements') or ():
-        if not _channel_has_value(payload, tuple(str(item) for item in candidates)):
-            missing.append(str(label))
-    return missing
+    return []
 
 
-def _serialize_china_channel(cfg: Config, channel_id: str) -> dict[str, Any]:
-    spec = _china_channel_spec(channel_id)
-    channel_model = getattr(cfg.china_bridge.channels, spec['attr'])
-    payload = channel_model.model_dump(by_alias=True, exclude_none=True)
-    enabled = bool(payload.pop('enabled', False))
-    runtime = _china_bridge_runtime_summary(cfg)
+def _channel_top_level_section(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key not in {'accounts', 'defaultAccount', 'default_account'}
+    }
+
+
+def _channel_effective_sections(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    base = _channel_top_level_section(payload)
     accounts = payload.get('accounts')
-    account_count = len(accounts) if isinstance(accounts, dict) else 0
+    if isinstance(accounts, dict) and accounts:
+        sections: list[tuple[str, dict[str, Any]]] = []
+        for raw_account_id, raw_account_payload in accounts.items():
+            account_id = str(raw_account_id or '').strip()
+            if not account_id or not isinstance(raw_account_payload, dict):
+                continue
+            sections.append((account_id, {**base, **raw_account_payload}))
+        if sections:
+            return sections
+    return [('default', dict(payload or {}))]
+
+
+def _channel_account_count(channel_id: str, payload: dict[str, Any]) -> int:
+    accounts = payload.get('accounts')
+    if isinstance(accounts, dict) and accounts:
+        return len([key for key in accounts.keys() if str(key or '').strip()])
+    top_level = _channel_top_level_section(payload)
+    has_top_level_values = any(value not in (None, '', [], {}, False) for value in top_level.values())
+    return 1 if has_top_level_values else 0
+
+
+def _string_value(value: Any) -> str:
+    return str(value or '').strip()
+
+
+def _trim_probe_response_text(text: str, limit: int = 240) -> str:
+    body = str(text or '').strip()
+    if not body:
+        return ''
+    if len(body) <= limit:
+        return body
+    return body[: limit - 1] + '…'
+
+
+async def _probe_http_json(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    json_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        response = await client.request(
+            method,
+            url,
+            headers=headers,
+            json=json_payload,
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f'请求失败：{exc}') from exc
+    if response.status_code >= 400:
+        body = _trim_probe_response_text(response.text)
+        suffix = f'：{body}' if body else ''
+        raise RuntimeError(f'HTTP {response.status_code}{suffix}')
+    try:
+        payload = response.json()
+    except Exception as exc:
+        body = _trim_probe_response_text(response.text)
+        suffix = f'：{body}' if body else ''
+        raise RuntimeError(f'响应不是合法 JSON{suffix}') from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError('响应格式异常，预期应返回 JSON 对象。')
+    return payload
+
+
+async def _probe_qqbot_connectivity(payload: dict[str, Any]) -> dict[str, Any]:
+    sections = _channel_effective_sections(payload)
+    async with httpx.AsyncClient(timeout=CHINA_PROBE_TIMEOUT) as client:
+        for account_id, section in sections:
+            app_id = _string_value(_channel_section_value(section, 'appId', 'app_id'))
+            client_secret = _string_value(_channel_section_value(section, 'clientSecret', 'client_secret'))
+            token_payload = await _probe_http_json(
+                client,
+                'POST',
+                QQBOT_ACCESS_TOKEN_URL,
+                json_payload={'appId': app_id, 'clientSecret': client_secret},
+            )
+            access_token = _string_value(token_payload.get('access_token'))
+            if not access_token:
+                raise RuntimeError(f'QQ Bot 账号 {account_id} 未返回 access_token，请检查 appId / clientSecret 是否正确。')
+            gateway_payload = await _probe_http_json(
+                client,
+                'GET',
+                QQBOT_GATEWAY_URL,
+                headers={'Authorization': f'QQBot {access_token}'},
+            )
+            gateway_url = _string_value(gateway_payload.get('url'))
+            if not gateway_url:
+                raise RuntimeError(f'QQ Bot 账号 {account_id} 未返回 gateway 地址，请稍后重试。')
+    return {
+        'status': 'success',
+        'checked': True,
+        'message': f'已完成 {len(sections)} 个 QQ Bot 账号的 access_token 与 gateway 连通性校验。',
+        'details': [],
+    }
+
+
+async def _probe_dingtalk_connectivity(payload: dict[str, Any]) -> dict[str, Any]:
+    sections = _channel_effective_sections(payload)
+    async with httpx.AsyncClient(timeout=CHINA_PROBE_TIMEOUT) as client:
+        for account_id, section in sections:
+            client_id = _string_value(_channel_section_value(section, 'clientId', 'client_id'))
+            client_secret = _string_value(_channel_section_value(section, 'clientSecret', 'client_secret'))
+            token_payload = await _probe_http_json(
+                client,
+                'POST',
+                DINGTALK_ACCESS_TOKEN_URL,
+                json_payload={'appKey': client_id, 'appSecret': client_secret},
+            )
+            access_token = _string_value(token_payload.get('accessToken'))
+            if not access_token:
+                raise RuntimeError(f'钉钉账号 {account_id} 未返回 accessToken，请检查 clientId / clientSecret 是否正确。')
+    return {
+        'status': 'success',
+        'checked': True,
+        'message': f'已完成 {len(sections)} 个钉钉账号的 accessToken 连通性校验。',
+        'details': [],
+    }
+
+
+async def _probe_wecom_app_connectivity(payload: dict[str, Any]) -> dict[str, Any]:
+    sections = [
+        (account_id, section)
+        for account_id, section in _channel_effective_sections(payload)
+        if _channel_section_has_all(section, ('corpId', 'corp_id'), ('corpSecret', 'corp_secret'))
+    ]
+    if not sections:
+        return {
+            'status': 'warning',
+            'checked': False,
+            'message': '当前企业微信应用仅检测到 webhook 入站配置；未提供 corpId / corpSecret，无法在保存前校验企业微信 API 连通性。',
+            'details': [],
+        }
+    async with httpx.AsyncClient(timeout=CHINA_PROBE_TIMEOUT) as client:
+        for account_id, section in sections:
+            corp_id = _string_value(_channel_section_value(section, 'corpId', 'corp_id'))
+            corp_secret = _string_value(_channel_section_value(section, 'corpSecret', 'corp_secret'))
+            query = httpx.QueryParams({'corpid': corp_id, 'corpsecret': corp_secret})
+            token_payload = await _probe_http_json(
+                client,
+                'GET',
+                f'{WECOM_ACCESS_TOKEN_URL}?{query}',
+            )
+            errcode = token_payload.get('errcode')
+            if errcode not in (None, 0):
+                errmsg = _string_value(token_payload.get('errmsg')) or 'unknown error'
+                raise RuntimeError(f'企业微信应用账号 {account_id} 获取 access_token 失败：{errmsg} (errcode={errcode})')
+            access_token = _string_value(token_payload.get('access_token'))
+            if not access_token:
+                raise RuntimeError(f'企业微信应用账号 {account_id} 未返回 access_token，请检查 corpId / corpSecret 是否正确。')
+    return {
+        'status': 'success',
+        'checked': True,
+        'message': f'已完成 {len(sections)} 个企业微信应用账号的 access_token 连通性校验。',
+        'details': [],
+    }
+
+
+async def _probe_wecom_kf_connectivity(payload: dict[str, Any]) -> dict[str, Any]:
+    sections = _channel_effective_sections(payload)
+    checkable = [
+        (account_id, section)
+        for account_id, section in sections
+        if _channel_section_has_all(section, ('corpId', 'corp_id'), ('corpSecret', 'corp_secret'))
+    ]
+    if not checkable:
+        return {
+            'status': 'warning',
+            'checked': False,
+            'message': '当前企业微信客服仅检测到 webhook 入站配置；未提供 corpSecret，无法在保存前校验企业微信 API 连通性。',
+            'details': [],
+        }
+    async with httpx.AsyncClient(timeout=CHINA_PROBE_TIMEOUT) as client:
+        for account_id, section in checkable:
+            corp_id = _string_value(_channel_section_value(section, 'corpId', 'corp_id'))
+            corp_secret = _string_value(_channel_section_value(section, 'corpSecret', 'corp_secret'))
+            query = httpx.QueryParams({'corpid': corp_id, 'corpsecret': corp_secret})
+            token_payload = await _probe_http_json(client, 'GET', f'{WECOM_ACCESS_TOKEN_URL}?{query}')
+            errcode = token_payload.get('errcode')
+            if errcode not in (None, 0):
+                errmsg = _string_value(token_payload.get('errmsg')) or 'unknown error'
+                raise RuntimeError(f'企业微信客服账号 {account_id} 获取 access_token 失败：{errmsg} (errcode={errcode})')
+            if not _string_value(token_payload.get('access_token')):
+                raise RuntimeError(f'企业微信客服账号 {account_id} 未返回 access_token，请检查 corpId / corpSecret 是否正确。')
+    return {
+        'status': 'success',
+        'checked': True,
+        'message': f'已完成 {len(checkable)} 个企业微信客服账号的 access_token 连通性校验。',
+        'details': [],
+    }
+
+
+async def _probe_wechat_mp_connectivity(payload: dict[str, Any]) -> dict[str, Any]:
+    sections = _channel_effective_sections(payload)
+    checkable = [
+        (account_id, section)
+        for account_id, section in sections
+        if _channel_section_has_all(section, ('appId', 'app_id'), ('appSecret', 'app_secret'))
+    ]
+    if not checkable:
+        return {
+            'status': 'warning',
+            'checked': False,
+            'message': '当前微信公众号仅检测到被动回复配置；未提供 appSecret，无法在保存前校验主动发送 access_token。',
+            'details': [],
+        }
+    async with httpx.AsyncClient(timeout=CHINA_PROBE_TIMEOUT) as client:
+        for account_id, section in checkable:
+            app_id = _string_value(_channel_section_value(section, 'appId', 'app_id'))
+            app_secret = _string_value(_channel_section_value(section, 'appSecret', 'app_secret'))
+            query = httpx.QueryParams(
+                {'grant_type': 'client_credential', 'appid': app_id, 'secret': app_secret}
+            )
+            token_payload = await _probe_http_json(client, 'GET', f'https://api.weixin.qq.com/cgi-bin/token?{query}')
+            errcode = token_payload.get('errcode')
+            if errcode not in (None, 0):
+                errmsg = _string_value(token_payload.get('errmsg')) or 'unknown error'
+                raise RuntimeError(f'微信公众号账号 {account_id} 获取 access_token 失败：{errmsg} (errcode={errcode})')
+            if not _string_value(token_payload.get('access_token')):
+                raise RuntimeError(f'微信公众号账号 {account_id} 未返回 access_token，请检查 appId / appSecret 是否正确。')
+    return {
+        'status': 'success',
+        'checked': True,
+        'message': f'已完成 {len(checkable)} 个微信公众号账号的 access_token 连通性校验。',
+        'details': [],
+    }
+
+
+async def _probe_feishu_connectivity(payload: dict[str, Any]) -> dict[str, Any]:
+    sections = _channel_effective_sections(payload)
+    async with httpx.AsyncClient(timeout=CHINA_PROBE_TIMEOUT) as client:
+        for account_id, section in sections:
+            app_id = _string_value(_channel_section_value(section, 'appId', 'app_id'))
+            app_secret = _string_value(_channel_section_value(section, 'appSecret', 'app_secret'))
+            token_payload = await _probe_http_json(
+                client,
+                'POST',
+                FEISHU_APP_ACCESS_TOKEN_URL,
+                json_payload={'app_id': app_id, 'app_secret': app_secret},
+            )
+            code = token_payload.get('code')
+            if code not in (None, 0):
+                msg = _string_value(token_payload.get('msg')) or 'unknown error'
+                raise RuntimeError(f'飞书账号 {account_id} 获取 app_access_token 失败：{msg} (code={code})')
+            access_token = _string_value(token_payload.get('app_access_token') or token_payload.get('tenant_access_token'))
+            if not access_token:
+                raise RuntimeError(f'飞书账号 {account_id} 未返回 app_access_token，请检查 appId / appSecret 是否正确。')
+    return {
+        'status': 'success',
+        'checked': True,
+        'message': f'已完成 {len(sections)} 个飞书账号的 app_access_token 连通性校验。',
+        'details': [],
+    }
+
+
+async def _probe_china_channel_platform_connectivity(channel_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if channel_id == 'qqbot':
+        return await _probe_qqbot_connectivity(payload)
+    if channel_id == 'dingtalk':
+        return await _probe_dingtalk_connectivity(payload)
+    if channel_id == 'wecom-app':
+        return await _probe_wecom_app_connectivity(payload)
+    if channel_id == 'wecom-kf':
+        return await _probe_wecom_kf_connectivity(payload)
+    if channel_id == 'wechat-mp':
+        return await _probe_wechat_mp_connectivity(payload)
+    if channel_id == 'feishu-china':
+        return await _probe_feishu_connectivity(payload)
+    if channel_id == 'wecom':
+        mode = _channel_mode_value(_channel_top_level_section(payload), 'ws')
+        if mode == 'webhook':
+            return {
+                'status': 'warning',
+                'checked': False,
+                'message': '企业微信机器人 webhook 模式需要依赖平台回调验签，保存前只能完成本地字段校验。',
+                'details': [],
+            }
+        return {
+            'status': 'warning',
+            'checked': False,
+            'message': '企业微信机器人 ws 模式暂不支持无副作用的后台预检，保存前只能完成本地字段校验。',
+            'details': [],
+        }
+    return {
+        'status': 'warning',
+        'checked': False,
+        'message': '当前渠道暂未实现平台侧预检，已完成本地字段校验。',
+        'details': [],
+    }
+
+
+def _build_china_channel_item(
+    cfg: Config,
+    channel_id: str,
+    *,
+    enabled: bool | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    spec = _china_channel_spec(channel_id)
+    if payload is None:
+        channel_model = getattr(cfg.china_bridge.channels, china_channel_attr(channel_id))
+        source_payload = channel_model.model_dump(by_alias=True, exclude_none=True)
+        enabled_value = bool(source_payload.pop('enabled', False))
+    else:
+        source_payload = dict(payload or {})
+        source_payload.pop('enabled', None)
+        enabled_value = bool(enabled)
+    runtime = _china_bridge_runtime_summary(cfg)
     return {
         'id': spec['id'],
         'label': spec['label'],
         'description': spec['description'],
-        'config_path': f"chinaBridge.channels.{spec['config_key']}",
-        'enabled': enabled,
-        'account_count': account_count,
-        'config': payload,
-        'json_text': json.dumps(payload, ensure_ascii=False, indent=2),
+        'maintenance_status': china_channel_maintenance_status(channel_id),
+        'config_path': f"chinaBridge.channels.{spec['id']}",
+        'enabled': enabled_value,
+        'account_count': _channel_account_count(channel_id, source_payload),
+        'config': source_payload,
+        'json_text': json.dumps(source_payload, ensure_ascii=False, indent=2),
+        'template_json': china_channel_template(channel_id),
         'runtime': runtime,
     }
 
 
-def _test_china_channel(cfg: Config, channel_id: str) -> dict[str, Any]:
-    item = _serialize_china_channel(cfg, channel_id)
+def _serialize_china_channel(cfg: Config, channel_id: str) -> dict[str, Any]:
+    return _build_china_channel_item(cfg, channel_id)
+
+
+async def _test_china_channel(
+    cfg: Config,
+    channel_id: str,
+    *,
+    enabled: bool | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    item = _build_china_channel_item(cfg, channel_id, enabled=enabled, payload=payload)
     runtime = item['runtime']
     if not item['enabled']:
         return {
             'status': 'disabled',
             'title': '当前通信已禁用',
-            'message': '配置已保存，当前渠道保持禁用状态。',
+            'message': '配置已校验，当前渠道保持禁用状态。',
             'details': [],
         }
     missing = _channel_missing_requirements(channel_id, item['config'])
@@ -333,14 +613,37 @@ def _test_china_channel(cfg: Config, channel_id: str) -> dict[str, Any]:
             'message': f"配置缺少必要字段：{', '.join(missing)}",
             'details': missing,
         }
+    try:
+        platform_probe = await _probe_china_channel_platform_connectivity(channel_id, item['config'])
+    except Exception as exc:
+        return {
+            'status': 'error',
+            'title': '测试失败',
+            'message': f'平台连通性校验失败：{exc}',
+            'details': [],
+        }
+    if str(platform_probe.get('status') or '').strip().lower() == 'error':
+        return {
+            'status': 'error',
+            'title': '测试失败',
+            'message': _string_value(platform_probe.get('message')) or '平台连通性校验失败。',
+            'details': list(platform_probe.get('details') or []),
+        }
     if runtime['running'] and runtime['connected']:
         return {
             'status': 'success',
             'title': '连接成功',
-            'message': '桥接宿主正在运行，内部控制连接已建立。',
+            'message': _string_value(platform_probe.get('message')) or '平台连通性校验通过，桥接宿主正在运行，内部控制连接已建立。',
             'details': [],
         }
     warnings: list[str] = []
+    probe_message = _string_value(platform_probe.get('message'))
+    if str(platform_probe.get('status') or '').strip().lower() == 'warning' and probe_message:
+        warnings.append(probe_message)
+    for detail in platform_probe.get('details') or []:
+        text = _string_value(detail)
+        if text:
+            warnings.append(text)
     if not runtime['node_found']:
         warnings.append('未找到 Node 可执行文件')
     if not runtime['dist_exists']:
@@ -351,13 +654,13 @@ def _test_china_channel(cfg: Config, channel_id: str) -> dict[str, Any]:
         return {
             'status': 'warning',
             'title': '测试通过',
-            'message': '配置校验已通过，但本地桥接环境尚未完全就绪。',
+            'message': probe_message or '配置校验已通过，但本地桥接环境尚未完全就绪。',
             'details': warnings,
         }
     return {
         'status': 'success',
         'title': '测试通过',
-        'message': '配置校验已通过，等待宿主完成平台侧连接。',
+        'message': probe_message or '配置校验已通过，等待宿主完成平台侧连接。',
         'details': [],
     }
 
@@ -370,12 +673,12 @@ def _update_china_channel_config(cfg: Config, channel_id: str, *, enabled: bool,
     full_payload = cfg.model_dump(by_alias=True, exclude_none=True)
     bridge_payload = full_payload.setdefault('chinaBridge', {})
     channels_payload = bridge_payload.setdefault('channels', {})
-    channels_payload[spec['config_key']] = {
+    channels_payload[spec['id']] = {
         **config_payload,
         'enabled': bool(enabled),
     }
     bridge_payload['enabled'] = any(
-        bool((channels_payload.get(item['config_key']) or {}).get('enabled'))
+        bool((channels_payload.get(item['id']) or {}).get('enabled'))
         for item in CHINA_CHANNEL_SPECS
     )
     next_cfg = Config.model_validate(full_payload)
@@ -918,23 +1221,47 @@ async def update_china_bridge_channel(channel_id: str, payload: dict = Body(...)
     if config_payload is None:
         raise HTTPException(status_code=400, detail='config must be a JSON object')
     cfg = load_config()
+    enabled = bool(payload.get('enabled'))
+    probe_result = await _test_china_channel(
+        cfg,
+        channel_id,
+        enabled=enabled,
+        payload=config_payload,
+    )
+    if enabled and str(probe_result.get('status') or '').strip().lower() == 'error':
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'china_channel_probe_failed',
+                'message': str(probe_result.get('message') or '平台连通性校验失败'),
+                'probe': probe_result,
+            },
+        )
     next_cfg = _update_china_channel_config(
         cfg,
         channel_id,
-        enabled=bool(payload.get('enabled')),
+        enabled=enabled,
         payload=config_payload,
     )
     await _refresh_runtime('admin_china_bridge_channel_update')
-    return {'ok': True, 'item': _serialize_china_channel(next_cfg, channel_id)}
+    return {
+        'ok': True,
+        'item': _serialize_china_channel(next_cfg, channel_id),
+        'probe_result': probe_result,
+    }
 
 
 @router.post('/china-bridge/channels/{channel_id}/test')
-async def test_china_bridge_channel(channel_id: str):
+async def test_china_bridge_channel(channel_id: str, payload: dict | None = Body(default=None)):
     cfg = load_config()
+    body = payload if isinstance(payload, dict) else {}
+    saved_item = _serialize_china_channel(cfg, channel_id)
+    config_payload = body.get('config') if isinstance(body.get('config'), dict) else None
+    enabled = body.get('enabled') if 'enabled' in body else saved_item['enabled']
     return {
         'ok': True,
-        'item': _serialize_china_channel(cfg, channel_id),
-        'result': _test_china_channel(cfg, channel_id),
+        'item': _build_china_channel_item(cfg, channel_id, enabled=enabled, payload=config_payload) if config_payload is not None else saved_item,
+        'result': await _test_china_channel(cfg, channel_id, enabled=enabled, payload=config_payload),
     }
 
 
@@ -961,11 +1288,8 @@ async def get_china_bridge_doctor():
         'status_path': str(path),
         'status_exists': path.exists(),
         'channels': {
-            'qqbot': cfg.china_bridge.channels.qqbot.enabled,
-            'dingtalk': cfg.china_bridge.channels.dingtalk.enabled,
-            'wecom': cfg.china_bridge.channels.wecom.enabled,
-            'wecom_app': cfg.china_bridge.channels.wecom_app.enabled,
-            'feishu_china': cfg.china_bridge.channels.feishu_china.enabled,
+            channel_id: bool(getattr(cfg.china_bridge.channels, china_channel_attr(channel_id)).enabled)
+            for channel_id in china_channel_ids()
         },
     }
     if path.exists():

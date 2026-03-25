@@ -9,6 +9,8 @@ def build(runtime):
     return ExecTool(
         working_dir=None,
         workspace_root=str(runtime.workspace),
+        temp_root=str(runtime.workspace / 'temp'),
+        externaltools_root=str(runtime.workspace / 'externaltools'),
         timeout=settings.timeout,
         restrict_to_workspace=settings.restrict_to_workspace,
         enable_safety_guard=settings.enable_safety_guard,

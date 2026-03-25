@@ -56,7 +56,7 @@ class ContextAssemblyService:
             if str(name).strip()
         }
 
-        if main_service is not None and memory_manager is not None and getattr(self._loop, '_use_rag_memory', lambda: False)():
+        if main_service is not None and memory_manager is not None:
             try:
                 await memory_manager.sync_catalog(main_service)
             except Exception:
@@ -79,6 +79,7 @@ class ContextAssemblyService:
 
         external_tools_block, external_trace = self._build_external_tool_block(
             visible_families=visible_families,
+            visible_tool_names=list(exposure.get('tool_names') or []),
             top_k=8,
         )
         if external_tools_block:
@@ -95,7 +96,7 @@ class ContextAssemblyService:
 
         retrieved_memory = ''
         retrieval_tokens = 0
-        if memory_manager is not None and getattr(self._loop, '_use_rag_memory', lambda: False)() and query_text:
+        if memory_manager is not None and query_text:
             try:
                 retrieved_memory = await memory_manager.retrieve_block(
                     query=query_text,
@@ -296,17 +297,24 @@ class ContextAssemblyService:
         self,
         *,
         visible_families: list[Any],
+        visible_tool_names: list[str],
         top_k: int,
     ) -> tuple[str, list[dict[str, Any]]]:
+        visible_name_set = {
+            str(name or '').strip()
+            for name in list(visible_tool_names or [])
+            if str(name or '').strip()
+        }
         eligible: list[Any] = []
         for family in list(visible_families or []):
             tool_id = str(getattr(family, 'tool_id', '') or '').strip()
             install_dir = str(getattr(family, 'install_dir', '') or '').strip()
             callable_flag = bool(getattr(family, 'callable', True))
             available_flag = bool(getattr(family, 'available', True))
+            registered_callable = self._family_has_registered_callable_executor(family, visible_name_set)
             if not tool_id:
                 continue
-            if callable_flag and available_flag:
+            if callable_flag and available_flag and registered_callable:
                 continue
             if not install_dir and not callable_flag:
                 continue
@@ -323,6 +331,7 @@ class ContextAssemblyService:
             install_dir = str(getattr(family, 'install_dir', '') or '').strip()
             callable_flag = bool(getattr(family, 'callable', True))
             available_flag = bool(getattr(family, 'available', True))
+            registered_callable = self._family_has_registered_callable_executor(family, visible_name_set)
             issue_summary = self._tool_family_issue_summary(family)
             if not callable_flag:
                 state_text = f"Install dir: `{install_dir}`"
@@ -335,7 +344,10 @@ class ContextAssemblyService:
                     f"For install, update, troubleshooting, or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
                 )
             else:
-                state_text = "Status: unavailable"
+                if available_flag and not registered_callable:
+                    state_text = "Status: enabled but not currently registered in the callable function tool list for this turn"
+                else:
+                    state_text = "Status: unavailable"
                 if issue_summary:
                     state_text = f"{state_text} ({issue_summary})"
                 line = (
@@ -351,10 +363,22 @@ class ContextAssemblyService:
                     'install_dir': install_dir,
                     'callable': callable_flag,
                     'available': available_flag,
+                    'registered_callable': registered_callable,
                     'tokens': line_tokens,
                 }
             )
         return '\n'.join(lines), trace
+
+    @staticmethod
+    def _family_has_registered_callable_executor(family: Any, visible_name_set: set[str]) -> bool:
+        executor_names: set[str] = set()
+        for action in list(getattr(family, 'actions', []) or []):
+            executor_names.update(
+                str(name or '').strip()
+                for name in list(getattr(action, 'executor_names', []) or [])
+                if str(name or '').strip()
+            )
+        return bool(executor_names & visible_name_set)
 
     @staticmethod
     def _tool_family_issue_summary(family: Any) -> str:

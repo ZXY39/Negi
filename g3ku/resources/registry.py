@@ -72,12 +72,7 @@ class ResourceRegistry:
         if not tool_root.is_dir() or not manifest_path.exists():
             return None
         descriptor = self._build_tool(tool_root, manifest_path)
-        if any(shutil.which(name) is None for name in descriptor.requires_bins):
-            descriptor.available = False
-            descriptor.warnings.append("missing required bins")
-        if any(not os.environ.get(name) for name in descriptor.requires_env):
-            descriptor.available = False
-            descriptor.warnings.append("missing required env")
+        self._apply_tool_runtime_requirements(descriptor)
         return descriptor
 
     def _discover_skills(self, *, tool_names: set[str]) -> dict[str, SkillResourceDescriptor]:
@@ -119,12 +114,7 @@ class ResourceRegistry:
                 descriptor.available = False
                 descriptor.errors.append(f"duplicate tool name: {descriptor.name}")
                 continue
-            if any(shutil.which(name) is None for name in descriptor.requires_bins):
-                descriptor.available = False
-                descriptor.warnings.append("missing required bins")
-            if any(not os.environ.get(name) for name in descriptor.requires_env):
-                descriptor.available = False
-                descriptor.warnings.append("missing required env")
+            self._apply_tool_runtime_requirements(descriptor)
             items[descriptor.name] = descriptor
         return items
 
@@ -194,6 +184,7 @@ class ResourceRegistry:
             permissions=dict(data.get("permissions") or {}),
             requires_tools=[str(item) for item in ((data.get("requires") or {}).get("tools") or [])],
             requires_bins=[str(item) for item in ((data.get("requires") or {}).get("bins") or [])],
+            requires_paths=[str(item) for item in ((data.get("requires") or {}).get("paths") or [])],
             requires_env=[str(item) for item in ((data.get("requires") or {}).get("env") or [])],
             toolskill_enabled=bool((data.get("toolskill") or {}).get("enabled", True)),
             metadata=data,
@@ -260,6 +251,37 @@ class ResourceRegistry:
         elif descriptor.toolskill_enabled and descriptor.toolskills_main_path is None:
             descriptor.warnings.append(f"missing toolskills/SKILL.md: {root}")
         return descriptor
+
+    def _apply_tool_runtime_requirements(self, descriptor: ToolResourceDescriptor) -> None:
+        if any(shutil.which(name) is None for name in descriptor.requires_bins):
+            descriptor.available = False
+            descriptor.warnings.append("missing required bins")
+        missing_paths = self._missing_required_paths(descriptor.requires_paths)
+        if missing_paths:
+            descriptor.available = False
+            descriptor.warnings.append("missing required paths: " + ", ".join(missing_paths))
+        if any(not os.environ.get(name) for name in descriptor.requires_env):
+            descriptor.available = False
+            descriptor.warnings.append("missing required env")
+
+    def _missing_required_paths(self, paths: list[str]) -> list[str]:
+        missing: list[str] = []
+        for raw in list(paths or []):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            resolved = self._resolve_required_path(text)
+            if resolved.exists():
+                continue
+            missing.append(text)
+        return missing
+
+    def _resolve_required_path(self, raw_value: Any) -> Path:
+        text = str(raw_value or "").strip()
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = self.workspace / path
+        return path.resolve(strict=False)
 
     @staticmethod
     def _safe_manifest(path: Path) -> dict[str, Any]:

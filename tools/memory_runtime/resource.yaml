@@ -51,11 +51,10 @@ settings:
   embedding:
     batch_size: 32
   isolation:
-    mode: session
+    mode: global
     namespace_template:
     - memory
-    - '{channel}'
-    - '{chat_id}'
+    - global
   guard:
     mode: tiered
     auto_fact_confidence: 0.8

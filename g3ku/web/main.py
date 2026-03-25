@@ -11,6 +11,7 @@ from loguru import logger
 from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import ensure_web_runtime_services, shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
+from g3ku.web.launcher import run_default_web_entrypoint
 from g3ku.web.server_control import request_server_shutdown, set_server_instance
 from g3ku.web.windows_asyncio import install_windows_connection_reset_filter
 from main.api import router as main_router
@@ -105,7 +106,7 @@ async def serve_frontend_file(full_path: str):
 
 
 def run():
-    run_server(host='127.0.0.1', port=3000, reload=False, log_level='info')
+    run_default_web_entrypoint()
 
 
 def run_server(*, host: str, port: int, reload: bool, log_level: str = 'info') -> None:

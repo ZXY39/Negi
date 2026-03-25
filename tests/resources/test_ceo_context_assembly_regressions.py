@@ -238,3 +238,36 @@ async def test_ceo_context_assembly_lists_unavailable_callable_tools_as_context_
     assert [item['tool_id'] for item in result.trace['external_tools']] == ['agent_browser']
     assert result.trace['external_tools'][0]['available'] is False
     assert result.trace['external_tools'][0]['callable'] is True
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_lists_enabled_but_unregistered_callable_tools_as_context_resources() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response='')
+    service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='help me repair the browser automation integration',
+        exposure={
+            'skills': [],
+            'tool_families': [
+                _family(
+                    'agent_browser',
+                    'Browser automation via the upstream CLI.',
+                    callable=True,
+                    available=True,
+                ),
+            ],
+            'tool_names': ['filesystem', 'load_tool_context'],
+        },
+        persisted_session=None,
+    )
+
+    assert 'load_tool_context(tool_id="agent_browser")' in result.system_prompt
+    assert '`agent_browser`' in result.system_prompt
+    assert 'enabled but not currently registered in the callable function tool list' in result.system_prompt
+    assert [item['tool_id'] for item in result.trace['external_tools']] == ['agent_browser']
+    assert result.trace['external_tools'][0]['available'] is True
+    assert result.trace['external_tools'][0]['callable'] is True
+    assert result.trace['external_tools'][0]['registered_callable'] is False

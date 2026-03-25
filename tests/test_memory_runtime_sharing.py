@@ -9,6 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.agent.rag_memory import G3kuHybridStore, _load_workspace_dashscope_settings
+from g3ku.llm_config.enums import Capability
+from g3ku.llm_config.facade import LLMConfigFacade, MEMORY_EMBEDDING_CONFIG_ID
+from g3ku.llm_config.migration import _build_record
+from g3ku.llm_config.models import NormalizedProviderConfig
 from g3ku.providers.openai_codex_provider import _convert_messages
 from g3ku.resources import ResourceManager
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
@@ -370,6 +374,41 @@ def test_load_workspace_dashscope_settings_reads_api_key_from_security_overlay(t
     assert api_base == "https://dashscope.aliyuncs.com"
 
 
+def test_resolve_memory_target_hydrates_secret_overlay(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    security = get_bootstrap_security_service(workspace)
+    security.setup_initial_realm(password="test-password")
+
+    facade = LLMConfigFacade(workspace)
+    config_id = _build_record(
+        facade,
+        config_id=MEMORY_EMBEDDING_CONFIG_ID,
+        provider_id="dashscope",
+        model_id="qwen3-vl-embedding",
+        api_key="memory-overlay-key",
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        extra_headers=None,
+        capability=Capability.EMBEDDING,
+    )
+    record = facade.repository.get(config_id)
+    assert isinstance(record, NormalizedProviderConfig)
+
+    facade.repository.save(
+        facade._sanitize_record_for_storage(record),
+        last_probe_status=None,
+    )
+    facade._store_record_secrets(record)
+    facade.set_memory_binding(
+        embedding_config_id=MEMORY_EMBEDDING_CONFIG_ID,
+        rerank_config_id=None,
+    )
+
+    target = facade.resolve_memory_target("embedding")
+
+    assert target.config_id == MEMORY_EMBEDDING_CONFIG_ID
+    assert target.secret_payload["api_key"] == "memory-overlay-key"
+
+
 
 def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
     workspace = tmp_path / 'workspace'
@@ -432,5 +471,68 @@ def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
         assert loop._memory_runtime_settings.enabled is True
         assert loop.memory_manager is not None
         assert loop._store_enabled is True
+    finally:
+        manager.close()
+
+
+def test_sync_internal_tool_runtimes_keeps_memory_manager_when_runtime_has_no_rag_store(tmp_path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(Path(__file__).resolve().parents[1] / 'tools' / 'memory_runtime', workspace / 'tools' / 'memory_runtime')
+
+    manager = ResourceManager(
+        workspace,
+        app_config=SimpleNamespace(
+            resources=SimpleNamespace(
+                enabled=True,
+                skills_dir='skills',
+                tools_dir='tools',
+                manifest_name='resource.yaml',
+                state_path='.g3ku/resources.state.json',
+                reload=SimpleNamespace(enabled=True, poll_interval_ms=200, debounce_ms=100, lazy_reload_on_access=True, keep_last_good_version=True),
+                locks=SimpleNamespace(lock_dir='.g3ku/resource-locks', logical_delete_guard=True, windows_fs_lock=True),
+            )
+        ),
+    )
+    manager.reload_now(trigger='test-bind')
+
+    class _FallbackOnlyMemoryManager:
+        def __init__(self, workspace_path, cfg):
+            self.workspace = workspace_path
+            self.cfg = cfg
+            self.store = None
+
+        def close(self):
+            return None
+
+    class _Loop(SimpleNamespace):
+        def _use_rag_memory(self) -> bool:
+            cfg = getattr(self, '_memory_runtime_settings', None)
+            return bool(cfg and cfg.enabled)
+
+    loop = _Loop(
+        workspace=workspace,
+        resource_manager=manager,
+        _internal_tool_settings_fingerprints={},
+        _memory_manager_cls=_FallbackOnlyMemoryManager,
+        memory_manager=None,
+        commit_service=None,
+        _memory_runtime_settings=None,
+        _store=None,
+        _store_enabled=False,
+        _checkpointer_enabled=False,
+        _checkpointer_backend='disabled',
+        _checkpointer_path=None,
+        _checkpointer=None,
+        _checkpointer_cm=None,
+    )
+
+    try:
+        changed = RuntimeBootstrapBridge(loop).sync_internal_tool_runtimes(force=True, reason='test')
+        assert changed is True
+        assert loop.memory_manager is not None
+        assert loop._store is None
+        assert loop._store_enabled is False
     finally:
         manager.close()

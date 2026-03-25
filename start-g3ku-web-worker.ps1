@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$venvPython = Join-Path $scriptDir ".venv\Scripts\python.exe"
+$bootstrapScript = Join-Path $scriptDir "g3ku.ps1"
 $rootPattern = [regex]::Escape($scriptDir)
 
 function Get-G3kuManagedPythonProcesses {
@@ -21,9 +21,9 @@ function Get-G3kuManagedPythonProcesses {
         $_.CommandLine -and
         $_.CommandLine -match $rootPattern -and
         (
-            $_.CommandLine -match 'g3ku_bootstrap\.py"?\s+start' -or
-            $_.CommandLine -match '-m\s+g3ku(?:\.g3ku_cli)?\s+start' -or
-            $_.CommandLine -match '-m\s+g3ku(?:\.g3ku_cli)?\s+worker'
+            $_.CommandLine -match 'g3ku_bootstrap\.py"?\s+web' -or
+            $_.CommandLine -match '-m\s+g3ku\s+web' -or
+            $_.CommandLine -match '-m\s+g3ku\s+worker'
         )
     }
 }
@@ -44,8 +44,8 @@ function Stop-G3kuManagedPythonProcesses {
 }
 
 function Assert-StartPreconditions {
-    if (-not (Test-Path $venvPython)) {
-        throw "[g3ku] Missing project virtualenv Python: $venvPython"
+    if (-not (Test-Path $bootstrapScript)) {
+        throw "[g3ku] Missing launcher script: $bootstrapScript"
     }
 
     $existingWeb = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
@@ -70,13 +70,20 @@ if ($ForceRestart) {
 
 Assert-StartPreconditions
 
-$webArgs = @("-m", "g3ku.g3ku_cli", "start", "--host", $BindHost, "--port", "$Port")
+$webArgs = @("web", "--host", $BindHost, "--port", "$Port")
 
 if ($PromptLog) {
-    $webArgs += "--log"
+    $env:G3KU_PROMPT_TRACE = "1"
+    Write-Host "[g3ku] Prompt logging enabled via G3KU_PROMPT_TRACE=1." -ForegroundColor Yellow
+} else {
+    Remove-Item Env:G3KU_PROMPT_TRACE -ErrorAction SilentlyContinue
 }
 if ($OpenBrowser) {
-    $webArgs += "--open"
+    Start-Job -ScriptBlock {
+        param($TargetUrl)
+        Start-Sleep -Seconds 3
+        Start-Process $TargetUrl | Out-Null
+    } -ArgumentList "http://${BindHost}:$Port" | Out-Null
 }
 if ($Reload) {
     $webArgs += "--reload"
@@ -94,7 +101,7 @@ if ($KeepWorker) {
 }
 
 $webExitCode = 0
-& $venvPython @webArgs
+& $bootstrapScript @webArgs
 $webExitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
 
 exit $webExitCode

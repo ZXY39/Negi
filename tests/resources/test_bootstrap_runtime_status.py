@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
+from types import SimpleNamespace
 
 import g3ku.shells.web as web_shell
 import main.api.bootstrap_rest as bootstrap_rest
@@ -140,3 +141,47 @@ async def test_ensure_web_runtime_services_limits_worker_wait(monkeypatch):
     assert waits == [1.0]
     assert service._started is True
     assert heartbeat._started is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_web_agent_runtime_restarts_china_bridge_when_config_changes(monkeypatch):
+    class _BridgeConfig:
+        def __init__(self, token: str) -> None:
+            self.enabled = True
+            self.auto_start = True
+            self.control_token = token
+
+        def model_dump(self, **_kwargs):
+            return {
+                'enabled': self.enabled,
+                'autoStart': self.auto_start,
+                'controlToken': self.control_token,
+            }
+
+    loop = SimpleNamespace(app_config=SimpleNamespace(china_bridge=_BridgeConfig('next')))
+    started_with: list[str] = []
+    stop_calls: list[str] = []
+
+    class _Supervisor:
+        def __init__(self) -> None:
+            self._app_config = SimpleNamespace(china_bridge=_BridgeConfig('current'))
+
+        async def stop(self) -> None:
+            stop_calls.append('stopped')
+
+    async def _start_china(_agent, config) -> None:
+        started_with.append(config.china_bridge.control_token)
+
+    monkeypatch.setattr(web_shell, 'get_agent', lambda: loop)
+    monkeypatch.setattr(web_shell, 'refresh_loop_runtime_config', lambda _loop, **_kwargs: True)
+    monkeypatch.setattr(web_shell, '_ensure_china_bridge_services', _noop)
+    monkeypatch.setattr(web_shell, '_global_china_supervisor', _Supervisor())
+    monkeypatch.setattr(web_shell, '_global_china_outbound_task', None)
+    monkeypatch.setattr(web_shell, '_global_china_start_task', None)
+    monkeypatch.setattr(web_shell, '_start_china_bridge_services_now', _start_china)
+
+    changed = await web_shell.refresh_web_agent_runtime(force=True, reason='test')
+
+    assert changed is True
+    assert stop_calls == ['stopped']
+    assert started_with == ['next']

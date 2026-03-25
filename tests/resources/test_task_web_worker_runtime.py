@@ -253,6 +253,8 @@ async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(
         payload=payload,
     )
     monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
+    async def _skip_china(_agent=None) -> None:
+        return None
 
     async def _start_heartbeat(_agent, _runtime_manager, **kwargs):
         if kwargs.get("replay_pending_outbox"):
@@ -262,6 +264,7 @@ async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(
         return heartbeat
 
     monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
+    monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _skip_china)
 
     await web_shell.ensure_web_runtime_services(SimpleNamespace(main_task_service=service))
 
@@ -304,6 +307,8 @@ async def test_ensure_web_runtime_services_replays_pending_task_stall_outbox(tmp
         payload=payload,
     )
     monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
+    async def _skip_china(_agent=None) -> None:
+        return None
 
     async def _start_heartbeat(_agent, _runtime_manager, **kwargs):
         if kwargs.get("replay_pending_outbox"):
@@ -313,6 +318,7 @@ async def test_ensure_web_runtime_services_replays_pending_task_stall_outbox(tmp
         return heartbeat
 
     monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
+    monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _skip_china)
 
     await web_shell.ensure_web_runtime_services(SimpleNamespace(main_task_service=service))
 

@@ -69,6 +69,7 @@ class ToolResourceDescriptor(BaseResourceDescriptor):
     permissions: dict[str, Any] = field(default_factory=dict)
     requires_tools: list[str] = field(default_factory=list)
     requires_bins: list[str] = field(default_factory=list)
+    requires_paths: list[str] = field(default_factory=list)
     requires_env: list[str] = field(default_factory=list)
     toolskill_enabled: bool = True
 

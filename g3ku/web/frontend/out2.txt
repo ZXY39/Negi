@@ -1,0 +1,150 @@
+239: box-shadow: var(--shadow-sm);
+245: box-shadow: var(--shadow-md);
+570: box-shadow: var(--shadow-md);
+657: box-shadow: 0 12px 32px color-mix(in srgb, var(--warning) 16%, transparent);
+822: box-shadow: var(--tree-node-shadow);
+825: transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+837: box-shadow: inset 0 0 0 0 rgba(57, 197, 187, 0);
+879: box-shadow: var(--shadow-md);
+885: box-shadow: var(--shadow-md);
+1009: box-shadow: var(--shadow-sm);
+1017: .detail-drawer.project-detail-drawer {
+1034: .detail-drawer.project-detail-drawer.is-open {
+1040: .detail-drawer.project-detail-drawer .panel-header {
+1044: .detail-drawer.project-detail-drawer .empty-state {
+1049: .detail-drawer.project-detail-drawer {
+1098: box-shadow: var(--shadow-sm);
+1100: transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+1105: box-shadow: var(--shadow-md);
+1111: box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-primary) 32%, transparent), var(--shadow-md);
+1324: box-shadow: var(--shadow-md);
+1433: transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+1444: box-shadow: inset 0 0 0 0 rgba(57, 197, 187, 0);
+1455: box-shadow: var(--shadow-sm);
+1461: box-shadow: var(--shadow-sm);
+1490: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+1519: background: linear-gradient(135deg, #fb7185, #ef4444);
+1523: box-shadow: 0 10px 20px -14px rgba(239, 68, 68, 0.85);
+1528: box-shadow: 0 0 0 1px color-mix(in srgb, #fb7185 12%, transparent), var(--shadow-sm);
+1534: box-shadow: inset 0 0 0 1px rgba(57, 197, 187, 0.14);
+1539: box-shadow: inset 0 0 0 2px rgba(57, 197, 187, 0.78), inset 0 0 18px rgba(57, 197, 187, 0.14);
+1544: box-shadow: inset 0 0 0 1px rgba(57, 197, 187, 0.14);
+1672: box-shadow: 0 14px 30px -22px rgba(15, 23, 42, 0.6);
+1691: box-shadow: var(--shadow-sm);
+1806: box-shadow: inset 0 1px 0 color-mix(in srgb, var(--bg-panel) 34%, transparent);
+1975: box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.14);
+2190: box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.14);
+2193: box-shadow: 0 0 0 8px rgba(96, 165, 250, 0.05);
+2222: box-shadow: var(--shadow-sm);
+2293: box-shadow: var(--shadow-md);
+2304: box-shadow: var(--shadow-lg);
+2309: backdrop-filter: blur(12px);
+2336: box-shadow: var(--shadow-sm);
+2337: transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+2343: box-shadow: var(--shadow-md);
+2349: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+2487: box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+2501: transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+2506: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+2525: box-shadow: 0 18px 34px -22px color-mix(in srgb, var(--brand-primary) 75%, transparent);
+2526: transition: transform 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+2531: box-shadow: 0 24px 42px -24px color-mix(in srgb, var(--brand-primary) 78%, transparent);
+2536: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 24%, transparent), 0 24px 42px -24px color-mix(in srgb, var(--brand-primary) 78%, transparent);
+2554: box-shadow: var(--shadow-md);
+2584: box-shadow: var(--shadow-sm);
+2595: box-shadow: var(--shadow-lg);
+2600: backdrop-filter: blur(12px);
+2637: box-shadow: var(--shadow-sm);
+2638: transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+2643: box-shadow: var(--shadow-md);
+2657: box-shadow: none;
+2669: box-shadow: 0 16px 30px -24px color-mix(in srgb, var(--brand-primary) 65%, transparent);
+2675: box-shadow: 0 20px 36px -24px color-mix(in srgb, var(--brand-primary-hover) 78%, transparent);
+2680: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 24%, transparent), 0 20px 36px -24px color-mix(in srgb, var(--brand-primary-hover) 78%, transparent);
+2687: box-shadow: 0 18px 32px -24px color-mix(in srgb, var(--brand-primary) 72%, transparent);
+2693: box-shadow: 0 22px 36px -24px color-mix(in srgb, var(--brand-primary-hover) 78%, transparent);
+2698: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 22%, transparent), 0 22px 36px -24px color-mix(in srgb, var(--brand-primary-hover) 78%, transparent);
+2768: box-shadow: var(--shadow-md);
+2827: box-shadow: var(--shadow-md);
+3068: box-shadow: var(--shadow-sm);
+3108: transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+3114: box-shadow: var(--shadow-sm);
+3123: box-shadow: 0 24px 42px -20px rgba(15, 23, 42, 0.55), 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+3131: box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 14%, transparent);
+3144: box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+3159: transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+3164: box-shadow: var(--shadow-sm);
+3266: .detail-drawer {
+3309: .detail-drawer {
+3411: box-shadow: 0 18px 36px -24px rgba(15, 23, 42, 0.42);
+3510: .confirm-backdrop {
+3524: .confirm-backdrop.is-open {
+3538: box-shadow: var(--shadow-lg);
+3610: box-shadow: var(--shadow-lg);
+3667: box-shadow: var(--shadow-sm);
+3668: transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+3673: box-shadow: var(--shadow-md);
+3679: box-shadow: none;
+3692: box-shadow: 0 16px 30px -24px rgba(22, 163, 74, 0.65);
+3698: box-shadow: 0 20px 36px -24px rgba(21, 128, 61, 0.78);
+3782: transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+3795: box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+3882: box-shadow: inset 0 1px 0 color-mix(in srgb, var(--bg-panel) 32%, transparent);
+3887: box-shadow: 0 0 0 5px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+3940: box-shadow: var(--shadow-sm);
+4042: box-shadow: var(--shadow-sm);
+4095: transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+4105: box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+4275: box-shadow: var(--shadow-sm);
+4276: transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+4281: box-shadow: var(--shadow-sm), 0 0 0 3px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+4329: box-shadow: 0 0 0 3px color-mix(in srgb, #ef4444 14%, transparent);
+4352: box-shadow: var(--shadow-md);
+4396: transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+4438: .detail-backdrop,
+4439: .model-detail-backdrop {
+4450: .detail-backdrop.is-open,
+4451: .model-detail-backdrop.is-open {
+4456: .detail-drawer,
+4471: box-shadow: var(--shadow-lg);
+4476: .detail-drawer.is-open,
+4483: .detail-drawer .resource-detail-shell,
+4489: .detail-drawer .resource-empty,
+4494: .detail-drawer .detail-modal-header,
+4499: .detail-drawer .detail-modal-body,
+4505: .detail-drawer .detail-modal-body {
+4555: .detail-drawer,
+4568: .detail-drawer,
+4573: .detail-drawer .detail-modal-header,
+4574: .detail-drawer .detail-modal-body,
+4624: box-shadow: var(--shadow-md);
+4793: box-shadow: var(--shadow-sm);
+4806: box-shadow: var(--shadow-sm);
+4853: transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+4864: box-shadow: 0 10px 24px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+4869: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 16%, transparent);
+4910: box-shadow: none;
+4919: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 16%, transparent);
+4953: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 16%, transparent);
+4983: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 16%, transparent);
+5048: box-shadow: var(--shadow-md);
+5082: transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+5098: box-shadow: var(--shadow-sm);
+5145: box-shadow: var(--shadow-sm);
+5146: transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
+5157: box-shadow: none;
+5163: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent), 0 12px 28px -20px rgba(15, 23, 42, 0.42);
+5168: box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 16%, transparent), 0 16px 30px -22px rgba(15, 23, 42, 0.46);
+5217: box-shadow: var(--shadow-lg);
+5253: box-shadow: inset 0 1px 0 color-mix(in srgb, var(--bg-panel) 32%, transparent);
+5295: box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+5323: transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+5330: box-shadow: var(--shadow-sm);
+5511: /* Token 模态窗口：backdrop 不模糊，仅半透明遮罩 */
+5512: #task-token-backdrop.detail-backdrop {
+5514: backdrop-filter: none;
+5515: -webkit-backdrop-filter: none;
+5775: box-shadow: var(--shadow-sm);
+5896: #rename-session-backdrop {
+5919: box-shadow: 0 20px 80px rgba(2, 6, 23, 0.35);
+5948: box-shadow: 0 18px 34px -22px color-mix(in srgb, var(--brand-primary) 62%, transparent);

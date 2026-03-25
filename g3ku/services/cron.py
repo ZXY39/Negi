@@ -107,6 +107,7 @@ class CronService:
                             deliver=j["payload"].get("deliver", False),
                             channel=j["payload"].get("channel"),
                             to=j["payload"].get("to"),
+                            session_key=j["payload"].get("sessionKey"),
                         ),
                         state=CronJobState(
                             next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
@@ -119,11 +120,14 @@ class CronService:
                         delete_after_run=j.get("deleteAfterRun", False),
                     ))
                 self._store = CronStore(jobs=jobs)
+                self._last_mtime_ns = self.store_path.stat().st_mtime_ns
             except Exception as e:
                 logger.warning("Failed to load cron store: {}", e)
                 self._store = CronStore()
+                self._last_mtime_ns = self.store_path.stat().st_mtime_ns
         else:
             self._store = CronStore()
+            self._last_mtime_ns = 0
 
         return self._store
 
@@ -154,6 +158,7 @@ class CronService:
                         "deliver": j.payload.deliver,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
+                        "sessionKey": j.payload.session_key,
                     },
                     "state": {
                         "nextRunAtMs": j.state.next_run_at_ms,
@@ -174,6 +179,10 @@ class CronService:
     
     async def start(self) -> None:
         """Start the cron service."""
+        if self._running:
+            return
+        if not callable(self.on_job):
+            raise RuntimeError("cron job handler is not configured")
         self._running = True
         self._load_store()
         self._recompute_next_runs()
@@ -189,11 +198,26 @@ class CronService:
             self._timer_task = None
 
     def _recompute_next_runs(self) -> None:
-        """Recompute next run times for all enabled jobs."""
+        """Restore next run times after startup without replaying every missed tick."""
         if not self._store:
             return
         now = _now_ms()
         for job in self._store.jobs:
+            if not job.enabled:
+                job.state.next_run_at_ms = None
+                continue
+            current_next = job.state.next_run_at_ms
+            if job.schedule.kind == "at":
+                if job.state.last_run_at_ms:
+                    job.state.next_run_at_ms = None
+                elif job.schedule.at_ms is not None and job.schedule.at_ms <= now:
+                    job.state.next_run_at_ms = now
+                else:
+                    job.state.next_run_at_ms = job.schedule.at_ms
+                continue
+            if current_next is not None and current_next <= now:
+                job.state.next_run_at_ms = now
+                continue
             if job.enabled:
                 job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
 
@@ -248,9 +272,9 @@ class CronService:
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
 
         try:
-            response = None
-            if self.on_job:
-                response = await self.on_job(job)
+            if not callable(self.on_job):
+                raise RuntimeError("cron job handler is not configured")
+            await self.on_job(job)
 
             job.state.last_status = "ok"
             job.state.last_error = None
@@ -291,6 +315,7 @@ class CronService:
         deliver: bool = False,
         channel: str | None = None,
         to: str | None = None,
+        session_key: str | None = None,
         delete_after_run: bool = False,
     ) -> CronJob:
         """Add a new job."""
@@ -309,6 +334,7 @@ class CronService:
                 deliver=deliver,
                 channel=channel,
                 to=to,
+                session_key=str(session_key or "").strip() or None,
             ),
             state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
             created_at_ms=now,
@@ -355,6 +381,8 @@ class CronService:
 
     async def run_job(self, job_id: str, force: bool = False) -> bool:
         """Manually run a job."""
+        if not callable(self.on_job):
+            return False
         store = self._load_store()
         for job in store.jobs:
             if job.id == job_id:

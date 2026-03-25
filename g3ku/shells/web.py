@@ -4,24 +4,32 @@ from __future__ import annotations
 
 import os
 import asyncio
+import json
 import subprocess
 import sys
 from typing import Optional
+from urllib.parse import urlparse
 
 from loguru import logger
 
 from g3ku.agent.loop import AgentLoop
 from g3ku.bus.queue import MessageBus
-from g3ku.china_bridge import ChinaBridgeSupervisor, ChinaBridgeTransport
-from g3ku.cli.commands import _make_provider
+from g3ku.china_bridge import CHINA_CHANNELS, ChinaBridgeSupervisor, ChinaBridgeTransport
+from g3ku.config.loader import get_data_dir
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.cron.runtime_dispatch import dispatch_cron_job
+from g3ku.cron.service import CronService
 from g3ku.heartbeat.bootstrap import build_web_session_heartbeat, start_web_session_heartbeat
+from g3ku.runtime.bootstrap_factory import make_agent_loop as _make_agent_loop
+from g3ku.runtime.bootstrap_factory import make_provider as _make_provider
 from g3ku.runtime import SessionRuntimeBridge
 from g3ku.runtime import SessionRuntimeManager
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.security import get_bootstrap_security_service
+from g3ku.web.launcher import run_web_server_entrypoint
 from g3ku.web.worker_control import ensure_managed_task_worker, shutdown_managed_task_worker
 from main.protocol import now_iso
+from main.service.task_terminal_callback import TASK_TERMINAL_CALLBACK_URL_ENV
 
 _global_agent: Optional[AgentLoop] = None
 _global_bus: Optional[MessageBus] = None
@@ -119,52 +127,89 @@ def debug_trace_enabled() -> bool:
     return raw in {'1', 'true', 'yes', 'on', 'debug'}
 
 
+def _resolve_web_runtime_port(agent: AgentLoop | None = None) -> int:
+    callback_url = str(os.getenv(TASK_TERMINAL_CALLBACK_URL_ENV, "") or "").strip()
+    if callback_url:
+        try:
+            parsed = urlparse(callback_url)
+            if parsed.port:
+                return int(parsed.port)
+        except Exception:
+            logger.debug("web cron port resolution skipped for callback url {}", callback_url)
+    runtime_agent = agent or _global_agent
+    config = getattr(runtime_agent, "app_config", None)
+    return int(getattr(getattr(config, "web", None), "port", 18790) or 18790)
+
+
+def _should_start_web_cron(agent: AgentLoop | None = None) -> bool:
+    port = _resolve_web_runtime_port(agent)
+    ownership = _process_owns_listen_port(port)
+    if ownership is False:
+        logger.debug(
+            "Skipping web cron startup in pid={} because web port {} is owned by another process",
+            os.getpid(),
+            port,
+        )
+        return False
+    return True
+
+
+def _cron_runtime_ready(agent: AgentLoop | None = None) -> bool:
+    runtime_agent = agent or _global_agent
+    cron_service = getattr(runtime_agent, "cron_service", None) if runtime_agent is not None else None
+    if cron_service is None:
+        return True
+    if not _should_start_web_cron(runtime_agent):
+        return True
+    status = getattr(cron_service, "status", None)
+    if not callable(status):
+        return False
+    try:
+        payload = status() or {}
+    except Exception:
+        return False
+    return bool(payload.get("enabled"))
+
+
+def _build_web_cron_service(agent_holder: dict[str, AgentLoop]) -> CronService:
+    async def _on_job(job) -> str | None:
+        runtime_agent = agent_holder.get("agent")
+        if runtime_agent is None:
+            raise RuntimeError("web cron runtime is not initialized")
+        runtime_bridge = SessionRuntimeBridge(get_runtime_manager(runtime_agent))
+        task_registrar = getattr(runtime_agent, "_register_active_task", None)
+        return await dispatch_cron_job(
+            job,
+            runtime_bridge=runtime_bridge,
+            session_manager=getattr(runtime_agent, "sessions", None),
+            register_task=task_registrar if callable(task_registrar) else None,
+        )
+
+    return CronService(get_data_dir() / "cron" / "jobs.json", on_job=_on_job)
+
+
 def get_agent() -> AgentLoop:
     global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
     if not get_bootstrap_security_service().is_unlocked():
         raise RuntimeError('project is locked')
     if not _global_agent:
         config, revision, _changed = get_runtime_config(force=True)
-        provider_name, model_name = config.get_role_model_target('ceo')
         provider = _make_provider(config, scope='ceo')
-        middlewares = []
-        try:
-            from g3ku.agent.middleware import build_middlewares
-        except ModuleNotFoundError:
-            if config.agents.defaults.middlewares:
-                logger.warning(
-                    'Runtime middleware unavailable in web mode because optional langchain middleware package is missing; '
-                    'starting without custom middleware.'
-                )
-        else:
-            try:
-                middlewares = build_middlewares(config.agents.defaults.middlewares)
-            except ValueError as exc:
-                logger.error('Invalid middleware config in web mode: {}', exc)
-                middlewares = []
 
         _global_bus = MessageBus()
         debug_mode = debug_trace_enabled()
         if debug_mode:
             logger.info('Web API debug trace enabled (G3KU_DEBUG_TRACE=1)')
-        _global_agent = AgentLoop(
-            bus=_global_bus,
-            provider=provider,
-            workspace=config.workspace_path,
-            model=model_name,
-            provider_name=provider_name,
-            temperature=config.agents.defaults.temperature,
-            max_tokens=config.agents.defaults.max_tokens,
-            max_iterations=config.get_role_max_iterations('ceo'),
-            memory_window=config.agents.defaults.memory_window,
-            reasoning_effort=config.agents.defaults.reasoning_effort,
-            multi_agent_config=config.agents.multi_agent,
-            app_config=config,
-            resource_config=config.resources,
-            channels_config=config.china_bridge,
+        agent_holder: dict[str, AgentLoop] = {}
+        cron_service = _build_web_cron_service(agent_holder)
+        _global_agent = _make_agent_loop(
+            config,
+            _global_bus,
+            provider,
             debug_mode=debug_mode,
-            middlewares=middlewares,
+            cron_service=cron_service,
         )
+        agent_holder["agent"] = _global_agent
         _global_agent._runtime_model_revision = revision
         _global_agent._runtime_default_model_key = config.resolve_role_model_key('ceo')
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
@@ -177,8 +222,74 @@ def get_agent() -> AgentLoop:
     return _global_agent
 
 
+def _china_bridge_enabled(config) -> bool:
+    bridge = getattr(config, 'china_bridge', None)
+    return bool(bridge and getattr(bridge, 'enabled', False) and getattr(bridge, 'auto_start', False))
+
+
+def _china_bridge_config_signature(config) -> str:
+    bridge = getattr(config, 'china_bridge', None)
+    if bridge is None:
+        return ''
+    if hasattr(bridge, 'model_dump'):
+        payload = bridge.model_dump(by_alias=True, exclude_none=False)
+    elif hasattr(bridge, '__dict__'):
+        payload = {
+            key: value
+            for key, value in vars(bridge).items()
+            if not key.startswith('_')
+        }
+    else:
+        payload = {'value': str(bridge)}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+async def _cancel_background_task(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def _stop_china_bridge_runtime() -> None:
+    global _global_china_supervisor, _global_china_outbound_task, _global_china_start_task
+    await _cancel_background_task(_global_china_start_task)
+    _global_china_start_task = None
+    await _cancel_background_task(_global_china_outbound_task)
+    _global_china_outbound_task = None
+    if _global_china_supervisor is not None:
+        await _global_china_supervisor.stop()
+        _global_china_supervisor = None
+
+
+async def _sync_china_bridge_services_after_runtime_refresh(runtime_agent: AgentLoop, config) -> None:
+    current_signature = _china_bridge_config_signature(getattr(_global_china_supervisor, '_app_config', None))
+    next_signature = _china_bridge_config_signature(config)
+
+    global _global_china_transport
+    if _global_china_transport is not None:
+        _global_china_transport._app_config = config
+
+    if not _china_bridge_enabled(config):
+        await _stop_china_bridge_runtime()
+        return
+
+    if _global_china_supervisor is None:
+        await _ensure_china_bridge_services(runtime_agent)
+        return
+
+    if current_signature == next_signature:
+        return
+
+    await _stop_china_bridge_runtime()
+    await _start_china_bridge_services_now(runtime_agent, config)
+
+
 async def refresh_web_agent_runtime(force: bool = False, reason: str = 'runtime') -> bool:
-    return refresh_loop_runtime_config(get_agent(), force=force, reason=reason)
+    runtime_agent = get_agent()
+    changed = refresh_loop_runtime_config(runtime_agent, force=force, reason=reason)
+    await _sync_china_bridge_services_after_runtime_refresh(runtime_agent, runtime_agent.app_config)
+    return changed
 
 
 def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager:
@@ -200,6 +311,8 @@ def _get_china_transport(agent: AgentLoop | None = None) -> ChinaBridgeTransport
             app_config=get_runtime_config(force=False)[0],
             register_task=task_registrar if callable(task_registrar) else None,
         )
+    else:
+        _global_china_transport._app_config = get_runtime_config(force=False)[0]
     return _global_china_transport
 
 
@@ -221,7 +334,7 @@ async def _start_china_bridge_services_now(runtime_agent: AgentLoop, config) -> 
             while True:
                 try:
                     msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-                    if msg.channel in {"qqbot", "dingtalk", "wecom", "wecom-app", "feishu-china"}:
+                    if msg.channel in CHINA_CHANNELS:
                         await transport.send_outbound(msg)
                 except asyncio.TimeoutError:
                     continue
@@ -254,7 +367,7 @@ async def _ensure_china_bridge_services(agent: AgentLoop | None = None) -> None:
     config = get_runtime_config(force=False)[0]
     if not bool(getattr(config, 'china_bridge', None) and config.china_bridge.enabled and config.china_bridge.auto_start):
         return
-    web_port = int(getattr(getattr(config, 'gateway', None), 'port', 18790) or 18790)
+    web_port = int(getattr(getattr(config, 'web', None), 'port', 18790) or 18790)
     global _global_china_start_task
     if _global_china_start_task is None or _global_china_start_task.done():
         _global_china_start_task = asyncio.create_task(
@@ -290,12 +403,12 @@ def describe_web_runtime_services(agent: AgentLoop | None = None) -> dict[str, b
 
 async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
     global _global_web_heartbeat
-    if describe_web_runtime_services(agent).get('ready'):
+    if describe_web_runtime_services(agent).get('ready') and _cron_runtime_ready(agent):
         return
 
     async with _get_runtime_services_lock():
         runtime_agent = agent or get_agent()
-        if describe_web_runtime_services(runtime_agent).get('ready'):
+        if describe_web_runtime_services(runtime_agent).get('ready') and _cron_runtime_ready(runtime_agent):
             return
 
         main_task_service = getattr(runtime_agent, 'main_task_service', None)
@@ -310,6 +423,9 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
         )
         if heartbeat is not None:
             _global_web_heartbeat = heartbeat
+        cron_service = getattr(runtime_agent, "cron_service", None)
+        if cron_service is not None and _should_start_web_cron(runtime_agent) and not _cron_runtime_ready(runtime_agent):
+            await cron_service.start()
         await _ensure_china_bridge_services(runtime_agent)
 
 
@@ -320,6 +436,7 @@ async def shutdown_web_runtime() -> None:
     agent = _global_agent
     runtime_manager = _global_runtime_manager
     heartbeat = _global_web_heartbeat
+    cron_service = getattr(agent, "cron_service", None) if agent is not None else None
     china_supervisor = _global_china_supervisor
     china_outbound_task = _global_china_outbound_task
     china_start_task = _global_china_start_task
@@ -335,6 +452,12 @@ async def shutdown_web_runtime() -> None:
 
     if agent is None:
         return
+
+    if cron_service is not None:
+        try:
+            cron_service.stop()
+        except Exception:
+            logger.debug('web cron stop skipped during shutdown')
 
     if heartbeat is not None:
         try:
@@ -400,11 +523,9 @@ async def shutdown_web_runtime() -> None:
         logger.debug('Agent runtime close skipped during shutdown')
 
 
-def run_web_shell(*, host: str, port: int, reload: bool, debug: bool, set_debug_mode) -> None:
-    from g3ku.web.main import run_server
-
+def run_web_shell(*, host: str | None, port: int | None, reload: bool, debug: bool, set_debug_mode) -> None:
     set_debug_mode(debug)
-    run_server(
+    run_web_server_entrypoint(
         host=host,
         port=port,
         reload=reload,

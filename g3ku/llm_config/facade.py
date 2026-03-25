@@ -285,7 +285,7 @@ class LLMConfigFacade:
             raise ValueError(f"Unsupported memory capability: {capability}")
         if not config_id:
             raise ValueError(f"Memory {normalized} config is not configured")
-        record = self.repository.get(config_id)
+        record = self._hydrate_record_secrets(self.repository.get(config_id))
         if record.capability.value != expected_capability:
             raise ValueError(
                 f"Memory config {config_id} is not configured for {expected_capability} capability"

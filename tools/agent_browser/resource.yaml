@@ -2,30 +2,34 @@ schema_version: 1
 kind: tool
 name: agent_browser
 display_name: Agent Browser
-description: Wrap the official agent-browser CLI as a built-in browser automation tool with session/profile safeguards and install/update help.
+description: Internal wrapper around the official agent-browser CLI, installed locally under externaltools/agent_browser with session/profile safeguards and install/update help.
+tool_type: internal
 source:
   type: git
   url: https://github.com/vercel-labs/agent-browser
-  ref: main
+  ref: v0.22.2
 current_version:
-  summary: Built-in wrapper around the upstream agent-browser CLI, following the local g3ku resource contract.
-  compare_rule: Update when the embedded tool interface, parameters, settings, or behavior changes.
+  summary: Internal wrapper plus pinned upstream agent-browser CLI v0.22.2, installed under externaltools/agent_browser.
+  compare_rule: Update when the wrapper interface, settings, local install contract, or pinned upstream CLI version changes.
   source_of_truth: This manifest plus tools/agent_browser/main/tool.py and tools/agent_browser/toolskills/SKILL.md.
 protocol: mcp
 mcp:
   transport: embedded
 requires:
   tools: []
-  bins:
-    - agent-browser
+  bins: []
+  paths:
+    - externaltools/agent_browser/node_modules/agent-browser/package.json
   env: []
 permissions:
   network: true
   filesystem:
     - workspace
 settings:
-  command_prefix:
-    - C:\Users\PC\AppData\Roaming\npm\agent-browser.cmd
+  command_prefix: []
+  install_root: externaltools/agent_browser
+  browser_root: externaltools/agent_browser/browsers
+  temp_root: temp/agent_browser
   default_timeout_seconds: 300
   auto_session: true
   default_session_name: g3ku-agent-browser

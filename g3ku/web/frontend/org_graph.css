@@ -13,105 +13,102 @@
     --space-10: 2.5rem;
     --space-12: 3rem;
 
-    /* Miku Green Brand Colors */
-    --brand-primary: #39c5bb;
-    --brand-primary-hover: #33b8ad;
-    --bg-app: #f8fafc;
+    /* Premium Light Mode Brand Colors */
+    --brand-primary: #0d9488;
+    --brand-primary-hover: #0f766e;
+    --brand-surface: #f0fdfa;
+    --bg-app: #e4e4e7;
     --bg-panel: #ffffff;
-    --bg-surface-inner: #f1f5f9;
-    --bg-hover: #e2e8f0;
-    --bg-msg-user: #e0f2f1;
-    --bg-msg-sys: #f1f5f9;
+    --bg-surface-inner: #f4f4f5;
+    --bg-hover: rgba(24, 24, 27, 0.04);
+    --bg-msg-user: #f0fdfa;
+    --bg-msg-sys: #ffffff; 
 
     /* Typography */
-    --text-primary: #0f172a;
-    /* Slate 900 */
-    --text-secondary: #475569;
-    /* Slate 600 */
-    --text-muted: #94a3b8;
-    /* Slate 400 */
+    --text-primary: #18181b;
+    --text-secondary: #52525b;
+    --text-muted: #a1a1aa;
     --text-inverse: #ffffff;
 
-    /* Softer Borders */
-    --border-color: #e2e8f0;
-    --border-strong: #cbd5e1;
-    --node-border: rgba(0, 0, 0, 0.08);
+    /* Premium Modern Borders */
+    --border-color: rgba(24, 24, 27, 0.08);
+    --border-strong: rgba(24, 24, 27, 0.15);
+    --node-border: rgba(24, 24, 27, 0.08);
 
-    /* Semantic Status Colors (Softer Tones) */
-    --status-running-bg: #e0e7ff;
-    /* Indigo 100 */
+    /* Semantic Status Colors */
+    --status-running-bg: rgba(79, 70, 229, 0.1);
     --status-running-text: #4338ca;
-    /* Indigo 700 */
-    --status-success-bg: #dcfce7;
-    /* Green 100 */
+    --status-success-bg: rgba(34, 197, 94, 0.1);
     --status-success-text: #15803d;
-    /* Green 700 */
-    --status-failed-bg: #fee2e2;
-    /* Red 100 */
+    --status-failed-bg: rgba(220, 38, 38, 0.1);
     --status-failed-text: #b91c1c;
-    /* Red 700 */
-    --status-pending-bg: #f1f5f9;
-    /* Slate 100 */
-    --status-pending-text: #475569;
-    /* Slate 600 */
-    --ceo-session-running-ring: #39c5bb;
-    --tree-node-bg: color-mix(in srgb, var(--bg-panel) 92%, #eef6ff 8%);
-    --tree-node-border: color-mix(in srgb, var(--border-strong) 78%, white 22%);
-    --tree-node-shadow: 0 14px 28px -20px rgba(15, 23, 42, 0.28), 0 4px 12px -8px rgba(15, 23, 42, 0.16);
+    --status-pending-bg: rgba(113, 113, 122, 0.1);
+    --status-pending-text: #52525b;
+    
+    --ceo-session-running-ring: #0d9488;
+    --tree-node-bg: rgba(255, 255, 255, 0.8);
+    --tree-node-border: rgba(24, 24, 27, 0.1);
+    --tree-node-shadow: 0 4px 6px -1px rgba(24, 24, 27, 0.05), 0 2px 4px -2px rgba(24, 24, 27, 0.02);
 
-    /* Diffuse Modern Shadows for ToC Feel */
-    --shadow-sm: 0 2px 8px -2px rgba(15, 23, 42, 0.05);
-    --shadow-md: 0 10px 25px -5px rgba(15, 23, 42, 0.08);
-    /* Floatier main shadow */
-    --shadow-lg: 0 20px 35px -10px rgba(15, 23, 42, 0.1);
+    /* Refined Shadows */
+    --shadow-sm: 0 1px 2px 0 rgba(24, 24, 27, 0.03);
+    --shadow-md: 0 4px 6px -1px rgba(24, 24, 27, 0.05), 0 2px 4px -2px rgba(24, 24, 27, 0.03);
+    --shadow-lg: 0 10px 15px -3px rgba(24, 24, 27, 0.05), 0 4px 6px -4px rgba(24, 24, 27, 0.02);
 
-    /* Rounded, friendly corners */
-    --radius-md: 12px;
-    --radius-lg: 20px;
+    /* Rounded Corners */
+    --radius-md: 8px;
+    --radius-lg: 12px;
     --radius-full: 9999px;
 
-    --font-sans: 'Fira Sans', 'Inter', system-ui, -apple-system, sans-serif;
-    --transition-fast: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-    --scrollbar-track: color-mix(in srgb, var(--bg-app) 84%, transparent);
-    --scrollbar-thumb: color-mix(in srgb, var(--brand-primary) 46%, var(--border-color) 54%);
-    --scrollbar-thumb-hover: color-mix(in srgb, var(--brand-primary) 68%, var(--border-color) 32%);
+    --font-sans: 'Fira Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --transition-fast: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    --scrollbar-track: transparent;
+    --scrollbar-thumb: rgba(161, 161, 170, 0.4);
+    --scrollbar-thumb-hover: rgba(161, 161, 170, 0.6);
 }
 
 /* Dark Mode Overrides */
 [data-theme="dark"] {
-    --bg-app: #020617;    /* Deep Ground */
-    --bg-panel: #1e293b;  /* Elevated surface */
-    --bg-surface-inner: #334155; /* Inner well */
-    --bg-hover: #334155;
-    --bg-msg-user: #0f766e; /* Deep Teal */
-    --bg-msg-sys: #334155;
+    --bg-app: #09090b;
+    --bg-panel: #18181b;
+    --bg-surface-inner: #27272a;
+    --bg-hover: rgba(255, 255, 255, 0.06);
+    --bg-msg-user: rgba(20, 184, 166, 0.08); /* Teal 500 alpha */
+    --bg-msg-sys: #18181b;
 
-    --text-primary: #f8fafc;
-    --text-secondary: #cbd5e1;
-    --text-muted: #64748b;
+    --text-primary: #fafafa;
+    --text-secondary: #a1a1aa;
+    --text-muted: #71717a;
 
-    --border-color: #334155;
-    --border-strong: #475569;
+    --border-color: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.15);
     --node-border: rgba(255, 255, 255, 0.08);
 
-    --status-running-bg: rgba(37, 99, 235, 0.2);
-    --status-running-text: #60a5fa;
-    --status-success-bg: rgba(22, 163, 74, 0.2);
+    --status-running-bg: rgba(99, 102, 241, 0.15);
+    --status-running-text: #818cf8;
+    --status-success-bg: rgba(34, 197, 94, 0.15);
     --status-success-text: #4ade80;
-    --status-failed-bg: rgba(220, 38, 38, 0.2);
+    --status-failed-bg: rgba(239, 68, 68, 0.15);
     --status-failed-text: #f87171;
-    --status-pending-bg: rgba(71, 85, 105, 0.4);
-    --status-pending-text: #cbd5e1;
-    --tree-node-bg: var(--bg-panel);
-    --tree-node-border: color-mix(in srgb, var(--border-color) 82%, transparent);
-    --tree-node-shadow: var(--shadow-sm);
+    --status-pending-bg: rgba(161, 161, 170, 0.15);
+    --status-pending-text: #a1a1aa;
+    
+    --brand-primary: #2dd4bf;
+    --brand-primary-hover: #14b8a6;
+    --brand-surface: rgba(20, 184, 166, 0.05);
+    --ceo-session-running-ring: #2dd4bf;
 
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.2);
-    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
-    --scrollbar-track: var(--bg-app);
-    --scrollbar-thumb: color-mix(in srgb, #60a5fa 34%, var(--border-color) 66%);
-    --scrollbar-thumb-hover: color-mix(in srgb, #60a5fa 58%, var(--border-color) 42%);
+    --tree-node-bg: rgba(24, 24, 27, 0.7);
+    --tree-node-border: rgba(255, 255, 255, 0.1);
+    --tree-node-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
+
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -2px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -4px rgba(0, 0, 0, 0.5);
+    
+    --scrollbar-track: transparent;
+    --scrollbar-thumb: rgba(113, 113, 122, 0.5);
+    --scrollbar-thumb-hover: rgba(161, 161, 170, 0.7);
 }
 
 /* 2. Reset & Base */
@@ -677,7 +674,7 @@ textarea {
 
 .execution-tree {
     --tree-line: color-mix(in srgb, var(--border-color) 82%, transparent);
-    --tree-line-width: 4px;
+    --tree-line-width: 3px;
     --tree-line-running: color-mix(in srgb, var(--status-running-text) 84%, white 16%);
     --tree-line-success: color-mix(in srgb, var(--status-success-text) 82%, white 18%);
     --tree-line-failed: color-mix(in srgb, var(--status-failed-text) 84%, white 16%);
@@ -765,11 +762,11 @@ textarea {
 
 .execution-tree-item:last-child::before {
     border-right: var(--tree-line-width) solid var(--tree-branch-color);
-    border-radius: 0 16px 0 0;
+    border-radius: 0 28px 0 0;
 }
 
 .execution-tree-item:first-child::after {
-    border-radius: 16px 0 0 0;
+    border-radius: 28px 0 0 0;
 }
 
 .execution-tree-item[data-status="running"],
@@ -885,7 +882,7 @@ textarea {
 
 .execution-tree-node.selected {
     border-color: color-mix(in srgb, var(--brand-primary) 62%, var(--border-color));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-primary) 35%, transparent), var(--shadow-md);
+    box-shadow: var(--shadow-md);
 }
 
 .execution-tree-node:focus-visible {
@@ -1321,9 +1318,9 @@ textarea {
     flex-direction: column;
     gap: var(--space-4);
     padding: var(--space-4);
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    border-radius: 24px;
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 92%, transparent), color-mix(in srgb, var(--bg-app) 82%, transparent));
+    border: 1px solid var(--border-strong);
+    border-radius: 16px;
+    background: var(--bg-panel);
     box-shadow: var(--shadow-md);
     overflow: hidden;
 }
@@ -1430,10 +1427,10 @@ textarea {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--space-3);
     padding: var(--space-3);
-    border-radius: 18px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%);
-    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+    border-radius: 14px;
+    border: 1px solid transparent;
+    background: transparent;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
 
 .ceo-session-card::after {
@@ -1454,9 +1451,9 @@ textarea {
 }
 
 .ceo-session-card.is-active {
-    border-color: color-mix(in srgb, var(--brand-primary) 52%, var(--border-color));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-primary) 18%, transparent), var(--shadow-sm);
-    background: color-mix(in srgb, var(--brand-primary) 9%, var(--bg-panel));
+    border-color: color-mix(in srgb, var(--brand-primary) 30%, transparent);
+    box-shadow: var(--shadow-sm);
+    background: var(--brand-surface);
 }
 
 .ceo-session-card:hover {
@@ -1635,10 +1632,10 @@ textarea {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: clamp(20px, 3vw, 32px) clamp(20px, 5vw, 56px) var(--space-6);
+    padding: clamp(24px, 3vw, 36px) clamp(28px, 6vw, 80px) var(--space-6);
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: stretch;
     gap: var(--space-5);
     scrollbar-gutter: stable;
     overscroll-behavior: contain;
@@ -1647,19 +1644,20 @@ textarea {
 .message {
     display: flex;
     gap: var(--space-4);
-    width: min(100%, 920px);
-    max-width: 920px;
+    width: 100%;
+    max-width: none;
     align-items: flex-end;
 }
 
 .message.user {
-    align-self: center;
-    justify-content: flex-end;
+    align-self: stretch;
+    justify-content: flex-start;
     flex-direction: row-reverse;
 }
 
 .message.system {
-    align-self: center;
+    align-self: stretch;
+    justify-content: flex-start;
 }
 
 .message .avatar {
@@ -1685,11 +1683,11 @@ textarea {
 
 .message .msg-content {
     width: min(100%, 760px);
-    padding: 16px 18px;
-    border-radius: 26px 26px 26px 10px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    padding: 18px 22px;
+    border-radius: 20px 20px 20px 6px;
+    border: 1px solid var(--border-strong);
     background-color: var(--bg-msg-sys);
-    line-height: 1.72;
+    line-height: 1.75;
     color: var(--text-primary);
     box-shadow: var(--shadow-sm);
     word-break: break-word;
@@ -1700,8 +1698,9 @@ textarea {
 }
 
 .message.user .msg-content {
-    border-radius: 26px 26px 10px 26px;
+    border-radius: 20px 20px 6px 20px;
     background-color: var(--bg-msg-user);
+    border-color: color-mix(in srgb, var(--brand-primary) 20%, transparent);
 }
 
 .message .msg-content .chat-attachment-list {
@@ -2299,16 +2298,16 @@ textarea {
 .chat-input-area {
     width: min(100%, 960px);
     margin: 0 auto clamp(18px, 3vw, 28px);
-    padding: 14px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
-    border-radius: 30px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 20px;
     background-color: var(--bg-panel);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--shadow-lg);
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 12px;
     align-items: end;
-    backdrop-filter: blur(14px);
+    backdrop-filter: blur(12px);
 }
 
 .ceo-composer {
@@ -2545,11 +2544,20 @@ textarea {
     }
 
     .ceo-session-panel {
-        max-height: 240px;
-    }
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    border: 1px solid var(--border-strong);
+    border-radius: 16px;
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-md);
+    overflow: hidden;
+}
 
     .chat-feed {
-        padding: 16px 14px 12px;
+        padding: 16px 18px 12px;
         gap: var(--space-4);
     }
 
@@ -2567,15 +2575,31 @@ textarea {
     }
 
     .message .msg-content {
-        width: min(100%, calc(100vw - 88px));
-    }
+    width: min(100%, 760px);
+    padding: 18px 22px;
+    border-radius: 20px 20px 20px 6px;
+    border: 1px solid var(--border-strong);
+    background-color: var(--bg-msg-sys);
+    line-height: 1.75;
+    color: var(--text-primary);
+    box-shadow: var(--shadow-sm);
+    word-break: break-word;
+}
 
     .chat-input-area {
-        width: calc(100% - 24px);
-        padding: 12px;
-        grid-template-columns: 1fr;
-        margin-bottom: 16px;
-    }
+    width: min(100%, 960px);
+    margin: 0 auto clamp(18px, 3vw, 28px);
+    padding: 12px 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 20px;
+    background-color: var(--bg-panel);
+    box-shadow: var(--shadow-lg);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+    backdrop-filter: blur(12px);
+}
 
     .ceo-input-row {
         grid-template-columns: auto minmax(0, 1fr);
@@ -3490,7 +3514,7 @@ textarea {
     display: grid;
     place-items: center;
     padding: 24px;
-    background: rgba(2, 6, 23, 0.76);
+    background: transparent;
     z-index: 1000;
     opacity: 0;
     pointer-events: none;
@@ -4416,7 +4440,7 @@ textarea {
 .model-detail-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(2, 6, 23, 0.8);
+    background: transparent;
     opacity: 0;
     pointer-events: none;
     transition: opacity 180ms ease;
@@ -4443,9 +4467,9 @@ textarea {
     pointer-events: none;
     overflow: hidden;
     border-radius: 28px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-    background: color-mix(in srgb, var(--bg-panel) 96%, var(--bg-app) 4%);
-    box-shadow: 0 18px 48px -24px rgba(2, 6, 23, 0.58), 0 0 0 1px color-mix(in srgb, var(--brand-primary) 14%, transparent);
+    border: 1px solid var(--border-strong);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-lg);
     transition: opacity 140ms ease, transform 160ms ease;
     z-index: 96;
 }
@@ -5490,7 +5514,7 @@ textarea {
     z-index: 97;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
-    background: rgba(2, 6, 23, 0.45);
+    background: transparent;
 }
 
 .task-token-shell {
@@ -5884,10 +5908,7 @@ textarea {
   display: grid;
   place-items: center;
   padding: 24px;
-  background:
-    radial-gradient(circle at top left, rgba(251, 191, 36, 0.16), transparent 32%),
-    radial-gradient(circle at bottom right, rgba(14, 165, 233, 0.18), transparent 28%),
-    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(17, 24, 39, 0.98));
+  background: var(--bg-app);
 }
 
 .boot-card {

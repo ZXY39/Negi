@@ -1768,6 +1768,21 @@ async def test_agent_browser_explicit_relative_profile_resolves_from_workspace(t
 
 
 @pytest.mark.asyncio
+async def test_agent_browser_resolves_local_cli_from_externaltools(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    handler = _load_agent_browser_handler(workspace)
+    local_cli = workspace / 'externaltools' / 'agent_browser' / 'node_modules' / '.bin' / (
+        'agent-browser.cmd' if os.name == 'nt' else 'agent-browser'
+    )
+    local_cli.parent.mkdir(parents=True, exist_ok=True)
+    local_cli.write_text('@echo off\n', encoding='utf-8')
+
+    prefix = await handler._resolve_command_prefix()
+
+    assert prefix == [str(local_cli.resolve(strict=False))]
+
+
+@pytest.mark.asyncio
 async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     handler = _load_agent_browser_handler(workspace)
@@ -1778,13 +1793,14 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
     async def _fake_resolve_command_prefix(self):
         return ['agent-browser']
 
-    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds):
+    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds, cancel_token):
         run_calls.append(
             {
                 'command_prefix': list(command_prefix),
                 'args': list(args),
                 'cwd': str(cwd),
                 'timeout_seconds': timeout_seconds,
+                'cancel_token': cancel_token,
             }
         )
         return {
@@ -1795,12 +1811,13 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
             'cwd': str(cwd),
         }
 
-    async def _fake_close_session(self, *, command_prefix, cwd, env, session):
+    async def _fake_close_session(self, *, command_prefix, cwd, env, session, cancel_token):
         close_calls.append(
             {
                 'command_prefix': list(command_prefix),
                 'cwd': str(cwd),
                 'session': session,
+                'cancel_token': cancel_token,
             }
         )
         return {
@@ -1832,6 +1849,7 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
             ],
             'cwd': str(workspace),
             'timeout_seconds': 300,
+            'cancel_token': None,
         }
     ]
     assert close_calls == [
@@ -1839,6 +1857,7 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
             'command_prefix': ['agent-browser'],
             'cwd': str(workspace),
             'session': 'g3ku-agent-browser',
+            'cancel_token': None,
         }
     ]
     assert payload['timed_out'] is True
@@ -1856,13 +1875,14 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
     async def _fake_resolve_command_prefix(self):
         return ['agent-browser']
 
-    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds):
+    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds, cancel_token):
         run_calls.append(
             {
                 'command_prefix': list(command_prefix),
                 'args': list(args),
                 'cwd': str(cwd),
                 'timeout_seconds': timeout_seconds,
+                'cancel_token': cancel_token,
             }
         )
         if len(run_calls) == 1:
@@ -1884,7 +1904,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
             'cwd': str(cwd),
         }
 
-    async def _fake_close_session(self, *, command_prefix, cwd, env, session):
+    async def _fake_close_session(self, *, command_prefix, cwd, env, session, cancel_token):
         close_calls.append(session)
         return {
             'ok': True,
@@ -1915,6 +1935,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
             ],
             'cwd': str(workspace),
             'timeout_seconds': 300,
+            'cancel_token': None,
         },
         {
             'command_prefix': ['agent-browser'],
@@ -1928,6 +1949,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
             ],
             'cwd': str(workspace),
             'timeout_seconds': 300,
+            'cancel_token': None,
         },
     ]
     assert close_calls == ['g3ku-agent-browser']
@@ -1950,4 +1972,6 @@ async def test_agent_browser_missing_cli_returns_install_guidance(tmp_path: Path
     assert payload['missing_dependency'] is True
     assert payload['error'] == 'agent-browser CLI not found'
     assert payload['repo_url'] == 'https://github.com/vercel-labs/agent-browser'
+    assert payload['install_root'] == str((workspace / 'externaltools' / 'agent_browser').resolve(strict=False))
+    assert payload['temp_root'] == str((workspace / 'temp' / 'agent_browser').resolve(strict=False))
     assert 'load_tool_context(tool_id="agent_browser")' in payload['next_actions']

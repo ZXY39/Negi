@@ -408,6 +408,18 @@ function getCommunicationTemplate(channelId) {
     return String(COMMUNICATION_JSON_TEMPLATES[key] || "{}").trim();
 }
 
+function hasCommunicationConfig(item) {
+    const config = item && typeof item.config === "object" ? item.config : null;
+    return !!(config && !Array.isArray(config) && Object.keys(config).length);
+}
+
+function initialCommunicationDraftText(item) {
+    if (hasCommunicationConfig(item)) {
+        return String(item.json_text || JSON.stringify(item.config || {}, null, 2));
+    }
+    return getCommunicationTemplate(item?.id);
+}
+
 function syncCommunicationDirtyState() {
     const next =
         S.communicationDraftEnabled !== S.communicationBaselineEnabled ||
@@ -521,10 +533,8 @@ function renderCommunicationDetail() {
                 </label>
                 <div class="resource-draft-hint${S.communicationDirty ? " is-dirty" : ""}" ${S.communicationDirty ? "" : "hidden"}></div>
                 <div class="resource-section">
-                    <h3>JSON 配置</h3>
-                    <div class="resource-copy-block">此处仅编辑该渠道的 JSON 配置对象；启用状态请使用上方开关。支持 <code>//</code> 与 <code>/* ... */</code> 注释，保存时会自动去除注释和多余逗号。</div>
                     <div class="communication-section-head">
-                        <span class="communication-section-spacer" aria-hidden="true"></span>
+                        <h3>JSON 配置</h3>
                         <button type="button" class="toolbar-btn ghost small" id="communication-load-template-btn">加载模板</button>
                     </div>
                     <textarea id="communication-json-editor" rows="18" class="resource-editor communication-json-editor">${esc(S.communicationDraftText)}</textarea>
@@ -532,20 +542,6 @@ function renderCommunicationDetail() {
             </div>
         </article>
     `;
-    const communicationSection = U.communicationDetail.querySelector(".resource-section");
-    const sectionHeading = communicationSection?.querySelector("h3");
-    const sectionCopy = communicationSection?.querySelector(".resource-copy-block");
-    const sectionHead = communicationSection?.querySelector(".communication-section-head");
-    const templateButton = U.communicationDetail.querySelector("#communication-load-template-btn");
-    if (sectionHead && sectionHeading && sectionCopy) {
-        sectionHead.innerHTML = "";
-        sectionHead.append(sectionHeading);
-        if (templateButton) {
-            templateButton.textContent = "加载模板";
-            sectionHead.append(templateButton);
-        }
-        communicationSection.insertBefore(sectionHead, sectionCopy);
-    }
     U.communicationDetail.querySelector("#communication-close-btn")?.addEventListener("click", clearCommunicationSelection);
     U.communicationDetail.querySelector("#communication-save-btn")?.addEventListener("click", () => void saveCommunication());
     U.communicationDetail.querySelector("#communication-enabled-toggle")?.addEventListener("change", (e) => {
@@ -609,7 +605,7 @@ async function openCommunication(channelId, quiet = false) {
         S.selectedCommunication = item;
         S.communicationBaselineEnabled = !!item.enabled;
         S.communicationDraftEnabled = !!item.enabled;
-        S.communicationBaselineText = String(item.json_text || JSON.stringify(item.config || {}, null, 2));
+        S.communicationBaselineText = initialCommunicationDraftText(item);
         S.communicationDraftText = S.communicationBaselineText;
         S.communicationDirty = false;
         renderCommunications();
@@ -663,15 +659,13 @@ async function saveCommunication() {
     renderCommunicationActions();
     showToast({ title: "保存中", text: `正在保存 ${item.label} 配置...`, kind: "info", persistent: true });
     try {
-        await ApiClient.updateChinaChannel(channelId, {
+        const saveResult = await ApiClient.updateChinaChannel(channelId, {
             enabled: S.communicationDraftEnabled,
             config: configPayload,
         });
-        showToast({ title: "测试连接中", text: `正在测试 ${item.label} 的当前连接状态...`, kind: "info", persistent: true });
-        const probe = await ApiClient.testChinaChannel(channelId);
         await loadCommunications({ renderDetail: false });
         await openCommunication(channelId, true);
-        const result = probe?.result || {};
+        const result = saveResult?.probe_result || saveResult?.probeResult || {};
         const message = [result.message, ...(Array.isArray(result.details) ? result.details : [])].filter(Boolean).join("；");
         showToast({
             title: result.title || "保存成功",
@@ -680,7 +674,16 @@ async function saveCommunication() {
             durationMs: result.status === "error" ? 3200 : 2600,
         });
     } catch (e) {
-        showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2800 });
+        const probe = e?.data?.probe || null;
+        const message = probe
+            ? [probe.message, ...(Array.isArray(probe.details) ? probe.details : [])].filter(Boolean).join("；")
+            : (e.message || "Unknown error");
+        showToast({
+            title: probe?.title || "保存失败",
+            text: message,
+            kind: probe ? communicationToastKind(probe.status) : "error",
+            durationMs: 3200,
+        });
     } finally {
         S.communicationBusy = false;
         renderCommunicationActions();

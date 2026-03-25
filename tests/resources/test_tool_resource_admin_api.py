@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from g3ku.resources import ResourceManager
+import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.security import get_bootstrap_security_service
 from g3ku.session.manager import Session
 from main.api import admin_rest
@@ -20,6 +21,24 @@ from main.models import TaskRecord
 from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _mock_ceo_catalog_config(monkeypatch) -> None:
+    monkeypatch.setattr(
+        web_ceo_sessions,
+        "load_config",
+        lambda: SimpleNamespace(
+            china_bridge=SimpleNamespace(
+                channels=SimpleNamespace(
+                    qqbot=SimpleNamespace(enabled=False, accounts={}),
+                    dingtalk=SimpleNamespace(enabled=False, accounts={}),
+                    wecom=SimpleNamespace(enabled=False, accounts={}),
+                    wecom_app=SimpleNamespace(enabled=False, accounts={}),
+                    feishu_china=SimpleNamespace(enabled=False, accounts={}),
+                )
+            )
+        ),
+    )
 
 
 def _resource_app_config() -> SimpleNamespace:
@@ -687,7 +706,8 @@ def test_main_runtime_settings_endpoint_reads_and_updates_global_depth(tmp_path:
     assert saved['mainRuntime']['defaultMaxDepth'] == 9
 
 
-def test_ceo_session_activate_endpoint_allows_switching_from_running_session(tmp_path: Path):
+def test_ceo_session_activate_endpoint_allows_switching_from_running_session(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
     class _SessionManager:
         def __init__(self, sessions: list[Session], paths: dict[str, Path]):
             self._sessions = {session.key: session for session in sessions}
@@ -746,7 +766,8 @@ def test_ceo_session_activate_endpoint_allows_switching_from_running_session(tmp
     assert ceo_sessions.WebCeoStateStore(tmp_path).get_active_session_id() == other.key
 
 
-def test_ceo_session_list_endpoint_reports_running_state(tmp_path: Path):
+def test_ceo_session_list_endpoint_reports_running_state(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
     class _SessionManager:
         def __init__(self, sessions: list[Session], paths: dict[str, Path]):
             self._sessions = {session.key: session for session in sessions}
@@ -809,6 +830,7 @@ def test_ceo_session_create_endpoint_allows_new_session_while_current_session_is
     tmp_path: Path,
     monkeypatch,
 ):
+    _mock_ceo_catalog_config(monkeypatch)
     class _SessionManager:
         def __init__(self, sessions: list[Session], paths: dict[str, Path]):
             self._sessions = {session.key: session for session in sessions}
@@ -872,7 +894,8 @@ def test_ceo_session_create_endpoint_allows_new_session_while_current_session_is
     assert ceo_sessions.WebCeoStateStore(tmp_path).get_active_session_id() == 'web:ceo-new'
 
 
-def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: Path):
+def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
     class _SessionManager:
         def __init__(self, sessions: list[Session], paths: dict[str, Path]):
             self._sessions = {session.key: session for session in sessions}
@@ -1080,7 +1103,7 @@ def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
             'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'roleIterations': {'ceo': 40, 'execution': 16, 'inspection': 16}, 'multiAgent': {'orchestratorModelKey': None}},
             'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': '', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
             'providers': {},
-            'gateway': {'host': '127.0.0.1', 'port': 1, 'heartbeat': {'enabled': True, 'intervalS': 1}},
+            'web': {'host': '127.0.0.1', 'port': 1},
             'tools': {'exec': {'timeout': 10}},
             'resources': {'enabled': True, 'skillsDir': 'skills', 'toolsDir': 'tools', 'manifestName': 'resource.yaml', 'reload': {'enabled': True, 'pollIntervalMs': 1000, 'debounceMs': 400, 'lazyReloadOnAccess': True, 'keepLastGoodVersion': True}, 'locks': {'lockDir': '.g3ku/resource-locks', 'logicalDeleteGuard': True, 'windowsFsLock': True}, 'statePath': '.g3ku/resources.state.json'},
             'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4},
@@ -1122,7 +1145,7 @@ def _write_runtime_config(workspace: Path) -> None:
             'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'roleIterations': {'ceo': 40, 'execution': 16, 'inspection': 16}, 'multiAgent': {'orchestratorModelKey': None}},
             'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': 'demo-key', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
             'providers': {'openai': {'apiKey': '', 'apiBase': None, 'extraHeaders': None}},
-            'gateway': {'host': '127.0.0.1', 'port': 1, 'heartbeat': {'enabled': True, 'intervalS': 1}},
+            'web': {'host': '127.0.0.1', 'port': 1},
             'toolSecrets': {},
             'resources': {'enabled': True, 'skillsDir': 'skills', 'toolsDir': 'tools', 'manifestName': 'resource.yaml', 'reload': {'enabled': True, 'pollIntervalMs': 1000, 'debounceMs': 400, 'lazyReloadOnAccess': True, 'keepLastGoodVersion': True}, 'locks': {'lockDir': '.g3ku/resource-locks', 'logicalDeleteGuard': True, 'windowsFsLock': True}, 'statePath': '.g3ku/resources.state.json'},
             'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4},
@@ -1455,6 +1478,11 @@ def test_china_bridge_channel_save_updates_config_file(tmp_path: Path, monkeypat
     app.include_router(admin_rest.router, prefix='/api')
     client = TestClient(app)
 
+    async def _probe(_channel_id: str, _payload: dict[str, object]):
+        return {'status': 'success', 'checked': True, 'message': 'probe ok', 'details': []}
+
+    monkeypatch.setattr(admin_rest, '_probe_china_channel_platform_connectivity', _probe)
+
     response = client.put(
         '/api/china-bridge/channels/qqbot',
         json={'enabled': True, 'config': {'appId': '123456', 'clientSecret': 'demo-secret', 'accounts': {'default': {'token': 'demo-token'}}}},
@@ -1463,10 +1491,67 @@ def test_china_bridge_channel_save_updates_config_file(tmp_path: Path, monkeypat
     assert response.status_code == 200
     payload = response.json()
     assert payload['item']['enabled'] is True
+    assert payload['probe_result']['status'] == 'warning'
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['chinaBridge']['enabled'] is True
     assert saved['chinaBridge']['channels']['qqbot']['enabled'] is True
     assert saved['chinaBridge']['channels']['qqbot']['appId'] == '123456'
+
+
+def test_china_bridge_single_top_level_account_counts_as_one(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    async def _probe(_channel_id: str, _payload: dict[str, object]):
+        return {'status': 'success', 'checked': True, 'message': 'probe ok', 'details': []}
+
+    monkeypatch.setattr(admin_rest, '_probe_china_channel_platform_connectivity', _probe)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    save_response = client.put(
+        '/api/china-bridge/channels/qqbot',
+        json={'enabled': True, 'config': {'appId': '123456', 'clientSecret': 'demo-secret'}},
+    )
+
+    assert save_response.status_code == 200
+    list_response = client.get('/api/china-bridge/channels')
+    assert list_response.status_code == 200
+    items = {item['id']: item for item in list_response.json()['items']}
+    assert items['qqbot']['account_count'] == 1
+
+
+def test_china_bridge_channel_save_rejects_probe_failure_before_persisting(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    async def _probe(_channel_id: str, _payload: dict[str, object]):
+        return {'status': 'error', 'checked': True, 'message': 'credentials invalid', 'details': ['qqbot rejected appId']}
+
+    monkeypatch.setattr(admin_rest, '_probe_china_channel_platform_connectivity', _probe)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/china-bridge/channels/qqbot',
+        json={'enabled': True, 'config': {'appId': '123456', 'clientSecret': 'demo-secret'}},
+    )
+
+    assert response.status_code == 400
+    detail = response.json()['detail']
+    assert detail['code'] == 'china_channel_probe_failed'
+    assert detail['probe']['message'] == 'credentials invalid'
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['chinaBridge']['channels']['qqbot']['enabled'] is False
+    assert saved['chinaBridge']['channels']['qqbot']['accounts'] == {}
 
 
 def test_china_bridge_channel_test_reports_disabled_or_validated(tmp_path: Path, monkeypatch):
@@ -1479,6 +1564,11 @@ def test_china_bridge_channel_test_reports_disabled_or_validated(tmp_path: Path,
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
     client = TestClient(app)
+
+    async def _probe(_channel_id: str, _payload: dict[str, object]):
+        return {'status': 'success', 'checked': True, 'message': 'probe ok', 'details': []}
+
+    monkeypatch.setattr(admin_rest, '_probe_china_channel_platform_connectivity', _probe)
 
     disabled = client.post('/api/china-bridge/channels/qqbot/test')
     assert disabled.status_code == 200
@@ -1776,6 +1866,7 @@ async def test_admin_endpoints_expose_builtin_agent_browser_fields(tmp_path: Pat
         payload = toolskill_response.json()
         assert payload['tool_type'] == 'internal'
         assert payload['callable'] is True
+        assert 'externaltools/agent_browser' in payload['content']
         assert '## 安装' in payload['content']
     finally:
         await service.close()
@@ -1783,21 +1874,11 @@ async def test_admin_endpoints_expose_builtin_agent_browser_fields(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path: Path, monkeypatch):
+async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     _copy_repo_tools(workspace, 'agent_browser', 'load_tool_context')
-
-    import shutil
-    import g3ku.resources.registry as registry_module
-
-    original_which = shutil.which
-    monkeypatch.setattr(
-        registry_module.shutil,
-        'which',
-        lambda name: None if name == 'agent-browser' else original_which(name),
-    )
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -1827,7 +1908,8 @@ async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path:
         assert payload['tool_id'] == 'agent_browser'
         assert payload['callable'] is True
         assert payload['available'] is False
-        assert payload['warnings'] == ['missing required bins']
+        assert len(payload['warnings']) == 1
+        assert payload['warnings'][0].startswith('missing required paths: externaltools/agent_browser/')
         assert '# agent_browser' in payload['content']
     finally:
         await service.close()

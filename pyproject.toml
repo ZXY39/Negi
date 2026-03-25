@@ -64,7 +64,7 @@ dev = [
 [project.scripts]
 g3ku-agent = "g3ku.cli.commands:app"
 g3ku-web = "g3ku.web.main:run"
-g3ku = "g3ku.g3ku_cli:main"
+g3ku = "g3ku.cli.commands:app"
 
 [build-system]
 requires = ["hatchling", "editables>=0.5,<1.0.0"]

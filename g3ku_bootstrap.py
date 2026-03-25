@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     _ensure_project_installed()
     args = list(argv if argv is not None else sys.argv[1:])
     try:
-        completed = subprocess.run([str(VENV_PYTHON), "-m", "g3ku.g3ku_cli", *args], cwd=str(PROJECT_ROOT))
+        completed = subprocess.run([str(VENV_PYTHON), "-m", "g3ku", *args], cwd=str(PROJECT_ROOT))
         return int(completed.returncode or 0)
     except KeyboardInterrupt:
         return 130

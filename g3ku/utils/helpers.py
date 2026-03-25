@@ -60,6 +60,13 @@ def timestamp() -> str:
 
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
+_ACTIVE_WORKSPACE_TEMPLATE_FILES: tuple[tuple[str, str], ...] = (
+    ("memory/MEMORY.md", "memory/MEMORY.md"),
+)
+_ACTIVE_WORKSPACE_PLACEHOLDERS: tuple[str, ...] = (
+    "memory/HISTORY.md",
+)
+
 
 def safe_filename(name: str) -> str:
     """Replace unsafe path characters with underscores."""
@@ -67,7 +74,7 @@ def safe_filename(name: str) -> str:
 
 
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
-    """Sync bundled templates to workspace. Only creates missing files."""
+    """Sync active bundled templates to workspace. Only creates missing files."""
     from importlib.resources import files as pkg_files
     try:
         tpl = pkg_files("g3ku") / "templates"
@@ -83,13 +90,12 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(src.read_text(encoding="utf-8") if src else "", encoding="utf-8")
-        added.append(str(dest.relative_to(workspace)))
+        added.append(dest.relative_to(workspace).as_posix())
 
-    for item in tpl.iterdir():
-        if item.name.endswith(".md"):
-            _write(item, workspace / item.name)
-    _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
-    _write(None, workspace / "memory" / "HISTORY.md")
+    for src_rel, dest_rel in _ACTIVE_WORKSPACE_TEMPLATE_FILES:
+        _write(tpl.joinpath(*Path(src_rel).parts), workspace / dest_rel)
+    for dest_rel in _ACTIVE_WORKSPACE_PLACEHOLDERS:
+        _write(None, workspace / dest_rel)
     (workspace / "skills").mkdir(exist_ok=True)
 
     if added and not silent:

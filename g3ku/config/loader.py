@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from g3ku.china_bridge.registry import china_channel_attr, china_channel_ids, china_channel_spec
 from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_ITERATIONS
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
 from g3ku.security import (
@@ -219,9 +220,20 @@ def _ensure_no_removed_channel_config(raw_data: dict[str, Any]) -> None:
     legacy_keys = sorted(str(key) for key in channels.keys())
     raise ValueError(
         "Legacy channels config has been removed. "
-        "Move China platform settings to chinaBridge.channels.{qqbot,dingtalk,wecom,wecomApp,feishuChina}, "
+        "Move China platform settings under chinaBridge.channels using canonical ids "
+        "{qqbot,dingtalk,wecom,wecom-app,wecom-kf,wechat-mp,feishu-china}, "
         "move sendProgress/sendToolHints to chinaBridge.sendProgress/chinaBridge.sendToolHints, "
         f"and remove channels.* from {get_config_path()}. Found: {', '.join(legacy_keys)}"
+    )
+
+
+def _ensure_no_removed_gateway_config(raw_data: dict[str, Any]) -> None:
+    gateway = raw_data.get("gateway")
+    if not isinstance(gateway, dict):
+        return
+    raise ValueError(
+        "Legacy gateway config has been removed. "
+        f"Move gateway.host/gateway.port to web.host/web.port in {get_config_path()} and delete gateway."
     )
 
 
@@ -353,6 +365,10 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         provider_name: _provider_payload(cfg, provider_name)
         for provider_name in _referenced_provider_names(cfg)
     }
+    channel_payloads = {
+        channel_id: getattr(cfg.china_bridge.channels, china_channel_attr(channel_id)).model_dump(by_alias=True, exclude_none=True)
+        for channel_id in china_channel_ids()
+    }
 
     return {
         "agents": {
@@ -379,9 +395,9 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "roles": routes,
         },
         "providers": providers,
-        "gateway": {
-            "host": cfg.gateway.host,
-            "port": cfg.gateway.port,
+        "web": {
+            "host": cfg.web.host,
+            "port": cfg.web.port,
         },
         "toolSecrets": {
             str(name): dict(payload or {})
@@ -429,13 +445,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "logLevel": cfg.china_bridge.log_level,
             "sendProgress": cfg.china_bridge.send_progress,
             "sendToolHints": cfg.china_bridge.send_tool_hints,
-            "channels": {
-                "qqbot": cfg.china_bridge.channels.qqbot.model_dump(by_alias=True, exclude_none=True),
-                "dingtalk": cfg.china_bridge.channels.dingtalk.model_dump(by_alias=True, exclude_none=True),
-                "wecom": cfg.china_bridge.channels.wecom.model_dump(by_alias=True, exclude_none=True),
-                "wecomApp": cfg.china_bridge.channels.wecom_app.model_dump(by_alias=True, exclude_none=True),
-                "feishuChina": cfg.china_bridge.channels.feishu_china.model_dump(by_alias=True, exclude_none=True),
-            },
+            "channels": channel_payloads,
         },
     }
 
@@ -445,7 +455,7 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
     if middlewares is not None:
         raise ValueError(
             "agents.defaults.middlewares is not allowed in project config. "
-            "Remove runtime middlewares from .g3ku/config.json; g3ku start does not use them."
+            "Remove runtime middlewares from .g3ku/config.json; g3ku web does not use them."
         )
 
     payload = _runtime_config_payload(cfg)
@@ -508,6 +518,7 @@ def load_config(config_path: Path | None = None) -> Config:
     _ensure_no_removed_role_scopes(raw_data)
     _ensure_no_removed_tools_config(raw_data)
     _ensure_no_removed_channel_config(raw_data)
+    _ensure_no_removed_gateway_config(raw_data)
     migrated_llm, changed = migrate_raw_config_if_needed(deepcopy(raw_data), workspace=Path.cwd())
     if changed:
         raw_data = migrated_llm
@@ -590,11 +601,17 @@ def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
         bridge = data["china_bridge"]
         channels = bridge.get("channels")
         if isinstance(channels, dict):
-            if "wecom_app" not in channels and isinstance(channels.get("wecomApp"), dict):
-                channels["wecom_app"] = channels["wecomApp"]
-            if "feishu_china" not in channels and isinstance(channels.get("feishuChina"), dict):
-                channels["feishu_china"] = channels["feishuChina"]
-    gateway = data.get("gateway")
-    if isinstance(gateway, dict):
-        gateway.pop("heartbeat", None)
+            legacy_pairs = (
+                ("wecomApp", "wecom-app"),
+                ("wecom_app", "wecom-app"),
+                ("wecomKf", "wecom-kf"),
+                ("wecom_kf", "wecom-kf"),
+                ("wechatMp", "wechat-mp"),
+                ("wechat_mp", "wechat-mp"),
+                ("feishuChina", "feishu-china"),
+                ("feishu_china", "feishu-china"),
+            )
+            for old_key, new_key in legacy_pairs:
+                if new_key not in channels and isinstance(channels.get(old_key), dict):
+                    channels[new_key] = channels[old_key]
     return data

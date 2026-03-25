@@ -1189,15 +1189,16 @@ class MainRuntimeService:
         for family in self.resource_registry.list_tool_families():
             callable_family = bool(getattr(family, 'callable', True))
             actions = []
+            context_lookup_only = False
             for action in family.actions:
                 decision = self.policy_engine.evaluate_tool_action(
                     subject=subject,
                     tool_id=family.tool_id,
                     action_id=action.action_id,
                 )
+                executor_visible = not callable_family or bool(set(action.executor_names) & visible_names)
                 if decision.allowed and (
-                    not callable_family
-                    or bool(set(action.executor_names) & visible_names)
+                    executor_visible
                 ):
                     actions.append(action)
                     continue
@@ -1207,8 +1208,22 @@ class MainRuntimeService:
                     action=action,
                 ):
                     actions.append(action)
+                    context_lookup_only = True
+                    continue
+                if self._should_expose_context_lookup_only_tool_action(
+                    actor_role=actor_role,
+                    family=family,
+                    action=action,
+                    decision=decision,
+                    executor_visible=executor_visible,
+                ):
+                    actions.append(action)
+                    context_lookup_only = True
             if actions:
-                families.append(family.model_copy(update={'actions': actions}))
+                metadata = dict(getattr(family, 'metadata', {}) or {})
+                if context_lookup_only:
+                    metadata['context_lookup_only'] = True
+                families.append(family.model_copy(update={'actions': actions, 'metadata': metadata}))
         return families
 
     @staticmethod
@@ -1225,6 +1240,36 @@ class MainRuntimeService:
             if str(role or '').strip()
         }
         return str(actor_role or '').strip() in allowed_roles
+
+    @staticmethod
+    def _should_expose_context_lookup_only_tool_action(
+        *,
+        actor_role: str,
+        family: Any,
+        action: Any,
+        decision: Any,
+        executor_visible: bool,
+    ) -> bool:
+        if not bool(getattr(decision, 'allowed', False)):
+            return False
+        if executor_visible:
+            return False
+        if not bool(getattr(family, 'enabled', True)):
+            return False
+        if not bool(getattr(family, 'available', True)):
+            return False
+        if not bool(getattr(family, 'callable', True)):
+            return False
+        if not bool(getattr(action, 'agent_visible', True)):
+            return False
+        allowed_roles = {
+            str(role or '').strip()
+            for role in list(getattr(action, 'allowed_roles', []) or [])
+            if str(role or '').strip()
+        }
+        if str(actor_role or '').strip() not in allowed_roles:
+            return False
+        return True
 
     def _visible_tool_family_map(self, *, actor_role: str, session_id: str) -> dict[str, Any]:
         mapping: dict[str, Any] = {}

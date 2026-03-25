@@ -87,7 +87,7 @@ class LoopRuntimeMiddleware(AgentMiddleware):
                     self._loop._preview(request.system_message.text, max_chars=1200),
                 )
         memory_block = ""
-        if self._loop.memory_manager and self._loop._use_rag_memory():
+        if self._loop.memory_manager:
             try:
                 user_text = ""
                 for message in reversed(request.messages):
@@ -102,7 +102,7 @@ class LoopRuntimeMiddleware(AgentMiddleware):
                         session_key=getattr(runtime_context, "session_key", None),
                     )
             except Exception:
-                logger.exception("RAG retrieval middleware failed")
+                logger.exception("Memory retrieval middleware failed")
 
         model_settings = dict(request.model_settings or {})
         model_settings.setdefault("temperature", self._loop.temperature)

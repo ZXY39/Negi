@@ -363,7 +363,10 @@ def write_inflight_turn_snapshot(session_id: str, snapshot: dict[str, Any] | Non
     if not isinstance(snapshot, dict) or not snapshot:
         path.unlink(missing_ok=True)
         return
-    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = dict(snapshot)
+    payload["session_id"] = key
+    payload["persisted_at"] = datetime.now().isoformat()
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def clear_inflight_turn_snapshot(session_id: str) -> None:
@@ -371,7 +374,89 @@ def clear_inflight_turn_snapshot(session_id: str) -> None:
     path.unlink(missing_ok=True)
 
 
-def build_session_summary(session: Any, *, is_active: bool, is_running: bool = False) -> dict[str, Any]:
+def _decode_inflight_session_id(path: Path, snapshot: dict[str, Any] | None = None) -> str:
+    payload = snapshot if isinstance(snapshot, dict) else {}
+    raw = str(payload.get("session_id") or payload.get("session_key") or "").strip()
+    if raw.startswith("web:"):
+        return raw
+    stem = str(path.stem or "").strip()
+    if stem.startswith("web_"):
+        return f"web:{stem[4:]}"
+    return ""
+
+
+def list_inflight_web_ceo_sessions() -> dict[str, dict[str, Any]]:
+    root = workspace_path() / WEB_CEO_INFLIGHT_ROOT
+    if not root.exists():
+        return {}
+    items: dict[str, dict[str, Any]] = {}
+    for path in root.glob("*.json"):
+        try:
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(snapshot, dict):
+            continue
+        session_id = _decode_inflight_session_id(path, snapshot)
+        if not session_id:
+            continue
+        items[session_id] = snapshot
+    return items
+
+
+def _inflight_user_message(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    user_message = snapshot.get("user_message")
+    return user_message if isinstance(user_message, dict) else None
+
+
+def _inflight_preview_text(snapshot: dict[str, Any] | None) -> str:
+    user_message = _inflight_user_message(snapshot)
+    if user_message is not None:
+        preview = summarize_preview_text(user_message.get("content") or "")
+        if preview:
+            return preview
+    assistant_preview = summarize_preview_text((snapshot or {}).get("assistant_text") or "")
+    if assistant_preview:
+        return assistant_preview
+    for item in reversed(list((snapshot or {}).get("tool_events") or [])):
+        if not isinstance(item, dict):
+            continue
+        preview = summarize_preview_text(item.get("text") or "")
+        if preview:
+            return preview
+    return ""
+
+
+def _inflight_updated_at(snapshot: dict[str, Any] | None) -> str:
+    if not isinstance(snapshot, dict):
+        return ""
+    candidates: list[str] = []
+    user_message = _inflight_user_message(snapshot)
+    if user_message is not None:
+        timestamp = str(user_message.get("timestamp") or "").strip()
+        if timestamp:
+            candidates.append(timestamp)
+    for item in list(snapshot.get("tool_events") or []):
+        if not isinstance(item, dict):
+            continue
+        timestamp = str(item.get("timestamp") or "").strip()
+        if timestamp:
+            candidates.append(timestamp)
+    persisted_at = str(snapshot.get("persisted_at") or "").strip()
+    if persisted_at:
+        candidates.append(persisted_at)
+    return max(candidates) if candidates else ""
+
+
+def build_session_summary(
+    session: Any,
+    *,
+    is_active: bool,
+    is_running: bool = False,
+    inflight_turn: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     ensure_ceo_session_metadata(session)
     messages = list(getattr(session, "messages", []) or [])
     preview_text = str(session.metadata.get("last_preview_text") or "").strip()
@@ -381,16 +466,33 @@ def build_session_summary(session: Any, *, is_active: bool, is_running: bool = F
             if isinstance(content, str) and content.strip():
                 preview_text = summarize_preview_text(content)
                 break
+    inflight_preview = _inflight_preview_text(inflight_turn)
+    if inflight_preview:
+        preview_text = inflight_preview
     created_at = getattr(session, "created_at", None)
     updated_at = getattr(session, "updated_at", None)
+    inflight_updated_at = _inflight_updated_at(inflight_turn)
+    updated_at_text = updated_at.isoformat() if isinstance(updated_at, datetime) else str(updated_at or "")
+    if inflight_updated_at and inflight_updated_at > updated_at_text:
+        updated_at_text = inflight_updated_at
+    title = str(session.metadata.get("title") or DEFAULT_CEO_SESSION_TITLE)
+    if title == DEFAULT_CEO_SESSION_TITLE:
+        user_message = _inflight_user_message(inflight_turn)
+        if user_message is not None:
+            candidate_title = summarize_session_title(user_message.get("content") or "")
+            if candidate_title:
+                title = candidate_title
+    message_count = len(messages)
+    if _inflight_user_message(inflight_turn) is not None:
+        message_count += 1
     last_llm_output = latest_llm_output_at(session)
     return {
         "session_id": str(getattr(session, "key", "") or ""),
-        "title": str(session.metadata.get("title") or DEFAULT_CEO_SESSION_TITLE),
+        "title": title,
         "preview_text": preview_text,
-        "message_count": len(messages),
+        "message_count": message_count,
         "created_at": created_at.isoformat() if isinstance(created_at, datetime) else str(created_at or ""),
-        "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else str(updated_at or ""),
+        "updated_at": updated_at_text,
         "last_llm_output_at": last_llm_output,
         "is_active": bool(is_active),
         "is_running": bool(is_running),
@@ -607,20 +709,34 @@ def list_local_ceo_sessions(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     changed_keys: list[str] = []
-    for item in session_manager.list_sessions():
-        key = str(item.get("key") or "").strip()
+    persisted_keys = {
+        str(item.get("key") or "").strip()
+        for item in session_manager.list_sessions()
+        if str(item.get("key") or "").strip().startswith("web:")
+    }
+    inflight_by_session = list_inflight_web_ceo_sessions()
+    session_keys = persisted_keys | set(inflight_by_session.keys())
+    for key in sorted(session_keys):
         if not key.startswith("web:"):
             continue
         session = session_manager.get_or_create(key)
         if ensure_ceo_session_metadata(session):
-            changed_keys.append(key)
+            if key in persisted_keys:
+                changed_keys.append(key)
         is_running = False
         if callable(is_running_resolver):
             try:
                 is_running = bool(is_running_resolver(key))
             except Exception:
                 is_running = False
-        rows.append(build_session_summary(session, is_active=key == active_session_id, is_running=is_running))
+        rows.append(
+            build_session_summary(
+                session,
+                is_active=key == active_session_id,
+                is_running=is_running,
+                inflight_turn=inflight_by_session.get(key),
+            )
+        )
     for key in changed_keys:
         session_manager.save(session_manager.get_or_create(key))
     rows.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("session_id") or "")), reverse=True)
@@ -846,11 +962,9 @@ def resolve_active_ceo_session_id(session_manager: Any, state_store: WebCeoState
 
 def ensure_active_web_ceo_session(session_manager: Any, state_store: WebCeoStateStore) -> str:
     active_session_id = state_store.get_active_session_id()
-    available_ids = [
-        str(item.get("key") or "").strip()
-        for item in session_manager.list_sessions()
-        if str(item.get("key") or "").strip().startswith("web:")
-    ]
+    catalog = build_ceo_session_catalog(session_manager, active_session_id=active_session_id)
+    local_items = list(catalog.get("items") or [])
+    available_ids = [str(item.get("session_id") or "").strip() for item in local_items if str(item.get("session_id") or "").strip()]
     if active_session_id and active_session_id in available_ids:
         return active_session_id
     if available_ids:

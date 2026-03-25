@@ -75,12 +75,92 @@ def test_exec_tool_builds_subprocess_env_with_project_python(monkeypatch) -> Non
     assert env['G3KU_PROJECT_PYTHON'] == fake_payload['project_python']
     assert env['G3KU_PROJECT_PYTHON_HINT'] == fake_payload['project_python_hint']
     assert env['VIRTUAL_ENV'] == fake_payload['project_virtual_env']
+    assert env['G3KU_TMP_DIR'].endswith('temp')
+    assert env['G3KU_EXTERNAL_TOOLS_DIR'].endswith('externaltools')
     assert env['PATH'].split(os.pathsep)[:4] == [
         r'C:\Python314',
         r'C:\Python314\Scripts',
         r'D:\extra\bin',
         r'C:\Windows\System32',
     ]
+
+
+def test_exec_tool_builds_subprocess_env_with_managed_temp_and_externaltools(tmp_path) -> None:
+    tool = ExecTool(workspace_root=str(tmp_path))
+
+    env = tool._build_subprocess_env(
+        runtime={'session_key': 'web:shared', 'temp_dir': str(tmp_path / 'legacy-temp')},
+        cwd=str(tmp_path),
+    )
+
+    assert env['G3KU_TMP_DIR'] == str(tmp_path / 'temp')
+    assert env['G3KU_TEMP_DIR'] == str(tmp_path / 'temp')
+    assert env['G3KU_EXTERNAL_TOOLS_DIR'] == str(tmp_path / 'externaltools')
+    assert env['G3KU_RUNTIME_TEMP_DIR'] == str(tmp_path / 'legacy-temp')
+    assert env['TMP'] == str(tmp_path / 'temp')
+    assert env['TEMP'] == str(tmp_path / 'temp')
+    assert (tmp_path / 'temp').is_dir()
+    assert (tmp_path / 'externaltools').is_dir()
+
+
+def test_exec_tool_blocks_downloads_outside_managed_dirs(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.setattr(ExecTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = ExecTool(workspace_root=str(workspace))
+
+    error = tool._enforce_command_path_policy(
+        command='curl -L https://example.com/tool.zip -o tool.zip',
+        cwd=str(workspace),
+    )
+
+    assert error is not None
+    assert str(workspace / 'temp') in error
+    assert str(workspace / 'externaltools') in error
+
+
+def test_exec_tool_allows_downloads_when_target_is_temp(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.setattr(ExecTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = ExecTool(workspace_root=str(workspace))
+
+    error = tool._enforce_command_path_policy(
+        command=r'curl -L https://example.com/tool.zip -o .\temp\tool.zip',
+        cwd=str(workspace),
+    )
+
+    assert error is None
+
+
+def test_exec_tool_blocks_install_payloads_under_tools_directory(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.setattr(ExecTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = ExecTool(workspace_root=str(workspace))
+
+    error = tool._enforce_command_path_policy(
+        command=r'git clone https://example.com/demo.git .\tools\demo',
+        cwd=str(workspace),
+    )
+
+    assert error is not None
+    assert 'registration-only' in error.lower()
+
+
+def test_exec_tool_blocks_global_tool_install_commands(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.setattr(ExecTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = ExecTool(workspace_root=str(workspace))
+
+    error = tool._enforce_command_path_policy(
+        command='winget install Git.Git',
+        cwd=str(workspace),
+    )
+
+    assert error is not None
+    assert 'global tool installs are blocked' in error.lower()
 
 
 @pytest.mark.asyncio

@@ -34,13 +34,7 @@ class RuntimeBootstrapBridge:
             logger.warning('Memory self-check: tools/memory_runtime is disabled.')
             return
         mode = str(getattr(cfg, 'mode', 'legacy') or 'legacy').lower()
-        if mode != 'rag':
-            logger.warning(
-                "Memory self-check alert: tools/memory_runtime mode='{}' (expected 'rag').",
-                mode,
-            )
-        else:
-            logger.info('Memory self-check: mode=rag.')
+        logger.info('Memory self-check: mode={}.', mode)
 
     def init_resource_runtime(self) -> None:
         cfg = getattr(self._loop, 'resource_config', None)
@@ -257,22 +251,24 @@ class RuntimeBootstrapBridge:
         if cfg is None or not getattr(cfg, 'enabled', False):
             return
 
-        if self._loop._use_rag_memory():
-            try:
-                manager_cls = getattr(self._loop, '_memory_manager_cls', None)
-                if manager_cls is None:
-                    raise RuntimeError('memory manager class is not configured')
-                self._loop.memory_manager = manager_cls(self._loop.workspace, cfg)
-                self._loop._store = self._loop.memory_manager.store
-                self._loop._store_enabled = True
-                if getattr(self._loop, 'main_task_service', None) is not None:
-                    self._loop.main_task_service.memory_manager = self._loop.memory_manager
-                logger.info('RAG memory store enabled ({})', type(self._loop._store).__name__)
-            except Exception as exc:
-                logger.warning('RAG memory store init failed, fallback to legacy memory: {}', exc)
-                self._loop.memory_manager = None
-                self._loop._store = None
-                self._loop._store_enabled = False
+        try:
+            manager_cls = getattr(self._loop, '_memory_manager_cls', None)
+            if manager_cls is None:
+                raise RuntimeError('memory manager class is not configured')
+            self._loop.memory_manager = manager_cls(self._loop.workspace, cfg)
+            self._loop._store = getattr(self._loop.memory_manager, 'store', None)
+            self._loop._store_enabled = self._loop._store is not None
+            if getattr(self._loop, 'main_task_service', None) is not None:
+                self._loop.main_task_service.memory_manager = self._loop.memory_manager
+            if self._loop._store is not None:
+                logger.info('Memory runtime enabled with RAG store ({})', type(self._loop._store).__name__)
+            else:
+                logger.warning('Memory runtime enabled in legacy fallback mode (RAG store unavailable).')
+        except Exception as exc:
+            logger.warning('Memory runtime init failed: {}', exc)
+            self._loop.memory_manager = None
+            self._loop._store = None
+            self._loop._store_enabled = False
 
         try:
             cp_cfg = cfg.checkpointer

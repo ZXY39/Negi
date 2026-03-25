@@ -18,10 +18,11 @@ from g3ku.china_bridge.session_keys import (
     build_runtime_chat_id,
     build_session_key,
 )
+from g3ku.china_bridge.registry import china_channel_id_set
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.bridge import SessionRuntimeBridge
 
-CHINA_CHANNELS = {"qqbot", "dingtalk", "wecom", "wecom-app", "feishu-china"}
+CHINA_CHANNELS = china_channel_id_set()
 
 Sender = Callable[[dict[str, Any]], asyncio.Future | Any]
 

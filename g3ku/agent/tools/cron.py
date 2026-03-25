@@ -71,8 +71,9 @@ class CronTool(Tool):
         job_id: str | None = None,
         **kwargs: Any,
     ) -> str:
+        runtime_context = kwargs.get("__g3ku_runtime") if isinstance(kwargs.get("__g3ku_runtime"), dict) else {}
         if action == "add":
-            return self._add_job(message, every_seconds, cron_expr, tz, at)
+            return self._add_job(message, every_seconds, cron_expr, tz, at, runtime_context=runtime_context)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
@@ -86,6 +87,8 @@ class CronTool(Tool):
         cron_expr: str | None,
         tz: str | None,
         at: str | None,
+        *,
+        runtime_context: dict[str, Any] | None = None,
     ) -> str:
         if not message:
             return "Error: message is required for add"
@@ -124,6 +127,7 @@ class CronTool(Tool):
             deliver=True,
             channel=self._channel,
             to=self._chat_id,
+            session_key=str((runtime_context or {}).get("session_key") or "").strip() or None,
             delete_after_run=delete_after,
         )
         return f"Created job '{job.name}' (id: {job.id})"

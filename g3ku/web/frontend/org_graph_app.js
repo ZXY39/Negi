@@ -55,6 +55,7 @@ const S = {
     ceoSessionUnread: {},
     ceoSessionMessageCounts: {},
     ceoSessionHydrated: false,
+    ceoScrollToLatestOnSnapshot: false,
     ceoCatalogRefreshId: null,
     liveDurationIntervalId: null,
     activeSessionId: "",
@@ -1832,6 +1833,8 @@ function renderPersistedCeoAssistantTurn(item = {}) {
 }
 
 function renderCeoSnapshot(messages = [], inflightTurn = null) {
+    const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
+    S.ceoScrollToLatestOnSnapshot = false;
     resetCeoFeed();
     messages.forEach((item) => {
         const role = String(item?.role || "").trim().toLowerCase();
@@ -1854,6 +1857,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null) {
         }
     });
     restoreCeoInflightTurn(inflightTurn);
+    if (shouldScrollToLatest) scrollCeoFeedToBottom();
 }
 
 function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
@@ -4180,11 +4184,12 @@ function resetCeoComposerForSessionChange(previousSessionId, nextSessionId) {
     return true;
 }
 
-function resetCeoSessionState() {
+function resetCeoSessionState({ scrollToLatest = false } = {}) {
     resetCeoFeed();
     S.ceoPendingTurns = [];
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
+    if (scrollToLatest) S.ceoScrollToLatestOnSnapshot = true;
     syncCeoPrimaryButton();
 }
 
@@ -4321,9 +4326,9 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
                 aria-pressed="${isActive ? "true" : "false"}"
                 aria-label="${esc(`${title}${isRunning ? "（运行中）" : ""}`)}"
             >
+                ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
                 <div class="ceo-session-head">
                     <div class="ceo-session-title">${esc(title)}</div>
-                    ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
                 </div>
                 <div class="ceo-session-id">${esc(shortId)}</div>
                 <div class="ceo-session-preview">${esc(preview)}</div>
@@ -4494,7 +4499,7 @@ async function activateCeoSession(sessionId) {
         const nextActiveId = applyCeoSessionsPayload(payload);
         closeCeoWs();
         resetCeoComposerState();
-        resetCeoSessionState();
+        resetCeoSessionState({ scrollToLatest: true });
         if (nextActiveId) initCeoWs();
     } catch (e) {
         showToast({ title: "切换失败", text: e.message || "Unknown error", kind: "error" });
@@ -4518,7 +4523,7 @@ async function createNewCeoSession() {
         const nextActiveId = applyCeoSessionsPayload(payload);
         closeCeoWs();
         resetCeoComposerState();
-        resetCeoSessionState();
+        resetCeoSessionState({ scrollToLatest: true });
         if (nextActiveId) initCeoWs();
     } catch (e) {
         showToast({ title: "新建失败", text: e.message || "Unknown error", kind: "error" });
@@ -4623,7 +4628,7 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } 
         if (wasActive) {
             closeCeoWs();
             resetCeoComposerState();
-            resetCeoSessionState();
+            resetCeoSessionState({ scrollToLatest: true });
             if (nextActiveId) initCeoWs();
         }
         if (S.view === "tasks") await loadTasks();
@@ -5529,6 +5534,7 @@ function init() {
     void loadModels();
     void loadTasks();
     void restoreTaskDetailSession();
+    S.ceoScrollToLatestOnSnapshot = true;
     initCeoWs();
 }
 

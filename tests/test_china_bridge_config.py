@@ -65,7 +65,7 @@ def test_load_config_rejects_legacy_channels_config(tmp_path, monkeypatch):
                     "roles": {"ceo": ["m"], "execution": ["m"], "inspection": ["m"]},
                 },
                 "providers": {"openai": {"apiKey": "", "apiBase": None, "extraHeaders": None}},
-                "gateway": {"host": "127.0.0.1", "port": 1, "heartbeat": {"enabled": True, "intervalS": 1}},
+                "web": {"host": "127.0.0.1", "port": 1},
                 "toolSecrets": {},
                 "resources": {
                     "enabled": True,

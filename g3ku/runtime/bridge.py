@@ -22,7 +22,7 @@ class SessionSubscription:
 
 
 class SessionRuntimeBridge:
-    """Shared session glue for web, CLI, gateway, and background services."""
+    """Shared session glue for web, CLI, and background services."""
 
     def __init__(self, manager: SessionRuntimeManager):
         self._manager = manager

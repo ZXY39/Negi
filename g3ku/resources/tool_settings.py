@@ -56,7 +56,10 @@ class SkillInstallerToolSettings(Base):
 
 
 class AgentBrowserToolSettings(Base):
-    command_prefix: list[str] = Field(default_factory=lambda: ['agent-browser'])
+    command_prefix: list[str] = Field(default_factory=list)
+    install_root: str = 'externaltools/agent_browser'
+    browser_root: str = 'externaltools/agent_browser/playwright-browsers'
+    temp_root: str = 'temp/agent_browser'
     default_timeout_seconds: int = 300
     auto_session: bool = True
     default_session_name: str = 'g3ku-agent-browser'

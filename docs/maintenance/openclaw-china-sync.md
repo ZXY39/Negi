@@ -37,7 +37,7 @@ When upstream changes touch those areas, review them for ideas, but do not reint
 ## Validation Checklist
 
 - `load_config()` rejects legacy `channels.*`
-- `g3ku gateway` starts without legacy channel framework
+- `g3ku web` starts without legacy channel framework
 - `npm run build` passes in `subsystems/china_channels_host`
 - `g3ku china-bridge doctor` reports the expected subsystem state
 

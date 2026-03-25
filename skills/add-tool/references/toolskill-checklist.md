@@ -10,7 +10,8 @@
 
 - [ ] 已填写 `tool_type`
 - [ ] `external` 已填写 `install_dir`
-- [ ] `external.install_dir` 位于 `tools/` 之外
+- [ ] `external.install_dir` 位于工作区根目录的 `externaltools/<tool_id>/`
+- [ ] `external` 的下载 / 缓存 / 解压中转目录约定为工作区根目录的 `temp/<tool_id>/`
 - [ ] `internal` 未填写 `install_dir`
 - [ ] `external` 未填写 `source.vendor_dir`
 - [ ] 已填写 `source`
@@ -24,6 +25,8 @@
 - [ ] 外置工具包含 `何时使用 / 安装 / 更新 / 使用` 四段
 - [ ] 内置工具已明确说明无需独立安装
 - [ ] 已说明如何定位真实执行入口或仓库内实现位置
+- [ ] 已明确写出 `tools/<tool_id>/` 只负责注册，`externaltools/<tool_id>/` 才是真实安装目录
+- [ ] 已明确写出 `temp/<tool_id>/` 用于下载 / 缓存 / 解压中转
 
 ## 四、安装与更新信息
 
@@ -43,9 +46,9 @@
 ## 六、强取消
 
 - [ ] 工具支持统一 cancellation token 或等价取消信号
-- [ ] 子进程句柄已保存，暂停/取消时会主动 terminate/kill
+- [ ] 子进程句柄已保存，暂停 / 取消时会主动 terminate / kill
 - [ ] 长任务阶段会主动检查取消状态并尽快退出
-- [ ] 暂停/取消时会给用户“正在安全停止...”之类的中间反馈
+- [ ] 暂停 / 取消时会给用户“正在安全停止...”之类的中间反馈
 - [ ] 外置工具的真实执行入口也实现了强取消，而不只是文档里提到
 
 ## 七、最终验收

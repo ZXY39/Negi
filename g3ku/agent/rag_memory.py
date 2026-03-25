@@ -6,8 +6,10 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sqlite3
 import threading
+import time
 import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -61,6 +63,8 @@ except Exception:  # pragma: no cover - optional runtime dependency fallback
 _NS_SEP = "\x1f"
 CONTEXT_TYPE_ALL: tuple[str, ...] = ("memory", "resource", "skill")
 CONTEXT_LAYER_ALL: tuple[str, ...] = ("l0", "l1", "l2")
+MEMORY_RUNTIME_SCHEMA_VERSION = "global-journal-v1"
+DEFAULT_GLOBAL_MEMORY_NAMESPACE: tuple[str, ...] = ("memory", "global")
 _SENTENCE_SPLIT_RE = re.compile(
     r"[.!?\u3002\uFF01\uFF1F]+(?=\s|$|[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF])"
 )
@@ -561,6 +565,25 @@ class CommitArtifact:
     merged_count: int
     skipped_count: int
     timestamp: str = field(default_factory=_now_iso)
+
+
+@dataclass(slots=True)
+class MemorySyncEvent:
+    """Append-only journal event for system-managed memory writes."""
+
+    seq: int
+    event_id: str
+    record_id: str
+    text: str
+    source: str = "turn"
+    confidence: float = 1.0
+    tags: list[str] = field(default_factory=list)
+    session_key: str = ""
+    channel: str = ""
+    chat_id: str = ""
+    event_type: Literal["memory_write"] = "memory_write"
+    created_at: str = field(default_factory=_now_iso)
+    updated_at: str = field(default_factory=_now_iso)
 
 
 @dataclass(slots=True)
@@ -1442,7 +1465,7 @@ class G3kuHybridRetriever(BaseRetriever):
         return docs
 
 
-class MemoryManager:
+class _RagMemoryBackend:
     """High-level RAG memory service: retrieval, write guard, pending queue, legacy dual-write."""
 
     def __init__(self, workspace: Path, config: Any):
@@ -1511,10 +1534,17 @@ class MemoryManager:
         self.store.close()
 
     def namespace_for(self, *, channel: str | None, chat_id: str | None) -> tuple[str, ...]:
-        template = list(self.config.isolation.namespace_template or ["memory", "{channel}", "{chat_id}"])
+        isolation = getattr(self.config, "isolation", None)
+        mode = str(getattr(isolation, "mode", "session") or "session").strip().lower()
         channel_val = str(channel or "unknown")
         chat_val = str(chat_id or "unknown")
         session_val = f"{channel_val}:{chat_val}"
+        if mode == "global":
+            template = list(getattr(isolation, "namespace_template", None) or list(DEFAULT_GLOBAL_MEMORY_NAMESPACE))
+        elif mode == "channel":
+            template = list(getattr(isolation, "namespace_template", None) or ["memory", "{channel}"])
+        else:
+            template = list(getattr(isolation, "namespace_template", None) or ["memory", "{channel}", "{chat_id}"])
         out = []
         for token in template:
             out.append(
@@ -1659,6 +1689,67 @@ class MemoryManager:
             c1, c2 = session_key.split(":", 1)
             return c1 or "unknown", c2 or "unknown"
         return ch or "unknown", cid or "unknown"
+
+    async def apply_sync_event(self, event: MemorySyncEvent) -> dict[str, Any]:
+        """Apply one journal event to the RAG-backed store idempotently."""
+        namespace = self.namespace_for(channel=event.channel, chat_id=event.chat_id)
+        if self.arch_version == "v2" and self._feature_enabled("unified_context"):
+            l2_ref = None
+            if self._feature_enabled("split_store"):
+                l2_ref = await self._write_l2_payload(record_id=event.record_id, content=event.text)
+            record_v2 = ContextRecordV2(
+                record_id=event.record_id,
+                context_type="memory",
+                uri=self._context_uri(
+                    context_type="memory",
+                    channel=event.channel,
+                    chat_id=event.chat_id,
+                    record_id=event.record_id,
+                ),
+                l0=self._l0_summary(event.text),
+                l1=self._l1_summary(event.text),
+                l2_ref=l2_ref,
+                tags=list(event.tags or []),
+                source=event.source,
+                confidence=float(event.confidence),
+                session_key=event.session_key,
+                channel=event.channel,
+                chat_id=event.chat_id,
+                created_at=event.created_at,
+                updated_at=event.updated_at,
+            )
+            await asyncio.to_thread(self.store.put_context_v2, namespace, record_v2)
+            if str(getattr(self.config, "mode", "") or "").lower() == "dual":
+                legacy_record = MemoryRecord(
+                    record_id=event.record_id,
+                    text=event.text,
+                    source=event.source,
+                    confidence=float(event.confidence),
+                    created_at=event.created_at,
+                    updated_at=event.updated_at,
+                    tags=list(event.tags or []),
+                    session_key=event.session_key,
+                    channel=event.channel,
+                    chat_id=event.chat_id,
+                )
+                await asyncio.to_thread(self.store.put, namespace, legacy_record.record_id, asdict(legacy_record))
+            return asdict(record_v2)
+
+        legacy_record = MemoryRecord(
+            record_id=event.record_id,
+            text=event.text,
+            source=event.source,
+            confidence=float(event.confidence),
+            created_at=event.created_at,
+            updated_at=event.updated_at,
+            tags=list(event.tags or []),
+            session_key=event.session_key,
+            channel=event.channel,
+            chat_id=event.chat_id,
+        )
+        payload = asdict(legacy_record)
+        await asyncio.to_thread(self.store.put, namespace, legacy_record.record_id, payload)
+        return payload
 
     def _l0_summary(self, text: str, *, limit: int = 160) -> str:
         compact = " ".join(str(text or "").split())
@@ -3126,5 +3217,1121 @@ class MemoryManager:
             "token_out": int(self._cost_metrics.get("token_out", 0)),
             "cost_delta_pct": self._cost_delta_pct(),
         }
+
+
+class MemoryManager:
+    """Facade that keeps memory available across RAG outages with journal replay."""
+
+    _RAG_RETRY_BACKOFF_S = 5.0
+
+    def __init__(self, workspace: Path, config: Any):
+        self.workspace = Path(workspace).expanduser().resolve()
+        self.config = config
+        self.mem_dir = ensure_dir(self.workspace / "memory")
+        self.archive_dir = self.mem_dir / "archives"
+        self.commit_summary_dir = self.mem_dir / "commit_summaries"
+        self.context_store_dir = self.mem_dir / "context_store"
+        self.pending_file = self.mem_dir / "pending_facts.jsonl"
+        self.audit_file = self.mem_dir / "audit.jsonl"
+        self.trace_file = self.mem_dir / "retrieval_trace.jsonl"
+        self.context_assembly_trace_file = self.mem_dir / "context_assembly.jsonl"
+        self.cost_file = self.mem_dir / "cost_metrics.json"
+        self.memory_file = self.mem_dir / "MEMORY.md"
+        self.history_file = self.mem_dir / "HISTORY.md"
+        self.journal_file = self.mem_dir / "sync_journal.jsonl"
+        self.sync_state_file = self.mem_dir / "sync_state.json"
+        self._legacy = MemoryStore(self.workspace)
+        self._io_lock = asyncio.Lock()
+        self._trace_lock = asyncio.Lock()
+        self._backend_lock = asyncio.Lock()
+        self._backend: _RagMemoryBackend | None = None
+        self._backend_state = "disabled"
+        self._last_backend_error = ""
+        self._last_rag_attempt_at = 0.0
+        self._sync_state = self._bootstrap_sync_state()
+        self._ensure_runtime_layout()
+        if self._rag_mode_enabled():
+            self._bootstrap_backend_now()
+        elif self._legacy_mode_enabled():
+            self._backend_state = "legacy_only"
+        self.store = getattr(self._backend, "store", None)
+
+    def _bootstrap_backend_now(self) -> None:
+        try:
+            backend = _RagMemoryBackend(self.workspace, self.config)
+        except Exception as exc:
+            self._backend = None
+            self.store = None
+            self._backend_state = "legacy_degraded"
+            self._last_backend_error = str(exc)
+            logger.warning("RAG memory backend unavailable during bootstrap; fallback to legacy: {}", exc)
+            return
+        self._backend = backend
+        self.store = backend.store
+        self._backend_state = "rag_healthy"
+        self._last_backend_error = ""
+
+    def _bootstrap_sync_state(self) -> dict[str, Any]:
+        state = self._load_json_dict(self.sync_state_file)
+        if str(state.get("schema_version") or "") != MEMORY_RUNTIME_SCHEMA_VERSION:
+            self._clear_runtime_artifacts()
+            state = self._default_sync_state()
+            self._write_json_dict(self.sync_state_file, state)
+        return state
+
+    def _default_sync_state(self) -> dict[str, Any]:
+        return {
+            "schema_version": MEMORY_RUNTIME_SCHEMA_VERSION,
+            "next_seq": 1,
+            "rag_applied_seq": 0,
+            "legacy_applied_seq": 0,
+            "last_reset_at": _now_iso(),
+        }
+
+    def _ensure_runtime_layout(self) -> None:
+        ensure_dir(self.archive_dir)
+        ensure_dir(self.commit_summary_dir)
+        ensure_dir(self.context_store_dir)
+        self._ensure_managed_files()
+        if not self.journal_file.exists():
+            self.journal_file.write_text("", encoding="utf-8")
+        if not self.pending_file.exists():
+            self.pending_file.write_text("", encoding="utf-8")
+
+    def _ensure_managed_files(self) -> None:
+        if not self.memory_file.exists():
+            self.memory_file.write_text("# Managed Memory Mirror\n\n", encoding="utf-8")
+        if not self.history_file.exists():
+            self.history_file.write_text("# Managed Memory History\n\n", encoding="utf-8")
+
+    def _clear_runtime_artifacts(self) -> None:
+        store_cfg = getattr(self.config, "store", None)
+        cp_cfg = getattr(self.config, "checkpointer", None)
+        sqlite_path = (
+            resolve_path_in_workspace(getattr(store_cfg, "sqlite_path", "memory/memory.db"), self.workspace)
+            if store_cfg is not None
+            else self.mem_dir / "memory.db"
+        )
+        qdrant_path = (
+            resolve_path_in_workspace(getattr(store_cfg, "qdrant_path", "memory/qdrant"), self.workspace)
+            if store_cfg is not None
+            else self.mem_dir / "qdrant"
+        )
+        checkpointer_path = (
+            resolve_path_in_workspace(getattr(cp_cfg, "path", "memory/checkpoints.sqlite3"), self.workspace)
+            if cp_cfg is not None
+            else self.mem_dir / "checkpoints.sqlite3"
+        )
+        for directory in (self.archive_dir, self.commit_summary_dir, self.context_store_dir, qdrant_path):
+            try:
+                shutil.rmtree(directory, ignore_errors=True)
+            except Exception:
+                pass
+        for candidate in (
+            self.pending_file,
+            self.audit_file,
+            self.trace_file,
+            self.context_assembly_trace_file,
+            self.cost_file,
+            self.memory_file,
+            self.history_file,
+            self.journal_file,
+            self.sync_state_file,
+            _dense_owner_lock_path(qdrant_path),
+        ):
+            try:
+                if candidate.exists():
+                    candidate.unlink()
+            except Exception:
+                pass
+        for root_path in (sqlite_path, checkpointer_path):
+            try:
+                for item in root_path.parent.glob(f"{root_path.name}*"):
+                    if item.is_file():
+                        item.unlink()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _load_json_dict(path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _write_json_dict(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _persist_sync_state(self) -> None:
+        self._write_json_dict(self.sync_state_file, self._sync_state)
+
+    def _journal_seq(self) -> int:
+        return max(0, int(self._sync_state.get("next_seq", 1)) - 1)
+
+    def _rag_mode_enabled(self) -> bool:
+        mode = str(getattr(self.config, "mode", "legacy") or "legacy").lower()
+        return bool(getattr(self.config, "enabled", False) and mode in {"rag", "dual"})
+
+    def _legacy_mode_enabled(self) -> bool:
+        mode = str(getattr(self.config, "mode", "legacy") or "legacy").lower()
+        return bool(getattr(self.config, "enabled", False) and mode in {"legacy", "dual"})
+
+    def _legacy_mirror_enabled(self) -> bool:
+        compat = getattr(self.config, "compat", None)
+        return bool(getattr(compat, "dual_write_legacy_files", True))
+
+    def _safe_channel_chat(self, session_key: str, channel: str | None, chat_id: str | None) -> tuple[str, str]:
+        ch = str(channel or "").strip()
+        cid = str(chat_id or "").strip()
+        if ch and cid:
+            return ch, cid
+        if ":" in str(session_key or ""):
+            left, right = str(session_key or "").split(":", 1)
+            return left or "unknown", right or "unknown"
+        return ch or "unknown", cid or "unknown"
+
+    def _next_record_id(self) -> str:
+        return uuid.uuid4().hex[:16]
+
+    @staticmethod
+    def _stable_text_hash(text: str) -> str:
+        return uuid.uuid5(uuid.NAMESPACE_URL, str(text or "").strip().lower()).hex
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        compact = " ".join(str(text or "").split())
+        if not compact:
+            return 0
+        by_chars = max(1, len(compact) // 4)
+        by_words = max(1, int(len(compact.split()) * 1.3))
+        return max(by_chars, by_words)
+
+    def _score_fact_confidence(self, text: str) -> float:
+        normalized = " ".join(str(text or "").split())
+        if not normalized:
+            return 0.0
+        lower = normalized.lower()
+        score = 0.25
+        english_markers = (
+            "prefer",
+            "always",
+            "never",
+            "my name is",
+            "i am",
+            "deadline",
+            "project",
+            "remember",
+            "habit",
+            "i like",
+            "i don't like",
+            "my team",
+            "my role",
+        )
+        chinese_markers = (
+            "我叫",
+            "我是",
+            "我喜欢",
+            "我不喜欢",
+            "偏好",
+            "习惯",
+            "项目",
+            "截止",
+            "记住",
+            "请记住",
+            "我的团队",
+            "我的角色",
+        )
+        for kw in english_markers:
+            if kw in lower:
+                score += 0.08
+        for kw in chinese_markers:
+            if kw in normalized:
+                score += 0.08
+        if ":" in normalized:
+            score += 0.05
+        if len(normalized) > 80:
+            score += 0.05
+        if any(ch.isdigit() for ch in normalized):
+            score += 0.04
+        if "?" in normalized:
+            score -= 0.08
+        if normalized.count("\n") > 8:
+            score -= 0.05
+        return max(0.0, min(score, 0.98))
+
+    def _load_journal_events(self, *, min_seq: int = 1) -> list[MemorySyncEvent]:
+        if not self.journal_file.exists():
+            return []
+        out: list[MemorySyncEvent] = []
+        try:
+            lines = self.journal_file.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return []
+        for line in lines:
+            line = str(line or "").strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            try:
+                event = MemorySyncEvent(**payload)
+            except Exception:
+                continue
+            if int(event.seq) < max(1, int(min_seq or 1)):
+                continue
+            out.append(event)
+        return out
+
+    async def _ensure_backend(self, *, force_retry: bool = False) -> _RagMemoryBackend | None:
+        if not self._rag_mode_enabled():
+            return None
+        if self._backend is not None:
+            return self._backend
+        now = time.monotonic()
+        if not force_retry and now - self._last_rag_attempt_at < self._RAG_RETRY_BACKOFF_S:
+            return None
+        async with self._backend_lock:
+            if self._backend is not None:
+                return self._backend
+            now = time.monotonic()
+            if not force_retry and now - self._last_rag_attempt_at < self._RAG_RETRY_BACKOFF_S:
+                return None
+            self._last_rag_attempt_at = now
+            try:
+                backend = _RagMemoryBackend(self.workspace, self.config)
+                self._backend = backend
+                self.store = backend.store
+                self._backend_state = "rag_recovering"
+                self._last_backend_error = ""
+                await self._replay_journal_to_rag(backend)
+                self._backend_state = "rag_healthy"
+                return backend
+            except Exception as exc:
+                if self._backend is not None:
+                    try:
+                        self._backend.close()
+                    except Exception:
+                        pass
+                self._backend = None
+                self.store = None
+                self._backend_state = "legacy_degraded"
+                self._last_backend_error = str(exc)
+                logger.warning("RAG memory backend unavailable; using legacy fallback: {}", exc)
+                return None
+
+    async def _replay_journal_to_rag(self, backend: _RagMemoryBackend) -> None:
+        mode = str(getattr(self.config, "bootstrap_mode", "new_only") or "new_only").lower()
+        if mode == "none":
+            return
+        min_seq = 1 if mode == "full" else int(self._sync_state.get("rag_applied_seq", 0)) + 1
+        events = self._load_journal_events(min_seq=min_seq)
+        for event in events:
+            await backend.apply_sync_event(event)
+        if events:
+            self._sync_state["rag_applied_seq"] = int(events[-1].seq)
+            self._persist_sync_state()
+
+    def _mark_backend_failure(self, exc: Exception) -> None:
+        logger.warning("RAG memory operation failed; degrading to legacy until recovery: {}", exc)
+        backend = self._backend
+        self._backend = None
+        self.store = None
+        self._backend_state = "legacy_degraded"
+        self._last_backend_error = str(exc)
+        if backend is not None:
+            try:
+                backend.close()
+            except Exception:
+                logger.debug("RAG backend close skipped after failure")
+
+    async def _append_audit(self, payload: AuditEvent) -> None:
+        async with self._io_lock:
+            await asyncio.to_thread(self._append_jsonl, self.audit_file, asdict(payload))
+
+    async def _append_memory_events(
+        self,
+        *,
+        rows: list[dict[str, Any]],
+    ) -> list[MemorySyncEvent]:
+        prepared: list[MemorySyncEvent] = []
+        async with self._io_lock:
+            next_seq = int(self._sync_state.get("next_seq", 1) or 1)
+            for row in rows:
+                text = " ".join(str(row.get("text", "") or "").split()).strip()
+                if not text:
+                    continue
+                event = MemorySyncEvent(
+                    seq=next_seq,
+                    event_id=str(row.get("event_id") or uuid.uuid4().hex[:12]),
+                    record_id=str(row.get("record_id") or self._next_record_id()),
+                    text=text,
+                    source=str(row.get("source") or "turn"),
+                    confidence=float(row.get("confidence", 1.0) or 1.0),
+                    tags=[str(item) for item in list(row.get("tags") or []) if str(item).strip()],
+                    session_key=str(row.get("session_key") or ""),
+                    channel=str(row.get("channel") or "unknown"),
+                    chat_id=str(row.get("chat_id") or "unknown"),
+                    created_at=str(row.get("created_at") or _now_iso()),
+                    updated_at=str(row.get("updated_at") or row.get("created_at") or _now_iso()),
+                )
+                await asyncio.to_thread(self._append_jsonl, self.journal_file, asdict(event))
+                prepared.append(event)
+                next_seq += 1
+            self._sync_state["next_seq"] = next_seq
+            self._persist_sync_state()
+        if prepared:
+            await self._apply_events_to_sinks(prepared)
+        return prepared
+
+    async def _apply_events_to_sinks(self, events: list[MemorySyncEvent]) -> None:
+        if not events:
+            return
+        if self._legacy_mirror_enabled():
+            await self._sync_legacy_projection()
+        if self._rag_mode_enabled():
+            backend = await self._ensure_backend(force_retry=False)
+            if backend is not None:
+                try:
+                    min_seq = int(self._sync_state.get("rag_applied_seq", 0)) + 1
+                    for event in self._load_journal_events(min_seq=min_seq):
+                        await backend.apply_sync_event(event)
+                    self._sync_state["rag_applied_seq"] = max(int(self._sync_state.get("rag_applied_seq", 0)), int(events[-1].seq))
+                    self._persist_sync_state()
+                except Exception as exc:
+                    self._mark_backend_failure(exc)
+
+    async def _sync_legacy_projection(self) -> None:
+        if not self._legacy_mirror_enabled():
+            return
+        events = self._load_journal_events(min_seq=1)
+        threshold = float(getattr(getattr(self.config, "guard", None), "auto_fact_confidence", 0.8) or 0.8)
+        lines = [
+            "# Managed Memory Mirror",
+            "",
+            "This file is generated from system-managed memory journal events.",
+            "",
+            "## Facts",
+        ]
+        seen_fact_hashes: set[str] = set()
+        for event in events:
+            text_hash = self._stable_text_hash(event.text)
+            if text_hash in seen_fact_hashes:
+                continue
+            if event.source == "turn" and float(event.confidence) < threshold:
+                continue
+            seen_fact_hashes.add(text_hash)
+            lines.append(f"- {event.text}")
+        if lines[-1] == "## Facts":
+            lines.append("- (empty)")
+        history_lines = [
+            "# Managed Memory History",
+            "",
+            "This file is generated from system-managed memory journal events.",
+            "",
+        ]
+        for event in events:
+            stamp = str(event.created_at or _now_iso()).replace("T", " ")[:16]
+            history_lines.append(f"[{stamp}] {str(event.source or 'turn').upper()}: {event.text}")
+            history_lines.append("")
+        async with self._io_lock:
+            await asyncio.to_thread(self.memory_file.write_text, "\n".join(lines).rstrip() + "\n", "utf-8")
+            await asyncio.to_thread(self.history_file.write_text, "\n".join(history_lines).rstrip() + "\n", "utf-8")
+            self._sync_state["legacy_applied_seq"] = self._journal_seq()
+            self._persist_sync_state()
+
+    async def list_context_records(
+        self,
+        *,
+        namespace_prefix: tuple[str, ...] | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[ContextRecordV2]:
+        backend = await self._ensure_backend()
+        if backend is None:
+            return []
+        try:
+            return await backend.list_context_records(namespace_prefix=namespace_prefix, limit=limit, offset=offset)
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+            return []
+
+    async def put_context_record(self, *, namespace: tuple[str, ...], record: ContextRecordV2) -> None:
+        backend = await self._ensure_backend()
+        if backend is None:
+            return
+        try:
+            await backend.put_context_record(namespace=namespace, record=record)
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+
+    async def delete_context_record(self, *, namespace: tuple[str, ...], record_id: str) -> None:
+        backend = await self._ensure_backend()
+        if backend is None:
+            return
+        try:
+            await backend.delete_context_record(namespace=namespace, record_id=record_id)
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+
+    async def sync_catalog(
+        self,
+        service: Any,
+        *,
+        skill_ids: set[str] | None = None,
+        tool_ids: set[str] | None = None,
+    ) -> dict[str, int]:
+        backend = await self._ensure_backend()
+        if backend is None:
+            return {"created": 0, "updated": 0, "removed": 0}
+        try:
+            return await backend.sync_catalog(service, skill_ids=skill_ids, tool_ids=tool_ids)
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+            return {"created": 0, "updated": 0, "removed": 0}
+
+    async def write_context_assembly_trace(
+        self,
+        *,
+        session_key: str | None,
+        channel: str | None,
+        chat_id: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        event = {
+            "timestamp": _now_iso(),
+            "session_key": str(session_key or ""),
+            "channel": str(channel or ""),
+            "chat_id": str(chat_id or ""),
+            "payload": payload,
+        }
+        async with self._trace_lock:
+            await asyncio.to_thread(self._append_jsonl, self.context_assembly_trace_file, event)
+
+    async def read_trace_file(self, *, trace_kind: str, limit: int = 20) -> list[dict[str, Any]]:
+        path = self.context_assembly_trace_file if trace_kind == "context_assembly" else self.trace_file
+        if not path.exists():
+            return []
+
+        def _run() -> list[dict[str, Any]]:
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                return []
+            items: list[dict[str, Any]] = []
+            for line in lines[-max(1, int(limit)) :]:
+                text = str(line or "").strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    items.append(payload)
+            return items
+
+        return await asyncio.to_thread(_run)
+
+    async def get_traces(self, *, session_key: str, limit: int = 20) -> list[dict[str, Any]]:
+        if not self.trace_file.exists():
+            return []
+        raw = await asyncio.to_thread(self.trace_file.read_text, "utf-8")
+        out: list[dict[str, Any]] = []
+        for line in raw.splitlines():
+            line = str(line or "").strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if str(obj.get("session_key", "")) != str(session_key):
+                continue
+            out.append(obj)
+        return out[-max(1, int(limit)) :]
+
+    async def explain_query(
+        self,
+        *,
+        query: str,
+        session_key: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+    ) -> dict[str, Any]:
+        block = await self.retrieve_block(query=query, channel=channel, chat_id=chat_id, session_key=session_key)
+        traces = await self.get_traces(session_key=session_key, limit=1)
+        return {
+            "query": query,
+            "session_key": session_key,
+            "trace": traces[0] if traces else None,
+            "preview_block": block,
+        }
+
+    async def search_tool_view(
+        self,
+        *,
+        query: str,
+        channel: str | None,
+        chat_id: str | None,
+        session_key: str | None = None,
+        limit: int = 8,
+        context_type: ContextType | None = None,
+        include_l2: bool = False,
+    ) -> dict[str, Any]:
+        backend = await self._ensure_backend()
+        if backend is not None:
+            try:
+                return await backend.search_tool_view(
+                    query=query,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_key=session_key,
+                    limit=limit,
+                    context_type=context_type,
+                    include_l2=include_l2,
+                )
+            except Exception as exc:
+                self._mark_backend_failure(exc)
+        return await self._search_legacy_tool_view(
+            query=query,
+            channel=channel,
+            chat_id=chat_id,
+            session_key=session_key,
+            limit=limit,
+            context_type=context_type,
+            include_l2=include_l2,
+        )
+
+    async def _search_legacy_tool_view(
+        self,
+        *,
+        query: str,
+        channel: str | None,
+        chat_id: str | None,
+        session_key: str | None,
+        limit: int,
+        context_type: ContextType | None,
+        include_l2: bool,
+    ) -> dict[str, Any]:
+        from g3ku.runtime.context.summarizer import score_query, summarize_l0, summarize_l1, window_extract
+
+        raw_query = str(query or "").strip()
+        top_k = max(1, int(limit or 1))
+        empty = {
+            "query": raw_query,
+            "grouped": {"memory": [], "resource": [], "skill": []},
+            "view": [],
+            "plan": [],
+            "meta": {
+                "total": 0,
+                "limit": top_k,
+                "session_key": str(session_key or ""),
+                "channel": str(channel or ""),
+                "chat_id": str(chat_id or ""),
+                "backend_state": self._backend_state,
+            },
+        }
+        if not raw_query:
+            empty["query"] = ""
+            return empty
+        if context_type is not None and context_type != "memory":
+            empty["plan"] = [{"query": raw_query, "context_type": str(context_type), "intent": "legacy_memory_only", "priority": 1, "candidates": 0}]
+            return empty
+
+        ranked: list[tuple[float, MemorySyncEvent]] = []
+        seen_hashes: set[str] = set()
+        journal_total = max(1.0, float(self._journal_seq()))
+        for event in self._load_journal_events(min_seq=1):
+            text_hash = self._stable_text_hash(event.text)
+            if text_hash in seen_hashes:
+                continue
+            score = score_query(raw_query, event.text, " ".join(event.tags), event.source)
+            if score <= 0:
+                continue
+            seen_hashes.add(text_hash)
+            recency_bonus = max(0.0, float(event.seq) / journal_total)
+            ranked.append((score + recency_bonus, event))
+        ranked.sort(key=lambda item: (item[0], item[1].seq), reverse=True)
+
+        grouped: dict[str, list[dict[str, Any]]] = {"memory": [], "resource": [], "skill": []}
+        unified: list[dict[str, Any]] = []
+        for rank, (_score, event) in enumerate(ranked[:top_k], start=1):
+            l2_preview = window_extract(raw_query, event.text, window=3, max_chars=500) if include_l2 else ""
+            entry = {
+                "rank": rank,
+                "record_id": event.record_id,
+                "context_type": "memory",
+                "uri": f"g3ku://memory/{event.channel}/{event.chat_id}/{event.record_id}",
+                "source": event.source,
+                "confidence": round(float(event.confidence), 4),
+                "l0": summarize_l0(event.text),
+                "l1": summarize_l1(event.text),
+                "l2_preview": l2_preview,
+                "tags": list(event.tags or []),
+            }
+            grouped["memory"].append(entry)
+            unified.append(entry)
+
+        trace = {
+            "timestamp": _now_iso(),
+            "session_key": str(session_key or ""),
+            "channel": str(channel or ""),
+            "chat_id": str(chat_id or ""),
+            "query": raw_query,
+            "payload": {
+                "mode": "legacy_fallback",
+                "total": len(unified),
+                "plan": [{"query": raw_query, "context_type": "memory", "intent": "legacy_fallback", "priority": 1, "candidates": len(ranked)}],
+            },
+        }
+        async with self._trace_lock:
+            await asyncio.to_thread(self._append_jsonl, self.trace_file, trace)
+
+        return {
+            "query": raw_query,
+            "grouped": grouped,
+            "view": unified,
+            "plan": [{"query": raw_query, "context_type": "memory", "intent": "legacy_fallback", "priority": 1, "candidates": len(ranked)}],
+            "meta": {
+                "total": len(unified),
+                "limit": top_k,
+                "trace_id": "",
+                "session_key": str(session_key or ""),
+                "channel": str(channel or ""),
+                "chat_id": str(chat_id or ""),
+                "backend_state": self._backend_state,
+            },
+        }
+
+    async def retrieve_block(
+        self,
+        *,
+        query: str,
+        channel: str | None,
+        chat_id: str | None,
+        session_key: str | None = None,
+        search_context_types: Iterable[str] | None = None,
+        allowed_context_types: Iterable[str] | None = None,
+        allowed_resource_record_ids: Iterable[str] | None = None,
+        allowed_skill_record_ids: Iterable[str] | None = None,
+    ) -> str:
+        backend = await self._ensure_backend()
+        if backend is not None:
+            try:
+                return await backend.retrieve_block(
+                    query=query,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_key=session_key,
+                    search_context_types=search_context_types,
+                    allowed_context_types=allowed_context_types,
+                    allowed_resource_record_ids=allowed_resource_record_ids,
+                    allowed_skill_record_ids=allowed_skill_record_ids,
+                )
+            except Exception as exc:
+                self._mark_backend_failure(exc)
+        result = await self._search_legacy_tool_view(
+            query=query,
+            channel=channel,
+            chat_id=chat_id,
+            session_key=session_key,
+            limit=max(1, int(getattr(getattr(self.config, "retrieval", None), "context_top_k", 8) or 8)),
+            context_type="memory",
+            include_l2=True,
+        )
+        view = list(result.get("view") or [])
+        if not view:
+            return ""
+        budget_tokens = max(120, int(getattr(getattr(self.config, "retrieval", None), "max_context_tokens", 1200) or 1200))
+        estimate_tokens = self._estimate_tokens
+        lines = ["# Retrieved Context (Fallback)"]
+        used = estimate_tokens(lines[0])
+        for entry in view:
+            header = f"- [memory:{entry['record_id']}] {entry.get('l0') or entry.get('l1') or ''}".strip()
+            l1 = str(entry.get("l1") or "").strip()
+            l2 = str(entry.get("l2_preview") or "").strip()
+            candidate = [header]
+            if l1:
+                candidate.append(f"  L1: {l1}")
+            if l2:
+                candidate.append(f"  L2: {l2}")
+            block = "\n".join(candidate)
+            block_tokens = estimate_tokens(block)
+            if used + block_tokens > budget_tokens:
+                break
+            lines.extend(candidate)
+            used += block_tokens
+        return "\n".join(lines) if len(lines) > 1 else ""
+
+    async def ingest_turn(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        if not messages:
+            return
+        selected: list[str] = []
+        for msg in messages[-8:]:
+            role = str(msg.get("role", ""))
+            if role not in {"user", "assistant"}:
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                if content.strip().startswith("[Runtime Context"):
+                    continue
+                selected.append(f"{role.upper()}: {content.strip()}")
+        if not selected:
+            return
+
+        channel_safe, chat_safe = self._safe_channel_chat(session_key, channel, chat_id)
+        text = "\n".join(selected)
+        conf = self._score_fact_confidence(text)
+        threshold = float(getattr(getattr(self.config, "guard", None), "auto_fact_confidence", 0.8) or 0.8)
+        trace_id = uuid.uuid4().hex[:12]
+
+        if str(getattr(getattr(self.config, "guard", None), "mode", "tiered") or "tiered").lower() == "tiered" and conf < threshold:
+            pending = PendingFact(
+                candidate=text,
+                reason=f"confidence<{threshold}",
+                confidence=conf,
+                session_key=session_key,
+                channel=channel_safe,
+                chat_id=chat_safe,
+            )
+            async with self._io_lock:
+                await asyncio.to_thread(self._append_jsonl, self.pending_file, asdict(pending))
+            await self._append_audit(
+                AuditEvent(
+                    action="pending",
+                    reason=pending.reason,
+                    actor="memory_manager",
+                    session_key=session_key,
+                    trace_id=trace_id,
+                    after=asdict(pending),
+                )
+            )
+            return
+
+        events = await self._append_memory_events(
+            rows=[
+                {
+                    "record_id": self._next_record_id(),
+                    "text": text,
+                    "source": "turn",
+                    "confidence": conf,
+                    "tags": ["turn_ingest"],
+                    "session_key": session_key,
+                    "channel": channel_safe,
+                    "chat_id": chat_safe,
+                    "created_at": _now_iso(),
+                    "updated_at": _now_iso(),
+                }
+            ]
+        )
+        if events:
+            await self._append_audit(
+                AuditEvent(
+                    action="upsert",
+                    reason="journal_turn_ingest",
+                    actor="memory_manager",
+                    session_key=session_key,
+                    trace_id=trace_id,
+                    after=asdict(events[0]),
+                )
+            )
+
+    async def list_pending(self, limit: int = 50) -> list[PendingFact]:
+        if not self.pending_file.exists():
+            return []
+        lines = await asyncio.to_thread(self.pending_file.read_text, "utf-8")
+        out: list[PendingFact] = []
+        for raw in lines.splitlines():
+            if not raw.strip():
+                continue
+            try:
+                data = json.loads(raw)
+                if data.get("status") == "pending":
+                    out.append(PendingFact(**data))
+            except Exception:
+                continue
+        return out[-max(1, int(limit)) :]
+
+    async def update_pending(self, pending_id: str, status: Literal["approved", "rejected"]) -> bool:
+        if not self.pending_file.exists():
+            return False
+        raw = await asyncio.to_thread(self.pending_file.read_text, "utf-8")
+        rows: list[dict[str, Any]] = []
+        target_pending: PendingFact | None = None
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("pending_id") == pending_id and obj.get("status") == "pending":
+                try:
+                    target_pending = PendingFact(**obj)
+                except Exception:
+                    target_pending = None
+                obj["status"] = status
+            rows.append(obj)
+        if target_pending is None:
+            return False
+
+        trace_id = uuid.uuid4().hex[:12]
+        if status == "approved":
+            events = await self._append_memory_events(
+                rows=[
+                    {
+                        "record_id": self._next_record_id(),
+                        "text": target_pending.candidate,
+                        "source": "pending_approved",
+                        "confidence": target_pending.confidence,
+                        "tags": ["pending_approved"],
+                        "session_key": target_pending.session_key,
+                        "channel": target_pending.channel,
+                        "chat_id": target_pending.chat_id,
+                        "created_at": target_pending.created_at,
+                        "updated_at": _now_iso(),
+                    }
+                ]
+            )
+            after_payload = asdict(events[0]) if events else {"pending_id": pending_id, "status": status}
+            await self._append_audit(
+                AuditEvent(
+                    action="approve",
+                    reason="pending_fact_approved",
+                    actor="memory_manager",
+                    session_key=target_pending.session_key,
+                    trace_id=trace_id,
+                    before={"pending_id": pending_id},
+                    after=after_payload,
+                )
+            )
+        else:
+            await self._append_audit(
+                AuditEvent(
+                    action="reject",
+                    reason="pending_fact_rejected",
+                    actor="memory_manager",
+                    session_key=target_pending.session_key,
+                    trace_id=trace_id,
+                    before={"pending_id": pending_id},
+                    after={"status": status},
+                )
+            )
+
+        content = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + ("\n" if rows else "")
+        async with self._io_lock:
+            await asyncio.to_thread(self.pending_file.write_text, content, "utf-8")
+        return True
+
+    async def commit_session(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        messages: list[dict[str, Any]],
+        reason: str = "turn_trigger",
+    ) -> CommitArtifact:
+        archive_id = uuid.uuid4().hex[:12]
+        if not messages:
+            return CommitArtifact(
+                archive_id=archive_id,
+                summary_uri="",
+                extracted_count=0,
+                merged_count=0,
+                skipped_count=0,
+            )
+
+        channel_safe, chat_safe = self._safe_channel_chat(session_key, channel, chat_id)
+        commit_time = _now_iso()
+        session_safe = (
+            str(session_key or f"{channel_safe}:{chat_safe}")
+            .replace("/", "_")
+            .replace("\\", "_")
+            .replace(":", "_")
+        )
+        archive_path = ensure_dir(self.archive_dir / session_safe) / f"{archive_id}.jsonl"
+        lines = [json.dumps(m, ensure_ascii=False) for m in messages]
+        await asyncio.to_thread(archive_path.write_text, ("\n".join(lines) + "\n"), "utf-8")
+
+        user_lines: list[str] = []
+        assistant_lines: list[str] = []
+        for msg in messages:
+            role = str(msg.get("role", ""))
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            text = " ".join(content.split())
+            if not text or text.startswith("[Runtime Context"):
+                continue
+            if role == "user":
+                user_lines.append(text)
+            elif role == "assistant":
+                assistant_lines.append(text)
+
+        summary_parts: list[str] = []
+        if user_lines:
+            summary_parts.append("User focus: " + " | ".join(user_lines[-3:]))
+        if assistant_lines:
+            summary_parts.append("Assistant outputs: " + " | ".join(assistant_lines[-2:]))
+        summary_text = "\n".join(summary_parts)[:1800]
+        summary_path = ensure_dir(self.commit_summary_dir) / f"{archive_id}.md"
+        await asyncio.to_thread(summary_path.write_text, summary_text, "utf-8")
+
+        category_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+            ("profile", ("my name is", "我是", "我叫", "my role", "我的角色")),
+            ("preferences", ("prefer", "喜欢", "偏好", "不喜欢", "i like")),
+            ("entities", ("team", "公司", "project", "项目", "repo", "仓库")),
+            ("events", ("deadline", "due", "截至", "截止", "schedule", "日程")),
+            ("cases", ("issue", "bug", "问题", "案例", "故障")),
+            ("patterns", ("always", "never", "通常", "经常", "习惯")),
+        )
+        extracted: list[tuple[str, list[str], float]] = []
+        seen_text_hash: set[str] = set()
+        for text in user_lines[-20:]:
+            lower = text.lower()
+            tags = [name for name, markers in category_rules if any(m in lower or m in text for m in markers)]
+            if not tags:
+                continue
+            text_hash = self._stable_text_hash(text)
+            if text_hash in seen_text_hash:
+                continue
+            seen_text_hash.add(text_hash)
+            extracted.append((text, tags, self._score_fact_confidence(text)))
+
+        rows_to_append: list[dict[str, Any]] = []
+        for text, tags, conf in extracted:
+            rows_to_append.append(
+                {
+                    "record_id": self._next_record_id(),
+                    "text": text,
+                    "source": "commit",
+                    "confidence": conf,
+                    "tags": tags + [f"commit:{reason}"],
+                    "session_key": session_key,
+                    "channel": channel_safe,
+                    "chat_id": chat_safe,
+                    "created_at": commit_time,
+                    "updated_at": commit_time,
+                }
+            )
+        events = await self._append_memory_events(rows=rows_to_append)
+
+        await self._append_audit(
+            AuditEvent(
+                action="commit",
+                reason=reason,
+                actor="memory_manager",
+                session_key=session_key,
+                trace_id=archive_id,
+                after={
+                    "archive_id": archive_id,
+                    "summary_uri": str(summary_path),
+                    "extracted_count": len(extracted),
+                    "created_count": len(events),
+                    "merged_count": 0,
+                    "skipped_count": max(0, len(extracted) - len(events)),
+                    "commit_time": commit_time,
+                },
+            )
+        )
+        return CommitArtifact(
+            archive_id=archive_id,
+            summary_uri=str(summary_path),
+            extracted_count=len(events),
+            merged_count=0,
+            skipped_count=max(0, len(extracted) - len(events)),
+        )
+
+    async def migrate_v2(self, *, dry_run: bool = False, limit: int = 100000) -> dict[str, Any]:
+        backend = await self._ensure_backend(force_retry=True)
+        if backend is None:
+            return {"dry_run": dry_run, "source_records": 0, "migrated": 0, "skipped": 0}
+        try:
+            return await backend.migrate_v2(dry_run=dry_run, limit=limit)
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+            return {"dry_run": dry_run, "source_records": 0, "migrated": 0, "skipped": 0}
+
+    async def run_decay(self, *, dry_run: bool = False) -> dict[str, Any]:
+        backend = await self._ensure_backend()
+        if backend is None:
+            return {"retention_days": getattr(self.config, "retention_days", None), "scanned": 0, "deleted": 0, "dry_run": dry_run}
+        try:
+            return await backend.run_decay(dry_run=dry_run)
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+            return {"retention_days": getattr(self.config, "retention_days", None), "scanned": 0, "deleted": 0, "dry_run": dry_run}
+
+    async def stats(self) -> dict[str, Any]:
+        journal_events = self._load_journal_events(min_seq=1)
+        pending = await self.list_pending(limit=100000)
+        base: dict[str, Any] = {
+            "records": len(journal_events),
+            "records_v2": 0,
+            "pending": len([p for p in pending if p.status == "pending"]),
+            "records_by_type": {"memory": len(journal_events)},
+            "layer_distribution": {"l0": 0, "l1": 0, "l2": 0},
+            "dense_enabled": False,
+            "sqlite_path": "",
+            "qdrant_path": "",
+            "planner_calls": 0,
+            "commit_calls": 0,
+            "rerank_calls": 0,
+            "token_in": 0,
+            "token_out": 0,
+            "cost_delta_pct": 0.0,
+        }
+        backend = await self._ensure_backend()
+        if backend is not None:
+            try:
+                base.update(await backend.stats())
+            except Exception as exc:
+                self._mark_backend_failure(exc)
+        journal_seq = self._journal_seq()
+        rag_applied_seq = int(self._sync_state.get("rag_applied_seq", 0) or 0)
+        legacy_applied_seq = int(self._sync_state.get("legacy_applied_seq", 0) or 0)
+        base.update(
+            {
+                "backend_state": self._backend_state,
+                "rag_healthy": bool(self._backend is not None),
+                "journal_seq": journal_seq,
+                "rag_applied_seq": rag_applied_seq,
+                "legacy_applied_seq": legacy_applied_seq,
+                "unsynced_rag_events": max(0, journal_seq - rag_applied_seq) if self._rag_mode_enabled() else 0,
+                "unsynced_legacy_events": max(0, journal_seq - legacy_applied_seq) if self._legacy_mirror_enabled() else 0,
+                "last_backend_error": self._last_backend_error,
+            }
+        )
+        return base
+
+    def close(self) -> None:
+        backend = self._backend
+        self._backend = None
+        self.store = None
+        if backend is not None:
+            backend.close()
 
 

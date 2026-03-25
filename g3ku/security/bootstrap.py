@@ -13,6 +13,8 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from g3ku.china_bridge.registry import china_channel_secret_fields
+
 
 MASTER_KEY_VERSION = 2
 UNLOCK_SCOPE = "global"
@@ -133,19 +135,10 @@ def extract_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
             out[f"{SCONFIG}.chinaBridge.controlToken"] = str(control_token)
         channels = china_bridge.get("channels")
         if isinstance(channels, dict):
-            secret_fields = {
-                "clientSecret",
-                "token",
-                "secret",
-                "corpSecret",
-                "appSecret",
-                "encodingAesKey",
-                "accounts",
-            }
             for channel_name, channel_payload in channels.items():
                 if not isinstance(channel_payload, dict):
                     continue
-                for field_name in secret_fields:
+                for field_name in china_channel_secret_fields(str(channel_name or "")):
                     value = channel_payload.get(field_name)
                     if _secret_value_present(value):
                         out[f"{SCONFIG}.chinaBridge.channels.{channel_name}.{field_name}"] = deepcopy(value)
@@ -174,17 +167,12 @@ def strip_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
         china_bridge["controlToken"] = ""
         channels = china_bridge.get("channels")
         if isinstance(channels, dict):
-            for channel_payload in channels.values():
+            for channel_name, channel_payload in channels.items():
                 if not isinstance(channel_payload, dict):
                     continue
-                for field_name in (
-                    "clientSecret",
-                    "token",
-                    "secret",
-                    "corpSecret",
-                    "appSecret",
-                    "encodingAesKey",
-                ):
+                for field_name in china_channel_secret_fields(str(channel_name or "")):
+                    if field_name == "accounts":
+                        continue
                     if field_name in channel_payload:
                         channel_payload[field_name] = ""
                 if "accounts" in channel_payload:

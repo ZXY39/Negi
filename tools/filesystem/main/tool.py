@@ -6,6 +6,7 @@ import difflib
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,14 @@ def _resolve_path(
         except ValueError as exc:
             raise PermissionError(f'Path {path} is outside allowed directory {allowed_dir}') from exc
     return resolved
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _runtime_task_id(runtime: dict[str, Any] | None, default: str | None = None) -> str:
@@ -151,6 +160,150 @@ class FilesystemTool:
             return None
         return f'Error: Action not allowed for role {actor_role}: filesystem.{action_id}'
 
+    def _workspace_root(self) -> Path:
+        return Path(self._workspace or Path.cwd()).expanduser().resolve()
+
+    def _temp_root(self) -> Path:
+        return self._workspace_root() / 'temp'
+
+    def _externaltools_root(self) -> Path:
+        return self._workspace_root() / 'externaltools'
+
+    def _tools_root(self) -> Path:
+        return self._workspace_root() / 'tools'
+
+    def _legacy_temp_roots(self) -> list[Path]:
+        workspace_root = self._workspace_root()
+        return [
+            workspace_root / 'tmp',
+            workspace_root / '.g3ku' / 'tmp',
+        ]
+
+    @staticmethod
+    def _system_temp_roots() -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for raw in (
+            tempfile.gettempdir(),
+            os.environ.get('TMP'),
+            os.environ.get('TEMP'),
+            os.environ.get('TMPDIR'),
+        ):
+            text = str(raw or '').strip()
+            if not text:
+                continue
+            try:
+                resolved = Path(text).expanduser().resolve()
+            except Exception:
+                continue
+            key = str(resolved).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(resolved)
+        return candidates
+
+    @staticmethod
+    def _suffix_candidates(path: Path) -> set[str]:
+        suffixes = [part.lower() for part in path.suffixes]
+        candidates = set(suffixes)
+        if len(suffixes) >= 2:
+            candidates.add(''.join(suffixes[-2:]))
+        if len(suffixes) >= 3:
+            candidates.add(''.join(suffixes[-3:]))
+        return candidates
+
+    @classmethod
+    def _looks_like_managed_artifact(cls, path: Path) -> bool:
+        suffix_candidates = cls._suffix_candidates(path)
+        managed_suffixes = {
+            '.7z',
+            '.apk',
+            '.appimage',
+            '.bin',
+            '.bz2',
+            '.cache',
+            '.cab',
+            '.dll',
+            '.dmg',
+            '.download',
+            '.exe',
+            '.gz',
+            '.iso',
+            '.jar',
+            '.log',
+            '.msi',
+            '.partial',
+            '.pkg',
+            '.rar',
+            '.so',
+            '.tar',
+            '.tar.bz2',
+            '.tar.gz',
+            '.tar.xz',
+            '.temp',
+            '.tgz',
+            '.tmp',
+            '.whl',
+            '.xz',
+            '.zip',
+        }
+        if suffix_candidates.intersection(managed_suffixes):
+            return True
+        lowered_parts = {part.lower() for part in path.parts}
+        if lowered_parts.intersection({'node_modules', 'site-packages', '.venv', 'venv', '__pycache__', 'dist', 'build'}):
+            return True
+        lowered_name = path.name.lower()
+        return lowered_name.startswith(('tmp.', 'tmp_', 'tmp-', 'temp.', 'temp_', 'temp-'))
+
+    @staticmethod
+    def _is_allowed_tool_registration_path(path: Path, tools_root: Path) -> bool:
+        if not _is_relative_to(path, tools_root):
+            return False
+        relative = path.relative_to(tools_root)
+        if len(relative.parts) < 2:
+            return False
+        if len(relative.parts) == 2 and relative.parts[1] == 'resource.yaml':
+            return True
+        return relative.parts[1] in {'main', 'toolskills'}
+
+    @classmethod
+    def _is_system_temp_path(cls, path: Path) -> bool:
+        resolved = path.expanduser().resolve()
+        for root in cls._system_temp_roots():
+            if _is_relative_to(resolved, root):
+                return True
+        return False
+
+    def _enforce_workspace_path_policy(self, *, file_path: Path, action: str) -> None:
+        resolved = file_path.expanduser().resolve()
+        temp_root = self._temp_root()
+        externaltools_root = self._externaltools_root()
+        tools_root = self._tools_root()
+
+        for legacy_root in self._legacy_temp_roots():
+            if _is_relative_to(resolved, legacy_root):
+                raise PermissionError(
+                    f'Path {resolved} is blocked for filesystem.{action}: use {temp_root} for temporary content instead of legacy tmp directories'
+                )
+
+        if self._is_system_temp_path(resolved) and not _is_relative_to(resolved, temp_root):
+            raise PermissionError(
+                f'Path {resolved} is blocked for filesystem.{action}: use {temp_root} for temporary content instead of the system temp directory'
+            )
+
+        if _is_relative_to(resolved, tools_root) and not self._is_allowed_tool_registration_path(resolved, tools_root):
+            raise PermissionError(
+                f'Path {resolved} is blocked for filesystem.{action}: tools/ may only contain resource.yaml, main/, and toolskills/ registration content; install real third-party tool payloads under {externaltools_root}'
+            )
+
+        if self._looks_like_managed_artifact(resolved) and not (
+            _is_relative_to(resolved, temp_root) or _is_relative_to(resolved, externaltools_root)
+        ):
+            raise PermissionError(
+                f'Path {resolved} is blocked for filesystem.{action}: downloads, temporary artifacts, archives, logs, and third-party tool payloads must live under {temp_root} or {externaltools_root}'
+            )
+
     def _describe(self, path: str) -> str:
         _raise_if_content_ref_path(path)
         return json.dumps(self._navigator().describe(path=path), ensure_ascii=False)
@@ -247,6 +400,7 @@ class FilesystemTool:
         if content is None:
             return 'Error: content is required when action=write'
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+        self._enforce_workspace_path_policy(file_path=file_path, action='write')
         existed_before = file_path.exists()
         original = ''
         if existed_before and file_path.is_file():
@@ -296,6 +450,7 @@ class FilesystemTool:
         if not text_mode and not range_mode:
             return 'Error: edit requires exactly one mode: text-replace or line-range'
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+        self._enforce_workspace_path_policy(file_path=file_path, action='edit')
         if not file_path.exists():
             return f'Error: File not found: {path}'
         if not file_path.is_file():
@@ -373,6 +528,7 @@ class FilesystemTool:
 
     def _delete(self, path: str) -> str:
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+        self._enforce_workspace_path_policy(file_path=file_path, action='delete')
         if not file_path.exists():
             return f'Error: File not found: {path}'
         if not file_path.is_file():
