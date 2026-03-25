@@ -1,4 +1,4 @@
-// Task list, task detail loading, and task event orchestration extracted from org_graph_app.js.
+﻿// Task list, task detail loading, and task event orchestration extracted from org_graph_app.js.
 // Loaded after org_graph_app.js and before org_graph_llm.js.
 
 
@@ -30,7 +30,47 @@ function setTaskMenuVisibility() {
     U.taskBatchTrigger?.setAttribute("aria-expanded", batchOpen ? "true" : "false");
 }
 
+function closeTaskCardMenus({ restoreFocus = false } = {}) {
+    const openMenus = [...(U.taskGrid?.querySelectorAll(".pc-card-menu-shell.is-open") || [])];
+    let closed = false;
+    openMenus.forEach((shell) => {
+        shell.classList.remove("is-open");
+        shell.querySelector(".pc-card-menu")?.setAttribute("hidden", "hidden");
+        const trigger = shell.querySelector("[data-task-menu-toggle]");
+        if (trigger) {
+            trigger.setAttribute("aria-expanded", "false");
+            if (restoreFocus && trigger instanceof HTMLElement) trigger.focus();
+        }
+        closed = true;
+    });
+    return closed;
+}
+
+function setTaskCardMenuOpen(taskId, open, { restoreFocus = false } = {}) {
+    const targetId = String(taskId || "").trim();
+    if (!targetId) return false;
+    let matched = false;
+    [...(U.taskGrid?.querySelectorAll(".pc-card-menu-shell[data-task-menu]") || [])].forEach((shell) => {
+        const currentId = String(shell.dataset.taskMenu || "").trim();
+        const shouldOpen = !!open && currentId === targetId;
+        const trigger = shell.querySelector("[data-task-menu-toggle]");
+        const menu = shell.querySelector(".pc-card-menu");
+        if (currentId === targetId) matched = true;
+        shell.classList.toggle("is-open", shouldOpen);
+        if (menu) {
+            if (shouldOpen) menu.removeAttribute("hidden");
+            else menu.setAttribute("hidden", "hidden");
+        }
+        if (trigger) {
+            trigger.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+            if (!shouldOpen && restoreFocus && currentId === targetId && trigger instanceof HTMLElement) trigger.focus();
+        }
+    });
+    return matched;
+}
+
 function setTaskMenuOpen(kind, open) {
+    if (open) closeTaskCardMenus();
     if (kind === "filter") {
         S.taskFilterMenuOpen = !!open;
         if (open) S.taskBatchMenuOpen = false;
@@ -41,10 +81,13 @@ function setTaskMenuOpen(kind, open) {
     setTaskMenuVisibility();
 }
 
-function closeTaskMenus() {
+function closeTaskMenus({ restoreFocus = false } = {}) {
+    const hadToolbarOpen = !!(S.taskFilterMenuOpen || S.taskBatchMenuOpen);
     S.taskFilterMenuOpen = false;
     S.taskBatchMenuOpen = false;
     setTaskMenuVisibility();
+    const cardClosed = closeTaskCardMenus({ restoreFocus });
+    return hadToolbarOpen || cardClosed;
 }
 
 function setMultiSelectMode(enabled) {
@@ -110,7 +153,11 @@ function taskMetaText(task) {
     const sessionMeta = taskSessionMeta(task);
     if (sessionMeta) parts.push(sessionMeta);
     if (task.created_at) parts.push(`Created ${formatSessionTime(task.created_at)}`);
-    return parts.join(" · ") || "No timestamp";
+    return parts.join(" 路 ") || "No timestamp";
+}
+
+function taskCreatedAtText(task) {
+    return task?.created_at ? formatSessionTime(task.created_at) : "\u6682\u65e0";
 }
 
 async function copyTaskId(taskId) {
@@ -133,10 +180,6 @@ async function copyTaskId(taskId) {
 
 function taskGridRenderSignature(meta) {
     const visibleItems = Array.isArray(meta?.items) ? meta.items : [];
-    const sessionLabels = (S.ceoSessions || []).map((session) => ({
-        session_id: String(session?.session_id || ""),
-        title: String(session?.title || ""),
-    }));
     return JSON.stringify({
         total: Number(meta?.total || 0),
         currentPage: Number(meta?.currentPage || 1),
@@ -147,21 +190,20 @@ function taskGridRenderSignature(meta) {
         multiSelectMode: !!S.multiSelectMode,
         emptyText: taskSessionEmptyText(),
         selectedTaskIds: [...S.selectedTaskIds].map((id) => String(id || "")).sort(),
-        sessionLabels,
         items: visibleItems.map((task) => {
             const taskId = String(task?.task_id || "");
-            const primaryAction = primaryTaskAction(task);
+            const tokenUsage = taskTokenUsage(task);
             return {
                 taskId,
                 selected: S.selectedTaskIds.has(taskId),
                 title: String(task?.title || ""),
-                brief: String(task?.brief || ""),
                 statusKey: taskStatusKey(task),
                 statusLabel: taskStatusLabel(task),
-                meta: taskMetaText(task),
-                tokenSummary: taskTokenSummaryLine(task?.token_usage),
-                primaryAction: primaryAction ? `${primaryAction.action}:${primaryAction.label}:${primaryAction.tone}` : "",
-                canDelete: canDelete(task),
+                createdAt: taskCreatedAtText(task),
+                tokenUsage: tokenUsage.tracked
+                    ? [tokenUsage.input_tokens, tokenUsage.output_tokens, tokenUsage.cache_hit_tokens]
+                    : [null, null, null],
+                actions: taskCardActions(task).map((action) => `${action.action}:${action.tone}`).join("|"),
             };
         }),
     });
@@ -199,35 +241,40 @@ function renderTasks() {
     }
     meta.items.forEach((task) => {
         const selected = S.selectedTaskIds.has(task.task_id);
-        const primaryAction = primaryTaskAction(task);
         const statusKey = taskStatusKey(task);
+        const tokenUsage = taskTokenUsage(task);
+        const cardActions = taskCardActions(task);
         const el = document.createElement("div");
         el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
         el.innerHTML = `
             <div class="pc-topbar">
-                <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
-                <div class="pc-topbar-meta">
-                    <span class="status-badge" data-status="${esc(statusKey)}">${esc(taskStatusLabel(task))}</span>
-                    <span class="pc-task-id-chip">
-                        <span class="pc-task-id-label">\u4efb\u52a1</span>
-                        <span class="pc-task-id-value">${esc(task.task_id)}</span>
-                    </span>
-                    <button class="icon-btn pc-copy-btn" type="button" title="\u590d\u5236\u4efb\u52a1 ID" aria-label="\u590d\u5236\u4efb\u52a1 ID">
-                        <i data-lucide="copy"></i>
-                    </button>
+                <div class="pc-topbar-left">
+                    <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
+                    <div class="pc-topbar-meta">
+                        <span class="status-badge" data-status="${esc(statusKey)}">${esc(taskStatusLabel(task))}</span>
+                        <span class="pc-task-id-chip">
+                            <span class="pc-task-id-label">Task</span>
+                            <span class="pc-task-id-value">${esc(task.task_id)}</span>
+                        </span>
+                    </div>
                 </div>
+                ${cardActions.length ? `
+                    <div class="pc-card-menu-shell toolbar-dropdown" data-task-menu="${esc(task.task_id)}">
+                        <button class="icon-btn pc-card-menu-trigger" type="button" data-task-menu-toggle="${esc(task.task_id)}" title="\u66f4\u591a\u64cd\u4f5c" aria-label="\u66f4\u591a\u64cd\u4f5c" aria-haspopup="menu" aria-expanded="false" ${S.taskBusy ? "disabled" : ""}>
+                            <i data-lucide="more-horizontal"></i>
+                        </button>
+                        <div class="toolbar-menu pc-card-menu" role="menu" hidden>
+                            ${cardActions.map((action) => `<button class="toolbar-menu-item ${action.tone}" type="button" data-task-card-action="${action.action}" role="menuitem" ${S.taskBusy ? "disabled" : ""}>${esc(action.label)}</button>`).join("")}
+                        </div>
+                    </div>
+                ` : ""}
             </div>
-            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title">${esc(task.title || task.task_id)}</h3></div></div>
-            <div class="pc-summary">${esc(task.brief || "No summary")}</div>
-            <div class="pc-stats">${esc(taskMetaText(task))}</div>
-            <div class="pc-token-stats">${esc(taskTokenSummaryLine(task.token_usage))}</div>
-            <div class="pc-actions">
-                <div class="pc-actions-left">
-                    ${primaryAction ? `<button class="project-action-btn ${primaryAction.tone}" type="button" data-action="${primaryAction.action}" ${S.taskBusy ? "disabled" : ""}>${primaryAction.label}</button>` : ""}
-                </div>
-                <div class="pc-actions-right">
-                    ${canDelete(task) ? `<button class="project-action-btn danger" type="button" data-action="delete" ${S.taskBusy ? "disabled" : ""}>删除</button>` : ""}
-                </div>
+            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" title="${esc(task.title || task.task_id)}">${esc(task.title || task.task_id)}</h3></div></div>
+            <div class="pc-created-at"><span class="pc-field-label">\u521b\u5efa\u65f6\u95f4</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
+            <div class="pc-metrics">
+                <div class="pc-metric"><span class="pc-metric-label">\u8f93\u5165</span><strong class="pc-metric-value">${esc(tokenUsage.tracked ? formatTokenCount(tokenUsage.input_tokens) : "--")}</strong></div>
+                <div class="pc-metric"><span class="pc-metric-label">\u8f93\u51fa</span><strong class="pc-metric-value">${esc(tokenUsage.tracked ? formatTokenCount(tokenUsage.output_tokens) : "--")}</strong></div>
+                <div class="pc-metric"><span class="pc-metric-label">\u7f13\u5b58\u547d\u4e2d</span><strong class="pc-metric-value">${esc(tokenUsage.tracked ? formatTokenCount(tokenUsage.cache_hit_tokens) : "--")}</strong></div>
             </div>
         `;
         const toggle = el.querySelector(".project-select-toggle");
@@ -239,13 +286,17 @@ function renderTasks() {
             else S.selectedTaskIds.delete(task.task_id);
             renderTasks();
         });
-        el.querySelector(".pc-copy-btn")?.addEventListener("click", async (e) => {
+        const menuTrigger = el.querySelector("[data-task-menu-toggle]");
+        menuTrigger?.addEventListener("click", (e) => {
             e.stopPropagation();
-            await copyTaskId(task.task_id);
+            const shell = menuTrigger.closest(".pc-card-menu-shell");
+            const isOpen = !!shell?.classList.contains("is-open");
+            setTaskCardMenuOpen(task.task_id, !isOpen, { restoreFocus: isOpen });
         });
-        el.querySelectorAll(".project-action-btn").forEach((btn) => btn.addEventListener("click", async (e) => {
+        el.querySelectorAll("[data-task-card-action]").forEach((btn) => btn.addEventListener("click", async (e) => {
             e.stopPropagation();
-            await runTaskAction(task.task_id, btn.dataset.action, { returnFocus: btn });
+            closeTaskCardMenus();
+            await runTaskAction(task.task_id, btn.dataset.taskCardAction, { returnFocus: menuTrigger || btn });
         }));
         el.addEventListener("click", () => {
             if (S.multiSelectMode) {
@@ -303,6 +354,21 @@ function updateTaskToolbar() {
         button.disabled = S.taskBusy || !enabled;
     });
     setTaskMenuVisibility();
+}
+
+function taskActionTone(action) {
+    if (action === "pause") return "warn";
+    if (action === "delete") return "danger";
+    return "success";
+}
+
+function taskCardActions(task) {
+    const actions = [];
+    if (canPause(task)) actions.push("pause");
+    if (canResume(task)) actions.push("resume");
+    if (canRetry(task)) actions.push("retry");
+    if (canDelete(task)) actions.push("delete");
+    return actions.map((action) => ({ action, label: taskActionText(action), tone: taskActionTone(action) }));
 }
 
 function primaryTaskAction(task) {
@@ -495,15 +561,18 @@ function resetTaskView() {
     S.treePan.suppressClickNodeId = null;
     U.tree.innerHTML = '<div class="empty-state">Waiting for task tree...</div>';
     if (U.taskTreeResetRounds) {
-        U.taskTreeResetRounds.hidden = false;
+        U.taskTreeResetRounds.hidden = true;
         U.taskTreeResetRounds.disabled = true;
         U.taskTreeResetRounds.classList.remove("active");
         U.taskTreeResetRounds.title = "轮次信息加载中";
     }
-    if (U.taskTreeRoundHint) {
-        U.taskTreeRoundHint.dataset.state = "loading";
-        U.taskTreeRoundHint.textContent = "轮次信息加载中...";
+    if (U.tdPromptDisclosure) U.tdPromptDisclosure.open = false;
+    if (U.tdTitle) {
+        U.tdTitle.textContent = "正在加载...";
+        U.tdTitle.title = "";
     }
+    if (U.tdStatus) U.tdStatus.textContent = "未知";
+    if (U.tdStatusPill) U.tdStatusPill.dataset.status = "unknown";
     U.feedTitle.textContent = "Node Details";
     if (U.adOutput) U.adOutput.textContent = "暂无最终输出";
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">选择任务树中的节点后，这里会显示执行流程。</div>';
@@ -539,10 +608,11 @@ function renderTaskTokenStats() {
     if (!U.taskTokenContent || !U.taskTokenSummaryText) return;
     const summary = taskTokenUsage(S.currentTask, S.currentTaskProgress);
     U.taskTokenSummaryText.textContent = taskTokenSummaryLine(summary);
+    if (U.taskTokenButton) U.taskTokenButton.title = taskTokenSummaryLine(summary);
     if (!summary.tracked) {
         U.taskTokenContent.innerHTML = `
             <div class="task-token-topline">
-                <div class="task-token-stat"><strong>未统计</strong><span>该任务创建于统计上线前，暂无精确数据。</span></div>
+                <div class="task-token-stat"><strong>鏈粺璁?/strong><span>璇ヤ换鍔″垱寤轰簬缁熻涓婄嚎鍓嶏紝鏆傛棤绮剧‘鏁版嵁銆?/span></div>
             </div>
         `;
         return;
@@ -558,30 +628,30 @@ function renderTaskTokenStats() {
         ? S.currentTaskProgress.model_calls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
         : [];
     const partialNote = summary.is_partial
-        ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
-        : '<span class="task-token-badge success">统计完整</span>';
+        ? '<span class="task-token-badge warn">閮ㄥ垎妯″瀷鏈繑鍥?usage</span>'
+        : '<span class="task-token-badge success">缁熻瀹屾暣</span>';
     const topline = `
         <div class="task-token-topline">
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>总输入</span></div>
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>总输出</span></div>
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缓存命中</span></div>
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.call_count))}</strong><span>模型调用</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>鎬昏緭鍏?/span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>鎬昏緭鍑?/span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缂撳瓨鍛戒腑</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.call_count))}</strong><span>妯″瀷璋冪敤</span></div>
         </div>
         <div class="task-token-meta">
             ${partialNote}
-            <span class="task-token-subtle">有 usage ${esc(formatTokenCount(summary.calls_with_usage))} · 缺失 ${esc(formatTokenCount(summary.calls_without_usage))}</span>
+            <span class="task-token-subtle">鏈?usage ${esc(formatTokenCount(summary.calls_with_usage))} 路 缂哄け ${esc(formatTokenCount(summary.calls_without_usage))}</span>
         </div>
     `;
     if (!summary.call_count) {
-        U.taskTokenContent.innerHTML = `${topline}<div class="empty-state task-token-empty">尚未发生模型调用。</div>`;
+        U.taskTokenContent.innerHTML = `${topline}<div class="empty-state task-token-empty">灏氭湭鍙戠敓妯″瀷璋冪敤銆?/div>`;
         return;
     }
     const rowsMarkup = modelRows.length
         ? modelRows.map((item) => {
             const subtitleParts = [item.provider_id, item.provider_model].filter(Boolean);
             const badges = [];
-            if (item.is_partial) badges.push('<span class="task-token-badge warn">部分缺失</span>');
-            if (!item.calls_without_usage) badges.push('<span class="task-token-badge success">完整</span>');
+            if (item.is_partial) badges.push('<span class="task-token-badge warn">閮ㄥ垎缂哄け</span>');
+            if (!item.calls_without_usage) badges.push('<span class="task-token-badge success">瀹屾暣</span>');
             return `
                 <div class="task-token-model-item">
                     <div class="task-token-model-head">
@@ -602,7 +672,7 @@ function renderTaskTokenStats() {
                 </div>
             `;
         }).join("")
-        : '<div class="empty-state task-token-empty">当前只有任务级统计，尚无按模型明细。</div>';
+        : '<div class="empty-state task-token-empty">褰撳墠鍙湁浠诲姟绾х粺璁★紝灏氭棤鎸夋ā鍨嬫槑缁嗐€?/div>';
     const recentCallMarkup = recentModelCalls.length
         ? `
             <div class="task-token-call-card">
@@ -716,8 +786,7 @@ function handleTaskEvent(payload) {
     }
     if (payload.type === "task.summary.updated" && payload.data?.task) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
-        U.tdStatus.textContent = taskStatusLabel(S.currentTask).toUpperCase();
-        U.tdStatus.dataset.status = taskStatusKey(S.currentTask);
+        renderTaskDetailHeader();
         renderTaskTokenStats();
         return;
     }
@@ -847,3 +916,10 @@ function initTasksWs() {
         }, 1000);
     };
 }
+
+
+
+
+
+
+

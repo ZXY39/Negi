@@ -77,6 +77,20 @@ function displayEnabledLabel(enabled, available = true, repairRequired = false) 
     return enabled ? "已启用" : "已禁用";
 }
 
+function dockResourceStatusBadge(root) {
+    const shell = root instanceof Element ? root : null;
+    const title = shell?.querySelector(".detail-modal-title");
+    const subtitle = title?.querySelector(".subtitle");
+    const statusRow = shell?.querySelector(".resource-status-row");
+    const statusBadge = statusRow?.querySelector(".meta-tag");
+    if (!title || !subtitle || !statusBadge) return;
+    const meta = document.createElement("div");
+    meta.className = "detail-modal-meta";
+    subtitle.replaceWith(meta);
+    meta.appendChild(subtitle);
+    meta.appendChild(statusBadge);
+}
+
 function renderSkills() {
     U.skillList.innerHTML = "";
     const meta = paginateResources(filterSkills(), S.skillPage, S.skillPageSize);
@@ -106,9 +120,11 @@ function filterTools() {
     const q = String(U.toolSearch.value || "").trim().toLowerCase();
     return S.tools.filter((tool) => {
         if (q && !`${tool.tool_id} ${tool.display_name} ${tool.source_path}`.toLowerCase().includes(q)) return false;
-        if (U.toolStatus.value === "enabled" && !tool.enabled) return false;
-        if (U.toolStatus.value === "disabled" && tool.enabled) return false;
-        if (U.toolStatus.value === "unavailable" && tool.available) return false;
+        const statusFilter = String(U.toolStatus.value || "all").trim().toLowerCase();
+        const statusKey = toolRepairRequired(tool)
+            ? "repair_required"
+            : (tool.available === false ? "unavailable" : (tool.enabled ? "enabled" : "disabled"));
+        if (statusFilter !== "all" && statusKey !== statusFilter) return false;
         if (U.toolRisk.value !== "all" && !(tool.actions || []).some((a) => a.risk_level === U.toolRisk.value)) return false;
         return true;
     });
@@ -132,7 +148,6 @@ function renderTools() {
             <div class="resource-list-subtitle">${esc(subtitle)}</div>
             <div class="resource-list-meta">
                 <span class="meta-tag status-${resourceAvailabilityStatus(tool)}">${esc(displayEnabledLabel(tool.enabled, tool.available, toolRepairRequired(tool)))}</span>
-                ${toolRepairRequired(tool) ? '<span class="meta-tag repair-flag">需先修复</span>' : ''}
                 ${tool.is_core ? '<span class="meta-tag">核心工具</span>' : ''}
                 <span class="meta-tag tool-actions">${(tool.actions || []).length} 个 action</span>
             </div>`;
@@ -762,10 +777,6 @@ function renderSkillDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
-                    <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
-                    ${repairRequired ? '<span class="meta-tag repair-flag">需先修复</span>' : ''}
-                    <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
-                    ${repairRequired ? '<span class="meta-tag repair-flag">需先修复</span>' : ''}
                     <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedSkill.enabled, S.selectedSkill.available))}</span>
                     ${S.selectedSkill.enabled
                         ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
@@ -792,23 +803,6 @@ function renderSkillDetail() {
                         `).join("")}
                     </div>
                 </div>
-                ${repairRequired ? `
-                    <div class="resource-warning-banner repair-required" role="status" aria-live="polite">
-                        <div class="resource-warning-title">当前 Tool 处于待修复状态</div>
-                        <div class="resource-copy-block">它会以 <code>【待修复】</code> 形式进入函数工具列表。主 Agent 调用它时，只会先收到修复指引，不会执行真实能力。</div>
-                        <ul class="resource-warning-list">
-                            ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
-                            <li>建议先查看 ToolSkill，并使用 <code>load_tool_context</code>、<code>repair-tool</code>、<code>exec</code>、<code>filesystem</code> 完成修复。</li>
-                        </ul>
-                    </div>
-                ` : (S.selectedTool.available === false ? `
-                    <div class="resource-warning-banner" role="status" aria-live="polite">
-                        <div class="resource-warning-title">当前 Tool 不可用</div>
-                        <ul class="resource-warning-list">
-                            ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
-                        </ul>
-                    </div>
-                ` : "")}
                 <div class="resource-section">
                     <h3>文件内容</h3>
                     <div class="resource-filter-row">${fileTabs}</div>
@@ -816,6 +810,7 @@ function renderSkillDetail() {
                 </div>
             </div>
         </article>`;
+    dockResourceStatusBadge(U.skillDetail);
     U.skillDetail.querySelector("#skill-modal-close")?.addEventListener("click", clearSkillSelection);
     U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => void saveSkill());
     U.skillDetail.querySelector("#skill-enable-btn")?.addEventListener("click", () => {
@@ -1067,30 +1062,20 @@ function renderToolDetail() {
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
                     <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
-                    ${repairRequired ? '<span class="meta-tag repair-flag">需先修复</span>' : ''}
                     ${isCoreTool
                         ? `<button type="button" class="toolbar-btn ghost" id="tool-disable-btn" disabled>核心工具不可禁用</button>`
                         : (S.selectedTool.enabled
                             ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>`
                             : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`)}
                 </div>
-                ${repairRequired ? `
-                    <div class="resource-warning-banner repair-required" role="status" aria-live="polite">
-                        <div class="resource-warning-title">当前 Tool 处于待修复状态</div>
-                        <div class="resource-copy-block">它会以 <code>【待修复】</code> 形式进入函数工具列表。主 Agent 调用它时，只会先收到修复指引，不会执行真实能力。</div>
-                        <ul class="resource-warning-list">
-                            ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
-                            <li>建议先查看 ToolSkill，并使用 <code>load_tool_context</code>、<code>repair-tool</code>、<code>exec</code>、<code>filesystem</code> 完成修复。</li>
-                        </ul>
-                    </div>
-                ` : (S.selectedTool.available === false ? `
+                ${!repairRequired && S.selectedTool.available === false ? `
                     <div class="resource-warning-banner" role="status" aria-live="polite">
                         <div class="resource-warning-title">当前 Tool 不可用</div>
                         <ul class="resource-warning-list">
                             ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
                         </ul>
                     </div>
-                ` : "")}
+                ` : ""}
                 <div class="resource-section">
                     <h3>描述</h3>
                     <div class="resource-copy-block">${esc(description || "暂无描述。")}</div>
@@ -1168,6 +1153,7 @@ function renderToolDetail() {
         deleteButton.disabled = isCoreTool;
         toolStatusRow.appendChild(deleteButton);
     }
+    dockResourceStatusBadge(U.toolDetail);
     U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
     U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => void saveTool());
     U.toolDetail.querySelector("#tool-enable-btn")?.addEventListener("click", () => {
@@ -1208,7 +1194,7 @@ async function loadTools({ renderDetail = true } = {}) {
                     ...next,
                     primary_executor_name: S.selectedTool?.primary_executor_name || next.primary_executor_name || "",
                     toolskill_content: S.selectedTool?.toolskill_content || "",
-                    repair_required: S.selectedTool?.repair_required ?? next.repair_required ?? (next?.metadata?.repair_required === true),
+                    repair_required: next.repair_required ?? (next?.metadata?.repair_required === true),
                 };
                 ensureToolPageForItem(selectedId);
             }

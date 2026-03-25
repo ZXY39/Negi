@@ -8,7 +8,9 @@ from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.web_ceo_sessions import (
     DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
+    build_last_task_memory,
     build_frontdoor_compact_history_message,
+    build_task_memory_message,
     extract_frontdoor_recent_history,
     resolve_frontdoor_context,
 )
@@ -139,6 +141,13 @@ class ContextAssemblyService:
             if frontdoor_summary_message is not None:
                 recent_history.append(frontdoor_summary_message)
                 frontdoor_summary_tokens = estimate_tokens(str(frontdoor_summary_message.get('content') or ''))
+            task_memory_message = build_task_memory_message(
+                getattr(persisted_session, 'metadata', {}).get('last_task_memory')
+            )
+            if task_memory_message is None:
+                task_memory_message = build_task_memory_message(build_last_task_memory(persisted_session))
+            if task_memory_message is not None:
+                recent_history.append(task_memory_message)
             recent_history.extend(
                 extract_frontdoor_recent_history(
                     persisted_session,

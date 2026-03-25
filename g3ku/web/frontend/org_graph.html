@@ -104,25 +104,20 @@
                 <div id="ceo-shell" class="ceo-shell">
                     <aside id="ceo-session-panel" class="ceo-session-panel" aria-label="CEO session list">
                         <div class="ceo-session-panel-header">
-                            <div class="ceo-session-panel-copy">
-                                <h2>会话</h2>
-                                <p class="subtitle">聊天记录彼此隔离，仅共享长期记忆。</p>
-                            </div>
                             <div class="ceo-session-panel-controls">
                                 <button id="ceo-session-panel-toggle" class="icon-btn ceo-session-panel-toggle" type="button" aria-expanded="false" aria-label="Expand session list">
                                     <i data-lucide="chevrons-right"></i>
                                 </button>
-                                <button id="ceo-new-session-btn" class="toolbar-btn ceo-new-session-btn" type="button">
+                                <button id="ceo-new-session-btn" class="toolbar-btn ceo-new-session-btn" type="button" aria-label="新建会话">
                                     <i data-lucide="plus"></i>
-                                    <span class="ceo-new-session-label">New Session</span>
                                 </button>
                             </div>
+                            <div id="ceo-session-tabs" class="ceo-session-tabs" role="tablist" aria-label="CEO session views">
+                                <button id="ceo-session-tab-local" class="ceo-session-tab" type="button" aria-pressed="true">本地</button>
+                                <button id="ceo-session-tab-channel" class="ceo-session-tab" type="button" aria-pressed="false">渠道</button>
+                            </div>
                         </div>
-                        <div class="ceo-session-tabs" role="tablist" aria-label="CEO session views">
-                            <button id="ceo-session-tab-local" class="ceo-session-tab" type="button" aria-pressed="true">本地</button>
-                            <button id="ceo-session-tab-channel" class="ceo-session-tab" type="button" aria-pressed="false">渠道</button>
-                        </div>
-                        <div id="ceo-session-current" class="ceo-session-current" aria-live="polite"></div>
+                        <div id="ceo-session-current" class="ceo-session-current" aria-live="polite" hidden></div>
                         <div id="ceo-session-list" class="ceo-session-list" role="list"></div>
                     </aside>
 
@@ -447,35 +442,32 @@
                 </div>
             </section>
             <section id="view-task-details" class="view-section" style="display: none;">
-                <header class="content-header project-header">
-                    <div class="header-left">
-                        <button class="icon-btn back-btn" id="back-to-tasks" type="button" title="返回任务大厅">
-                            <i data-lucide="arrow-left"></i>
-                        </button>
-                        <div>
-                            <h1 id="td-title">正在加载...</h1>
-                            <div class="project-meta">
-                                <span class="status-badge" id="td-status">UNKNOWN</span>
-                                <span id="td-summary" class="text-muted">正在获取任务摘要...</span>
-                            </div>
-                        </div>
+                <header class="content-header project-header task-detail-header">
+                    <button class="icon-btn back-btn task-detail-back-btn" id="back-to-tasks" type="button" title="返回任务大厅">
+                        <i data-lucide="arrow-left"></i>
+                    </button>
+                    <span class="status-badge task-detail-pill task-detail-status" id="td-status-pill" data-status="unknown">
+                        <span id="td-status" class="task-detail-pill-value">UNKNOWN</span>
+                    </span>
+                    <details id="td-prompt-disclosure" class="task-detail-pill task-prompt-disclosure">
+                        <summary class="task-prompt-summary" aria-label="展开或折叠任务初始提示词">
+                            <span class="task-detail-pill-label">初始提示词</span>
+                            <span id="td-prompt-text" class="task-prompt-text">正在加载...</span>
+                        </summary>
+                    </details>
+                    <div class="task-detail-pill task-detail-stat" aria-live="polite">
+                        <i data-lucide="play-circle"></i>
+                        <span class="task-detail-pill-label">活跃节点</span>
+                        <span id="td-active-count" class="task-detail-pill-value">0</span>
                     </div>
-                    <div class="header-actions">
-                        <div class="stat-pill"><i data-lucide="play-circle"></i> <span id="td-active-count">0</span>
-                            活跃节点</div>
-                    </div>
+                    <div class="header-actions"></div>
                 </header>
 
                 <div class="project-dashboard">
                     <div class="org-tree-panel panel">
-                        <div class="panel-header">
-                            <h2>任务树</h2>
-                            <div class="panel-header-actions">
-                                <button id="task-tree-reset-rounds-btn" class="toolbar-btn ghost small" type="button"
-                                    disabled>回到最新树</button>
-                                <span id="task-tree-round-hint" class="task-tree-round-hint" aria-live="polite">轮次信息加载中...</span>
-                                <i data-lucide="network"></i>
-                            </div>
+                        <div class="task-tree-floating-tools" aria-live="polite">
+                            <button id="task-tree-reset-rounds-btn" class="toolbar-btn ghost small task-tree-floating-reset"
+                                type="button" hidden disabled>回到最新树</button>
                         </div>
                         <div class="tree-container" id="org-tree-container">
                             <div class="empty-state">正在加载任务树...</div>

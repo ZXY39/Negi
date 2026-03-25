@@ -162,17 +162,28 @@ function hasManualTreeRoundSelections() {
     return Object.keys(normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId)).length > 0;
 }
 
-function countSwitchableRoundNodes(root) {
-    if (!root) return 0;
-    let count = 0;
-    walkFullTaskTree(root, (node) => {
-        if (rawNodeRounds(node).length > 1) count += 1;
-    });
-    return count;
+function taskDetailStatusLabel(task) {
+    return ({ in_progress: "运行中", success: "已完成", failed: "失败", blocked: "已暂停", unknown: "未知" })[taskStatusKey(task)] || "未知";
+}
+
+function taskInitialPromptText(task = null, progress = null) {
+    return String(task?.user_request || task?.title || task?.final_output || progress?.text || "暂无初始提示词").trim() || "暂无初始提示词";
+}
+
+function renderTaskDetailHeader({ resetPromptDisclosure = false } = {}) {
+    const task = S.currentTask || null;
+    const progress = S.currentTaskProgress || null;
+    const promptText = taskInitialPromptText(task, progress);
+    if (resetPromptDisclosure && U.tdPromptDisclosure) U.tdPromptDisclosure.open = false;
+    if (U.tdTitle) {
+        U.tdTitle.textContent = promptText;
+        U.tdTitle.title = promptText;
+    }
+    if (U.tdStatus) U.tdStatus.textContent = taskDetailStatusLabel(task);
+    if (U.tdStatusPill) U.tdStatusPill.dataset.status = taskStatusKey(task);
 }
 
 function syncTaskTreeHeaderState(projectedRoot = null) {
-    const switchableCount = countSwitchableRoundNodes(S.tree);
     const hasManual = hasManualTreeRoundSelections();
     if (U.tdActiveCount) {
         U.tdActiveCount.textContent = String(
@@ -182,18 +193,12 @@ function syncTaskTreeHeaderState(projectedRoot = null) {
         );
     }
     if (U.taskTreeResetRounds) {
-        U.taskTreeResetRounds.hidden = false;
+        U.taskTreeResetRounds.hidden = !hasManual;
         U.taskTreeResetRounds.disabled = !hasManual;
         U.taskTreeResetRounds.classList.toggle("active", hasManual);
         U.taskTreeResetRounds.title = hasManual
-            ? "恢复所有节点的默认最新轮次"
-            : (switchableCount > 0 ? "当前已经是默认最新轮次" : "当前任务没有可切换的轮次");
-    }
-    if (U.taskTreeRoundHint) {
-        U.taskTreeRoundHint.dataset.state = hasManual ? "manual" : (switchableCount > 0 ? "available" : "empty");
-        U.taskTreeRoundHint.textContent = switchableCount > 0
-            ? `${switchableCount} 个节点支持轮次切换${hasManual ? "，当前为手动轮次视图" : ""}`
-            : "当前任务没有可切换的轮次";
+            ? "恢复所有节点的最新树视图"
+            : "";
     }
 }
 
@@ -1266,6 +1271,8 @@ function hideAgent() {
 
 function applyTaskPayload(payload) {
     if (!payload || !payload.task) return;
+    const previousTaskId = String(S.currentTask?.task_id || "").trim();
+    const nextTaskId = String(payload.task?.task_id || "").trim();
     const treeRoot = payload.tree_root || payload.progress?.root || null;
     const runtimeSummary = payload.runtime_summary || payload.progress?.live_state || null;
     S.currentTask = payload.task;
@@ -1280,11 +1287,7 @@ function applyTaskPayload(payload) {
     };
     S.tree = treeRoot;
     S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
-    U.tdTitle.textContent = payload.task.title || payload.task.task_id || "Loading...";
-    U.tdStatus.textContent = taskStatusLabel(payload.task).toUpperCase();
-    U.tdStatus.dataset.status = taskStatusKey(payload.task);
-    const baseSummary = payload.task.user_request || payload.task.final_output || payload.progress?.text || "No summary";
-    U.tdSummary.textContent = baseSummary;
+    renderTaskDetailHeader({ resetPromptDisclosure: previousTaskId !== nextTaskId });
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
     if (S.tree) renderTree();

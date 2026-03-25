@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: skill-creator
-description: 面向 G3KU 创建、更新、迁移和校验 `skills/` 与 `tools/` 资源；提供两条明确工作流：一条用于创建 `skills/<skill_id>/`，一条用于接入 `tools/<tool_id>/`。也可把工作流描述、代码、文档、链接、PDF 或现有 skill/tool 转成适配 G3KU 的 skill 或 tool，并在需要时生成可导出的开放标准 SKILL.md 技能。适用于创建 skill、接入 tool、封装现有 CLI 或仓库、自动化重复流程、设计多 agent skill 套件、校验或导出 skill。若用户只是要从 GitHub repo/path 安装现成 skill，应优先调用 `skill-installer` 工具。
+description: 面向 G3KU 创建、更新、迁移和校验 `skills/` 与 `tools/` 资源；提供两条明确工作流：一条用于创建 `skills/<skill_id>/`，一条用于接入 `tools/<tool_id>/`。也可把工作流描述、代码、文档、链接、PDF 或现有 skill/tool 转成适配 G3KU 的 skill 或 tool，并在需要时生成可导出的开放标准 SKILL.md 技能。适用于创建 skill、接入 tool、封装现有 CLI 或仓库、自动化重复流程、设计多 agent skill 套件、校验或导出 skill。若用户只是要从 GitHub repo/path 安装现成 skill，应优先调用 `skill-installer` 工具；若用户要从 ClawHub 搜索、下载或更新 skill，则转用 `clawhub-skill-manager`。
 trigger:
   keywords:
     - skill-creator
@@ -16,9 +16,6 @@ trigger:
     - 封装 CLI
     - 自动化流程
     - automate workflow
-    - 安装 skill
-    - 导入 skill
-    - GitHub skill
     - validate skill
     - export skill
     - migrate skill

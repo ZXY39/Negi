@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import uuid
 from datetime import datetime
@@ -21,9 +22,19 @@ DEFAULT_TASK_HARD_MAX_DEPTH = 4
 DEFAULT_FRONTDOOR_RAW_TAIL_TURNS = 4
 FRONTDOOR_CONTEXT_VERSION = 1
 FRONTDOOR_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
+TASK_MEMORY_VERSION = 1
+TASK_MEMORY_PREFIX = '[[G3KU_TASK_MEMORY_V1]]'
+TASK_META_PREFIX = '[[G3KU_TASK_META_V1]]'
+TOOL_TRACE_PREFIX = '[[G3KU_TOOL_TRACE_V1]]'
+STAGE_TRACE_PREFIX = '[[G3KU_STAGE_TRACE_V1]]'
 _FRONTDOOR_ROUTE_KINDS = {"direct_reply", "self_execute", "task_dispatch"}
 _FRONTDOOR_SUMMARY_MAX_CHARS = 2_400
 _FRONTDOOR_TURN_SUMMARY_MAX_CHARS = 240
+_TASK_MEMORY_MAX_IDS = 3
+_TASK_ID_PATTERN = re.compile(r'task:[A-Za-z0-9][\w:-]*')
+_RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
+_RECENT_HISTORY_TOOL_TEXT_MAX_CHARS = 96
+_RECENT_HISTORY_STAGE_GOAL_MAX_CHARS = 120
 
 
 def _normalize_frontdoor_route_kind(value: Any) -> str:
@@ -52,10 +63,178 @@ def normalize_frontdoor_context(payload: Any, *, raw_tail_turns: int = DEFAULT_F
     }
 
 
+def _normalize_task_ids(values: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[str]:
+    items = list(values) if isinstance(values, (list, tuple, set)) else [values]
+    normalized: list[str] = []
+    for raw in items:
+        task_id = str(raw or '').strip()
+        if not task_id or not task_id.startswith('task:'):
+            continue
+        if task_id in normalized:
+            continue
+        normalized.append(task_id)
+        if len(normalized) >= max(1, int(limit or _TASK_MEMORY_MAX_IDS)):
+            break
+    return normalized
+
+
+def _extract_task_ids_from_text(text: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[str]:
+    return _normalize_task_ids(_TASK_ID_PATTERN.findall(str(text or '')), limit=limit)
+
+
+def normalize_task_memory(payload: Any) -> dict[str, Any]:
+    source = dict(payload or {}) if isinstance(payload, dict) else {}
+    return {
+        'version': TASK_MEMORY_VERSION,
+        'task_ids': _normalize_task_ids(source.get('task_ids')),
+        'source': str(source.get('source') or '').strip(),
+        'reason': str(source.get('reason') or '').strip(),
+        'updated_at': str(source.get('updated_at') or '').strip(),
+    }
+
+
+def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[str]:
+    metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
+    task_ids: list[str] = []
+    task_ids.extend(_normalize_task_ids(metadata.get('task_ids'), limit=limit))
+    task_ids.extend(_extract_task_ids_from_text(message.get('content'), limit=limit))
+    tool_events = message.get('tool_events') if isinstance(message.get('tool_events'), list) else []
+    for item in tool_events:
+        if not isinstance(item, dict):
+            continue
+        task_ids.extend(_extract_task_ids_from_text(item.get('text'), limit=limit))
+    interaction_trace = message.get('interaction_trace') if isinstance(message.get('interaction_trace'), dict) else {}
+    task_ids.extend(_extract_task_ids_from_text(interaction_trace.get('final_output'), limit=limit))
+    return _normalize_task_ids(task_ids, limit=limit)
+
+
+def build_last_task_memory(session: Any) -> dict[str, Any]:
+    remembered: list[str] = []
+    source = ''
+    reason = ''
+    updated_at = ''
+    for raw in reversed(list(getattr(session, 'messages', []) or [])):
+        if not isinstance(raw, dict):
+            continue
+        task_ids = _extract_task_ids_from_message(raw)
+        if not task_ids:
+            continue
+        for task_id in task_ids:
+            if task_id not in remembered:
+                remembered.append(task_id)
+                if len(remembered) >= _TASK_MEMORY_MAX_IDS:
+                    break
+        metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
+        if not source:
+            source = str(metadata.get('source') or '').strip() or 'transcript'
+        if not reason:
+            reason = str(metadata.get('reason') or '').strip()
+        if not updated_at:
+            updated_at = str(raw.get('timestamp') or '').strip()
+        if len(remembered) >= _TASK_MEMORY_MAX_IDS:
+            break
+    return normalize_task_memory(
+        {
+            'task_ids': remembered,
+            'source': source,
+            'reason': reason,
+            'updated_at': updated_at,
+        }
+    )
+
+
+def build_task_memory_message(task_memory: Any) -> dict[str, Any] | None:
+    normalized = normalize_task_memory(task_memory)
+    if not normalized['task_ids']:
+        return None
+    payload = {
+        'kind': 'task_memory',
+        'task_ids': list(normalized['task_ids']),
+    }
+    if normalized['source']:
+        payload['source'] = normalized['source']
+    if normalized['reason']:
+        payload['reason'] = normalized['reason']
+    return {
+        'role': 'assistant',
+        'content': f"{TASK_MEMORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}",
+    }
+
+
+def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
+    payload: dict[str, Any] = {}
+    task_ids = _normalize_task_ids(metadata.get('task_ids'))
+    if task_ids:
+        payload['task_ids'] = task_ids
+    source = str(metadata.get('source') or '').strip()
+    if source:
+        payload['source'] = source
+    reason = str(metadata.get('reason') or '').strip()
+    if reason:
+        payload['reason'] = reason
+    return payload or None
+
+
+def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]:
+    tool_events = message.get('tool_events') if isinstance(message.get('tool_events'), list) else []
+    summaries: list[dict[str, str]] = []
+    for item in tool_events:
+        if not isinstance(item, dict):
+            continue
+        tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
+        if tool_name == 'submit_next_stage':
+            continue
+        status = str(item.get('status') or '').strip().lower()
+        if status not in {'success', 'error'}:
+            continue
+        text = summarize_preview_text(item.get('text') or '', max_chars=_RECENT_HISTORY_TOOL_TEXT_MAX_CHARS)
+        if not text:
+            continue
+        summaries.append({'tool': tool_name, 'status': status, 'text': text})
+    return summaries[-_RECENT_HISTORY_TOOL_TRACE_LIMIT:]
+
+
+def _compact_stage_trace_payload(message: dict[str, Any]) -> dict[str, Any] | None:
+    interaction_trace = message.get('interaction_trace') if isinstance(message.get('interaction_trace'), dict) else {}
+    stages = [item for item in list(interaction_trace.get('stages') or []) if isinstance(item, dict)]
+    if not stages:
+        return None
+    latest = stages[-1]
+    payload: dict[str, Any] = {}
+    status = str(latest.get('status') or '').strip()
+    if status:
+        payload['status'] = status
+    stage_goal = summarize_preview_text(latest.get('stage_goal') or '', max_chars=_RECENT_HISTORY_STAGE_GOAL_MAX_CHARS)
+    if stage_goal:
+        payload['stage_goal'] = stage_goal
+    tool_rounds_used = latest.get('tool_rounds_used')
+    if isinstance(tool_rounds_used, int):
+        payload['tool_rounds_used'] = tool_rounds_used
+    return payload or None
+
+
+def _history_content_from_message(message: dict[str, Any]) -> str:
+    blocks: list[str] = []
+    content = str(message.get('content') or '').strip()
+    if content:
+        blocks.append(content)
+    task_meta = _compact_task_meta_payload(message)
+    if task_meta is not None:
+        blocks.append(f"{TASK_META_PREFIX}\n{json.dumps(task_meta, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}")
+    tool_trace = _compact_tool_trace_payload(message)
+    if tool_trace:
+        blocks.append(f"{TOOL_TRACE_PREFIX}\n{json.dumps(tool_trace, ensure_ascii=False, separators=(',', ':'))}")
+    stage_trace = _compact_stage_trace_payload(message)
+    if stage_trace is not None:
+        blocks.append(f"{STAGE_TRACE_PREFIX}\n{json.dumps(stage_trace, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}")
+    return '\n'.join(block for block in blocks if block).strip()
+
+
 def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "role": str(message.get("role") or ""),
-        "content": message.get("content", ""),
+        "content": _history_content_from_message(message),
     }
     for key in ("tool_calls", "tool_call_id", "name"):
         if key in message:
@@ -155,10 +334,29 @@ def resolve_frontdoor_context(
 
 
 def extract_frontdoor_recent_history(session: Any, *, raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS) -> list[dict[str, Any]]:
-    turns = _complete_transcript_turns(session)
+    messages = [
+        item
+        for item in list(getattr(session, 'messages', []) or [])
+        if isinstance(item, dict) and str(item.get('role') or '').strip().lower() in {'user', 'assistant'}
+    ]
     normalized_tail_turns = max(1, int(raw_tail_turns or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS))
-    tail_turns = turns[-normalized_tail_turns:]
-    return [_history_entry_from_message(message) for turn in tail_turns for message in turn]
+    if not messages:
+        return []
+    turn_start_indexes: list[int] = []
+    current_user_index: int | None = None
+    for index, message in enumerate(messages):
+        role = str(message.get('role') or '').strip().lower()
+        if role == 'user':
+            current_user_index = index
+            continue
+        if role == 'assistant' and current_user_index is not None:
+            turn_start_indexes.append(current_user_index)
+            current_user_index = None
+    if turn_start_indexes:
+        start_index = turn_start_indexes[-normalized_tail_turns] if len(turn_start_indexes) >= normalized_tail_turns else turn_start_indexes[0]
+    else:
+        start_index = max(0, len(messages) - max(1, normalized_tail_turns * 2))
+    return [_history_entry_from_message(message) for message in messages[start_index:]]
 
 
 def build_frontdoor_compact_history_message(frontdoor_context: Any) -> dict[str, Any] | None:
@@ -280,6 +478,7 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
         default_max_depth=depth_limits["default_max_depth"],
         hard_max_depth=depth_limits["hard_max_depth"],
     )
+    last_task_memory = normalize_task_memory(payload.get('last_task_memory', payload.get('lastTaskMemory')))
     return {
         **payload,
         "title": title,
@@ -287,6 +486,7 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
         "frontdoor_context": frontdoor_context,
         "memory_scope": memory_scope,
         "task_defaults": task_defaults,
+        'last_task_memory': last_task_memory,
     }
 
 
@@ -325,6 +525,10 @@ def update_ceo_session_after_turn(
     )
     if metadata.get("frontdoor_context") != next_frontdoor_context:
         metadata["frontdoor_context"] = next_frontdoor_context
+        changed = True
+    next_task_memory = build_last_task_memory(session)
+    if metadata.get('last_task_memory') != next_task_memory:
+        metadata['last_task_memory'] = next_task_memory
         changed = True
     if changed:
         session.metadata = metadata

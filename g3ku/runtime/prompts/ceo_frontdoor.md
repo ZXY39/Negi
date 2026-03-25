@@ -48,7 +48,7 @@
 
 - 任务失败后，除非存在不确定因素或缺少信息，否则必须自动创建新任务续跑，直到完成用户需求。
 - 只有在以下情况之一成立时，才允许失败后不自动续跑：用户明确要求停止或改方向；继续推进需要用户新增信息、批准或选择。
-- 从效率出发，续跑任务时，注意在新任务的提示词中直接传递或引导节点搜索之前有关任务中能发挥作用的有关信息，避免新任务要从零开始探索。
+- 从效率出发，续跑任务时，使用create_async_task重新创建任务，但是注意在新任务的提示词中直接传递或引导节点去搜索之前有关任务中能发挥作用的有关信息，避免新任务要从零开始探索。
 
 ## 6. 查询任务规则
 
@@ -68,6 +68,7 @@
 - `exec` 在 Windows 上始终运行于 PowerShell。优先使用 PowerShell 兼容命令，例如 `Get-ChildItem`、`Get-Location`、`Get-Content`，或别名 `ls` / `pwd`；不要假设 `true`、`false`、bash heredoc 或 `rg` 这类类 Unix shell 内建一定可用。
 - `exec` 会继承当前 G3KU 进程使用的同一套 Python 环境。需要精确选择解释器时，优先使用 `{{project_python_hint}}` 或注入的 `G3KU_PROJECT_PYTHON` 环境变量，不要默认裸 `python` 一定指向正确解释器。
 - 不要假设自己拥有不可见的工具或 Skill。
+- 凡是“搜索 skill / 下载 skill / 安装 skill / 更新 skill / 检查 ClawHub skill 新版本”这类请求，必须先 `load_skill_context(skill_id="clawhub-skill-manager")`，并把它作为唯一工作流入口；不要绕过该 skill 手工搜索下载，也不要直接把 `skill-creator` 当作 ClawHub skill 下载器。
 - 对于不会直接出现在函数工具列表里的工具资源，包括已注册的外置工具和当前不可用的工具，先用 `load_tool_context` 读取安装、排障、更新和使用说明，再决定是否修复或继续调用。
 - 如果需要工具，优先直接调用工具，而不是只做口头解释。
 

@@ -136,6 +136,91 @@ def test_frontdoor_context_resolution_falls_back_then_uses_metadata() -> None:
     assert resolved_again == context
 
 
+def test_update_ceo_session_after_turn_persists_last_task_memory() -> None:
+    session = Session(key='web:shared')
+    session.add_message('user', 'open browser')
+    session.add_message(
+        'assistant',
+        'created async task',
+        tool_events=[
+            {
+                'tool_name': 'create_async_task',
+                'status': 'success',
+                'text': '创建任务成功task:demo123',
+            }
+        ],
+    )
+
+    changed = web_ceo_sessions.update_ceo_session_after_turn(
+        session,
+        user_text='open browser',
+        assistant_text='created async task',
+        route_kind='task_dispatch',
+    )
+
+    assert changed is True
+    assert session.metadata['last_task_memory'] == {
+        'version': web_ceo_sessions.TASK_MEMORY_VERSION,
+        'task_ids': ['task:demo123'],
+        'source': 'transcript',
+        'reason': '',
+        'updated_at': session.messages[-1]['timestamp'],
+    }
+
+
+def test_extract_frontdoor_recent_history_preserves_heartbeat_and_compact_traces() -> None:
+    session = Session(key='web:shared')
+    _append_turn(session, 1)
+    session.add_message('user', 'user turn 2')
+    session.add_message(
+        'assistant',
+        'assistant turn 2',
+        tool_events=[
+            {'tool_name': 'submit_next_stage', 'status': 'success', 'text': 'stage created'},
+            {
+                'tool_name': 'task_progress',
+                'status': 'success',
+                'text': 'Task status: in_progress\n(node:abc,in_progress,working on task:trace-1)',
+            },
+        ],
+        interaction_trace={
+            'stages': [
+                {
+                    'status': 'completed',
+                    'stage_goal': 'Inspect task:trace-1 and summarize the latest runtime state for follow-up.',
+                    'tool_rounds_used': 1,
+                }
+            ]
+        },
+    )
+    _append_turn(session, 3)
+    session.add_message(
+        'assistant',
+        'task:trace-1 failed in heartbeat',
+        metadata={'source': 'heartbeat', 'reason': 'task_terminal', 'task_ids': ['task:trace-1']},
+    )
+
+    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(session, raw_tail_turns=2)
+
+    assert [item['content'] for item in recent_history[:3]] == [
+        'user turn 2',
+        (
+            'assistant turn 2\n'
+            f'{web_ceo_sessions.TOOL_TRACE_PREFIX}\n'
+            '[{"tool":"task_progress","status":"success","text":"Task status: in_progress (node:abc,in_progress,working on task:trace-1)"}]\n'
+            f'{web_ceo_sessions.STAGE_TRACE_PREFIX}\n'
+            '{"stage_goal":"Inspect task:trace-1 and summarize the latest runtime state for follow-up.","status":"completed","tool_rounds_used":1}'
+        ),
+        'user turn 3',
+    ]
+    assert recent_history[-1]['role'] == 'assistant'
+    assert recent_history[-1]['content'] == (
+        'task:trace-1 failed in heartbeat\n'
+        f'{web_ceo_sessions.TASK_META_PREFIX}\n'
+        '{"reason":"task_terminal","source":"heartbeat","task_ids":["task:trace-1"]}'
+    )
+
+
 @pytest.mark.asyncio
 async def test_context_assembly_uses_frontdoor_summary_and_recent_tail() -> None:
     persisted_session = Session(key='web:shared')
@@ -174,6 +259,45 @@ async def test_context_assembly_uses_frontdoor_summary_and_recent_tail() -> None
     assert metadata_result.trace['frontdoor_context']['source'] == 'metadata'
     assert metadata_result.trace['frontdoor_context']['summary_turn_count'] == 2
     assert metadata_result.trace['recent_history_count'] == 9
+
+
+@pytest.mark.asyncio
+async def test_context_assembly_includes_compact_task_memory_message() -> None:
+    persisted_session = Session(key='web:shared')
+    persisted_session.add_message('user', 'open browser')
+    persisted_session.add_message(
+        'assistant',
+        'created async task',
+        tool_events=[
+            {
+                'tool_name': 'create_async_task',
+                'status': 'success',
+                'text': '创建任务成功task:ctx-1',
+            }
+        ],
+    )
+    web_ceo_sessions.update_ceo_session_after_turn(
+        persisted_session,
+        user_text='open browser',
+        assistant_text='created async task',
+        route_kind='task_dispatch',
+    )
+
+    prompt_builder = _PromptBuilder()
+    memory_manager = _AssemblyMemoryManager(response='')
+    service = ContextAssemblyService(loop=_assembly_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session_state(),
+        query_text='why did the task fail',
+        exposure={'skills': [], 'tool_families': [], 'tool_names': []},
+        persisted_session=persisted_session,
+    )
+
+    assert any(
+        str(item.get('content') or '').startswith(web_ceo_sessions.TASK_MEMORY_PREFIX)
+        for item in result.recent_history
+    )
 
 
 class _IngestRecorder:

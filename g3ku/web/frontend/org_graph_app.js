@@ -172,6 +172,7 @@ const U = {
     ceoShell: document.getElementById("ceo-shell"),
     ceoSessionPanel: document.getElementById("ceo-session-panel"),
     ceoSessionPanelToggle: document.getElementById("ceo-session-panel-toggle"),
+    ceoSessionTabs: document.getElementById("ceo-session-tabs"),
     ceoSessionTabLocal: document.getElementById("ceo-session-tab-local"),
     ceoSessionTabChannel: document.getElementById("ceo-session-tab-channel"),
     ceoSessionList: document.getElementById("ceo-session-list"),
@@ -225,12 +226,12 @@ const U = {
     taskBatchTrigger: document.getElementById("task-batch-menu-trigger"),
     taskBatchMenu: document.getElementById("task-batch-menu"),
     backToTasks: document.getElementById("back-to-tasks"),
-    tdTitle: document.getElementById("td-title"),
+    tdTitle: document.getElementById("td-prompt-text"),
+    tdPromptDisclosure: document.getElementById("td-prompt-disclosure"),
+    tdStatusPill: document.getElementById("td-status-pill"),
     tdStatus: document.getElementById("td-status"),
-    tdSummary: document.getElementById("td-summary"),
     tdActiveCount: document.getElementById("td-active-count"),
     taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
-    taskTreeRoundHint: document.getElementById("task-tree-round-hint"),
     tree: document.getElementById("org-tree-container"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
@@ -397,9 +398,18 @@ function normalizeCeoChannelGroups(groups = []) {
 
 function ceoSessionGlyph(item = {}) {
     const title = String(item?.title || item?.channel_id || item?.session_id || "").trim();
-    for (const ch of title) {
-        if (/^[A-Za-z0-9]$/.test(ch)) return ch.toUpperCase();
-        if (String(ch || "").trim()) return ch;
+    const compactChars = [...title].filter((ch) => String(ch || "").trim() && !/^[()[\]{}<>《》【】'"`~!@#$%^&*_=+|\\/:;,.?-]$/.test(ch));
+    if (compactChars.length) {
+        const cjkChars = compactChars.filter((ch) => /[\u3400-\u9fff]/.test(ch));
+        if (cjkChars.length) return cjkChars.slice(0, 2).join("");
+        const asciiTokens = title
+            .split(/[\s_.\-/:|]+/)
+            .map((token) => token.replace(/[^A-Za-z0-9]/g, ""))
+            .filter(Boolean);
+        if (asciiTokens.length >= 2) return `${asciiTokens[0][0]}${asciiTokens[1][0]}`.toUpperCase();
+        const asciiChars = compactChars.filter((ch) => /[A-Za-z0-9]/.test(ch)).join("").toUpperCase();
+        if (asciiChars) return asciiChars.slice(0, 2);
+        return compactChars.slice(0, 2).join("").toUpperCase();
     }
     const chatType = String(item?.chat_type || "").trim().toLowerCase();
     if (chatType === "group") return "#";
@@ -1317,6 +1327,45 @@ function canActivateCeoSessions() {
     return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
 }
 
+function closeCeoSessionMenus({ restoreFocus = false } = {}) {
+    const openMenus = [...(U.ceoSessionList?.querySelectorAll(".ceo-session-actions.is-open") || [])];
+    let closed = false;
+    openMenus.forEach((shell) => {
+        shell.classList.remove("is-open");
+        shell.querySelector(".ceo-session-menu")?.setAttribute("hidden", "hidden");
+        const trigger = shell.querySelector("[data-session-menu-toggle]");
+        if (trigger) {
+            trigger.setAttribute("aria-expanded", "false");
+            if (restoreFocus && trigger instanceof HTMLElement) trigger.focus();
+        }
+        closed = true;
+    });
+    return closed;
+}
+
+function setCeoSessionMenuOpen(sessionId, open, { restoreFocus = false } = {}) {
+    const targetId = String(sessionId || "").trim();
+    if (!targetId) return false;
+    let matched = false;
+    [...(U.ceoSessionList?.querySelectorAll(".ceo-session-actions[data-session-menu]") || [])].forEach((shell) => {
+        const currentId = String(shell.dataset.sessionMenu || "").trim();
+        const shouldOpen = !!open && currentId === targetId;
+        const trigger = shell.querySelector("[data-session-menu-toggle]");
+        const menu = shell.querySelector(".ceo-session-menu");
+        if (currentId === targetId) matched = true;
+        shell.classList.toggle("is-open", shouldOpen);
+        if (menu) {
+            if (shouldOpen) menu.removeAttribute("hidden");
+            else menu.setAttribute("hidden", "hidden");
+        }
+        if (trigger) {
+            trigger.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+            if (!shouldOpen && restoreFocus && currentId === targetId && trigger instanceof HTMLElement) trigger.focus();
+        }
+    });
+    return matched;
+}
+
 function syncCeoSessionActions() {
     const mutationDisabled = !canMutateCeoSessions();
     const creationDisabled = !canCreateCeoSessions();
@@ -1326,11 +1375,16 @@ function syncCeoSessionActions() {
         const targetId = String(button?.dataset?.sessionActivate || "").trim();
         button.disabled = activationDisabled || targetId === activeSessionId();
     });
-    U.ceoSessionList?.querySelectorAll("[data-session-rename], [data-session-delete]")?.forEach((button) => {
+    U.ceoSessionList?.querySelectorAll("[data-session-menu-toggle], [data-session-rename], [data-session-delete]")?.forEach((button) => {
         button.disabled = mutationDisabled;
     });
+    if (mutationDisabled) closeCeoSessionMenus();
     if (U.ceoSessionTabLocal) U.ceoSessionTabLocal.setAttribute("aria-pressed", S.ceoSessionTab === "local" ? "true" : "false");
     if (U.ceoSessionTabChannel) U.ceoSessionTabChannel.setAttribute("aria-pressed", S.ceoSessionTab === "channel" ? "true" : "false");
+    if (U.ceoSessionTabs) {
+        U.ceoSessionTabs.style.setProperty("--ceo-session-tab-index", S.ceoSessionTab === "channel" ? "1" : "0");
+        U.ceoSessionTabs.dataset.active = S.ceoSessionTab;
+    }
 }
 
 function safeHref(value) {
@@ -4377,13 +4431,14 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
                 ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
             </button>
             ${allowActions ? `
-                <div class="ceo-session-actions" aria-label="Session actions">
-                    <button type="button" class="ceo-session-action" data-session-rename="${esc(sessionId)}" aria-label="Rename session">
-                        <i data-lucide="pencil"></i>
+                <div class="ceo-session-actions toolbar-dropdown" data-session-menu="${esc(sessionId)}" aria-label="Session actions">
+                    <button type="button" class="ceo-session-action ceo-session-menu-trigger" data-session-menu-toggle="${esc(sessionId)}" aria-label="More session actions" aria-haspopup="menu" aria-expanded="false">
+                        <i data-lucide="more-horizontal"></i>
                     </button>
-                    <button type="button" class="ceo-session-action danger" data-session-delete="${esc(sessionId)}" aria-label="Delete session">
-                        <i data-lucide="trash-2"></i>
-                    </button>
+                    <div class="toolbar-menu ceo-session-menu" role="menu" hidden>
+                        <button type="button" class="toolbar-menu-item" data-session-rename="${esc(sessionId)}" role="menuitem">命名</button>
+                        <button type="button" class="toolbar-menu-item danger" data-session-delete="${esc(sessionId)}" role="menuitem">删除</button>
+                    </div>
                 </div>
             ` : ""}
         </div>
@@ -4391,19 +4446,12 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
 }
 
 function renderCeoSessions() {
-    if (!U.ceoSessionList || !U.ceoSessionCurrent) return;
+    if (!U.ceoSessionList) return;
     const sessions = visibleCeoSessions();
-    const current = activeSessionItem();
-    U.ceoSessionCurrent.innerHTML = current
-        ? `
-            <div class="ceo-session-current-title">${esc(String(current.title || current.session_id || "Session"))}</div>
-            <div class="ceo-session-current-meta">${esc(current.session_family === "channel" ? "渠道会话" : "本地会话")} · ${esc(shortSessionIdLabel(current.session_id))} · ${esc(formatSessionTime(ceoSessionDisplayTime(current)))}</div>
-            ${current.session_family === "channel" ? `<div class="ceo-session-current-meta">${esc(String(current.channel_id || ""))} · ${esc(String(current.account_id || "default"))} · ${esc(String(current.chat_type || "dm"))} · 只读</div>` : ""}
-        `
-        : `
-            <div class="ceo-session-current-title">正在准备会话</div>
-            <div class="ceo-session-current-meta">会话加载后会自动连接。</div>
-        `;
+    if (U.ceoSessionCurrent) {
+        U.ceoSessionCurrent.innerHTML = "";
+        U.ceoSessionCurrent.hidden = true;
+    }
     if (!sessions.length) {
         U.ceoSessionList.innerHTML = `<div class="empty-state ceo-session-empty">${S.ceoSessionTab === "channel" ? "暂无渠道会话。" : "No sessions yet."}</div>`;
         syncCeoComposerReadonlyState();
@@ -4939,12 +4987,13 @@ function ensureTaskTokenUi() {
         if (headerActions) {
             const button = document.createElement("button");
             button.id = "task-token-stats-btn";
-            button.className = "toolbar-btn ghost";
+            button.className = "task-detail-pill task-detail-token-btn";
             button.type = "button";
-            button.textContent = "Token统计";
+            button.innerHTML = '<i data-lucide="pie-chart"></i><span>Token统计</span>';
             button.disabled = true;
             headerActions.appendChild(button);
             U.taskTokenButton = button;
+            icons();
         }
     }
     if (!U.taskTokenBackdrop || !U.taskTokenDrawer) {
@@ -5194,20 +5243,32 @@ function bind() {
         if (e.key === "Escape") handleRenameCancel();
     });
     U.ceoSessionList?.addEventListener("click", (e) => {
+        const menuToggle = e.target.closest("[data-session-menu-toggle]");
+        if (menuToggle) {
+            e.stopPropagation();
+            const sessionId = String(menuToggle.dataset.sessionMenuToggle || "").trim();
+            const shell = menuToggle.closest(".ceo-session-actions");
+            const isOpen = !!shell?.classList.contains("is-open");
+            setCeoSessionMenuOpen(sessionId, !isOpen);
+            return;
+        }
         const activate = e.target.closest("[data-session-activate]");
         if (activate) {
+            closeCeoSessionMenus();
             void activateCeoSession(activate.dataset.sessionActivate);
             return;
         }
         const rename = e.target.closest("[data-session-rename]");
         if (rename) {
             e.stopPropagation();
+            closeCeoSessionMenus();
             void renameCeoSession(rename.dataset.sessionRename);
             return;
         }
         const remove = e.target.closest("[data-session-delete]");
         if (remove) {
             e.stopPropagation();
+            closeCeoSessionMenus();
             requestDeleteCeoSession(remove.dataset.sessionDelete);
         }
     });
@@ -5507,19 +5568,18 @@ function bind() {
     document.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
         if (!e.target.closest(".resource-select-shell")) closeResourceSelects();
+        if (!e.target.closest(".ceo-session-actions.toolbar-dropdown")) closeCeoSessionMenus();
         if (!e.target.closest(".toolbar-dropdown")) closeTaskMenus();
     });
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
         if (closeResourceSelects({ restoreFocus: true })) return;
+        if (closeCeoSessionMenus({ restoreFocus: true })) return;
         if (S.confirmState) {
             closeConfirm();
             return;
         }
-        if (S.taskFilterMenuOpen || S.taskBatchMenuOpen) {
-            closeTaskMenus();
-            return;
-        }
+        if (closeTaskMenus({ restoreFocus: true })) return;
         if (S.taskTokenStatsOpen) {
             setTaskTokenStatsOpen(false);
             return;

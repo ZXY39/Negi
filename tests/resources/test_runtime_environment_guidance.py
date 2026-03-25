@@ -42,6 +42,15 @@ def test_ceo_prompt_builder_mentions_task_id_and_execution_id_guidance(monkeypat
     assert 'stop_tool_execution' in prompt
 
 
+def test_ceo_prompt_builder_mentions_clawhub_skill_manager(monkeypatch) -> None:
+    monkeypatch.setattr(prompt_builder_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
+
+    prompt = CeoPromptBuilder(loop=SimpleNamespace(workspace=r'D:\projects\G3KU')).build(skills=[])
+
+    assert 'clawhub-skill-manager' in prompt
+    assert '搜索 skill / 下载 skill / 安装 skill / 更新 skill' in prompt
+
+
 def test_node_runner_runtime_context_and_guidance_include_project_python(monkeypatch) -> None:
     monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
     runner = NodeRunner(
