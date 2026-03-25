@@ -22,8 +22,17 @@ function displayRiskLabel(level) {
 }
 
 function resourceAvailabilityStatus(item) {
+    if (toolRepairRequired(item)) return "repair-required";
     if (item?.available === false) return "unavailable";
     return item?.enabled ? "enabled" : "disabled";
+}
+
+function toolRepairRequired(item) {
+    if (!item) return false;
+    if (item.repair_required === true) return true;
+    const metadata = item && typeof item.metadata === "object" ? item.metadata : {};
+    if (metadata.repair_required === true) return true;
+    return item.callable === true && item.available === false;
 }
 
 function normalizeResourceAvailabilityReason(reason, item = null) {
@@ -62,7 +71,8 @@ function resourceAvailabilityReasons(item) {
     return [...new Set(normalized)];
 }
 
-function displayEnabledLabel(enabled, available = true) {
+function displayEnabledLabel(enabled, available = true, repairRequired = false) {
+    if (repairRequired) return "待修复";
     if (!available) return "不可用";
     return enabled ? "已启用" : "已禁用";
 }
@@ -121,7 +131,8 @@ function renderTools() {
             <div class="resource-list-title">${esc(tool.display_name)}</div>
             <div class="resource-list-subtitle">${esc(subtitle)}</div>
             <div class="resource-list-meta">
-                <span class="meta-tag status-${resourceAvailabilityStatus(tool)}">${esc(displayEnabledLabel(tool.enabled, tool.available))}</span>
+                <span class="meta-tag status-${resourceAvailabilityStatus(tool)}">${esc(displayEnabledLabel(tool.enabled, tool.available, toolRepairRequired(tool)))}</span>
+                ${toolRepairRequired(tool) ? '<span class="meta-tag repair-flag">需先修复</span>' : ''}
                 ${tool.is_core ? '<span class="meta-tag">核心工具</span>' : ''}
                 <span class="meta-tag tool-actions">${(tool.actions || []).length} 个 action</span>
             </div>`;
@@ -354,7 +365,7 @@ const COMMUNICATION_JSON_TEMPLATES = {
   // }
 }
 `),
-    wecomApp: buildCommunicationJsonTemplate(`
+    "wecom-app": buildCommunicationJsonTemplate(`
 {
   // 必填：企业微信应用回调 Token
   "token": "your-wecom-app-token",
@@ -384,7 +395,28 @@ const COMMUNICATION_JSON_TEMPLATES = {
   // }
 }
 `),
-    feishuChina: buildCommunicationJsonTemplate(`
+    "wecom-kf": buildCommunicationJsonTemplate(`
+{
+  "token": "your-wecom-kf-token",
+  "encodingAESKey": "your-wecom-kf-encoding-aes-key",
+  "corpId": "your-wecom-corp-id",
+  "corpSecret": "your-wecom-kf-corp-secret",
+  "openKfId": "your-open-kf-id",
+  "webhookPath": "/wecom-kf"
+}
+`),
+    "wechat-mp": buildCommunicationJsonTemplate(`
+{
+  "appId": "your-wechat-mp-app-id",
+  "appSecret": "your-wechat-mp-app-secret",
+  "token": "your-wechat-mp-token",
+  "encodingAESKey": "your-wechat-mp-encoding-aes-key",
+  "webhookPath": "/wechat-mp",
+  "messageMode": "safe",
+  "replyMode": "passive"
+}
+`),
+    "feishu-china": buildCommunicationJsonTemplate(`
 {
   // 必填：飞书应用 App ID
   "appId": "your-feishu-app-id",
@@ -403,7 +435,11 @@ const COMMUNICATION_JSON_TEMPLATES = {
 `),
 };
 
-function getCommunicationTemplate(channelId) {
+function getCommunicationTemplate(channelId, item = null) {
+    const remoteTemplate = item && item.template_json && typeof item.template_json === "object"
+        ? JSON.stringify(item.template_json, null, 2)
+        : "";
+    if (remoteTemplate.trim()) return remoteTemplate;
     const key = String(channelId || "").trim();
     return String(COMMUNICATION_JSON_TEMPLATES[key] || "{}").trim();
 }
@@ -417,7 +453,7 @@ function initialCommunicationDraftText(item) {
     if (hasCommunicationConfig(item)) {
         return String(item.json_text || JSON.stringify(item.config || {}, null, 2));
     }
-    return getCommunicationTemplate(item?.id);
+    return getCommunicationTemplate(item?.id, item);
 }
 
 function syncCommunicationDirtyState() {
@@ -554,7 +590,7 @@ function renderCommunicationDetail() {
         syncCommunicationDirtyState();
     });
     U.communicationDetail.querySelector("#communication-load-template-btn")?.addEventListener("click", () => {
-        const template = getCommunicationTemplate(item.id);
+        const template = getCommunicationTemplate(item.id, item);
         S.communicationDraftText = template;
         const editor = U.communicationDetail.querySelector("#communication-json-editor");
         if (editor) editor.value = S.communicationDraftText;
@@ -726,6 +762,10 @@ function renderSkillDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
+                    <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
+                    ${repairRequired ? '<span class="meta-tag repair-flag">需先修复</span>' : ''}
+                    <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
+                    ${repairRequired ? '<span class="meta-tag repair-flag">需先修复</span>' : ''}
                     <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedSkill.enabled, S.selectedSkill.available))}</span>
                     ${S.selectedSkill.enabled
                         ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
@@ -752,6 +792,23 @@ function renderSkillDetail() {
                         `).join("")}
                     </div>
                 </div>
+                ${repairRequired ? `
+                    <div class="resource-warning-banner repair-required" role="status" aria-live="polite">
+                        <div class="resource-warning-title">当前 Tool 处于待修复状态</div>
+                        <div class="resource-copy-block">它会以 <code>【待修复】</code> 形式进入函数工具列表。主 Agent 调用它时，只会先收到修复指引，不会执行真实能力。</div>
+                        <ul class="resource-warning-list">
+                            ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
+                            <li>建议先查看 ToolSkill，并使用 <code>load_tool_context</code>、<code>repair-tool</code>、<code>exec</code>、<code>filesystem</code> 完成修复。</li>
+                        </ul>
+                    </div>
+                ` : (S.selectedTool.available === false ? `
+                    <div class="resource-warning-banner" role="status" aria-live="polite">
+                        <div class="resource-warning-title">当前 Tool 不可用</div>
+                        <ul class="resource-warning-list">
+                            ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
+                        </ul>
+                    </div>
+                ` : "")}
                 <div class="resource-section">
                     <h3>文件内容</h3>
                     <div class="resource-filter-row">${fileTabs}</div>
@@ -992,6 +1049,9 @@ function renderToolDetail() {
     const description = String(S.selectedTool.description || "").trim();
     const toolskillContent = String(S.selectedTool.toolskill_content || "").trim();
     const isCoreTool = !!S.selectedTool.is_core;
+    const repairRequired = toolRepairRequired(S.selectedTool);
+    const availabilityState = resourceAvailabilityStatus(S.selectedTool);
+    const unavailableReasons = resourceAvailabilityReasons(S.selectedTool);
     U.toolDetail.innerHTML = `
         <article class="resource-detail-card detail-modal-shell">
             <div class="detail-modal-header">
@@ -1006,12 +1066,31 @@ function renderToolDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
+                    <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
+                    ${repairRequired ? '<span class="meta-tag repair-flag">需先修复</span>' : ''}
                     ${isCoreTool
                         ? `<button type="button" class="toolbar-btn ghost" id="tool-disable-btn" disabled>核心工具不可禁用</button>`
                         : (S.selectedTool.enabled
                             ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>`
                             : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`)}
                 </div>
+                ${repairRequired ? `
+                    <div class="resource-warning-banner repair-required" role="status" aria-live="polite">
+                        <div class="resource-warning-title">当前 Tool 处于待修复状态</div>
+                        <div class="resource-copy-block">它会以 <code>【待修复】</code> 形式进入函数工具列表。主 Agent 调用它时，只会先收到修复指引，不会执行真实能力。</div>
+                        <ul class="resource-warning-list">
+                            ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
+                            <li>建议先查看 ToolSkill，并使用 <code>load_tool_context</code>、<code>repair-tool</code>、<code>exec</code>、<code>filesystem</code> 完成修复。</li>
+                        </ul>
+                    </div>
+                ` : (S.selectedTool.available === false ? `
+                    <div class="resource-warning-banner" role="status" aria-live="polite">
+                        <div class="resource-warning-title">当前 Tool 不可用</div>
+                        <ul class="resource-warning-list">
+                            ${unavailableReasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}
+                        </ul>
+                    </div>
+                ` : "")}
                 <div class="resource-section">
                     <h3>描述</h3>
                     <div class="resource-copy-block">${esc(description || "暂无描述。")}</div>
@@ -1129,6 +1208,7 @@ async function loadTools({ renderDetail = true } = {}) {
                     ...next,
                     primary_executor_name: S.selectedTool?.primary_executor_name || next.primary_executor_name || "",
                     toolskill_content: S.selectedTool?.toolskill_content || "",
+                    repair_required: S.selectedTool?.repair_required ?? next.repair_required ?? (next?.metadata?.repair_required === true),
                 };
                 ensureToolPageForItem(selectedId);
             }
@@ -1162,6 +1242,7 @@ async function openTool(toolId, quiet = false) {
             ...tool,
             primary_executor_name: toolskill?.primary_executor_name || tool?.primary_executor_name || "",
             toolskill_content: toolskill?.content || "",
+            repair_required: toolskill?.repair_required ?? tool?.repair_required ?? (tool?.metadata?.repair_required === true),
         };
         ensureToolPageForItem(toolId);
         S.toolDirty = false;

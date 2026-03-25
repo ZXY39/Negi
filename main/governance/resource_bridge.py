@@ -91,7 +91,12 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
                 'callable': bool(getattr(descriptor, 'callable', True)),
                 'source_path': str(descriptor.root),
                 'actions': OrderedDict(),
-                'metadata': {'sources': [descriptor.root.name], 'warnings': list(descriptor.warnings), 'errors': list(descriptor.errors)},
+                'metadata': {
+                    'sources': [descriptor.root.name],
+                    'warnings': list(descriptor.warnings),
+                    'errors': list(descriptor.errors),
+                    'repair_required': bool(getattr(descriptor, 'callable', True)) and not bool(descriptor.available),
+                },
             },
         )
         family['enabled'] = bool(family['enabled']) and bool(descriptor.enabled)
@@ -104,6 +109,7 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
             family['install_dir'] = str(getattr(descriptor, 'install_dir', '') or '') or None
         if descriptor.root.name not in family['metadata']['sources']:
             family['metadata']['sources'].append(descriptor.root.name)
+        family['metadata']['repair_required'] = bool(family['callable']) and not bool(family['available'])
         for action in list(governance.get('actions') or []):
             action_id = str(action.get('id') or '').strip()
             if not action_id:

@@ -265,7 +265,7 @@ class ResourceManager:
         for name, descriptor in discovery.tools.items():
             old_descriptor = old.tools.get(name)
             old_instance = old.tool_instances.get(name)
-            if old_descriptor and old_descriptor.fingerprint == descriptor.fingerprint and old_instance is not None:
+            if self._can_reuse_tool_instance(old_descriptor=old_descriptor, descriptor=descriptor, old_instance=old_instance):
                 descriptor = old_descriptor
                 new_tools[name] = descriptor
                 new_tool_instances[name] = old_instance
@@ -275,14 +275,9 @@ class ResourceManager:
                 new_tool_instances[name] = old_instance
             else:
                 descriptor.generation = generation
-                try:
-                    instance = self._loader.load_tool(descriptor, services=services)
-                except Exception as exc:
-                    descriptor.available = False
-                    descriptor.errors.append(str(exc))
-                    instance = None
+                instance = self._load_tool_instance(descriptor, services=services)
                 new_tools[name] = descriptor
-                if descriptor.available and instance is not None:
+                if instance is not None:
                     new_tool_instances[name] = instance
                     self._locks.clear_pending_delete(ResourceKind.TOOL, name)
             self._locks.register_path(ResourceKind.TOOL, name, descriptor.manifest_path)
@@ -482,7 +477,7 @@ class ResourceManager:
     ) -> None:
         old_descriptor = old_snapshot.tools.get(descriptor.name)
         old_instance = old_snapshot.tool_instances.get(descriptor.name)
-        if old_descriptor and old_descriptor.fingerprint == descriptor.fingerprint and old_instance is not None:
+        if self._can_reuse_tool_instance(old_descriptor=old_descriptor, descriptor=descriptor, old_instance=old_instance):
             descriptor = old_descriptor
             new_tools[descriptor.name] = descriptor
             new_tool_instances[descriptor.name] = old_instance
@@ -492,19 +487,41 @@ class ResourceManager:
             new_tool_instances[descriptor.name] = old_instance
         else:
             descriptor.generation = generation
-            try:
-                instance = self._loader.load_tool(descriptor, services=services)
-            except Exception as exc:
-                descriptor.available = False
-                descriptor.errors.append(str(exc))
-                instance = None
+            instance = self._load_tool_instance(descriptor, services=services)
             new_tools[descriptor.name] = descriptor
-            if descriptor.available and instance is not None:
+            if instance is not None:
                 new_tool_instances[descriptor.name] = instance
                 self._locks.clear_pending_delete(ResourceKind.TOOL, descriptor.name)
             else:
                 new_tool_instances.pop(descriptor.name, None)
         self._locks.register_path(ResourceKind.TOOL, descriptor.name, descriptor.manifest_path)
+
+    @staticmethod
+    def _can_reuse_tool_instance(*, old_descriptor: ToolResourceDescriptor | None, descriptor: ToolResourceDescriptor, old_instance: Any) -> bool:
+        if old_descriptor is None or old_instance is None:
+            return False
+        if old_descriptor.fingerprint != descriptor.fingerprint:
+            return False
+        if bool(old_descriptor.available) != bool(descriptor.available):
+            return False
+        if list(old_descriptor.warnings or []) != list(descriptor.warnings or []):
+            return False
+        if list(old_descriptor.errors or []) != list(descriptor.errors or []):
+            return False
+        return True
+
+    def _load_tool_instance(self, descriptor: ToolResourceDescriptor, *, services: dict[str, Any]) -> Any:
+        try:
+            if descriptor.available:
+                instance = self._loader.load_tool(descriptor, services=services)
+                if instance is not None:
+                    return instance
+                return self._loader.load_repair_required_tool(descriptor, reason='tool_handler_unavailable')
+            return self._loader.load_repair_required_tool(descriptor, reason='resource_unavailable')
+        except Exception as exc:
+            descriptor.available = False
+            descriptor.errors.append(str(exc))
+            return self._loader.load_repair_required_tool(descriptor, reason=str(exc))
 
     @staticmethod
     def _resource_dir_state(base_dir: Path) -> dict[str, str]:

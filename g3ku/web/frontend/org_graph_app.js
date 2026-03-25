@@ -51,6 +51,7 @@ const S = {
     ceoLocalSessions: [],
     ceoChannelGroups: [],
     ceoSessionTab: "local",
+    ceoSessionPanelExpanded: false,
     activeSessionFamily: "local",
     ceoSessionUnread: {},
     ceoSessionMessageCounts: {},
@@ -168,6 +169,9 @@ const S = {
 const U = {
     nav: [...document.querySelectorAll(".nav-item")],
     theme: document.getElementById("theme-toggle"),
+    ceoShell: document.getElementById("ceo-shell"),
+    ceoSessionPanel: document.getElementById("ceo-session-panel"),
+    ceoSessionPanelToggle: document.getElementById("ceo-session-panel-toggle"),
     ceoSessionTabLocal: document.getElementById("ceo-session-tab-local"),
     ceoSessionTabChannel: document.getElementById("ceo-session-tab-channel"),
     ceoSessionList: document.getElementById("ceo-session-list"),
@@ -335,10 +339,12 @@ function displayChinaChannelLabel(channelId) {
     return ({
         qqbot: "QQ Bot",
         dingtalk: "DingTalk",
-        wecom: "企业微信",
-        "wecom-app": "企业微信应用",
-        "feishu-china": "飞书",
-    }[String(channelId || "").trim()] || String(channelId || "渠道").trim() || "渠道");
+        wecom: "????",
+        "wecom-app": "??????",
+        "wecom-kf": "??????",
+        "wechat-mp": "?????",
+        "feishu-china": "??",
+    }[String(channelId || "").trim()] || String(channelId || "??").trim() || "??");
 }
 
 function flattenChannelGroups(groups = []) {
@@ -387,6 +393,36 @@ function normalizeCeoChannelGroups(groups = []) {
         ...group,
         items: sortChannelGroupItems(group?.items || []),
     }));
+}
+
+function ceoSessionGlyph(item = {}) {
+    const title = String(item?.title || item?.channel_id || item?.session_id || "").trim();
+    for (const ch of title) {
+        if (/^[A-Za-z0-9]$/.test(ch)) return ch.toUpperCase();
+        if (String(ch || "").trim()) return ch;
+    }
+    const chatType = String(item?.chat_type || "").trim().toLowerCase();
+    if (chatType === "group") return "#";
+    if (chatType === "thread") return "T";
+    if (String(item?.session_family || "").trim() === "channel") return "@";
+    return "S";
+}
+
+function syncCeoSessionPanelState() {
+    const expanded = !!S.ceoSessionPanelExpanded;
+    U.ceoShell?.classList.toggle("is-session-panel-expanded", expanded);
+    U.ceoSessionPanel?.setAttribute("data-panel-state", expanded ? "expanded" : "collapsed");
+    if (U.ceoSessionPanelToggle) {
+        U.ceoSessionPanelToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        U.ceoSessionPanelToggle.setAttribute("aria-label", expanded ? "Collapse session list" : "Expand session list");
+        U.ceoSessionPanelToggle.innerHTML = `<i data-lucide="${expanded ? "chevrons-left" : "chevrons-right"}"></i>`;
+    }
+    icons();
+}
+
+function setCeoSessionPanelExpanded(expanded) {
+    S.ceoSessionPanelExpanded = !!expanded;
+    syncCeoSessionPanelState();
 }
 
 function setCeoSessionTab(tab) {
@@ -4307,6 +4343,7 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
     const isRunning = !!item?.is_running;
     const preview = String(item?.preview_text || "").trim() || "No messages yet.";
     const title = String(item?.title || sessionId || "Session");
+    const glyph = ceoSessionGlyph(item);
     const unreadCount = isActive ? 0 : sessionUnreadCount(sessionId);
     const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
     const displayTime = ceoSessionDisplayTime(item);
@@ -4325,15 +4362,19 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
                 data-session-activate="${esc(sessionId)}"
                 aria-pressed="${isActive ? "true" : "false"}"
                 aria-label="${esc(`${title}${isRunning ? "（运行中）" : ""}`)}"
+                title="${esc(title)}"
             >
+                <span class="ceo-session-glyph" aria-hidden="true">${esc(glyph)}</span>
+                <span class="ceo-session-body">
+                    <span class="ceo-session-head">
+                        <span class="ceo-session-title">${esc(title)}</span>
+                    </span>
+                    <span class="ceo-session-id">${esc(shortId)}</span>
+                    <span class="ceo-session-preview">${esc(preview)}</span>
+                    <span class="ceo-session-meta">${esc(formatSessionTime(displayTime))}</span>
+                    ${badges ? `<span class="ceo-session-badges">${badges}</span>` : ""}
+                </span>
                 ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
-                <div class="ceo-session-head">
-                    <div class="ceo-session-title">${esc(title)}</div>
-                </div>
-                <div class="ceo-session-id">${esc(shortId)}</div>
-                <div class="ceo-session-preview">${esc(preview)}</div>
-                <div class="ceo-session-meta">${esc(formatSessionTime(displayTime))}</div>
-                ${badges ? `<div class="ceo-session-badges">${badges}</div>` : ""}
             </button>
             ${allowActions ? `
                 <div class="ceo-session-actions" aria-label="Session actions">
@@ -5142,6 +5183,7 @@ function bind() {
     U.taskTokenClose?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.taskTokenBackdrop?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.artifactApply?.addEventListener("click", () => void applySelectedArtifact());
+    U.ceoSessionPanelToggle?.addEventListener("click", () => setCeoSessionPanelExpanded(!S.ceoSessionPanelExpanded));
     U.ceoNewSession?.addEventListener("click", () => void createNewCeoSession());
     U.ceoSessionTabLocal?.addEventListener("click", () => setCeoSessionTab("local"));
     U.ceoSessionTabChannel?.addEventListener("click", () => setCeoSessionTab("channel"));
@@ -5498,6 +5540,7 @@ function bind() {
     syncCeoInputHeight();
     syncCeoComposerReadonlyState();
     renderCeoSessions();
+    syncCeoSessionPanelState();
     renderTaskSessionScope();
     syncCeoPrimaryButton();
 }

@@ -569,6 +569,97 @@ def test_main_runtime_service_node_detail_includes_matching_artifacts():
     assert result['artifacts'][0]['ref'] == 'artifact:artifact:1'
 
 
+def test_main_runtime_service_node_detail_compacts_execution_trace_for_tool_output():
+    class _Store:
+        def list_artifacts(self, task_id: str):
+            return []
+
+    class _Task:
+        task_id = 'task:demo'
+
+    service = object.__new__(MainRuntimeService)
+    service.store = _Store()
+    service.get_task = lambda task_id: _Task() if task_id == 'task:demo' else None
+    service.get_node_detail_payload = lambda task_id, node_id: {
+        'ok': True,
+        'task_id': task_id,
+        'node_id': node_id,
+        'item': {
+            'task_id': task_id,
+            'node_id': node_id,
+            'status': 'failed',
+            'execution_trace': {
+                'initial_prompt': 'full prompt',
+                'tool_steps': [
+                    {
+                        'tool_name': 'filesystem',
+                        'arguments_text': '{"path": "repo"}',
+                        'output_text': 'repo summary',
+                        'output_ref': 'artifact:tool-step',
+                        'status': 'success',
+                    }
+                ],
+                'stages': [
+                    {
+                        'stage_id': 'stage-1',
+                        'stage_goal': 'inspect repository',
+                        'tool_round_budget': 2,
+                        'tool_rounds_used': 1,
+                        'rounds': [
+                            {
+                                'round_id': 'round-1',
+                                'tools': [
+                                    {
+                                        'tool_name': 'filesystem',
+                                        'arguments_text': '{"path": "repo"}',
+                                        'output_text': 'repo summary',
+                                        'output_ref': 'artifact:tool-step',
+                                        'status': 'success',
+                                    },
+                                    {
+                                        'tool_name': 'content',
+                                        'arguments_text': '{"ref": "artifact:tool-step"}',
+                                        'output_text': 'file contents',
+                                        'output_ref': 'artifact:content-step',
+                                        'status': 'success',
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+                'final_output': 'done',
+                'acceptance_result': 'pass',
+            },
+        },
+    }
+
+    result = service.node_detail('demo', 'node:demo')
+
+    assert isinstance(result, dict)
+    assert result['item']['execution_trace'] == {
+        'stages': [
+            {
+                'stage_goal': 'inspect repository',
+                'tool_calls': [
+                    {
+                        'tool_name': 'filesystem',
+                        'arguments_text': '{"path": "repo"}',
+                        'output_text': 'repo summary',
+                        'output_ref': 'artifact:tool-step',
+                    },
+                    {
+                        'tool_name': 'content',
+                        'arguments_text': '{"ref": "artifact:tool-step"}',
+                        'output_text': 'file contents',
+                        'output_ref': 'artifact:content-step',
+                    },
+                ],
+            }
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     captured: dict[str, object] = {}
@@ -1167,8 +1258,10 @@ def _write_runtime_config(workspace: Path) -> None:
                     'qqbot': {'enabled': False, 'accounts': {}},
                     'dingtalk': {'enabled': False, 'accounts': {}},
                     'wecom': {'enabled': False, 'accounts': {}},
-                    'wecomApp': {'enabled': False, 'accounts': {}},
-                    'feishuChina': {'enabled': False, 'accounts': {}},
+                    'wecom-app': {'enabled': False, 'accounts': {}},
+                    'wecom-kf': {'enabled': False, 'accounts': {}},
+                    'wechat-mp': {'enabled': False, 'accounts': {}},
+                    'feishu-china': {'enabled': False, 'accounts': {}},
                 },
             },
         }),
@@ -1465,7 +1558,7 @@ def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path,
     assert response.status_code == 200
     payload = response.json()
     assert payload['ok'] is True
-    assert [item['id'] for item in payload['items']] == ['qqbot', 'dingtalk', 'wecom', 'wecomApp', 'feishuChina']
+    assert [item['id'] for item in payload['items']] == ['qqbot', 'dingtalk', 'wecom', 'wecom-app', 'wecom-kf', 'wechat-mp', 'feishu-china']
 
 
 def test_china_bridge_channel_save_updates_config_file(tmp_path: Path, monkeypatch):

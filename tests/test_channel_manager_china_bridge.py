@@ -29,8 +29,10 @@ def test_config_accepts_china_bridge_channels_only():
                     "qqbot": {"enabled": True, "appId": "123"},
                     "dingtalk": {"enabled": True, "clientId": "ding-demo"},
                     "wecom": {"enabled": True},
-                    "wecomApp": {"enabled": True},
-                    "feishuChina": {"enabled": True},
+                    "wecom-app": {"enabled": True},
+                    "wecom-kf": {"enabled": True},
+                    "wechat-mp": {"enabled": True},
+                    "feishu-china": {"enabled": True},
                 },
             },
         }

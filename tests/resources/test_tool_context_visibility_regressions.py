@@ -87,3 +87,39 @@ def test_load_tool_context_search_includes_enabled_but_unregistered_callable_too
     assert payload['candidates'][0]['tool_id'] == 'agent_browser'
     assert payload['candidates'][0]['callable'] is True
     assert payload['candidates'][0]['available'] is True
+
+
+def test_decorated_tool_family_exposes_repair_required_metadata_and_toolskill_flag():
+    family = ToolFamilyRecord(
+        tool_id='agent_browser',
+        display_name='Agent Browser',
+        description='Browser automation via the upstream CLI.',
+        primary_executor_name='agent_browser',
+        enabled=True,
+        available=False,
+        callable=True,
+        source_path='tools/agent_browser',
+        actions=[
+            ToolActionRecord(action_id='browse', label='Browse', allowed_roles=['ceo'], executor_names=['agent_browser']),
+        ],
+        metadata={'warnings': ['missing required paths']},
+    )
+
+    class _Registry:
+        def list_tool_families(self):
+            return [family]
+
+    service = object.__new__(MainRuntimeService)
+    service.resource_registry = _Registry()
+    service._core_tool_resolution = lambda: SimpleNamespace(family_ids=set())
+    service._raw_tool_family = lambda tool_id: family if tool_id == 'agent_browser' else None
+    service._tool_family_executor_name = lambda family: 'agent_browser'
+    service._resource_manager = None
+
+    decorated = service.get_tool_family('agent_browser')
+    payload = service.get_tool_toolskill('agent_browser')
+
+    assert decorated is not None
+    assert decorated.metadata['repair_required'] is True
+    assert payload is not None
+    assert payload['repair_required'] is True

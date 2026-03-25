@@ -77,3 +77,13 @@
 某个 Skill 没有出现在摘要里，不代表它不可见；不要仅因为摘要未列出，就断言该 Skill 当前不可见。
 
 {{skill_inventory}}
+
+## 9. 需要修复的工具
+
+- 如果函数工具描述以 `【待修复】` 开头，或返回 `repair_required=true` 或 `tool_state="repair_required"`，都代表执行器必须修复后才可使用。
+- `【待修复】` 工具的默认工作流程是：
+  1. 调用 `load_tool_context(tool_id="<tool_id>")`
+  2. 使用 `repair-tool`、`filesystem` 和 `exec` 修复工具
+  3. 刷新或重新检查可用性
+  4. 重试原始工具操作
+- 只有在受到缺失凭据、缺失批准或用户停止指令的阻碍，才允许告诉用户该工具完全不可用。

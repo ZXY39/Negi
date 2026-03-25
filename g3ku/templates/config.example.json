@@ -160,11 +160,19 @@
         "enabled": false,
         "accounts": {}
       },
-      "wecomApp": {
+      "wecom-app": {
         "enabled": false,
         "accounts": {}
       },
-      "feishuChina": {
+      "wecom-kf": {
+        "enabled": false,
+        "accounts": {}
+      },
+      "wechat-mp": {
+        "enabled": false,
+        "accounts": {}
+      },
+      "feishu-china": {
         "enabled": false,
         "accounts": {}
       }

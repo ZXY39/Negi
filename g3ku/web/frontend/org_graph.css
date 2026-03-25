@@ -1306,30 +1306,101 @@ textarea {
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
     gap: var(--space-5);
     padding: var(--space-5) var(--space-6) var(--space-6);
     overflow: hidden;
+    align-items: stretch;
 }
 
 .ceo-session-panel {
+    width: 92px;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
-    padding: var(--space-4);
+    gap: var(--space-3);
+    padding: 12px 10px;
     border: 1px solid var(--border-strong);
-    border-radius: 16px;
-    background: var(--bg-panel);
+    border-radius: 20px;
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
     box-shadow: var(--shadow-md);
     overflow: hidden;
+    transition: width 220ms cubic-bezier(0.16, 1, 0.3, 1), padding 220ms cubic-bezier(0.16, 1, 0.3, 1), gap 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-panel {
+    width: clamp(280px, 24vw, 320px);
+    gap: var(--space-4);
+    padding: var(--space-4);
+    background: var(--bg-panel);
 }
 
 .ceo-session-panel-header {
     display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-panel-header {
+    flex-direction: row;
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-3);
+}
+
+.ceo-session-panel-copy {
+    display: none;
+    min-width: 0;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-panel-copy {
+    display: grid;
+    gap: 4px;
+}
+
+.ceo-session-panel-controls {
+    display: grid;
+    gap: 8px;
+    width: 100%;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-panel-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: auto;
+}
+
+.ceo-session-panel-toggle {
+    width: 100%;
+    min-height: 42px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--bg-panel) 90%, var(--bg-app) 10%);
+    box-shadow: var(--shadow-sm);
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-panel-toggle {
+    width: 42px;
+}
+
+.ceo-new-session-btn {
+    width: 100%;
+    gap: 8px;
+    justify-content: center;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-new-session-btn {
+    width: auto;
+}
+
+.ceo-new-session-label {
+    display: none;
+    white-space: nowrap;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-new-session-label {
+    display: inline;
 }
 
 .ceo-session-panel-header h2 {
@@ -1346,6 +1417,11 @@ textarea {
 }
 
 .ceo-session-tabs {
+    display: grid;
+    gap: 6px;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-tabs {
     display: inline-flex;
     gap: 8px;
     padding: 4px;
@@ -1355,23 +1431,40 @@ textarea {
 }
 
 .ceo-session-tab {
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+    padding: 0 10px;
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 82%, var(--bg-panel) 18%);
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 600;
+    transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-tab {
     min-width: 72px;
+    width: auto;
     height: 34px;
     padding: 0 14px;
-    border-radius: 10px;
     border: 0;
     background: transparent;
-    color: var(--text-secondary);
     font-size: 0.82rem;
-    font-weight: 600;
 }
 
 .ceo-session-tab[aria-pressed="true"] {
+    border-color: color-mix(in srgb, var(--brand-primary) 32%, var(--border-color));
     background: color-mix(in srgb, var(--brand-primary) 18%, var(--bg-panel));
     color: var(--text-primary);
 }
 
 .ceo-session-current {
+    display: none;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-current {
     display: grid;
     gap: 6px;
     padding: var(--space-3) var(--space-4);
@@ -1397,17 +1490,30 @@ textarea {
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 10px;
-    padding: 4px 8px 4px 4px;
+    padding: 4px 0;
     scrollbar-gutter: stable;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-list {
+    align-items: stretch;
+    padding: 4px 8px 4px 4px;
 }
 
 .ceo-session-group {
     display: grid;
     gap: 10px;
+    width: 100%;
+    justify-items: center;
 }
 
 .ceo-session-group-title {
+    display: none;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-group-title {
+    display: block;
     padding: 0 4px;
     color: var(--text-secondary);
     font-size: 0.78rem;
@@ -1418,19 +1524,36 @@ textarea {
 .ceo-session-group-list {
     display: grid;
     gap: 10px;
+    justify-items: center;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-group,
+.ceo-shell.is-session-panel-expanded .ceo-session-group-list {
+    justify-items: stretch;
 }
 
 .ceo-session-card {
     position: relative;
     isolation: isolate;
     display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    width: 56px;
+    justify-self: center;
+    padding: 0;
+    border-radius: 18px;
+    border: 1px solid transparent;
+    background: transparent;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-card {
+    width: auto;
+    justify-self: stretch;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--space-3);
     padding: var(--space-3);
     border-radius: 14px;
-    border: 1px solid transparent;
-    background: transparent;
-    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
 
 .ceo-session-card::after {
@@ -1464,9 +1587,53 @@ textarea {
 
 .ceo-session-main {
     min-width: 0;
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+    justify-items: center;
+    gap: 0;
+    position: relative;
+    text-align: left;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-main {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: flex-start;
+    justify-items: stretch;
+    gap: 10px;
+}
+
+.ceo-session-glyph {
+    width: 56px;
+    height: 56px;
+    border-radius: 18px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 84%, var(--bg-panel) 16%);
+    color: var(--text-primary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.94rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    box-shadow: var(--shadow-sm);
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-glyph {
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    font-size: 0.86rem;
+}
+
+.ceo-session-body {
+    display: none;
+    min-width: 0;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-body {
     display: grid;
     gap: 6px;
-    text-align: left;
 }
 
 .ceo-session-head {
@@ -1485,7 +1652,8 @@ textarea {
 
 .ceo-session-select:focus-visible,
 .ceo-session-action:focus-visible,
-#ceo-new-session-btn:focus-visible {
+#ceo-new-session-btn:focus-visible,
+.ceo-session-panel-toggle:focus-visible {
     outline: 0;
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent);
 }
@@ -1508,7 +1676,9 @@ textarea {
 }
 
 .ceo-session-unread {
-    flex-shrink: 0;
+    position: absolute;
+    top: -6px;
+    right: -6px;
     min-width: 22px;
     height: 22px;
     padding: 0 7px;
@@ -1521,6 +1691,11 @@ textarea {
     font-size: 0.72rem;
     font-weight: 700;
     box-shadow: 0 10px 20px -14px rgba(239, 68, 68, 0.85);
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-unread {
+    position: static;
+    align-self: start;
 }
 
 .ceo-session-card.has-unread:not(.is-active) {
@@ -1587,9 +1762,13 @@ textarea {
 }
 
 .ceo-session-actions {
-    display: flex;
+    display: none;
     align-items: flex-start;
     gap: 8px;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-actions {
+    display: flex;
 }
 
 .ceo-session-action {
@@ -1617,6 +1796,7 @@ textarea {
 .ceo-session-empty {
     min-height: 140px;
     margin: 0;
+    width: 100%;
 }
 
 .chat-wrapper {
@@ -1626,13 +1806,14 @@ textarea {
     flex-direction: column;
     overflow: hidden;
     width: 100%;
+    position: relative;
 }
 
 .chat-feed {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: clamp(24px, 3vw, 36px) clamp(28px, 6vw, 80px) var(--space-6);
+    padding: clamp(24px, 3vw, 36px) clamp(28px, 6vw, 80px) calc(var(--space-6) + 132px);
     display: flex;
     flex-direction: column;
     align-items: stretch;
@@ -1682,7 +1863,8 @@ textarea {
 }
 
 .message .msg-content {
-    width: min(100%, 760px);
+    width: fit-content;
+    max-width: min(100%, 760px);
     padding: 18px 22px;
     border-radius: 20px 20px 20px 6px;
     border: 1px solid var(--border-strong);
@@ -1701,6 +1883,10 @@ textarea {
     border-radius: 20px 20px 6px 20px;
     background-color: var(--bg-msg-user);
     border-color: color-mix(in srgb, var(--brand-primary) 20%, transparent);
+}
+
+.ceo-turn-message .msg-content {
+    width: min(100%, 760px);
 }
 
 .message .msg-content .chat-attachment-list {
@@ -2297,7 +2483,7 @@ textarea {
 
 .chat-input-area {
     width: min(100%, 960px);
-    margin: 0 auto clamp(18px, 3vw, 28px);
+    margin: 0 auto 24px;
     padding: 12px 14px;
     border: 1px solid var(--border-strong);
     border-radius: 20px;
@@ -2308,6 +2494,10 @@ textarea {
     gap: 12px;
     align-items: end;
     backdrop-filter: blur(12px);
+    position: sticky;
+    bottom: 24px;
+    z-index: 2;
+    flex-shrink: 0;
 }
 
 .ceo-composer {
@@ -2544,20 +2734,114 @@ textarea {
     }
 
     .ceo-session-panel {
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-    padding: var(--space-4);
-    border: 1px solid var(--border-strong);
-    border-radius: 16px;
-    background: var(--bg-panel);
-    box-shadow: var(--shadow-md);
-    overflow: hidden;
-}
+        width: 100%;
+        gap: var(--space-4);
+        padding: var(--space-4);
+        border-radius: 16px;
+        background: var(--bg-panel);
+    }
+
+    .ceo-session-panel-toggle {
+        display: none;
+    }
+
+    .ceo-session-panel-copy {
+        display: grid;
+        gap: 4px;
+    }
+
+    .ceo-session-panel-controls {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: auto;
+    }
+
+    .ceo-new-session-btn {
+        width: auto;
+    }
+
+    .ceo-new-session-label {
+        display: inline;
+    }
+
+    .ceo-session-tabs {
+        display: inline-flex;
+        gap: 8px;
+        padding: 4px;
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--bg-app) 78%, var(--bg-panel) 22%);
+        border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    }
+
+    .ceo-session-tab {
+        min-width: 72px;
+        width: auto;
+        height: 34px;
+        padding: 0 14px;
+        border: 0;
+        background: transparent;
+        font-size: 0.82rem;
+    }
+
+    .ceo-session-current {
+        display: grid;
+        gap: 6px;
+    }
+
+    .ceo-session-list {
+        align-items: stretch;
+        padding: 4px 8px 4px 4px;
+    }
+
+    .ceo-session-group,
+    .ceo-session-group-list {
+        justify-items: stretch;
+    }
+
+    .ceo-session-group-title {
+        display: block;
+    }
+
+    .ceo-session-card {
+        width: auto;
+        justify-self: stretch;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: var(--space-3);
+        padding: var(--space-3);
+        border-radius: 14px;
+    }
+
+    .ceo-session-main {
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: flex-start;
+        justify-items: stretch;
+        gap: 10px;
+    }
+
+    .ceo-session-glyph {
+        width: 44px;
+        height: 44px;
+        border-radius: 14px;
+        font-size: 0.86rem;
+    }
+
+    .ceo-session-body {
+        display: grid;
+        gap: 6px;
+    }
+
+    .ceo-session-unread {
+        position: static;
+        align-self: start;
+    }
+
+    .ceo-session-actions {
+        display: flex;
+    }
 
     .chat-feed {
-        padding: 16px 18px 12px;
+        padding: 16px 18px 120px;
         gap: var(--space-4);
     }
 
@@ -2575,31 +2859,19 @@ textarea {
     }
 
     .message .msg-content {
-    width: min(100%, 760px);
-    padding: 18px 22px;
-    border-radius: 20px 20px 20px 6px;
-    border: 1px solid var(--border-strong);
-    background-color: var(--bg-msg-sys);
-    line-height: 1.75;
-    color: var(--text-primary);
-    box-shadow: var(--shadow-sm);
-    word-break: break-word;
-}
+        width: fit-content;
+        max-width: 100%;
+    }
+
+    .ceo-turn-message .msg-content {
+        width: 100%;
+    }
 
     .chat-input-area {
-    width: min(100%, 960px);
-    margin: 0 auto clamp(18px, 3vw, 28px);
-    padding: 12px 14px;
-    border: 1px solid var(--border-strong);
-    border-radius: 20px;
-    background-color: var(--bg-panel);
-    box-shadow: var(--shadow-lg);
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 12px;
-    align-items: end;
-    backdrop-filter: blur(12px);
-}
+        width: 100%;
+        margin: 0 auto 16px;
+        bottom: 16px;
+    }
 
     .ceo-input-row {
         grid-template-columns: auto minmax(0, 1fr);
@@ -5832,6 +6104,13 @@ textarea {
     border-color: color-mix(in srgb, #f59e0b 30%, transparent);
 }
 
+.meta-tag.status-repair-required,
+.meta-tag.repair-flag {
+    background-color: color-mix(in srgb, #f97316 16%, var(--bg-surface-inner));
+    color: #fb923c;
+    border-color: color-mix(in srgb, #f97316 34%, transparent);
+}
+
 .meta-tag.status-running,
 .meta-tag.status-success {
     background-color: color-mix(in srgb, #22c55e 15%, var(--bg-surface-inner));
@@ -5870,6 +6149,13 @@ textarea {
 [data-theme="dark"] .meta-tag.status-enabled { color: #4ade80; }
 [data-theme="dark"] .meta-tag.status-disabled { color: #fca5a1; }
 [data-theme="dark"] .meta-tag.status-unavailable { color: #fbbf24; }
+[data-theme="dark"] .meta-tag.status-repair-required,
+[data-theme="dark"] .meta-tag.repair-flag { color: #fdba74; }
+
+.resource-warning-banner.repair-required {
+    border-color: color-mix(in srgb, #f97316 28%, transparent);
+    background: color-mix(in srgb, #f97316 10%, var(--bg-surface));
+}
 
 .meta-tag.status-running,
 .meta-tag.status-success {

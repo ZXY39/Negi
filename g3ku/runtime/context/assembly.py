@@ -346,14 +346,21 @@ class ContextAssemblyService:
             else:
                 if available_flag and not registered_callable:
                     state_text = "Status: enabled but not currently registered in the callable function tool list for this turn"
+                    next_step = f"For repair steps or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
+                elif not available_flag and registered_callable:
+                    state_text = "Status: unavailable but exposed in the callable function tool list as `【待修复】`"
+                    next_step = (
+                        f"If you call `{tool_id}`, it will return structured repair guidance instead of executing the real capability. "
+                        f"For repair steps or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
+                    )
                 else:
                     state_text = "Status: unavailable"
+                    next_step = f"For repair steps or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
                 if issue_summary:
                     state_text = f"{state_text} ({issue_summary})"
                 line = (
                     f"- `{tool_id}` ({display_name}): {description or 'Tool guidance resource.'} {state_text}. "
-                    f"It will not appear in the callable function tool list until fixed. "
-                    f"For repair steps or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
+                    f"{next_step}"
                 )
             line_tokens = estimate_tokens(line)
             lines.append(line)

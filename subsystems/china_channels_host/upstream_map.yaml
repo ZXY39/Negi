@@ -1,41 +1,419 @@
 schema_version: 1
 upstream:
   repo: https://github.com/BytePioneer-AI/openclaw-china.git
-  ref: v2026.3.15
+  ref: snapshot:openclaw-china-2026.3.22
 files:
-  - local: src/shared/index.ts
-    upstream: packages/shared/src/index.ts
+  - local: src/vendor/qqbot/bot.ts
+    upstream: extensions/qqbot/src/bot.ts
     mode: direct_copy
-  - local: src/shared/http/client.ts
+  - local: src/vendor/qqbot/channel.ts
+    upstream: extensions/qqbot/src/channel.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/client.ts
+    upstream: extensions/qqbot/src/client.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/config.ts
+    upstream: extensions/qqbot/src/config.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/logger.ts
+    upstream: extensions/qqbot/src/logger.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/markdown-images.ts
+    upstream: extensions/qqbot/src/markdown-images.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/monitor.ts
+    upstream: extensions/qqbot/src/monitor.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/onboarding.ts
+    upstream: extensions/qqbot/src/onboarding.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/outbound.ts
+    upstream: extensions/qqbot/src/outbound.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/proactive.ts
+    upstream: extensions/qqbot/src/proactive.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/ref-index-store.ts
+    upstream: extensions/qqbot/src/ref-index-store.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/runtime.ts
+    upstream: extensions/qqbot/src/runtime.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/send.ts
+    upstream: extensions/qqbot/src/send.ts
+    mode: direct_copy
+  - local: src/vendor/qqbot/types.ts
+    upstream: extensions/qqbot/src/types.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/bot-gateway.ts
+    upstream: extensions/dingtalk/src/bot-gateway.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/bot-handler.ts
+    upstream: extensions/dingtalk/src/bot-handler.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/bot-inbound.ts
+    upstream: extensions/dingtalk/src/bot-inbound.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/bot-stream-handler.ts
+    upstream: extensions/dingtalk/src/bot-stream-handler.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/bot.ts
+    upstream: extensions/dingtalk/src/bot.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/card.ts
+    upstream: extensions/dingtalk/src/card.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/channel.ts
+    upstream: extensions/dingtalk/src/channel.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/client.ts
+    upstream: extensions/dingtalk/src/client.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/config.ts
+    upstream: extensions/dingtalk/src/config.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/logger.ts
+    upstream: extensions/dingtalk/src/logger.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/media.ts
+    upstream: extensions/dingtalk/src/media.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/monitor.ts
+    upstream: extensions/dingtalk/src/monitor.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/onboarding.ts
+    upstream: extensions/dingtalk/src/onboarding.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/outbound.ts
+    upstream: extensions/dingtalk/src/outbound.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/runtime.ts
+    upstream: extensions/dingtalk/src/runtime.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/send.ts
+    upstream: extensions/dingtalk/src/send.ts
+    mode: direct_copy
+  - local: src/vendor/dingtalk/types.ts
+    upstream: extensions/dingtalk/src/types.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/bot.ts
+    upstream: extensions/wecom/src/bot.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/channel.ts
+    upstream: extensions/wecom/src/channel.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/config.ts
+    upstream: extensions/wecom/src/config.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/crypto.ts
+    upstream: extensions/wecom/src/crypto.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/mcp-config.ts
+    upstream: extensions/wecom/src/mcp-config.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/monitor.ts
+    upstream: extensions/wecom/src/monitor.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/outbound-reply.ts
+    upstream: extensions/wecom/src/outbound-reply.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/runtime.ts
+    upstream: extensions/wecom/src/runtime.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/status.ts
+    upstream: extensions/wecom/src/status.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/test-sdk-mock.ts
+    upstream: extensions/wecom/src/test-sdk-mock.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/types.ts
+    upstream: extensions/wecom/src/types.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/ws-gateway.ts
+    upstream: extensions/wecom/src/ws-gateway.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/ws-media.ts
+    upstream: extensions/wecom/src/ws-media.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/ws-protocol.ts
+    upstream: extensions/wecom/src/ws-protocol.ts
+    mode: direct_copy
+  - local: src/vendor/wecom/ws-reply-context.ts
+    upstream: extensions/wecom/src/ws-reply-context.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/api.ts
+    upstream: extensions/wecom-app/src/api.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/bot.ts
+    upstream: extensions/wecom-app/src/bot.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/channel.ts
+    upstream: extensions/wecom-app/src/channel.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/config.ts
+    upstream: extensions/wecom-app/src/config.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/crypto.ts
+    upstream: extensions/wecom-app/src/crypto.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/ffmpeg.ts
+    upstream: extensions/wecom-app/src/ffmpeg.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/monitor.ts
+    upstream: extensions/wecom-app/src/monitor.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/runtime.ts
+    upstream: extensions/wecom-app/src/runtime.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/send.ts
+    upstream: extensions/wecom-app/src/send.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/types.ts
+    upstream: extensions/wecom-app/src/types.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-app/voice.ts
+    upstream: extensions/wecom-app/src/voice.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/api.ts
+    upstream: extensions/wecom-kf/src/api.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/bot.ts
+    upstream: extensions/wecom-kf/src/bot.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/channel.ts
+    upstream: extensions/wecom-kf/src/channel.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/config.ts
+    upstream: extensions/wecom-kf/src/config.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/crypto.ts
+    upstream: extensions/wecom-kf/src/crypto.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/dispatch.ts
+    upstream: extensions/wecom-kf/src/dispatch.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/onboarding.ts
+    upstream: extensions/wecom-kf/src/onboarding.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/probe.ts
+    upstream: extensions/wecom-kf/src/probe.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/runtime.ts
+    upstream: extensions/wecom-kf/src/runtime.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/send.ts
+    upstream: extensions/wecom-kf/src/send.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/state.ts
+    upstream: extensions/wecom-kf/src/state.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/types.ts
+    upstream: extensions/wecom-kf/src/types.ts
+    mode: direct_copy
+  - local: src/vendor/wecom-kf/webhook.ts
+    upstream: extensions/wecom-kf/src/webhook.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/api.ts
+    upstream: extensions/wechat-mp/src/api.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/channel.ts
+    upstream: extensions/wechat-mp/src/channel.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/config.ts
+    upstream: extensions/wechat-mp/src/config.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/crypto.ts
+    upstream: extensions/wechat-mp/src/crypto.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/dispatch.ts
+    upstream: extensions/wechat-mp/src/dispatch.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/inbound.ts
+    upstream: extensions/wechat-mp/src/inbound.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/onboarding.ts
+    upstream: extensions/wechat-mp/src/onboarding.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/outbound.ts
+    upstream: extensions/wechat-mp/src/outbound.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/probe.ts
+    upstream: extensions/wechat-mp/src/probe.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/runtime.ts
+    upstream: extensions/wechat-mp/src/runtime.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/send.ts
+    upstream: extensions/wechat-mp/src/send.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/state.ts
+    upstream: extensions/wechat-mp/src/state.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/text.ts
+    upstream: extensions/wechat-mp/src/text.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/token.ts
+    upstream: extensions/wechat-mp/src/token.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/types.ts
+    upstream: extensions/wechat-mp/src/types.ts
+    mode: direct_copy
+  - local: src/vendor/wechat-mp/webhook.ts
+    upstream: extensions/wechat-mp/src/webhook.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/bot.ts
+    upstream: extensions/feishu/src/bot.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/channel.ts
+    upstream: extensions/feishu/src/channel.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/client.ts
+    upstream: extensions/feishu/src/client.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/config.ts
+    upstream: extensions/feishu/src/config.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/gateway.ts
+    upstream: extensions/feishu/src/gateway.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/logger.ts
+    upstream: extensions/feishu/src/logger.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/outbound.ts
+    upstream: extensions/feishu/src/outbound.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/runtime.ts
+    upstream: extensions/feishu/src/runtime.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/send.ts
+    upstream: extensions/feishu/src/send.ts
+    mode: direct_copy
+  - local: src/vendor/feishu-china/types.ts
+    upstream: extensions/feishu/src/types.ts
+    mode: direct_copy
+  - local: src/vendor/shared/asr/errors.ts
+    upstream: packages/shared/src/asr/errors.ts
+    mode: direct_copy
+  - local: src/vendor/shared/asr/index.ts
+    upstream: packages/shared/src/asr/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/asr/tencent-flash.ts
+    upstream: packages/shared/src/asr/tencent-flash.ts
+    mode: direct_copy
+  - local: src/vendor/shared/cli/china-setup.ts
+    upstream: packages/shared/src/cli/china-setup.ts
+    mode: direct_copy
+  - local: src/vendor/shared/cli/index.ts
+    upstream: packages/shared/src/cli/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/cli/install-hint.ts
+    upstream: packages/shared/src/cli/install-hint.ts
+    mode: direct_copy
+  - local: src/vendor/shared/cron/index.ts
+    upstream: packages/shared/src/cron/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/file/file-utils.ts
+    upstream: packages/shared/src/file/file-utils.ts
+    mode: direct_copy
+  - local: src/vendor/shared/file/index.ts
+    upstream: packages/shared/src/file/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/http/client.ts
     upstream: packages/shared/src/http/client.ts
     mode: direct_copy
-  - local: src/shared/logger/logger.ts
+  - local: src/vendor/shared/http/index.ts
+    upstream: packages/shared/src/http/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/http/retry.ts
+    upstream: packages/shared/src/http/retry.ts
+    mode: direct_copy
+  - local: src/vendor/shared/index.ts
+    upstream: packages/shared/src/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/logger/index.ts
+    upstream: packages/shared/src/logger/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/logger/logger.ts
     upstream: packages/shared/src/logger/logger.ts
     mode: direct_copy
-  - local: src/qqbot/channel.ts
-    upstream: extensions/qqbot/src/channel.ts
-    mode: adapted_copy
-  - local: src/qqbot/bot.ts
-    upstream: extensions/qqbot/src/bot.ts
-    mode: adapted_copy
-  - local: src/dingtalk/channel.ts
-    upstream: extensions/dingtalk/src/channel.ts
-    mode: adapted_copy
-  - local: src/wecom/channel.ts
-    upstream: extensions/wecom/src/channel.ts
-    mode: adapted_copy
-  - local: src/wecom_app/channel.ts
-    upstream: extensions/wecom-app/src/channel.ts
-    mode: adapted_copy
-  - local: src/feishu_china/channel.ts
-    upstream: extensions/feishu/src/channel.ts
-    mode: adapted_copy
+  - local: src/vendor/shared/media/index.ts
+    upstream: packages/shared/src/media/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/media/media-io.ts
+    upstream: packages/shared/src/media/media-io.ts
+    mode: direct_copy
+  - local: src/vendor/shared/media/media-parser.ts
+    upstream: packages/shared/src/media/media-parser.ts
+    mode: direct_copy
+  - local: src/vendor/shared/policy/dm-policy.ts
+    upstream: packages/shared/src/policy/dm-policy.ts
+    mode: direct_copy
+  - local: src/vendor/shared/policy/group-policy.ts
+    upstream: packages/shared/src/policy/group-policy.ts
+    mode: direct_copy
+  - local: src/vendor/shared/policy/index.ts
+    upstream: packages/shared/src/policy/index.ts
+    mode: direct_copy
+  - local: src/vendor/shared/types/common.ts
+    upstream: packages/shared/src/types/common.ts
+    mode: direct_copy
+  - local: channel_registry.json
+    upstream: null
+    mode: g3ku_native
+  - local: src/channel_registry.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/config.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/host.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/index.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/logger.ts
+    upstream: null
+    mode: g3ku_native
   - local: src/protocol.ts
     upstream: null
     mode: g3ku_native
   - local: src/runtime_bridge.ts
     upstream: null
     mode: g3ku_native
-  - local: src/host.ts
+  - local: src/session_keys.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/qqbot/channel.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/dingtalk/channel.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/wecom/channel.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/wecom/monitor.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/wecom-app/channel.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/wecom-app/monitor.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/wecom-kf/channel.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/wecom-kf/webhook.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/wechat-mp/channel.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/wechat-mp/webhook.ts
+    upstream: null
+    mode: g3ku_native
+  - local: src/feishu-china/channel.ts
     upstream: null
     mode: g3ku_native

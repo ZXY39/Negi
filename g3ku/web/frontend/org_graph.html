@@ -101,14 +101,22 @@
                     <p class="subtitle">通过 CEO 前门与 main 运行时交互，查看工具执行流与最终回复。</p>
                 </header>
 
-                <div class="ceo-shell">
-                    <aside class="ceo-session-panel" aria-label="CEO session list">
+                <div id="ceo-shell" class="ceo-shell">
+                    <aside id="ceo-session-panel" class="ceo-session-panel" aria-label="CEO session list">
                         <div class="ceo-session-panel-header">
-                            <div>
+                            <div class="ceo-session-panel-copy">
                                 <h2>会话</h2>
                                 <p class="subtitle">聊天记录彼此隔离，仅共享长期记忆。</p>
                             </div>
-                            <button id="ceo-new-session-btn" class="toolbar-btn" type="button">New Session</button>
+                            <div class="ceo-session-panel-controls">
+                                <button id="ceo-session-panel-toggle" class="icon-btn ceo-session-panel-toggle" type="button" aria-expanded="false" aria-label="Expand session list">
+                                    <i data-lucide="chevrons-right"></i>
+                                </button>
+                                <button id="ceo-new-session-btn" class="toolbar-btn ceo-new-session-btn" type="button">
+                                    <i data-lucide="plus"></i>
+                                    <span class="ceo-new-session-label">New Session</span>
+                                </button>
+                            </div>
                         </div>
                         <div class="ceo-session-tabs" role="tablist" aria-label="CEO session views">
                             <button id="ceo-session-tab-local" class="ceo-session-tab" type="button" aria-pressed="true">本地</button>

@@ -271,3 +271,34 @@ async def test_ceo_context_assembly_lists_enabled_but_unregistered_callable_tool
     assert result.trace['external_tools'][0]['available'] is True
     assert result.trace['external_tools'][0]['callable'] is True
     assert result.trace['external_tools'][0]['registered_callable'] is False
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_marks_registered_unavailable_callable_tools_as_repair_required() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response='')
+    service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='repair the browser tool and continue',
+        exposure={
+            'skills': [],
+            'tool_families': [
+                _family(
+                    'agent_browser',
+                    'Browser automation via the upstream CLI.',
+                    callable=True,
+                    available=False,
+                    metadata={'warnings': ['missing required paths']},
+                ),
+            ],
+            'tool_names': ['filesystem', 'load_tool_context', 'agent_browser'],
+        },
+        persisted_session=None,
+    )
+
+    assert '【待修复】' in result.system_prompt
+    assert 'structured repair guidance' in result.system_prompt
+    assert [item['tool_id'] for item in result.trace['external_tools']] == ['agent_browser']
+    assert result.trace['external_tools'][0]['registered_callable'] is True

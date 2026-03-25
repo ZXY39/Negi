@@ -227,6 +227,31 @@ def _ensure_no_removed_channel_config(raw_data: dict[str, Any]) -> None:
     )
 
 
+def _migrate_legacy_gateway_config(raw_data: dict[str, Any]) -> bool:
+    gateway = raw_data.get("gateway")
+    if not isinstance(gateway, dict):
+        return False
+
+    web = raw_data.get("web")
+    if not isinstance(web, dict):
+        web = {}
+        raw_data["web"] = web
+
+    changed = False
+    host = gateway.get("host")
+    if host is not None and not str(web.get("host") or "").strip():
+        web["host"] = host
+        changed = True
+
+    port = gateway.get("port")
+    if port is not None and web.get("port") in {None, ""}:
+        web["port"] = port
+        changed = True
+
+    raw_data.pop("gateway", None)
+    return True or changed
+
+
 def _ensure_no_removed_gateway_config(raw_data: dict[str, Any]) -> None:
     gateway = raw_data.get("gateway")
     if not isinstance(gateway, dict):
@@ -514,14 +539,16 @@ def load_config(config_path: Path | None = None) -> Config:
     if path != expected_path:
         raise ValueError(f"Config must be loaded from {expected_path}, got {path}")
     raw_data = _load_json_file(expected_path)
+    changed = _migrate_legacy_gateway_config(raw_data)
     _ensure_no_removed_model_fields(raw_data)
     _ensure_no_removed_role_scopes(raw_data)
     _ensure_no_removed_tools_config(raw_data)
     _ensure_no_removed_channel_config(raw_data)
     _ensure_no_removed_gateway_config(raw_data)
-    migrated_llm, changed = migrate_raw_config_if_needed(deepcopy(raw_data), workspace=Path.cwd())
-    if changed:
+    migrated_llm, llm_changed = migrate_raw_config_if_needed(deepcopy(raw_data), workspace=Path.cwd())
+    if llm_changed:
         raw_data = migrated_llm
+    changed = changed or llm_changed
     changed = _ensure_role_iterations_defaults(raw_data) or changed
     security = get_bootstrap_security_service(Path.cwd())
     migrated = _migrate_config(

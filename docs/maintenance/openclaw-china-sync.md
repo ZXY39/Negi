@@ -2,51 +2,51 @@
 
 ## Goal
 
-`subsystems/china_channels_host` keeps selected communication logic extracted from upstream OpenClaw China sources, while staying fully hosted inside G3KU.
+`subsystems/china_channels_host` mirrors the upstream OpenClaw China runtime while keeping the G3KU bridge contract isolated in a small native layer.
 
 ## Source Of Truth
 
+- upstream snapshot: `D:/projects/openclaw-china-2026.3.22`
 - sync map: `subsystems/china_channels_host/upstream_map.yaml`
-- runtime root: `subsystems/china_channels_host/src`
+- shared runtime registry: `subsystems/china_channels_host/channel_registry.json`
+- Node runtime root: `subsystems/china_channels_host/src`
 
-The sync map documents which files are:
+The sync map now describes the full runtime boundary:
 
-- direct copies
-- adapted copies
-- G3KU-native bridge files
+- `src/vendor/*`: direct upstream runtime files
+- `src/*.ts` and wrapper entrypoints: G3KU-native files
 
 ## What We Intentionally Do Not Sync
 
-The G3KU subtree excludes non-runtime upstream content, including:
+The G3KU subtree still excludes non-runtime upstream content where possible:
 
-- onboarding and setup CLI flows
-- OpenClaw plugin installer surfaces
-- tool and skill wrappers
-- upstream test files
+- standalone plugin packaging metadata
+- installer and setup surfaces outside the runtime dependency chain
 
-When upstream changes touch those areas, review them for ideas, but do not reintroduce them into the runtime subtree unless G3KU needs them for production behavior.
+Vendor directories may retain upstream test files as read-only references, but they are not part of the sync-map upgrade gate and are excluded from the Node build. If an upstream channel entrypoint imports a small onboarding/runtime helper, vendor that helper rather than rewriting the vendor file.
 
 ## Upgrade Procedure
 
-1. Pick the upstream tag or commit to adopt.
-2. Update `upstream_map.yaml` with the new `ref`.
-3. Diff only the mapped runtime files.
-4. Port changes into the matching local files.
-5. Re-run Python bridge tests and Node build validation.
+1. Replace the upstream snapshot reference in `channel_registry.json` and `upstream_map.yaml`.
+2. Re-copy the upstream runtime files into `src/vendor/*`.
+3. Re-run the sync-map audit: every vendor runtime file must appear in `upstream_map.yaml`.
+4. Review G3KU-native files only: `src/config.ts`, `src/host.ts`, `src/runtime_bridge.ts`, wrapper files, Python registry/config/admin glue, and docs.
+5. Rebuild the Node host and rerun Python/JS checks.
 
 ## Validation Checklist
 
-- `load_config()` rejects legacy `channels.*`
-- `g3ku web` starts without legacy channel framework
 - `npm run build` passes in `subsystems/china_channels_host`
-- `g3ku china-bridge doctor` reports the expected subsystem state
+- `py -3 -m py_compile` passes for the Python bridge/config/admin files
+- `node --check` passes for the frontend resource pages touched by channel ids/templates
+- `GET /api/china-bridge/channels` returns all canonical ids from the registry
+- `g3ku china-bridge doctor` reports the same canonical ids as the registry
 
 ## Drift Policy
 
-If a local runtime file diverges for G3KU-specific reasons:
+If a vendor file must diverge from upstream for G3KU-specific reasons:
 
-- keep the local file path stable
-- document the reason in commit notes or PR text
-- preserve the upstream mapping entry as `adapted_copy`
+- prefer moving the difference into the native layer instead of editing the vendor file
+- if a vendor edit is unavoidable, document it in commit/PR notes and mark the mapping entry accordingly later
+- keep channel ids canonical and registry-driven across Python, Node, UI, and docs
 
-This keeps future upgrades incremental instead of requiring another architecture rewrite.
+This keeps future upgrades incremental instead of forcing another architecture rewrite.

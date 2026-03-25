@@ -2102,14 +2102,12 @@ class MainRuntimeService:
         if family is None:
             return None
         resolution = self._core_tool_resolution()
-        return family.model_copy(update={'is_core': family.tool_id in resolution.family_ids})
+        metadata = dict(getattr(family, 'metadata', {}) or {})
+        metadata['repair_required'] = bool(getattr(family, 'callable', True)) and not bool(getattr(family, 'available', True))
+        return family.model_copy(update={'is_core': family.tool_id in resolution.family_ids, 'metadata': metadata})
 
     def list_tool_resources(self) -> list[Any]:
-        resolution = self._core_tool_resolution()
-        return [
-            item.model_copy(update={'is_core': item.tool_id in resolution.family_ids})
-            for item in self.resource_registry.list_tool_families()
-        ]
+        return [self._decorate_tool_family(item) for item in self.resource_registry.list_tool_families()]
 
     def get_tool_family(self, tool_id: str):
         return self._decorate_tool_family(self._raw_tool_family(tool_id))
@@ -2190,6 +2188,7 @@ class MainRuntimeService:
             or ''
         ).strip() or None
         callable_flag = bool(getattr(family, 'callable', getattr(descriptor, 'callable', True)))
+        repair_required = callable_flag and not bool(getattr(family, 'available', getattr(descriptor, 'available', True)))
         return {
             'tool_id': family.tool_id,
             'primary_executor_name': executor_name,
@@ -2200,6 +2199,7 @@ class MainRuntimeService:
             'install_dir': install_dir,
             'callable': callable_flag,
             'available': bool(getattr(family, 'available', getattr(descriptor, 'available', True))),
+            'repair_required': repair_required,
             'warnings': list(getattr(family, 'metadata', {}).get('warnings') or []),
             'errors': list(getattr(family, 'metadata', {}).get('errors') or []),
         }
@@ -2426,6 +2426,16 @@ class MainRuntimeService:
         if payload is None:
             return f'Error: Node not found: {node_id}'
 
+        item = payload.get('item') if isinstance(payload, dict) else None
+        if isinstance(item, dict):
+            payload = {
+                **payload,
+                'item': {
+                    **item,
+                    'execution_trace': self._compact_execution_trace_for_tool(item.get('execution_trace')),
+                },
+            }
+
         artifacts = [
             {
                 **artifact.model_dump(mode='json'),
@@ -2438,6 +2448,62 @@ class MainRuntimeService:
             **payload,
             'artifact_count': len(artifacts),
             'artifacts': artifacts,
+        }
+
+    @staticmethod
+    def _compact_execution_trace_for_tool(execution_trace: Any) -> dict[str, Any]:
+        trace = execution_trace if isinstance(execution_trace, dict) else {}
+        stages_payload: list[dict[str, Any]] = []
+        for stage in list(trace.get('stages') or []):
+            if not isinstance(stage, dict):
+                continue
+            tool_calls: list[dict[str, str]] = []
+            for round_item in list(stage.get('rounds') or []):
+                if not isinstance(round_item, dict):
+                    continue
+                for step in list(round_item.get('tools') or []):
+                    compact_step = MainRuntimeService._compact_execution_trace_tool_call(step)
+                    if compact_step is not None:
+                        tool_calls.append(compact_step)
+            stages_payload.append(
+                {
+                    'stage_goal': str(stage.get('stage_goal') or ''),
+                    'tool_calls': tool_calls,
+                }
+            )
+
+        if stages_payload:
+            return {'stages': stages_payload}
+
+        fallback_tool_calls: list[dict[str, str]] = []
+        for step in list(trace.get('tool_steps') or []):
+            compact_step = MainRuntimeService._compact_execution_trace_tool_call(step)
+            if compact_step is not None:
+                fallback_tool_calls.append(compact_step)
+        if fallback_tool_calls:
+            return {
+                'stages': [
+                    {
+                        'stage_goal': '',
+                        'tool_calls': fallback_tool_calls,
+                    }
+                ]
+            }
+        return {'stages': []}
+
+    @staticmethod
+    def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:
+        if not isinstance(step, dict):
+            return None
+        tool_name = str(step.get('tool_name') or '').strip() or 'tool'
+        arguments_text = str(step.get('arguments_text') or '')
+        output_text = str(step.get('output_text') or '')
+        output_ref = str(step.get('output_ref') or '')
+        return {
+            'tool_name': tool_name,
+            'arguments_text': arguments_text,
+            'output_text': output_text,
+            'output_ref': output_ref,
         }
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:

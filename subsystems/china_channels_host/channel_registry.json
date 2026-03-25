@@ -2,7 +2,7 @@
   "schema_version": 1,
   "upstream": {
     "snapshot": "openclaw-china-2026.3.22",
-    "source_path": "D:/zxy/project/openclaw-china-2026.3.22"
+    "source_path": "D:/projects/openclaw-china-2026.3.22"
   },
   "channels": [
     {

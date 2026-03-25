@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.repair_required import RepairRequiredTool
 from g3ku.resources.embedded_mcp import EmbeddedMCPTool
 from g3ku.resources.models import ToolResourceDescriptor
 from g3ku.resources.tool_settings import (
@@ -106,6 +107,11 @@ class ResourceLoader:
         if hasattr(module, "execute"):
             return EmbeddedMCPTool(descriptor, getattr(module, "execute"))
         raise RuntimeError(f"tool module missing build()/execute(): {entrypoint}")
+
+    def load_repair_required_tool(self, descriptor: ToolResourceDescriptor, *, reason: str = '') -> Tool | None:
+        if not bool(getattr(descriptor, 'callable', True)):
+            return None
+        return RepairRequiredTool(descriptor, reason=reason)
 
     def _module_name(self, descriptor: ToolResourceDescriptor) -> str:
         digest = descriptor.entrypoint_hash or hashlib.sha256(str(descriptor.entrypoint_path).encode("utf-8")).hexdigest()
