@@ -1,4 +1,4 @@
-﻿// Task list, task detail loading, and task event orchestration extracted from org_graph_app.js.
+// Task list, task detail loading, and task event orchestration extracted from org_graph_app.js.
 // Loaded after org_graph_app.js and before org_graph_llm.js.
 
 
@@ -256,6 +256,9 @@ function renderTasks() {
                             <span class="pc-task-id-label">Task</span>
                             <span class="pc-task-id-value">${esc(task.task_id)}</span>
                         </span>
+                                            <button class="icon-btn pc-copy-btn" type="button" title="复制任务 ID" aria-label="复制任务 ID">
+                            <i data-lucide="copy"></i>
+                        </button>
                     </div>
                 </div>
                 ${cardActions.length ? `
@@ -285,6 +288,10 @@ function renderTasks() {
             if (e.target.checked) S.selectedTaskIds.add(task.task_id);
             else S.selectedTaskIds.delete(task.task_id);
             renderTasks();
+        });
+        el.querySelector(".pc-copy-btn")?.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            await copyTaskId(task.task_id);
         });
         const menuTrigger = el.querySelector("[data-task-menu-toggle]");
         menuTrigger?.addEventListener("click", (e) => {

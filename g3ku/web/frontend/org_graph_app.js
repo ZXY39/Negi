@@ -1316,7 +1316,7 @@ function orderedTasks(tasks = S.tasks) {
 }
 
 function canMutateCeoSessions() {
-    return !(S.ceoTurnActive || S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
+    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
 }
 
 function canCreateCeoSessions() {

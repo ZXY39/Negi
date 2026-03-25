@@ -58,11 +58,6 @@ def _assert_known_session(session_manager, session_id: str):
     return session_manager.get_or_create(key)
 
 
-def _assert_no_running_turn(runtime_manager, session_id: str):
-    if _session_is_running(runtime_manager, session_id):
-        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
-
-
 def _list_session_items(session_manager, runtime_manager, *, active_session_id: str) -> list[dict]:
     return list_web_ceo_sessions(
         session_manager,
@@ -209,8 +204,6 @@ async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     agent, session_manager, runtime_manager, state_store = _sessions()
     if _is_channel_session_id(session_id):
         _raise_channel_session_readonly()
-    current_active = resolve_active_ceo_session_id(session_manager, state_store)
-    _assert_no_running_turn(runtime_manager, current_active)
     session = _assert_known_session(session_manager, session_id)
     title = str(payload.get("title") or "").strip()
     if not title:
@@ -308,11 +301,7 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
         _raise_channel_session_readonly()
     agent, session_manager, runtime_manager, state_store = _sessions()
     service = await _task_service(agent)
-    current_active = resolve_active_ceo_session_id(session_manager, state_store)
-    _assert_no_running_turn(runtime_manager, current_active)
     session = _assert_known_session(session_manager, session_id)
-    if current_active != session.key:
-        _assert_no_running_turn(runtime_manager, session.key)
     delete_check = _session_task_delete_payload(service, session.key)
     if not bool(delete_check.get('can_delete')):
         _raise_session_delete_blocked(session_id=session.key, payload=delete_check)
