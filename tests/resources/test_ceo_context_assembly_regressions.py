@@ -111,7 +111,7 @@ async def test_ceo_context_assembly_defaults_to_memory_only_retrieval_for_genera
 
 
 @pytest.mark.asyncio
-async def test_ceo_context_assembly_dedupes_prompt_inventory_against_targeted_retrieval() -> None:
+async def test_ceo_context_assembly_keeps_prompt_inventory_visible_during_targeted_retrieval() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response='# Retrieved Context\n\n- [skill:demo_skill] Detailed skill context\n- [resource:tool:external_browser] Detailed tool context')
     service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
@@ -133,16 +133,47 @@ async def test_ceo_context_assembly_dedupes_prompt_inventory_against_targeted_re
         persisted_session=None,
     )
 
-    assert prompt_builder.calls == [['other_skill']]
+    assert len(prompt_builder.calls) == 1
+    assert set(prompt_builder.calls[0]) == {'demo_skill', 'other_skill'}
     assert len(memory_manager.calls) == 1
     call = memory_manager.calls[0]
     assert call['search_context_types'] == ['memory', 'skill', 'resource']
     assert call['allowed_context_types'] == ['memory', 'skill', 'resource']
     assert call['allowed_skill_record_ids'] == ['skill:demo_skill']
     assert call['allowed_resource_record_ids'] == ['tool:external_browser']
-    assert result.trace['retrieval_scope']['deduped_skill_ids'] == ['demo_skill']
-    assert result.trace['retrieval_scope']['deduped_tool_ids'] == ['external_browser']
-    assert [item['tool_id'] for item in result.trace['external_tools']] == ['external_search']
+    assert result.trace['retrieval_scope']['targeted_skill_ids'] == ['demo_skill']
+    assert result.trace['retrieval_scope']['targeted_tool_ids'] == ['external_browser']
+    assert result.trace['retrieval_scope']['deduped_skill_ids'] == []
+    assert result.trace['retrieval_scope']['deduped_tool_ids'] == []
+    assert {item['tool_id'] for item in result.trace['external_tools']} == {'external_browser', 'external_search'}
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_keeps_explicitly_named_skill_visible_in_prompt_inventory() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response='# Retrieved Context\n\n- [skill:update-tool] Detailed skill context')
+    service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='why did you say update-tool is not visible?',
+        exposure={
+            'skills': [
+                _skill('update-tool', 'Update an existing tool resource'),
+                _skill('add-tool', 'Add a new tool resource'),
+            ],
+            'tool_families': [],
+            'tool_names': ['filesystem', 'load_skill_context'],
+        },
+        persisted_session=None,
+    )
+
+    assert len(prompt_builder.calls) == 1
+    assert set(prompt_builder.calls[0]) == {'update-tool', 'add-tool'}
+    assert len(memory_manager.calls) == 1
+    assert memory_manager.calls[0]['allowed_skill_record_ids'] == ['skill:update-tool']
+    assert result.trace['retrieval_scope']['targeted_skill_ids'] == ['update-tool']
+    assert result.trace['retrieval_scope']['deduped_skill_ids'] == []
 
 
 @pytest.mark.asyncio

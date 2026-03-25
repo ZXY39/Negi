@@ -30,6 +30,14 @@ _global_china_transport: Optional[ChinaBridgeTransport] = None
 _global_china_supervisor: Optional[ChinaBridgeSupervisor] = None
 _global_china_outbound_task: Optional[asyncio.Task] = None
 _global_china_start_task: Optional[asyncio.Task] = None
+_global_runtime_services_lock: Optional[asyncio.Lock] = None
+
+
+def _get_runtime_services_lock() -> asyncio.Lock:
+    global _global_runtime_services_lock
+    if _global_runtime_services_lock is None:
+        _global_runtime_services_lock = asyncio.Lock()
+    return _global_runtime_services_lock
 
 
 def _listen_port_owners(port: int) -> set[int] | None:
@@ -285,23 +293,48 @@ def get_web_heartbeat_service(agent: AgentLoop | None = None):
     return _global_web_heartbeat
 
 
+def describe_web_runtime_services(agent: AgentLoop | None = None) -> dict[str, bool]:
+    runtime_agent = agent or _global_agent
+    main_task_service = getattr(runtime_agent, 'main_task_service', None) if runtime_agent is not None else None
+    heartbeat = _global_web_heartbeat
+    main_runtime_ready = bool(main_task_service is not None and getattr(main_task_service, '_started', False))
+    heartbeat_ready = bool(heartbeat is not None and getattr(heartbeat, '_started', False))
+    bootstrapping = _get_runtime_services_lock().locked()
+    ready = bool(runtime_agent is not None and main_runtime_ready and heartbeat_ready and not bootstrapping)
+    return {
+        'agent_ready': runtime_agent is not None,
+        'main_runtime_ready': main_runtime_ready,
+        'heartbeat_ready': heartbeat_ready,
+        'bootstrapping': bootstrapping,
+        'ready': ready,
+    }
+
+
 async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
-    runtime_agent = agent or get_agent()
-    main_task_service = getattr(runtime_agent, 'main_task_service', None)
-    if main_task_service is not None:
-        await main_task_service.startup()
-        await ensure_managed_task_worker(main_task_service)
-    heartbeat = get_web_heartbeat_service(agent)
-    if heartbeat is not None:
-        await heartbeat.start()
+    if describe_web_runtime_services(agent).get('ready'):
+        return
+
+    async with _get_runtime_services_lock():
+        runtime_agent = agent or get_agent()
+        if describe_web_runtime_services(runtime_agent).get('ready'):
+            return
+
+        main_task_service = getattr(runtime_agent, 'main_task_service', None)
         if main_task_service is not None:
-            for entry in main_task_service.store.list_pending_task_terminal_outbox(limit=500):
-                payload = dict(entry.get('payload') or {})
-                heartbeat.enqueue_task_terminal_payload(payload)
-            for entry in main_task_service.store.list_pending_task_stall_outbox(limit=500):
-                payload = dict(entry.get('payload') or {})
-                heartbeat.enqueue_task_stall_payload(payload)
-    await _ensure_china_bridge_services(runtime_agent)
+            await main_task_service.startup()
+            # Avoid blocking unlock on worker warmup; the UI can surface worker readiness separately.
+            await ensure_managed_task_worker(main_task_service, wait_timeout_s=1.0)
+        heartbeat = get_web_heartbeat_service(runtime_agent)
+        if heartbeat is not None:
+            await heartbeat.start()
+            if main_task_service is not None:
+                for entry in main_task_service.store.list_pending_task_terminal_outbox(limit=500):
+                    payload = dict(entry.get('payload') or {})
+                    heartbeat.enqueue_task_terminal_payload(payload)
+                for entry in main_task_service.store.list_pending_task_stall_outbox(limit=500):
+                    payload = dict(entry.get('payload') or {})
+                    heartbeat.enqueue_task_stall_payload(payload)
+        await _ensure_china_bridge_services(runtime_agent)
 
 
 async def shutdown_web_runtime() -> None:
@@ -404,6 +437,7 @@ def run_web_shell(*, host: str, port: int, reload: bool, debug: bool, set_debug_
 
 
 __all__ = [
+    'describe_web_runtime_services',
     'debug_trace_enabled',
     'ensure_web_runtime_services',
     'get_agent',

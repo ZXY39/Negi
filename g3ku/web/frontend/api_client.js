@@ -5,6 +5,7 @@ class ApiClient {
     static _activeSessionId = "";
     static _requestControllers = new Map();
     static _requestTokens = new Map();
+    static _bootstrapUnlockRequestKey = "bootstrap:unlock";
 
     static getActiveSessionId() {
         return String(this._activeSessionId || FALLBACK_SESSION_ID).trim() || FALLBACK_SESSION_ID;
@@ -24,6 +25,16 @@ class ApiClient {
             }
         });
         return url;
+    }
+
+    static _delay(delayMs) {
+        return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, Number(delayMs) || 0)));
+    }
+
+    static _isTimeoutError(error) {
+        if (!error || typeof error !== "object") return false;
+        if (error.isTimeout === true) return true;
+        return String(error?.name || "").trim() === "AbortError" && String(error?.message || "").trim() === "Request timeout";
     }
 
     static async _request(method, path, { params = {}, body, headers = {}, requestKey = "", timeoutMs = 10000 } = {}) {
@@ -48,7 +59,11 @@ class ApiClient {
             this._requestTokens.set(normalizedKey, token);
         }
         try {
-            const timeoutId = window.setTimeout(() => controller.abort(new DOMException("Request timeout", "AbortError")), Math.max(1000, Number(timeoutMs) || 10000));
+            let didTimeout = false;
+            const timeoutId = window.setTimeout(() => {
+                didTimeout = true;
+                controller.abort(new DOMException("Request timeout", "AbortError"));
+            }, Math.max(1000, Number(timeoutMs) || 10000));
             let response;
             try {
                 response = await fetch(url.toString(), {
@@ -59,9 +74,10 @@ class ApiClient {
                 });
             } catch (error) {
                 if (error?.name === "AbortError") {
-                    const timeoutError = new Error("Request timeout");
-                    timeoutError.name = "AbortError";
-                    throw timeoutError;
+                    const abortError = new Error(didTimeout ? "Request timeout" : "Request aborted");
+                    abortError.name = "AbortError";
+                    abortError.isTimeout = didTimeout;
+                    throw abortError;
                 }
                 throw error;
             } finally {
@@ -124,8 +140,9 @@ class ApiClient {
         return this._request("DELETE", path, normalized);
     }
 
-    static async getBootstrapStatus() {
-        const data = await this.get("/api/bootstrap/status");
+    static async getBootstrapStatus(options = {}) {
+        const normalized = options && typeof options === "object" && !Array.isArray(options) ? options : {};
+        const data = await this._request("GET", "/api/bootstrap/status", normalized);
         return data.item || null;
     }
 
@@ -134,9 +151,88 @@ class ApiClient {
         return data.item || null;
     }
 
-    static async unlockBootstrap(payload) {
-        const data = await this.post("/api/bootstrap/unlock", payload || {});
-        return data.item || null;
+    static async _waitForBootstrapRuntimeReady({ maxPolls = 6, pollIntervalMs = 1000, onProgress = null } = {}) {
+        const totalPolls = Math.max(1, Number(maxPolls) || 1);
+        for (let pollIndex = 0; pollIndex < totalPolls; pollIndex += 1) {
+            if (pollIndex > 0) {
+                await this._delay(pollIntervalMs);
+            }
+            try {
+                const status = await this.getBootstrapStatus({ timeoutMs: 4000 });
+                const runtime = status?.runtime && typeof status.runtime === "object" ? status.runtime : {};
+                const mode = String(status?.mode || "").trim().toLowerCase();
+                const runtimeReady = Boolean(status?.runtime_ready ?? runtime.ready);
+                const runtimeBootstrapping = Boolean(status?.runtime_bootstrapping ?? runtime.bootstrapping);
+                if (typeof onProgress === "function") {
+                    onProgress({
+                        mode,
+                        status,
+                        runtimeReady,
+                        runtimeBootstrapping,
+                        pollIndex: pollIndex + 1,
+                        totalPolls,
+                    });
+                }
+                if (mode === "unlocked" && runtimeReady) {
+                    return status;
+                }
+                if (mode !== "unlocked" && !runtimeBootstrapping) {
+                    return null;
+                }
+            } catch (error) {
+                if (typeof onProgress === "function") {
+                    onProgress({
+                        mode: "",
+                        status: null,
+                        runtimeReady: false,
+                        runtimeBootstrapping: false,
+                        pollIndex: pollIndex + 1,
+                        totalPolls,
+                        error,
+                    });
+                }
+            }
+        }
+        return null;
+    }
+
+    static async unlockBootstrap(payload, { onRetry = null, onProgress = null } = {}) {
+        const maxRetries = 3;
+        let lastTimeoutError = null;
+        for (let retryIndex = 0; retryIndex <= maxRetries; retryIndex += 1) {
+            try {
+                const data = await this._request("POST", "/api/bootstrap/unlock", {
+                    body: payload || {},
+                    requestKey: this._bootstrapUnlockRequestKey,
+                    timeoutMs: 15000,
+                });
+                return data.item || null;
+            } catch (error) {
+                if (!this._isTimeoutError(error)) {
+                    throw error;
+                }
+                lastTimeoutError = error;
+                const recoveredStatus = await this._waitForBootstrapRuntimeReady({ onProgress });
+                if (recoveredStatus) {
+                    return recoveredStatus;
+                }
+                if (retryIndex >= maxRetries) {
+                    break;
+                }
+                if (typeof onRetry === "function") {
+                    onRetry({
+                        retryIndex: retryIndex + 1,
+                        maxRetries,
+                    });
+                }
+                await this._delay(Math.min(1600, 450 * (retryIndex + 1)));
+            }
+        }
+        const timeoutError = new Error("\u8d85\u65f6\u8bf7\u91cd\u8bd5");
+        timeoutError.name = "AbortError";
+        timeoutError.isTimeout = true;
+        timeoutError.cause = lastTimeoutError;
+        throw timeoutError;
     }
 
     static async getBootstrapExitCheck() {

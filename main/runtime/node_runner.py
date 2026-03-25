@@ -18,6 +18,7 @@ from main.models import (
     NodeFinalResult,
     NodeRecord,
     RESULT_SCHEMA_VERSION,
+    SpawnChildFailureInfo,
     SpawnChildResult,
     SpawnChildSpec,
     TokenUsageSummary,
@@ -478,7 +479,7 @@ class NodeRunner:
                 )
 
         results = await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
-        cached_payload['results'] = [item.model_dump(mode='json') for item in results]
+        cached_payload['results'] = [item.model_dump(mode='json', exclude_none=True) for item in results]
         cached_payload['completed'] = True
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
         return list(results)
@@ -552,6 +553,12 @@ class NodeRunner:
                     node_output=child_summary,
                     node_output_summary=child_summary,
                     node_output_ref=child_ref,
+                    failure_info=self._spawn_failure_info_from_node(
+                        task_id=task.task_id,
+                        node=child,
+                        fallback_output=child_result.output,
+                        source='execution',
+                    ),
                 )
                 self._update_spawn_entry(
                     task_id=task.task_id,
@@ -562,7 +569,7 @@ class NodeRunner:
                     status='error',
                     finished_at=_now(),
                     check_status='skipped',
-                    result=result.model_dump(mode='json'),
+                    result=result.model_dump(mode='json', exclude_none=True),
                 )
                 return result
 
@@ -584,7 +591,7 @@ class NodeRunner:
                     status='success',
                     finished_at=_now(),
                     check_status='skipped',
-                    result=result.model_dump(mode='json'),
+                    result=result.model_dump(mode='json', exclude_none=True),
                 )
                 return result
 
@@ -629,6 +636,16 @@ class NodeRunner:
                 node_output=child_summary,
                 node_output_summary=child_summary,
                 node_output_ref=child_ref,
+                failure_info=(
+                    None
+                    if acceptance_result.status == STATUS_SUCCESS
+                    else self._spawn_failure_info_from_node(
+                        task_id=task.task_id,
+                        node=acceptance,
+                        fallback_output=acceptance_result.output,
+                        source='acceptance',
+                    )
+                ),
             )
             self._update_spawn_entry(
                 task_id=task.task_id,
@@ -639,7 +656,7 @@ class NodeRunner:
                 status='success' if acceptance_result.status == STATUS_SUCCESS else 'error',
                 finished_at=_now(),
                 check_status='passed' if acceptance_result.status == STATUS_SUCCESS else 'failed',
-                result=result.model_dump(mode='json'),
+                result=result.model_dump(mode='json', exclude_none=True),
             )
             return result
         except TaskPausedError:
@@ -653,6 +670,7 @@ class NodeRunner:
                 node_output='',
                 node_output_summary='',
                 node_output_ref='',
+                failure_info=self._runtime_spawn_failure_info(f'Error: {exc}'),
             )
             self._update_spawn_entry(
                 task_id=task.task_id,
@@ -663,7 +681,7 @@ class NodeRunner:
                 status='error',
                 finished_at=_now(),
                 check_status='failed',
-                result=result.model_dump(mode='json'),
+                result=result.model_dump(mode='json', exclude_none=True),
             )
             return result
 
@@ -1107,6 +1125,51 @@ class NodeRunner:
             'result_payload_ref': result_payload_ref,
             'evidence_summary': evidence_summary,
         }
+
+    def _spawn_failure_info_from_node(
+        self,
+        *,
+        task_id: str,
+        node: NodeRecord,
+        fallback_output: str,
+        source: str,
+    ) -> SpawnChildFailureInfo:
+        latest = self._log_service.ensure_node_output_externalized(task_id, node.node_id) or self._store.get_node(node.node_id) or node
+        latest = self._log_service.ensure_node_result_payload_externalized(task_id, latest.node_id) or self._store.get_node(latest.node_id) or latest
+        result_payload = normalize_result_payload((latest.metadata or {}).get('result_payload'))
+        summary = str(getattr(latest, 'final_output', '') or fallback_output or getattr(latest, 'failure_reason', '') or '').strip()
+        output_ref = str(getattr(latest, 'final_output_ref', '') or '').strip()
+        result_payload_ref = str((latest.metadata or {}).get('result_payload_ref') or '').strip()
+        delivery_status = 'blocked'
+        blocking_reason = ''
+        remaining_work: list[str] = []
+        if result_payload is not None:
+            summary = str(result_payload.summary or result_payload.output or summary or blocking_reason).strip()
+            delivery_status = 'blocked' if str(result_payload.delivery_status or '').strip() == 'blocked' else 'final'
+            blocking_reason = str(result_payload.blocking_reason or '').strip()
+            remaining_work = [str(item).strip() for item in list(result_payload.remaining_work or []) if str(item).strip()]
+        return SpawnChildFailureInfo(
+            source=str(source or 'runtime').strip() or 'runtime',
+            summary=summary,
+            delivery_status=delivery_status,
+            blocking_reason=blocking_reason,
+            remaining_work=remaining_work,
+            output_ref=output_ref,
+            result_payload_ref=result_payload_ref,
+        )
+
+    @staticmethod
+    def _runtime_spawn_failure_info(error_text: str) -> SpawnChildFailureInfo:
+        text = str(error_text or 'Error: child pipeline failed').strip() or 'Error: child pipeline failed'
+        return SpawnChildFailureInfo(
+            source='runtime',
+            summary=text,
+            delivery_status='blocked',
+            blocking_reason=text,
+            remaining_work=[],
+            output_ref='',
+            result_payload_ref='',
+        )
 
     async def _submit_next_stage(
         self,

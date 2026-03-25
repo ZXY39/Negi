@@ -997,6 +997,285 @@ def test_failed_node_ids_follow_projection_tree_for_failed_acceptance(tmp_path: 
     assert service.failed_node_ids(record.task_id) == f'- {acceptance.node_id}'
 
 
+@pytest.mark.asyncio
+async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            if node.goal == "bad child":
+                return service.node_runner._mark_finished(
+                    task_id,
+                    node_id,
+                    NodeFinalResult(
+                        status="failed",
+                        delivery_status="final",
+                        summary="child failed summary",
+                        answer="",
+                        evidence=[],
+                        remaining_work=["tighten child scope"],
+                        blocking_reason="",
+                    ),
+                )
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="good child done",
+                    answer="good child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[
+                SpawnChildSpec(goal="bad child", prompt="bad prompt"),
+                SpawnChildSpec(goal="good child", prompt="good prompt"),
+            ],
+            call_id="round-failure-info",
+        )
+
+        failed_result = next(item for item in results if item.goal == "bad child")
+        success_result = next(item for item in results if item.goal == "good child")
+
+        assert failed_result.failure_info is not None
+        assert failed_result.failure_info.source == "execution"
+        assert failed_result.failure_info.summary == "child failed summary"
+        assert failed_result.failure_info.delivery_status == "final"
+        assert failed_result.failure_info.blocking_reason == ""
+        assert failed_result.failure_info.remaining_work == ["tighten child scope"]
+        assert "failure_info" in failed_result.model_dump(mode="json", exclude_none=True)
+
+        assert success_result.failure_info is None
+        assert "failure_info" not in success_result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_child_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            if node.node_kind == "acceptance":
+                return service.node_runner._mark_finished(
+                    task_id,
+                    node_id,
+                    NodeFinalResult(
+                        status="failed",
+                        delivery_status="final",
+                        summary="acceptance failed summary",
+                        answer="need stricter proof",
+                        evidence=[],
+                        remaining_work=["reopen cited lines"],
+                        blocking_reason="",
+                    ),
+                )
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="child done",
+                    answer="child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", acceptance_prompt="check child")],
+            call_id="round-acceptance-failure",
+        )
+
+        result = results[0]
+
+        assert result.node_output == "child done"
+        assert result.node_output_summary == "child done"
+        assert result.check_result == "acceptance failed summary"
+        assert result.failure_info is not None
+        assert result.failure_info.source == "acceptance"
+        assert result.failure_info.summary == "acceptance failed summary"
+        assert result.failure_info.delivery_status == "final"
+        assert result.failure_info.remaining_work == ["reopen cited lines"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_children_surfaces_runtime_failure_info_for_pipeline_exceptions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(service.node_runner, "run_node", _boom)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt")],
+            call_id="round-runtime-failure",
+        )
+
+        result = results[0]
+
+        assert result.failure_info is not None
+        assert result.failure_info.source == "runtime"
+        assert result.failure_info.summary == "Error: boom"
+        assert result.failure_info.delivery_status == "blocked"
+        assert result.failure_info.blocking_reason == "Error: boom"
+        assert result.failure_info.remaining_work == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subtree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        attempts = {"bad child": 0}
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            if node.goal == "bad child":
+                attempts["bad child"] += 1
+                if attempts["bad child"] == 1:
+                    return service.node_runner._mark_finished(
+                        task_id,
+                        node_id,
+                        NodeFinalResult(
+                            status="failed",
+                            delivery_status="final",
+                            summary="first attempt failed",
+                            answer="",
+                            evidence=[],
+                            remaining_work=["retry with refined prompt"],
+                            blocking_reason="",
+                        ),
+                    )
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="retry succeeded",
+                    answer="retry succeeded",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        first_results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="bad child", prompt="bad prompt")],
+            call_id="round-1",
+        )
+        second_results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="bad child", prompt="bad prompt refined")],
+            call_id="round-2",
+        )
+
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        spawn_operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        first_child_id = spawn_operations["round-1"]["entries"][0]["child_node_id"]
+        second_child_id = spawn_operations["round-2"]["entries"][0]["child_node_id"]
+
+        assert len(first_results) == 1
+        assert len(second_results) == 1
+        assert first_results[0].failure_info is not None
+        assert second_results[0].failure_info is None
+        assert first_child_id != second_child_id
+
+        snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+        assert snapshot is not None
+        tree_root = snapshot["tree_root"]
+
+        assert [item["round_id"] for item in tree_root["spawn_rounds"]] == ["round-1", "round-2"]
+        assert tree_root["default_round_id"] == "round-2"
+        assert [item["node_id"] for item in tree_root["children"]] == [second_child_id]
+        assert tree_root["spawn_rounds"][0]["children"][0]["node_id"] == first_child_id
+        assert tree_root["spawn_rounds"][1]["children"][0]["node_id"] == second_child_id
+    finally:
+        await service.close()
+
+
 def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

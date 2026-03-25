@@ -74,20 +74,14 @@ class ContextAssemblyService:
             query_text=query_text,
             visible_skills=visible_skills,
             visible_families=visible_families,
-            selected_skills=selected_skills,
         )
-        prompt_skills = [
-            item
-            for item in selected_skills
-            if str(getattr(item, 'skill_id', '') or '').strip() not in retrieval_scope['deduped_skill_ids']
-        ]
+        prompt_skills = list(selected_skills)
         system_prompt = self._prompt_builder.build(skills=prompt_skills)
 
         external_tools_block, external_trace = self._build_external_tool_block(
             query_text=query_text,
             visible_families=visible_families,
             top_k=8,
-            exclude_tool_ids=retrieval_scope['deduped_tool_ids'],
         )
         if external_tools_block:
             system_prompt = f"{system_prompt}\n\n{external_tools_block}"
@@ -170,6 +164,8 @@ class ContextAssemblyService:
                 'allowed_context_types': list(retrieval_scope['allowed_context_types']),
                 'allowed_resource_record_ids': list(retrieval_scope['allowed_resource_record_ids']),
                 'allowed_skill_record_ids': list(retrieval_scope['allowed_skill_record_ids']),
+                'targeted_skill_ids': list(retrieval_scope['targeted_skill_ids']),
+                'targeted_tool_ids': list(retrieval_scope['targeted_tool_ids']),
                 'deduped_skill_ids': list(retrieval_scope['deduped_skill_ids']),
                 'deduped_tool_ids': list(retrieval_scope['deduped_tool_ids']),
             },
@@ -206,7 +202,6 @@ class ContextAssemblyService:
         query_text: str,
         visible_skills: list[Any],
         visible_families: list[Any],
-        selected_skills: list[Any],
     ) -> dict[str, list[str]]:
         query_lower = str(query_text or '').strip().lower()
         targeted_skill_ids: list[str] = []
@@ -257,13 +252,8 @@ class ContextAssemblyService:
                 if str(getattr(item, 'tool_id', '') or '').strip()
             ][:3]
 
-        selected_skill_ids = {
-            str(getattr(item, 'skill_id', '') or '').strip()
-            for item in list(selected_skills or [])
-            if str(getattr(item, 'skill_id', '') or '').strip()
-        }
-        deduped_skill_ids = sorted({item for item in targeted_skill_ids if item in selected_skill_ids})
-        deduped_tool_ids = sorted(set(targeted_tool_ids))
+        targeted_skill_ids = sorted(set(targeted_skill_ids))
+        targeted_tool_ids = sorted(set(targeted_tool_ids))
 
         search_context_types = ['memory']
         if targeted_skill_ids:
@@ -274,10 +264,12 @@ class ContextAssemblyService:
         return {
             'search_context_types': search_context_types,
             'allowed_context_types': list(search_context_types),
-            'allowed_resource_record_ids': [f'tool:{item}' for item in deduped_tool_ids] if targeted_tool_ids else [],
+            'allowed_resource_record_ids': [f'tool:{item}' for item in targeted_tool_ids] if targeted_tool_ids else [],
             'allowed_skill_record_ids': [f'skill:{item}' for item in targeted_skill_ids] if targeted_skill_ids else [],
-            'deduped_skill_ids': deduped_skill_ids,
-            'deduped_tool_ids': deduped_tool_ids,
+            'targeted_skill_ids': targeted_skill_ids,
+            'targeted_tool_ids': targeted_tool_ids,
+            'deduped_skill_ids': [],
+            'deduped_tool_ids': [],
         }
 
     def _select_skills(

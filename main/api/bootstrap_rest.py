@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException
 
 from g3ku.security import get_bootstrap_security_service
-from g3ku.shells.web import ensure_web_runtime_services, get_agent, get_runtime_manager
+from g3ku.shells.web import describe_web_runtime_services, ensure_web_runtime_services, get_agent, get_runtime_manager
 from g3ku.web.server_control import request_server_shutdown
 
 router = APIRouter()
@@ -19,6 +19,16 @@ def _service():
 def _status_payload(*, include_preview: bool = True) -> dict[str, Any]:
     service = _service()
     payload = dict(service.status())
+    runtime = describe_web_runtime_services() if payload.get("mode") == "unlocked" else {
+        "agent_ready": False,
+        "main_runtime_ready": False,
+        "heartbeat_ready": False,
+        "bootstrapping": False,
+        "ready": False,
+    }
+    payload["runtime"] = runtime
+    payload["runtime_ready"] = bool(runtime.get("ready"))
+    payload["runtime_bootstrapping"] = bool(runtime.get("bootstrapping"))
     if include_preview and payload.get("legacy_detected"):
         try:
             payload["legacy_preview"] = service.export_legacy_state()

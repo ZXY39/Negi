@@ -114,4 +114,7 @@ class SpawnChildNodesTool(Tool):
         runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
         specs = [SpawnChildSpec.model_validate(item) for item in list(children or [])]
         results = await self._spawn_callback(specs, runtime.get('current_tool_call_id'))
-        return json.dumps({'children': [item.model_dump(mode='json') for item in results]}, ensure_ascii=False)
+        return json.dumps(
+            {'children': [item.model_dump(mode='json', exclude_none=True) for item in results]},
+            ensure_ascii=False,
+        )

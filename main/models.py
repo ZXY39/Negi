@@ -111,12 +111,23 @@ class SpawnChildSpec(Model):
     requires_acceptance: bool | None = None
 
 
+class SpawnChildFailureInfo(Model):
+    source: Literal['execution', 'acceptance', 'runtime']
+    summary: str = ''
+    delivery_status: Literal['final', 'blocked'] = 'blocked'
+    blocking_reason: str = ''
+    remaining_work: list[str] = Field(default_factory=list)
+    output_ref: str = ''
+    result_payload_ref: str = ''
+
+
 class SpawnChildResult(Model):
     goal: str
     check_result: str = ''
     node_output: str = ''
     node_output_summary: str = ''
     node_output_ref: str = ''
+    failure_info: SpawnChildFailureInfo | None = None
 
 
 class TokenUsageSummary(Model):

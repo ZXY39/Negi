@@ -53,3 +53,6 @@ memory/
 *.tmp
 .DS_Store
 Thumbs.db
+
+browser-profile/
+default/
