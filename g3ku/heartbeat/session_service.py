@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,19 @@ from main.service.task_stall_notifier import stalled_minutes_since, stall_bucket
 from main.service.task_terminal_callback import build_task_terminal_payload, normalize_task_terminal_payload
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
+HeartbeatReplyNotifier = Callable[[str, str], Awaitable[None] | None]
+
+
+@lru_cache(maxsize=1)
+def _bundled_heartbeat_rules_text() -> str:
+    path = Path(__file__).resolve().parents[1] / "runtime" / "prompts" / "heartbeat_rules.md"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        logger.debug("heartbeat rules read skipped")
+        return ""
 
 
 class WebSessionHeartbeatService:
@@ -33,21 +48,18 @@ class WebSessionHeartbeatService:
         runtime_manager: Any,
         main_task_service: Any,
         session_manager: Any,
+        reply_notifier: HeartbeatReplyNotifier | None = None,
     ) -> None:
-        self._workspace = Path(workspace)
         self._agent = agent
         self._runtime_manager = runtime_manager
         self._main_task_service = main_task_service
         self._session_manager = session_manager
+        self._reply_notifier = reply_notifier if callable(reply_notifier) else None
         self._events = SessionHeartbeatEventQueue()
         self._wake = SessionHeartbeatWakeQueue(handler=self._run_session)
         self._started = False
         self._start_lock = asyncio.Lock()
         self._prompt_tasks: dict[str, asyncio.Task[Any]] = {}
-
-    @property
-    def heartbeat_file(self) -> Path:
-        return self._workspace / "HEARTBEAT.md"
 
     async def start(self) -> None:
         if self._started:
@@ -371,16 +383,6 @@ class WebSessionHeartbeatService:
         except Exception:
             return False
 
-    def _read_heartbeat_text(self) -> str:
-        try:
-            content = self.heartbeat_file.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return ""
-        except Exception:
-            logger.debug("heartbeat file read skipped")
-            return ""
-        return str(content or "").strip()
-
     def _build_prompt(self, events: list[SessionHeartbeatEvent]) -> str:
         has_tool_background = any(str(event.reason or "").strip().lower() == "tool_background" for event in events)
         has_task_stall = any(str(event.reason or "").strip().lower() == "task_stall" for event in events)
@@ -406,7 +408,7 @@ class WebSessionHeartbeatService:
                     "After any stop decision, explain the likely cause and the next follow-up action.",
                 ]
             )
-        heartbeat_text = self._read_heartbeat_text()
+        heartbeat_text = _bundled_heartbeat_rules_text()
         if heartbeat_text:
             lines.extend(["", heartbeat_text])
         lines.append("")
@@ -738,6 +740,7 @@ class WebSessionHeartbeatService:
             self._publish_ceo(key, "ceo.turn.discard", {"source": preserved_source})
         self._persist_assistant_reply(key, text=output, task_ids=task_ids, reason=heartbeat_reason)
         self._publish_ceo(key, "ceo.reply.final", {"text": output, "source": "heartbeat"})
+        await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}
         popped = self._events.pop_many(key, event_ids=event_ids)
         self._requeue_running_background_events(key, events)
@@ -745,3 +748,15 @@ class WebSessionHeartbeatService:
         self._ack_task_stall_events(popped)
         next_delay = self._events.next_delay(key)
         return next_delay
+
+    async def _notify_reply(self, session_id: str, text: str) -> None:
+        notifier = self._reply_notifier
+        payload = str(text or "").strip()
+        if notifier is None or not payload:
+            return
+        try:
+            maybe = notifier(str(session_id or "").strip(), payload)
+            if hasattr(maybe, "__await__"):
+                await maybe
+        except Exception:
+            logger.debug("heartbeat reply notify skipped for {}", session_id)

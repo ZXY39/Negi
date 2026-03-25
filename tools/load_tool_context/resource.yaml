@@ -1,15 +1,15 @@
 schema_version: 1
 kind: tool
 name: load_tool_context
-description: 加载当前可见工具或已注册外置工具的详细说明，返回其使用指引以及 tool_type、install_dir、callable 信息。
+description: Load detailed context for a visible tool or registered external tool, or search visible tool candidates with natural-language search_query.
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: 当前版本表示仓库内置实现；更新时需同步代码、参数契约和资源描述。
-  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文案不单独视为版本升级。
-  source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
+  summary: Current version is the repository-managed implementation; updates must keep code, parameter contract, and resource metadata in sync.
+  compare_rule: Treat changes in main/ implementation, parameters, permissions, settings, or return payload shape as version changes; toolskills-only doc edits do not count as upgrades by themselves.
+  source_of_truth: This resource.yaml and the main/ implementation are authoritative; toolskills/ supplements usage guidance when present.
 requires:
   tools: []
   bins: []
@@ -22,19 +22,24 @@ parameters:
   properties:
     tool_id:
       type: string
-      description: 要加载的工具 family id 或 executor tool name。
+      description: Optional tool family id or executor tool name to load directly.
+    search_query:
+      type: string
+      description: Optional natural-language query used to search visible tool candidates when tool_id is omitted.
+    limit:
+      type: integer
+      description: Optional candidate limit for search mode. Defaults to 5.
     level:
       type: string
       enum: [l0, l1, l2]
-      description: 请求的上下文层级。默认 l1。
+      description: Requested context level for detail mode. Defaults to l1.
     query:
       type: string
-      description: 可选：用于提取聚焦 L2 摘录的查询。
+      description: Optional query used to extract a focused L2 excerpt for detail mode.
     max_tokens:
       type: integer
-      description: 可选的返回 token 预算。
-  required:
-  - tool_id
+      description: Optional output token budget.
+  required: []
 exposure:
   agent: true
   org_graph: true

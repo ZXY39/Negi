@@ -15,6 +15,7 @@ from g3ku.bus.queue import MessageBus
 from g3ku.china_bridge import ChinaBridgeSupervisor, ChinaBridgeTransport
 from g3ku.cli.commands import _make_provider
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.heartbeat.bootstrap import build_web_session_heartbeat, start_web_session_heartbeat
 from g3ku.runtime import SessionRuntimeBridge
 from g3ku.runtime import SessionRuntimeManager
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
@@ -167,12 +168,12 @@ def get_agent() -> AgentLoop:
         _global_agent._runtime_model_revision = revision
         _global_agent._runtime_default_model_key = config.resolve_role_model_key('ceo')
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
-        _global_web_heartbeat = _build_web_heartbeat(_global_agent, _global_runtime_manager)
+        _global_web_heartbeat = build_web_session_heartbeat(_global_agent, _global_runtime_manager)
     elif _global_runtime_manager is None or _global_runtime_manager.loop is not _global_agent:
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
-        _global_web_heartbeat = _build_web_heartbeat(_global_agent, _global_runtime_manager)
+        _global_web_heartbeat = build_web_session_heartbeat(_global_agent, _global_runtime_manager)
     elif _global_web_heartbeat is None:
-        _global_web_heartbeat = _build_web_heartbeat(_global_agent, _global_runtime_manager)
+        _global_web_heartbeat = build_web_session_heartbeat(_global_agent, _global_runtime_manager)
     return _global_agent
 
 
@@ -261,35 +262,12 @@ async def _ensure_china_bridge_services(agent: AgentLoop | None = None) -> None:
         )
 
 
-def _build_web_heartbeat(agent: AgentLoop, runtime_manager: SessionRuntimeManager):
-    from g3ku.heartbeat import WebSessionHeartbeatService
-
-    main_task_service = getattr(agent, 'main_task_service', None)
-    session_manager = getattr(agent, 'sessions', None)
-    if main_task_service is None or session_manager is None:
-        setattr(agent, 'web_session_heartbeat', None)
-        return None
-    heartbeat = WebSessionHeartbeatService(
-        workspace=getattr(agent, 'workspace', '.'),
-        agent=agent,
-        runtime_manager=runtime_manager,
-        main_task_service=main_task_service,
-        session_manager=session_manager,
-    )
-    setattr(agent, 'web_session_heartbeat', heartbeat)
-    log_service = getattr(main_task_service, 'log_service', None)
-    if log_service is not None and not bool(getattr(log_service, '_web_session_heartbeat_bound', False)):
-        log_service.add_task_terminal_listener(heartbeat.enqueue_task_terminal)
-        setattr(log_service, '_web_session_heartbeat_bound', True)
-    return heartbeat
-
-
 def get_web_heartbeat_service(agent: AgentLoop | None = None):
     runtime_agent = agent or get_agent()
     runtime_manager = get_runtime_manager(runtime_agent)
     global _global_web_heartbeat
     if _global_web_heartbeat is None:
-        _global_web_heartbeat = _build_web_heartbeat(runtime_agent, runtime_manager)
+        _global_web_heartbeat = build_web_session_heartbeat(runtime_agent, runtime_manager)
     return _global_web_heartbeat
 
 
@@ -311,6 +289,7 @@ def describe_web_runtime_services(agent: AgentLoop | None = None) -> dict[str, b
 
 
 async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
+    global _global_web_heartbeat
     if describe_web_runtime_services(agent).get('ready'):
         return
 
@@ -324,16 +303,13 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             await main_task_service.startup()
             # Avoid blocking unlock on worker warmup; the UI can surface worker readiness separately.
             await ensure_managed_task_worker(main_task_service, wait_timeout_s=1.0)
-        heartbeat = get_web_heartbeat_service(runtime_agent)
+        heartbeat = await start_web_session_heartbeat(
+            runtime_agent,
+            get_runtime_manager(runtime_agent),
+            replay_pending_outbox=True,
+        )
         if heartbeat is not None:
-            await heartbeat.start()
-            if main_task_service is not None:
-                for entry in main_task_service.store.list_pending_task_terminal_outbox(limit=500):
-                    payload = dict(entry.get('payload') or {})
-                    heartbeat.enqueue_task_terminal_payload(payload)
-                for entry in main_task_service.store.list_pending_task_stall_outbox(limit=500):
-                    payload = dict(entry.get('payload') or {})
-                    heartbeat.enqueue_task_stall_payload(payload)
+            _global_web_heartbeat = heartbeat
         await _ensure_china_bridge_services(runtime_agent)
 
 

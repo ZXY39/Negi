@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, Callable
 
 from g3ku.china_bridge import ChinaBridgeSupervisor, ChinaBridgeTransport
+from g3ku.heartbeat.bootstrap import start_web_session_heartbeat
 
 
 def run_gateway_shell(
@@ -26,7 +27,7 @@ def run_gateway_shell(
     from g3ku.config.loader import get_data_dir, load_config
     from g3ku.cron.types import CronJob
     from g3ku.runtime import SessionRuntimeBridge, SessionRuntimeManager
-    from g3ku.services import CronService, HeartbeatService
+    from g3ku.services import CronService
     from g3ku.session.manager import SessionManager
 
     if verbose:
@@ -93,42 +94,26 @@ def run_gateway_shell(
         transport=china_transport,
     )
 
-    def _pick_heartbeat_target() -> tuple[str, str, dict[str, str]]:
-        for item in session_manager.list_sessions():
-            key = item.get("key") or ""
-            if not key.startswith("china:"):
-                continue
-            parts = key.split(":")
-            if len(parts) < 5:
-                continue
-            channel = parts[1]
-            account_id = parts[2]
-            scope = parts[3]
-            peer_id = parts[4]
-            peer_kind = "group" if scope == "group" else "user"
-            return channel, peer_id, {"_china_account_id": account_id, "_china_peer_kind": peer_kind, "_china_peer_id": peer_id}
-        return "cli", "direct", {}
+    def _heartbeat_target_for_session(session_id: str) -> tuple[str, str, dict[str, str]] | None:
+        key = str(session_id or "").strip()
+        if not key.startswith("china:"):
+            return None
+        parts = key.split(":")
+        if len(parts) < 5:
+            return None
+        channel = parts[1]
+        account_id = parts[2]
+        scope = parts[3]
+        peer_id = parts[4]
+        peer_kind = "group" if scope == "group" else "user"
+        return channel, peer_id, {"_china_account_id": account_id, "_china_peer_kind": peer_kind, "_china_peer_id": peer_id}
 
-    async def on_heartbeat_notify(response: str) -> None:
-        channel, chat_id, metadata = _pick_heartbeat_target()
-        if channel == "cli":
+    async def on_heartbeat_notify(session_id: str, response: str) -> None:
+        target = _heartbeat_target_for_session(session_id)
+        if target is None:
             return
+        channel, chat_id, metadata = target
         await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response, metadata=metadata))
-
-    hb_cfg = config.gateway.heartbeat
-    heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        provider=provider,
-        model=agent.model,
-        runtime_bridge=runtime_bridge,
-        target_resolver=_pick_heartbeat_target,
-        session_key="heartbeat",
-        task_registrar=task_registrar,
-        on_notify=on_heartbeat_notify,
-        interval_s=hb_cfg.interval_s,
-        enabled=hb_cfg.enabled,
-    )
-
     enabled_china_channels = [
         name
         for name in ("qqbot", "dingtalk", "wecom", "wecom_app", "feishu_china")
@@ -142,8 +127,6 @@ def run_gateway_shell(
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
         console.print(f"[green]OK[/green] Cron: {cron_status['jobs']} scheduled jobs")
-
-    console.print(f"[green]OK[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
     async def _drain_outbound() -> None:
         while True:
@@ -159,9 +142,17 @@ def run_gateway_shell(
     async def run() -> None:
         outbound_task: asyncio.Task | None = None
         china_wait_task: asyncio.Task | None = None
+        heartbeat = None
         try:
             await cron.start()
-            await heartbeat.start()
+            main_task_service = getattr(agent, "main_task_service", None)
+            if main_task_service is not None:
+                await main_task_service.startup()
+            heartbeat = await start_web_session_heartbeat(
+                agent,
+                runtime_manager,
+                reply_notifier=on_heartbeat_notify,
+            )
             await china_supervisor.start()
             outbound_task = asyncio.create_task(_drain_outbound())
             waiters = [outbound_task]
@@ -178,8 +169,9 @@ def run_gateway_shell(
             if china_wait_task is not None:
                 china_wait_task.cancel()
                 await asyncio.gather(china_wait_task, return_exceptions=True)
+            if heartbeat is not None:
+                await heartbeat.stop()
             await agent.close_mcp()
-            heartbeat.stop()
             cron.stop()
             agent.stop()
             await china_supervisor.stop()

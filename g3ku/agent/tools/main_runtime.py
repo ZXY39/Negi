@@ -34,7 +34,7 @@ class LoadSkillContextTool(_MainRuntimeTool):
 
     @property
     def description(self) -> str:
-        return 'Load layered context for a currently visible skill. Defaults to L1 overview; use level=l2 for query-aware excerpts.'
+        return 'Load layered context for a currently visible skill, or search visible skills by natural language using search_query.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -42,16 +42,20 @@ class LoadSkillContextTool(_MainRuntimeTool):
             'type': 'object',
             'properties': {
                 'skill_id': {'type': 'string', 'description': 'The skill id to load.'},
+                'search_query': {'type': 'string', 'description': 'Optional natural-language query used to search visible skill candidates when skill_id is omitted.'},
+                'limit': {'type': 'integer', 'description': 'Optional candidate limit for search mode. Defaults to 5.'},
                 'level': {'type': 'string', 'enum': ['l0', 'l1', 'l2'], 'description': 'Requested context level. Defaults to l1.'},
                 'query': {'type': 'string', 'description': 'Optional query used to extract a focused L2 excerpt.'},
                 'max_tokens': {'type': 'integer', 'description': 'Optional output token budget for the returned content.'},
             },
-            'required': ['skill_id'],
+            'required': [],
         }
 
     async def execute(
         self,
-        skill_id: str,
+        skill_id: str = '',
+        search_query: str = '',
+        limit: int | None = None,
         level: str = 'l1',
         query: str = '',
         max_tokens: int | None = None,
@@ -59,21 +63,31 @@ class LoadSkillContextTool(_MainRuntimeTool):
         **kwargs: Any,
     ) -> str:
         service = await self._service()
+        skill_name = str(skill_id or '').strip()
+        search_text = str(search_query or '')
         if hasattr(service, 'load_skill_context_v2'):
-            payload = service.load_skill_context_v2(
-                actor_role=_runtime_actor_role(__g3ku_runtime),
-                session_id=_runtime_session_key(__g3ku_runtime),
-                skill_id=str(skill_id or '').strip(),
-                level=str(level or 'l1').strip().lower() or 'l1',
-                query=str(query or ''),
-                max_tokens=max_tokens,
-            )
+            kwargs_v2: dict[str, Any] = {
+                'actor_role': _runtime_actor_role(__g3ku_runtime),
+                'session_id': _runtime_session_key(__g3ku_runtime),
+                'skill_id': skill_name,
+                'level': str(level or 'l1').strip().lower() or 'l1',
+                'query': str(query or ''),
+                'max_tokens': max_tokens,
+            }
+            if search_text:
+                kwargs_v2['search_query'] = search_text
+                kwargs_v2['limit'] = limit
+            payload = service.load_skill_context_v2(**kwargs_v2)
         else:
-            payload = service.load_skill_context(
-                actor_role=_runtime_actor_role(__g3ku_runtime),
-                session_id=_runtime_session_key(__g3ku_runtime),
-                skill_id=str(skill_id or '').strip(),
-            )
+            kwargs_v1: dict[str, Any] = {
+                'actor_role': _runtime_actor_role(__g3ku_runtime),
+                'session_id': _runtime_session_key(__g3ku_runtime),
+                'skill_id': skill_name,
+            }
+            if search_text:
+                kwargs_v1['search_query'] = search_text
+                kwargs_v1['limit'] = limit
+            payload = service.load_skill_context(**kwargs_v1)
         return json.dumps(payload, ensure_ascii=False)
 
 
@@ -84,7 +98,7 @@ class LoadToolContextTool(_MainRuntimeTool):
 
     @property
     def description(self) -> str:
-        return 'Load layered context for a currently visible tool or registered external tool. Returns the usage guide together with tool_type, install_dir, and callable status.'
+        return 'Load layered context for a currently visible tool or registered external tool, or search visible tool candidates by natural language using search_query.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -92,16 +106,20 @@ class LoadToolContextTool(_MainRuntimeTool):
             'type': 'object',
             'properties': {
                 'tool_id': {'type': 'string', 'description': 'The tool id to load.'},
+                'search_query': {'type': 'string', 'description': 'Optional natural-language query used to search visible tool candidates when tool_id is omitted.'},
+                'limit': {'type': 'integer', 'description': 'Optional candidate limit for search mode. Defaults to 5.'},
                 'level': {'type': 'string', 'enum': ['l0', 'l1', 'l2'], 'description': 'Requested context level. Defaults to l1.'},
                 'query': {'type': 'string', 'description': 'Optional query used to extract a focused L2 excerpt.'},
                 'max_tokens': {'type': 'integer', 'description': 'Optional output token budget for the returned content.'},
             },
-            'required': ['tool_id'],
+            'required': [],
         }
 
     async def execute(
         self,
-        tool_id: str,
+        tool_id: str = '',
+        search_query: str = '',
+        limit: int | None = None,
         level: str = 'l1',
         query: str = '',
         max_tokens: int | None = None,
@@ -109,19 +127,29 @@ class LoadToolContextTool(_MainRuntimeTool):
         **kwargs: Any,
     ) -> str:
         service = await self._service()
+        tool_name = str(tool_id or '').strip()
+        search_text = str(search_query or '')
         if hasattr(service, 'load_tool_context_v2'):
-            payload = service.load_tool_context_v2(
-                actor_role=_runtime_actor_role(__g3ku_runtime),
-                session_id=_runtime_session_key(__g3ku_runtime),
-                tool_id=str(tool_id or '').strip(),
-                level=str(level or 'l1').strip().lower() or 'l1',
-                query=str(query or ''),
-                max_tokens=max_tokens,
-            )
+            kwargs_v2: dict[str, Any] = {
+                'actor_role': _runtime_actor_role(__g3ku_runtime),
+                'session_id': _runtime_session_key(__g3ku_runtime),
+                'tool_id': tool_name,
+                'level': str(level or 'l1').strip().lower() or 'l1',
+                'query': str(query or ''),
+                'max_tokens': max_tokens,
+            }
+            if search_text:
+                kwargs_v2['search_query'] = search_text
+                kwargs_v2['limit'] = limit
+            payload = service.load_tool_context_v2(**kwargs_v2)
         else:
-            payload = service.load_tool_context(
-                actor_role=_runtime_actor_role(__g3ku_runtime),
-                session_id=_runtime_session_key(__g3ku_runtime),
-                tool_id=str(tool_id or '').strip(),
-            )
+            kwargs_v1: dict[str, Any] = {
+                'actor_role': _runtime_actor_role(__g3ku_runtime),
+                'session_id': _runtime_session_key(__g3ku_runtime),
+                'tool_id': tool_name,
+            }
+            if search_text:
+                kwargs_v1['search_query'] = search_text
+                kwargs_v1['limit'] = limit
+            payload = service.load_tool_context(**kwargs_v1)
         return json.dumps(payload, ensure_ascii=False)

@@ -887,6 +887,7 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
     assert "tool-exec:1" in str(prompt.content)
     assert "already been refreshed" in str(prompt.content)
     assert "Do not call wait_tool_execution" in str(prompt.content)
+    assert "task terminal result means the task has reached a final status" in str(prompt.content)
     assert manager.calls == [("tool-exec:1", 0.1)]
     published_types = [envelope["type"] for _session_id, envelope in task_service.registry.published]
     assert "ceo.turn.discard" in published_types
@@ -1038,6 +1039,46 @@ async def test_web_session_heartbeat_final_reply_discards_preserved_user_turn(tm
     assert final_session == session_id
     assert final_envelope["data"]["source"] == "heartbeat"
     assert "Background install finished successfully." in str(final_envelope["data"]["text"])
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_calls_reply_notifier_for_final_output(tmp_path: Path) -> None:
+    session_id = "china:qqbot:acct:user:peer"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatFinalSession(output="Background install finished successfully.")
+    task_service = _TaskService()
+    notified: list[tuple[str, str]] = []
+
+    async def _notify(current_session_id: str, text: str) -> None:
+        notified.append((current_session_id, text))
+
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+        reply_notifier=_notify,
+    )
+    payload = {
+        "task_id": "task:demo-terminal",
+        "session_id": session_id,
+        "title": "demo terminal task",
+        "status": "success",
+        "brief_text": "task finished successfully",
+        "finished_at": "2026-03-23T01:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00",
+    }
+    accepted = service.enqueue_task_terminal_payload(payload)
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert notified == [(session_id, "Background install finished successfully.")]
 
 
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:

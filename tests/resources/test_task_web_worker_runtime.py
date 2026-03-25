@@ -252,7 +252,16 @@ async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(
         created_at=str(payload.get("finished_at") or now_iso()),
         payload=payload,
     )
-    monkeypatch.setattr(web_shell, "get_web_heartbeat_service", lambda _agent=None: heartbeat)
+    monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
+
+    async def _start_heartbeat(_agent, _runtime_manager, **kwargs):
+        if kwargs.get("replay_pending_outbox"):
+            for entry in service.store.list_pending_task_terminal_outbox(limit=500):
+                heartbeat.enqueue_task_terminal_payload(dict(entry.get("payload") or {}))
+        await heartbeat.start()
+        return heartbeat
+
+    monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
 
     await web_shell.ensure_web_runtime_services(SimpleNamespace(main_task_service=service))
 
@@ -294,7 +303,16 @@ async def test_ensure_web_runtime_services_replays_pending_task_stall_outbox(tmp
         created_at=str(payload.get("last_visible_output_at") or now_iso()),
         payload=payload,
     )
-    monkeypatch.setattr(web_shell, "get_web_heartbeat_service", lambda _agent=None: heartbeat)
+    monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
+
+    async def _start_heartbeat(_agent, _runtime_manager, **kwargs):
+        if kwargs.get("replay_pending_outbox"):
+            for entry in service.store.list_pending_task_stall_outbox(limit=500):
+                heartbeat.enqueue_task_stall_payload(dict(entry.get("payload") or {}))
+        await heartbeat.start()
+        return heartbeat
+
+    monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
 
     await web_shell.ensure_web_runtime_services(SimpleNamespace(main_task_service=service))
 
@@ -318,14 +336,21 @@ async def test_ensure_web_runtime_services_starts_managed_worker(tmp_path: Path,
     heartbeat = _HeartbeatRecorder()
     worker_calls: list[MainRuntimeService] = []
 
-    async def _ensure_worker(current_service) -> bool:
+    async def _ensure_worker(current_service, *, wait_timeout_s: float = 5.0) -> bool:
+        _ = wait_timeout_s
         worker_calls.append(current_service)
         return True
 
     async def _skip_china(_agent=None) -> None:
         return None
 
-    monkeypatch.setattr(web_shell, "get_web_heartbeat_service", lambda _agent=None: heartbeat)
+    monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
+    async def _start_heartbeat(_agent, _runtime_manager, **kwargs):
+        _ = kwargs
+        await heartbeat.start()
+        return heartbeat
+
+    monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
     monkeypatch.setattr(web_shell, "ensure_managed_task_worker", _ensure_worker)
     monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _skip_china)
 

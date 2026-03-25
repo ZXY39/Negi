@@ -382,10 +382,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         "gateway": {
             "host": cfg.gateway.host,
             "port": cfg.gateway.port,
-            "heartbeat": {
-                "enabled": cfg.gateway.heartbeat.enabled,
-                "intervalS": cfg.gateway.heartbeat.interval_s,
-            },
         },
         "toolSecrets": {
             str(name): dict(payload or {})
@@ -598,4 +594,7 @@ def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
                 channels["wecom_app"] = channels["wecomApp"]
             if "feishu_china" not in channels and isinstance(channels.get("feishuChina"), dict):
                 channels["feishu_china"] = channels["feishuChina"]
+    gateway = data.get("gateway")
+    if isinstance(gateway, dict):
+        gateway.pop("heartbeat", None)
     return data

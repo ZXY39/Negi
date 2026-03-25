@@ -12,13 +12,12 @@ g3ku cron add --name "reminder" --message "你的消息" --at "YYYY-MM-DDTHH:MM:
 
 **不要只把提醒写进 MEMORY.md** —— 那不会触发实际通知。
 
-## 心跳任务
+## 周期任务
 
-`HEARTBEAT.md` 每 30 分钟检查一次。使用 `filesystem` 工具管理周期性任务：
+当用户要求执行重复/周期性任务时，使用 `exec` 运行 `g3ku cron add` 创建真实的定时任务，而不是写入工作区文件。
 
-- **添加**: `filesystem(action="edit")` 追加新任务
-- **删除**: `filesystem(action="edit")` 删除已完成任务
-- **重写**: `filesystem(action="write")` 替换所有任务
+- **固定间隔**: `g3ku cron add --name "job" --message "你的消息" --every 3600 --deliver --to "USER_ID" --channel "CHANNEL"`
+- **日历计划**: `g3ku cron add --name "job" --message "你的消息" --cron "0 9 * * *" --tz "Asia/Shanghai" --deliver --to "USER_ID" --channel "CHANNEL"`
 
-当用户要求执行重复/周期性任务时，请更新 `HEARTBEAT.md` 而不是创建一次性的 cron 提醒。
+不要把这类需求写进 `MEMORY.md` 或其他文档文件，那不会触发实际执行。
 

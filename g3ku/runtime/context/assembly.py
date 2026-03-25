@@ -65,7 +65,6 @@ class ContextAssemblyService:
         visible_skills = list(exposure.get('skills') or [])
         visible_families = list(exposure.get('tool_families') or [])
         selected_skills, skill_trace = self._select_skills(
-            query_text=query_text,
             visible_skills=visible_skills,
             top_k=inventory_top_k,
             token_budget=inventory_budget,
@@ -79,7 +78,6 @@ class ContextAssemblyService:
         system_prompt = self._prompt_builder.build(skills=prompt_skills)
 
         external_tools_block, external_trace = self._build_external_tool_block(
-            query_text=query_text,
             visible_families=visible_families,
             top_k=8,
         )
@@ -164,10 +162,6 @@ class ContextAssemblyService:
                 'allowed_context_types': list(retrieval_scope['allowed_context_types']),
                 'allowed_resource_record_ids': list(retrieval_scope['allowed_resource_record_ids']),
                 'allowed_skill_record_ids': list(retrieval_scope['allowed_skill_record_ids']),
-                'targeted_skill_ids': list(retrieval_scope['targeted_skill_ids']),
-                'targeted_tool_ids': list(retrieval_scope['targeted_tool_ids']),
-                'deduped_skill_ids': list(retrieval_scope['deduped_skill_ids']),
-                'deduped_tool_ids': list(retrieval_scope['deduped_tool_ids']),
             },
             'recent_history_count': len(recent_history),
             'tokens': {
@@ -266,37 +260,19 @@ class ContextAssemblyService:
             'allowed_context_types': list(search_context_types),
             'allowed_resource_record_ids': [f'tool:{item}' for item in targeted_tool_ids] if targeted_tool_ids else [],
             'allowed_skill_record_ids': [f'skill:{item}' for item in targeted_skill_ids] if targeted_skill_ids else [],
-            'targeted_skill_ids': targeted_skill_ids,
-            'targeted_tool_ids': targeted_tool_ids,
-            'deduped_skill_ids': [],
-            'deduped_tool_ids': [],
         }
 
     def _select_skills(
         self,
         *,
-        query_text: str,
         visible_skills: list[Any],
         top_k: int,
         token_budget: int,
     ) -> tuple[list[Any], list[dict[str, Any]]]:
-        ranked = sorted(
-            visible_skills,
-            key=lambda item: (
-                score_query(
-                    query_text,
-                    getattr(item, 'skill_id', ''),
-                    getattr(item, 'display_name', ''),
-                    getattr(item, 'description', ''),
-                ),
-                getattr(item, 'skill_id', ''),
-            ),
-            reverse=True,
-        )
         selected: list[Any] = []
         trace: list[dict[str, Any]] = []
         used_tokens = 0
-        for item in ranked[: max(top_k * 2, top_k)]:
+        for item in list(visible_skills or []):
             line = f"- {getattr(item, 'skill_id', '')}: {getattr(item, 'description', '') or getattr(item, 'display_name', '')}"
             line_tokens = estimate_tokens(line)
             if len(selected) >= top_k:
@@ -308,58 +284,40 @@ class ContextAssemblyService:
             trace.append(
                 {
                     'skill_id': getattr(item, 'skill_id', ''),
-                    'score': score_query(
-                        query_text,
-                        getattr(item, 'skill_id', ''),
-                        getattr(item, 'display_name', ''),
-                        getattr(item, 'description', ''),
-                    ),
                     'tokens': line_tokens,
                 }
             )
         if not selected:
-            selected = ranked[:top_k]
-            trace = [{'skill_id': getattr(item, 'skill_id', ''), 'score': 0.0, 'tokens': 0} for item in selected]
+            selected = list(visible_skills or [])[:top_k]
+            trace = [{'skill_id': getattr(item, 'skill_id', ''), 'tokens': 0} for item in selected]
         return selected, trace
 
     def _build_external_tool_block(
         self,
         *,
-        query_text: str,
         visible_families: list[Any],
         top_k: int,
-        exclude_tool_ids: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
-        ranked: list[tuple[float, str, Any]] = []
-        excluded = {str(item or '').strip() for item in list(exclude_tool_ids or []) if str(item or '').strip()}
-        for family in visible_families:
+        eligible: list[Any] = []
+        for family in list(visible_families or []):
             tool_id = str(getattr(family, 'tool_id', '') or '').strip()
             install_dir = str(getattr(family, 'install_dir', '') or '').strip()
             callable_flag = bool(getattr(family, 'callable', True))
             available_flag = bool(getattr(family, 'available', True))
             if not tool_id:
                 continue
-            if tool_id in excluded and available_flag:
-                continue
             if callable_flag and available_flag:
                 continue
             if not install_dir and not callable_flag:
                 continue
-            score = score_query(
-                query_text,
-                tool_id,
-                getattr(family, 'display_name', ''),
-                getattr(family, 'description', ''),
-                install_dir,
-            )
-            ranked.append((score, tool_id, family))
-        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        if not ranked:
+            eligible.append(family)
+        if not eligible:
             return '', []
 
         lines = ['## Tool Resources That Require `load_tool_context`']
         trace: list[dict[str, Any]] = []
-        for score, tool_id, family in ranked[: max(1, top_k)]:
+        for family in eligible[: max(1, top_k)]:
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
             display_name = str(getattr(family, 'display_name', '') or tool_id).strip() or tool_id
             description = str(getattr(family, 'description', '') or '').strip()
             install_dir = str(getattr(family, 'install_dir', '') or '').strip()
@@ -390,7 +348,6 @@ class ContextAssemblyService:
             trace.append(
                 {
                     'tool_id': tool_id,
-                    'score': score,
                     'install_dir': install_dir,
                     'callable': callable_flag,
                     'available': available_flag,

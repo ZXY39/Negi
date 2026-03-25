@@ -111,12 +111,28 @@ async def test_ceo_context_assembly_defaults_to_memory_only_retrieval_for_genera
 
 
 @pytest.mark.asyncio
-async def test_ceo_context_assembly_keeps_prompt_inventory_visible_during_targeted_retrieval() -> None:
+async def test_ceo_context_assembly_keeps_prompt_inventory_stable_while_targeted_retrieval_changes() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response='# Retrieved Context\n\n- [skill:demo_skill] Detailed skill context\n- [resource:tool:external_browser] Detailed tool context')
     service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
 
-    result = await service.build_for_ceo(
+    general_result = await service.build_for_ceo(
+        session=_session(),
+        query_text='recap our current workspace preferences',
+        exposure={
+            'skills': [
+                _skill('demo_skill', 'Handle rollback planning'),
+                _skill('other_skill', 'Handle metrics review'),
+            ],
+            'tool_families': [
+                _family('external_browser', 'Browser automation', callable=False, install_dir='D:/ext/browser'),
+                _family('external_search', 'Search helper', callable=False, install_dir='D:/ext/search'),
+            ],
+            'tool_names': ['filesystem', 'load_tool_context'],
+        },
+        persisted_session=None,
+    )
+    targeted_result = await service.build_for_ceo(
         session=_session(),
         query_text='how do I use demo_skill with the external_browser tool?',
         exposure={
@@ -133,34 +149,45 @@ async def test_ceo_context_assembly_keeps_prompt_inventory_visible_during_target
         persisted_session=None,
     )
 
-    assert len(prompt_builder.calls) == 1
-    assert set(prompt_builder.calls[0]) == {'demo_skill', 'other_skill'}
-    assert len(memory_manager.calls) == 1
-    call = memory_manager.calls[0]
-    assert call['search_context_types'] == ['memory', 'skill', 'resource']
-    assert call['allowed_context_types'] == ['memory', 'skill', 'resource']
-    assert call['allowed_skill_record_ids'] == ['skill:demo_skill']
-    assert call['allowed_resource_record_ids'] == ['tool:external_browser']
-    assert result.trace['retrieval_scope']['targeted_skill_ids'] == ['demo_skill']
-    assert result.trace['retrieval_scope']['targeted_tool_ids'] == ['external_browser']
-    assert result.trace['retrieval_scope']['deduped_skill_ids'] == []
-    assert result.trace['retrieval_scope']['deduped_tool_ids'] == []
-    assert {item['tool_id'] for item in result.trace['external_tools']} == {'external_browser', 'external_search'}
+    assert len(prompt_builder.calls) == 2
+    assert prompt_builder.calls[0] == ['demo_skill', 'other_skill']
+    assert prompt_builder.calls[1] == ['demo_skill', 'other_skill']
+    assert len(memory_manager.calls) == 2
+    assert memory_manager.calls[0]['search_context_types'] == ['memory']
+    assert memory_manager.calls[0]['allowed_skill_record_ids'] == []
+    assert memory_manager.calls[0]['allowed_resource_record_ids'] == []
+    assert memory_manager.calls[1]['search_context_types'] == ['memory', 'skill', 'resource']
+    assert memory_manager.calls[1]['allowed_context_types'] == ['memory', 'skill', 'resource']
+    assert memory_manager.calls[1]['allowed_skill_record_ids'] == ['skill:demo_skill']
+    assert memory_manager.calls[1]['allowed_resource_record_ids'] == ['tool:external_browser']
+    assert general_result.trace['retrieval_scope'] == {
+        'search_context_types': ['memory'],
+        'allowed_context_types': ['memory'],
+        'allowed_resource_record_ids': [],
+        'allowed_skill_record_ids': [],
+    }
+    assert targeted_result.trace['retrieval_scope'] == {
+        'search_context_types': ['memory', 'skill', 'resource'],
+        'allowed_context_types': ['memory', 'skill', 'resource'],
+        'allowed_resource_record_ids': ['tool:external_browser'],
+        'allowed_skill_record_ids': ['skill:demo_skill'],
+    }
+    assert [item['tool_id'] for item in targeted_result.trace['external_tools']] == ['external_browser', 'external_search']
 
 
 @pytest.mark.asyncio
-async def test_ceo_context_assembly_keeps_explicitly_named_skill_visible_in_prompt_inventory() -> None:
+async def test_ceo_context_assembly_keeps_explicitly_named_skill_in_stable_summary_order() -> None:
     prompt_builder = _PromptBuilder()
-    memory_manager = _MemoryManager(response='# Retrieved Context\n\n- [skill:update-tool] Detailed skill context')
+    memory_manager = _MemoryManager(response='# Retrieved Context\n\n- [skill:focused-skill] Detailed skill context')
     service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
 
     result = await service.build_for_ceo(
         session=_session(),
-        query_text='why did you say update-tool is not visible?',
+        query_text='why did you say focused-skill is not visible?',
         exposure={
             'skills': [
-                _skill('update-tool', 'Update an existing tool resource'),
-                _skill('add-tool', 'Add a new tool resource'),
+                _skill('focused-skill', 'Primary workflow'),
+                _skill('secondary-skill', 'Secondary workflow'),
             ],
             'tool_families': [],
             'tool_names': ['filesystem', 'load_skill_context'],
@@ -169,11 +196,15 @@ async def test_ceo_context_assembly_keeps_explicitly_named_skill_visible_in_prom
     )
 
     assert len(prompt_builder.calls) == 1
-    assert set(prompt_builder.calls[0]) == {'update-tool', 'add-tool'}
+    assert prompt_builder.calls[0] == ['focused-skill', 'secondary-skill']
     assert len(memory_manager.calls) == 1
-    assert memory_manager.calls[0]['allowed_skill_record_ids'] == ['skill:update-tool']
-    assert result.trace['retrieval_scope']['targeted_skill_ids'] == ['update-tool']
-    assert result.trace['retrieval_scope']['deduped_skill_ids'] == []
+    assert memory_manager.calls[0]['allowed_skill_record_ids'] == ['skill:focused-skill']
+    assert result.trace['retrieval_scope'] == {
+        'search_context_types': ['memory', 'skill'],
+        'allowed_context_types': ['memory', 'skill'],
+        'allowed_resource_record_ids': [],
+        'allowed_skill_record_ids': ['skill:focused-skill'],
+    }
 
 
 @pytest.mark.asyncio

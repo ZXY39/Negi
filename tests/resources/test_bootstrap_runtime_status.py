@@ -120,10 +120,16 @@ async def test_ensure_web_runtime_services_limits_worker_wait(monkeypatch):
         waits.append(wait_timeout_s)
         return False
 
+    async def _start_heartbeat(_agent, _runtime_manager, **kwargs):
+        _ = _agent, _runtime_manager, kwargs
+        await heartbeat.start()
+        return heartbeat
+
     monkeypatch.setattr(web_shell, "_global_runtime_services_lock", None)
     monkeypatch.setattr(web_shell, "_global_web_heartbeat", heartbeat)
     monkeypatch.setattr(web_shell, "ensure_managed_task_worker", _ensure_worker)
-    monkeypatch.setattr(web_shell, "get_web_heartbeat_service", lambda _agent=None: heartbeat)
+    monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
+    monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
     monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _noop)
 
     class _Agent:

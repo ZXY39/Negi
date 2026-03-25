@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +24,7 @@ from g3ku.resources.models import ResourceKind
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
-from g3ku.runtime.context.summarizer import layered_body_payload
+from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from main.governance import (
     GovernanceStore,
     MainRuntimePolicyEngine,
@@ -1238,9 +1239,178 @@ class MainRuntimeService:
                         mapping[name] = family
         return mapping
 
-    def load_skill_context(self, *, actor_role: str, session_id: str, skill_id: str) -> dict[str, Any]:
+    @staticmethod
+    def _search_limit(limit: int | None, *, default: int = 5, max_limit: int = 20) -> int:
+        try:
+            value = int(limit if limit is not None else default)
+        except Exception:
+            value = default
+        return max(1, min(max_limit, value))
+
+    @staticmethod
+    def _matched_search_fields(query: str, fields: dict[str, Any]) -> list[str]:
+        raw_query = ' '.join(str(query or '').lower().split())
+        if not raw_query:
+            return []
+        terms = [term for term in re.split(r'[^\w\u4e00-\u9fff]+', raw_query) if term]
+        matched: list[str] = []
+        for field_name, value in dict(fields or {}).items():
+            haystack = ' '.join(str(value or '').lower().split())
+            if not haystack:
+                continue
+            if raw_query in haystack or any(term in haystack for term in terms):
+                matched.append(str(field_name))
+        return matched
+
+    def _search_visible_skills(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        search_query: str,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        query = str(search_query or '').strip()
+        if not query:
+            return {'ok': False, 'error': 'search_query_required'}
+        visible = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id) or [])
+        scored: list[tuple[float, str, Any, list[str]]] = []
+        for record in visible:
+            skill_id = str(getattr(record, 'skill_id', '') or '').strip()
+            display_name = str(getattr(record, 'display_name', '') or '').strip()
+            description = str(getattr(record, 'description', '') or '').strip()
+            score = score_query(query, skill_id, display_name, description)
+            if score <= 0:
+                continue
+            matched_fields = self._matched_search_fields(
+                query,
+                {
+                    'skill_id': skill_id,
+                    'display_name': display_name,
+                    'description': description,
+                },
+            )
+            scored.append((score, skill_id, record, matched_fields))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        effective_limit = self._search_limit(limit)
+        candidates = [
+            {
+                'skill_id': str(getattr(record, 'skill_id', '') or '').strip(),
+                'display_name': str(getattr(record, 'display_name', '') or '').strip(),
+                'description': str(getattr(record, 'description', '') or '').strip(),
+                'match_score': score,
+                'matched_fields': list(matched_fields),
+            }
+            for score, _skill_id, record, matched_fields in scored[:effective_limit]
+        ]
+        return {
+            'ok': True,
+            'mode': 'search',
+            'query': query,
+            'limit': effective_limit,
+            'total_visible': len(visible),
+            'candidates': candidates,
+            'message': '' if candidates else 'No visible skills matched the query.',
+            'next_action_hint': 'Call load_skill_context(skill_id="<skill_id>") to load details for a candidate.',
+        }
+
+    def _search_visible_tools(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        search_query: str,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        query = str(search_query or '').strip()
+        if not query:
+            return {'ok': False, 'error': 'search_query_required'}
+        visible = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_id) or [])
+        scored: list[tuple[float, int, int, str, Any, list[str], list[str]]] = []
+        for family in visible:
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            display_name = str(getattr(family, 'display_name', '') or '').strip()
+            description = str(getattr(family, 'description', '') or '').strip()
+            executor_names: list[str] = []
+            for action in list(getattr(family, 'actions', []) or []):
+                executor_names.extend(
+                    str(name or '').strip()
+                    for name in list(getattr(action, 'executor_names', []) or [])
+                    if str(name or '').strip()
+                )
+            executor_names = sorted(set(executor_names))
+            score = score_query(query, tool_id, display_name, description, ' '.join(executor_names))
+            if score <= 0:
+                continue
+            matched_fields = self._matched_search_fields(
+                query,
+                {
+                    'tool_id': tool_id,
+                    'display_name': display_name,
+                    'description': description,
+                    'executor_names': ' '.join(executor_names),
+                },
+            )
+            scored.append(
+                (
+                    score,
+                    1 if bool(getattr(family, 'available', True)) else 0,
+                    1 if bool(getattr(family, 'callable', True)) else 0,
+                    tool_id,
+                    family,
+                    matched_fields,
+                    executor_names,
+                )
+            )
+        scored.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+        effective_limit = self._search_limit(limit)
+        candidates = [
+            {
+                'tool_id': str(getattr(family, 'tool_id', '') or '').strip(),
+                'display_name': str(getattr(family, 'display_name', '') or '').strip(),
+                'description': str(getattr(family, 'description', '') or '').strip(),
+                'executor_names': list(executor_names),
+                'available': bool(getattr(family, 'available', True)),
+                'callable': bool(getattr(family, 'callable', True)),
+                'tool_type': str(getattr(family, 'tool_type', '') or '').strip(),
+                'install_dir': str(getattr(family, 'install_dir', '') or '').strip() or None,
+                'match_score': score,
+                'matched_fields': list(matched_fields),
+            }
+            for score, _available_rank, _callable_rank, _tool_id, family, matched_fields, executor_names in scored[:effective_limit]
+        ]
+        return {
+            'ok': True,
+            'mode': 'search',
+            'query': query,
+            'limit': effective_limit,
+            'total_visible': len(visible),
+            'candidates': candidates,
+            'message': '' if candidates else 'No visible tools matched the query.',
+            'next_action_hint': 'Call load_tool_context(tool_id="<tool_id>") to load details for a candidate.',
+        }
+
+    def load_skill_context(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        skill_id: str = '',
+        search_query: str = '',
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        skill_name = str(skill_id or '').strip()
+        if not skill_name:
+            if str(search_query or '').strip():
+                return self._search_visible_skills(
+                    actor_role=actor_role,
+                    session_id=session_id,
+                    search_query=search_query,
+                    limit=limit,
+                )
+            return {'ok': False, 'error': 'skill_id_or_search_query_required'}
         visible = {item.skill_id: item for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)}
-        record = visible.get(str(skill_id or '').strip())
+        record = visible.get(skill_name)
         if record is None:
             return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
         path = Path(record.skill_doc_path) if record.skill_doc_path else None
@@ -1256,13 +1426,25 @@ class MainRuntimeService:
         *,
         actor_role: str,
         session_id: str,
-        skill_id: str,
+        skill_id: str = '',
+        search_query: str = '',
+        limit: int | None = None,
         level: str = 'l1',
         query: str = '',
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
+        skill_name = str(skill_id or '').strip()
+        if not skill_name:
+            if str(search_query or '').strip():
+                return self._search_visible_skills(
+                    actor_role=actor_role,
+                    session_id=session_id,
+                    search_query=search_query,
+                    limit=limit,
+                )
+            return {'ok': False, 'error': 'skill_id_or_search_query_required'}
         visible = {item.skill_id: item for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)}
-        record = visible.get(str(skill_id or '').strip())
+        record = visible.get(skill_name)
         if record is None:
             return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
         path = Path(record.skill_doc_path) if record.skill_doc_path else None
@@ -1287,8 +1469,25 @@ class MainRuntimeService:
             'path': payload['path'],
         }
 
-    def load_tool_context(self, *, actor_role: str, session_id: str, tool_id: str) -> dict[str, Any]:
+    def load_tool_context(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        tool_id: str = '',
+        search_query: str = '',
+        limit: int | None = None,
+    ) -> dict[str, Any]:
         tool_name = str(tool_id or '').strip()
+        if not tool_name:
+            if str(search_query or '').strip():
+                return self._search_visible_tools(
+                    actor_role=actor_role,
+                    session_id=session_id,
+                    search_query=search_query,
+                    limit=limit,
+                )
+            return {'ok': False, 'error': 'tool_id_or_search_query_required'}
         visible = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
         if tool_name not in visible:
             return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
@@ -1314,12 +1513,23 @@ class MainRuntimeService:
         *,
         actor_role: str,
         session_id: str,
-        tool_id: str,
+        tool_id: str = '',
+        search_query: str = '',
+        limit: int | None = None,
         level: str = 'l1',
         query: str = '',
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
         tool_name = str(tool_id or '').strip()
+        if not tool_name:
+            if str(search_query or '').strip():
+                return self._search_visible_tools(
+                    actor_role=actor_role,
+                    session_id=session_id,
+                    search_query=search_query,
+                    limit=limit,
+                )
+            return {'ok': False, 'error': 'tool_id_or_search_query_required'}
         visible = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
         if tool_name not in visible:
             return {'ok': False, 'error': f'Tool not visible: {tool_id}'}

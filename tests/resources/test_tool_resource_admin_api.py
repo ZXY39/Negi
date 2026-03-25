@@ -1835,6 +1835,55 @@ async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_runtime_service_can_search_visible_tool_and_skill_candidates(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _write_skill(workspace, name='rollback_helper')
+    _copy_repo_tools(workspace, 'content', 'load_skill_context', 'load_tool_context')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-search')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+
+        tool_payload = service.load_tool_context_v2(
+            actor_role='ceo',
+            session_id='web:shared',
+            search_query='externalized content reference',
+        )
+        assert tool_payload['ok'] is True
+        assert tool_payload['mode'] == 'search'
+        assert tool_payload['candidates'][0]['tool_id'] in {'content', 'content_navigation'}
+        assert 'description' in tool_payload['candidates'][0]['matched_fields']
+        assert 'load_tool_context(tool_id="' in tool_payload['next_action_hint']
+
+        skill_payload = service.load_skill_context_v2(
+            actor_role='ceo',
+            session_id='web:shared',
+            search_query='rollback planning',
+        )
+        assert skill_payload['ok'] is True
+        assert skill_payload['mode'] == 'search'
+        assert skill_payload['candidates'][0]['skill_id'] == 'rollback_helper'
+        assert skill_payload['candidates'][0]['matched_fields']
+        assert 'load_skill_context(skill_id="' in skill_payload['next_action_hint']
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
