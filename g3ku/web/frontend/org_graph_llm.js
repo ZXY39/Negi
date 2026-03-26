@@ -68,6 +68,7 @@
     U.llmEditorPanel = document.querySelector(".llm-editor-panel");
     U.llmEditorShell = document.getElementById("llm-editor-shell");
     U.llmEditorBackdrop = document.getElementById("llm-editor-backdrop");
+    U.modelRolesCancel = document.getElementById("model-roles-cancel-btn");
     U.modelList = U.llmBindingsList || U.modelList;
   }
 
@@ -829,9 +830,17 @@
   }
 
   function renderAll() {
+    const state = llmState();
     refs();
     projectRoutes();
-    if (U.modelRolesSave) U.modelRolesSave.textContent = S.modelCatalog.roleEditing ? (S.modelCatalog.rolesDirty ? "保存模型链" : "完成编辑") : "编辑模型链";
+    if (U.modelRolesCancel) {
+      U.modelRolesCancel.hidden = !S.modelCatalog.roleEditing;
+      U.modelRolesCancel.disabled = state.loading || state.saving;
+    }
+    if (U.modelRolesSave) {
+      U.modelRolesSave.disabled = state.loading || state.saving;
+      U.modelRolesSave.textContent = S.modelCatalog.roleEditing ? (S.modelCatalog.rolesDirty ? "保存模型链" : "完成编辑") : "编辑模型链";
+    }
     renderHint();
     renderBindings();
     renderRoutes();

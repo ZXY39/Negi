@@ -71,3 +71,21 @@ def test_node_runner_runtime_context_and_guidance_include_project_python(monkeyp
     assert runtime_context['project_python_hint'] == r"& 'C:\Python314\python.exe'"
     assert 'same Python environment as the current G3KU process' in guidance
     assert r"& 'C:\Python314\python.exe'" in guidance
+
+
+def test_node_execution_prompt_mentions_visible_skill_only_policy(monkeypatch) -> None:
+    monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
+    runner = NodeRunner(
+        store=None,
+        log_service=None,
+        react_loop=None,
+        tool_provider=None,
+        execution_model_refs=['execution_model'],
+        acceptance_model_refs=['acceptance_model'],
+    )
+    node = SimpleNamespace(node_id='node:1', depth=0, node_kind='execution', can_spawn_children=False)
+
+    prompt = runner._build_system_prompt(node=node)
+
+    assert 'visible_skills' in prompt
+    assert 'load_skill_context(skill_id="' in prompt

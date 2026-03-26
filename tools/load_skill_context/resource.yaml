@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: load_skill_context
-description: Load full context for a visible skill, or search visible skill candidates with natural-language search_query.
+description: Load full context for a visible skill by exact skill_id. This tool is not a skill discovery interface.
 source:
   type: ''
   url: ''
@@ -22,14 +22,9 @@ parameters:
   properties:
     skill_id:
       type: string
-      description: Optional skill id to load directly.
-    search_query:
-      type: string
-      description: Optional natural-language query used to search visible skill candidates when skill_id is omitted.
-    limit:
-      type: integer
-      description: Optional candidate limit for search mode. Defaults to 5.
-  required: []
+      description: The exact visible skill id to load.
+  required:
+    - skill_id
 exposure:
   agent: true
   org_graph: true

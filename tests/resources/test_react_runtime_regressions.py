@@ -300,6 +300,52 @@ async def test_execute_tool_blocks_repeated_overflowed_search() -> None:
     assert result == 'Error: previous search overflowed; refine query before retrying'
 
 
+@pytest.mark.asyncio
+async def test_execute_tool_passes_runtime_context_to_name_mangled_class_tool() -> None:
+    class _RuntimeCaptureTool(Tool):
+        @property
+        def name(self) -> str:
+            return 'capture_runtime'
+
+        @property
+        def description(self) -> str:
+            return 'Capture runtime context'
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                'type': 'object',
+                'properties': {
+                    'value': {'type': 'string', 'description': 'value'},
+                },
+                'required': ['value'],
+            }
+
+        async def execute(self, value: str, __g3ku_runtime: dict[str, object] | None = None, **kwargs):
+            runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
+            return json.dumps(
+                {
+                    'value': value,
+                    'current_tool_call_id': runtime.get('current_tool_call_id'),
+                    'kwargs_runtime': kwargs.get('__g3ku_runtime'),
+                },
+                ensure_ascii=False,
+            )
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    result = await loop._execute_tool(
+        tools={'capture_runtime': _RuntimeCaptureTool()},
+        tool_name='capture_runtime',
+        arguments={'value': 'demo'},
+        runtime_context={'current_tool_call_id': 'call:test-runtime'},
+    )
+
+    payload = json.loads(result)
+    assert payload['value'] == 'demo'
+    assert payload['current_tool_call_id'] == 'call:test-runtime'
+    assert payload['kwargs_runtime'] is None
+
+
 def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
     base_messages = [

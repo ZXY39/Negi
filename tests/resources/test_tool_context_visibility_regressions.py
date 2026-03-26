@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
+import pytest
+
+from g3ku.agent.tools.main_runtime import LoadSkillContextTool
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
 from main.service.runtime_service import MainRuntimeService
 
@@ -123,3 +127,48 @@ def test_decorated_tool_family_exposes_repair_required_metadata_and_toolskill_fl
     assert decorated.metadata['repair_required'] is True
     assert payload is not None
     assert payload['repair_required'] is True
+
+
+@pytest.mark.asyncio
+async def test_load_skill_context_tool_requires_known_visible_skill_id():
+    class _Service:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def startup(self) -> None:
+            return None
+
+        def load_skill_context_v2(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return {'ok': True, 'skill_id': kwargs['skill_id'], 'content': 'demo body'}
+
+    service = _Service()
+    tool = LoadSkillContextTool(lambda: service)
+
+    assert set(tool.parameters['properties']) == {'skill_id'}
+    assert tool.parameters['required'] == ['skill_id']
+
+    payload = json.loads(
+        await tool.execute(
+            skill_id='demo_visible_skill',
+        )
+    )
+
+    assert payload['ok'] is True
+    assert payload['skill_id'] == 'demo_visible_skill'
+    assert len(service.calls) == 1
+    assert service.calls[0]['session_id'] == 'web:shared'
+    assert service.calls[0]['skill_id'] == 'demo_visible_skill'
+
+
+@pytest.mark.asyncio
+async def test_load_skill_context_tool_rejects_search_query_discovery_mode():
+    class _Service:
+        async def startup(self) -> None:
+            return None
+
+    tool = LoadSkillContextTool(lambda: _Service())
+    payload = json.loads(await tool.execute(skill_id='', search_query='rollback planning'))
+
+    assert payload['ok'] is False
+    assert payload['error'] == 'skill_search_not_allowed'

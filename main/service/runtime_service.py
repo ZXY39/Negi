@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
 import shutil
 from datetime import datetime, timezone
@@ -2602,20 +2603,70 @@ class MainRuntimeService:
             }
         return dict(self._builtin_tool_cache)
 
+    @staticmethod
+    def _visible_skill_prompt_items(visible_skills: list[Any]) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        for record in list(visible_skills or []):
+            skill_id = str(getattr(record, 'skill_id', '') or '').strip()
+            if not skill_id:
+                continue
+            items.append(
+                {
+                    'skill_id': skill_id,
+                    'display_name': str(getattr(record, 'display_name', '') or skill_id).strip() or skill_id,
+                    'description': str(getattr(record, 'description', '') or '').strip(),
+                }
+            )
+        return items
+
+    def _inject_visible_skills_into_node_messages(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        visible_skills: list[Any],
+    ) -> list[dict[str, Any]]:
+        enriched = list(messages or [])
+        skill_items = self._visible_skill_prompt_items(visible_skills)
+        for index, message in enumerate(enriched):
+            if str(message.get('role') or '').strip().lower() != 'user':
+                continue
+            raw_content = message.get('content')
+            if not isinstance(raw_content, str):
+                continue
+            try:
+                payload = json.loads(raw_content)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            payload['visible_skills'] = skill_items
+            payload['skill_usage_rules'] = {
+                'visible_only': True,
+                'skill_discovery_allowed': False,
+                'load_skill_context_requires_visible_skill_id': True,
+            }
+            enriched[index] = {
+                **message,
+                'content': json.dumps(payload, ensure_ascii=False, indent=2),
+            }
+            break
+        return enriched
+
     async def _enrich_node_messages(self, *, task, node: NodeRecord, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        actor_role = self._actor_role_for_node(node)
+        visible_skills = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
+        enriched = self._inject_visible_skills_into_node_messages(messages=messages, visible_skills=visible_skills)
         manager = getattr(self, 'memory_manager', None)
         if manager is None or not getattr(manager, '_feature_enabled', lambda _key: False)('unified_context'):
-            return messages
+            return enriched
         query_text = str(getattr(node, 'prompt', '') or getattr(node, 'goal', '') or '').strip()
         if not query_text:
-            return messages
-        session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+            return enriched
         memory_scope = self._task_memory_scope(task)
         channel = str(memory_scope.get('channel') or 'unknown')
         chat_id = str(memory_scope.get('chat_id') or 'unknown')
-        actor_role = self._actor_role_for_node(node)
         visible_families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
-        visible_skills = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
         semantic_frontdoor = await semantic_catalog_rankings(
             memory_manager=manager,
             query_text=query_text,
@@ -2641,10 +2692,9 @@ class MainRuntimeService:
                 allowed_skill_record_ids=retrieval_scope['allowed_skill_record_ids'],
             )
         except Exception:
-            return messages
+            return enriched
         if not block:
-            return messages
-        enriched = list(messages)
+            return enriched
         if enriched and enriched[0].get('role') == 'system':
             base = str(enriched[0].get('content') or '')
             enriched[0] = {**enriched[0], 'content': f"{base}\n\n{block}".strip()}

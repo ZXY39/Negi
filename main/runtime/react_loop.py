@@ -581,8 +581,9 @@ class ReActToolLoop:
         if errors:
             return 'Error: ' + '; '.join(errors)
         execute_kwargs = dict(arguments)
-        if self._accepts_runtime_context(tool):
-            execute_kwargs['__g3ku_runtime'] = runtime_context
+        runtime_param_name = self._runtime_context_parameter_name(tool)
+        if runtime_param_name is not None:
+            execute_kwargs[runtime_param_name] = runtime_context
         if not actor_role_allows_watchdog(runtime_context):
             return await tool.execute(**execute_kwargs)
         outcome = await run_tool_with_watchdog(
@@ -968,10 +969,19 @@ class ReActToolLoop:
 
     @staticmethod
     def _accepts_runtime_context(tool: Tool) -> bool:
+        return ReActToolLoop._runtime_context_parameter_name(tool) is not None
+
+    @staticmethod
+    def _runtime_context_parameter_name(tool: Tool) -> str | None:
         sig = inspect.signature(tool.execute)
         if '__g3ku_runtime' in sig.parameters:
-            return True
-        return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
+            return '__g3ku_runtime'
+        for name in sig.parameters:
+            if str(name).endswith('__g3ku_runtime'):
+                return str(name)
+        if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
+            return '__g3ku_runtime'
+        return None
 
     @staticmethod
     def _render_tool_result(result: Any) -> str:

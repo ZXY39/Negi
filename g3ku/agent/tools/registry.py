@@ -235,8 +235,9 @@ class ToolRegistry:
         runtime_context: dict[str, Any],
     ) -> Any:
         execute_kwargs = dict(params)
-        if runtime_context and self._accepts_runtime_context(tool):
-            execute_kwargs["__g3ku_runtime"] = runtime_context
+        runtime_param_name = self._runtime_context_parameter_name(tool)
+        if runtime_context and runtime_param_name is not None:
+            execute_kwargs[runtime_param_name] = runtime_context
 
         async def _invoke() -> Any:
             resource_manager = self._resolve_resource_manager(runtime_context)
@@ -359,10 +360,19 @@ class ToolRegistry:
 
     @staticmethod
     def _accepts_runtime_context(tool: Tool) -> bool:
+        return ToolRegistry._runtime_context_parameter_name(tool) is not None
+
+    @staticmethod
+    def _runtime_context_parameter_name(tool: Tool) -> str | None:
         sig = inspect.signature(tool.execute)
         if "__g3ku_runtime" in sig.parameters:
-            return True
-        return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            return "__g3ku_runtime"
+        for name in sig.parameters:
+            if str(name).endswith("__g3ku_runtime"):
+                return str(name)
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return "__g3ku_runtime"
+        return None
 
     @staticmethod
     def _build_args_schema(tool: Tool):

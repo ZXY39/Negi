@@ -71,6 +71,7 @@ const S = {
     liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
+    ceoSessionCatalogBusy: false,
     ceoSessionSwitchToken: 0,
     taskDefaults: {
         scope: "global",
@@ -749,13 +750,13 @@ function readSessionJson(key) {
 function writeSessionJson(key, value) {
     try {
         window.sessionStorage?.setItem?.(key, JSON.stringify(value));
-    } catch {}
+    } catch { }
 }
 
 function removeSessionJson(key) {
     try {
         window.sessionStorage?.removeItem?.(key);
-    } catch {}
+    } catch { }
 }
 
 function normalizeCeoComposerDraftEntry(sessionId, entry = {}) {
@@ -1761,15 +1762,15 @@ function orderedTasks(tasks = S.tasks) {
 }
 
 function canMutateCeoSessions() {
-    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
+    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy || S.ceoSessionCatalogBusy);
 }
 
 function canCreateCeoSessions() {
-    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
+    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy || S.ceoSessionCatalogBusy);
 }
 
 function canActivateCeoSessions() {
-    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy);
+    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionCatalogBusy);
 }
 
 function closeCeoSessionMenus({ restoreFocus = false } = {}) {
@@ -2093,7 +2094,9 @@ function renderPendingCeoUploads() {
             </div>
         `;
     }
-    if (U.ceoAttach) U.ceoAttach.disabled = !!S.ceoUploadBusy || !!S.ceoSessionBusy || !activeSessionId() || activeSessionIsReadonly();
+    if (U.ceoAttach) {
+        U.ceoAttach.disabled = !!S.ceoUploadBusy || !!S.ceoSessionBusy || !!S.ceoSessionCatalogBusy || !activeSessionId() || activeSessionIsReadonly();
+    }
     syncCeoPrimaryButton();
     syncCeoSessionActions();
     icons();
@@ -2112,7 +2115,7 @@ function syncCeoPrimaryButton() {
     const label = S.ceoPauseBusy ? "暂停中" : isPause ? "暂停" : "发送";
     const icon = isPause ? "pause" : "send";
     U.ceoSend.innerHTML = `<i data-lucide="${icon}"></i> ${label}`;
-    U.ceoSend.disabled = !!S.ceoUploadBusy || !!S.ceoPauseBusy || !!S.ceoSessionBusy || !activeSessionId();
+    U.ceoSend.disabled = !!S.ceoUploadBusy || !!S.ceoPauseBusy || !!S.ceoSessionBusy || !!S.ceoSessionCatalogBusy || !activeSessionId();
     U.ceoSend.setAttribute("aria-label", isPause ? "暂停当前 CEO 会话" : "发送消息");
     icons();
 }
@@ -4234,10 +4237,10 @@ function renderModelDetail() {
                             </label>
                         </div>
                         <div class="model-form-status-area" style="margin-top: var(--space-4);">
-                            ${enabled 
-                                ? `<button type="button" class="toolbar-btn danger" data-model-control="disable" data-key="${esc(current?.key || "")}">禁用模型</button>` 
-                                : `<button type="button" class="toolbar-btn success" data-model-control="enable" data-key="${esc(current?.key || "")}">启用模型</button>`
-                            }
+                            ${enabled
+            ? `<button type="button" class="toolbar-btn danger" data-model-control="disable" data-key="${esc(current?.key || "")}">禁用模型</button>`
+            : `<button type="button" class="toolbar-btn success" data-model-control="enable" data-key="${esc(current?.key || "")}">启用模型</button>`
+        }
                             ${!isCreate ? `<button type="button" class="toolbar-btn ghost" data-model-control="delete" data-key="${esc(current?.key || "")}">删除模型</button>` : ""}
                             <input type="checkbox" name="enabled" ${enabled ? "checked" : ""} style="display:none">
                         </div>
@@ -4343,6 +4346,7 @@ function clearModelDragDecorations() {
     [U.modelRoleEditors, U.modelList].filter(Boolean).forEach((root) => {
         root.querySelectorAll('.is-drop-target').forEach((item) => item.classList.remove('is-drop-target'));
         root.querySelectorAll('.is-drop-zone').forEach((item) => item.classList.remove('is-drop-zone'));
+        root.querySelectorAll('[data-drop-position]').forEach((item) => delete item.dataset.dropPosition);
         root.querySelectorAll('[data-model-drop-placeholder]').forEach((item) => item.remove());
     });
 }
@@ -4354,6 +4358,7 @@ function beginModelDrag(item, { scope = "", ref = "", source = "available" } = {
         scope: String(scope || ""),
         ref: modelRef,
         source,
+        hoverZoneKey: "",
         scrollFrameId: null,
         scrollTarget: null,
         scrollStep: 0,
@@ -4425,7 +4430,14 @@ function didModelDragLeaveZone(zone, event) {
     if (!zone) return true;
     const related = event?.relatedTarget;
     if (related instanceof Node && zone.contains(related)) return false;
-    return !modelDragZoneContainsPoint(zone, Number(event?.clientX), Number(event?.clientY));
+    const clientX = Number(event?.clientX);
+    const clientY = Number(event?.clientY);
+    if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
+        const hovered = document.elementFromPoint(clientX, clientY);
+        if (hovered instanceof Node && zone.contains(hovered)) return false;
+        return !modelDragZoneContainsPoint(zone, clientX, clientY);
+    }
+    return false;
 }
 
 function resolveModelChainDropList(target) {
@@ -4474,7 +4486,9 @@ function resolveModelChainDropIndex(list, dragState, clientY) {
 
 function ensureModelDropPlaceholder(list, targetItem, clientY) {
     if (!list) return null;
-    const placeholder = document.createElement('div');
+    list.querySelectorAll('.is-drop-target').forEach((item) => item.classList.remove('is-drop-target'));
+    list.querySelectorAll('[data-drop-position]').forEach((item) => delete item.dataset.dropPosition);
+    const placeholder = list.querySelector('[data-model-drop-placeholder]') || document.createElement('div');
     placeholder.className = 'model-chain-drop-placeholder';
     placeholder.dataset.modelDropPlaceholder = '1';
     list.classList.add('is-drop-zone');
@@ -4495,6 +4509,7 @@ function ensureModelDropPlaceholder(list, targetItem, clientY) {
 
 function highlightModelAvailableZone(list, targetItem = null) {
     if (!list) return;
+    list.querySelectorAll('.is-drop-target').forEach((item) => item.classList.remove('is-drop-target'));
     list.classList.add('is-drop-zone');
     if (targetItem && targetItem.parentElement === list) {
         targetItem.classList.add('is-drop-target');
@@ -5110,7 +5125,7 @@ function applyOptimisticCeoSessionSwitch(sessionId, session = null) {
 
 async function refreshCeoSessions({ reconnect = false, background = false } = {}) {
     if (!background) {
-        S.ceoSessionBusy = true;
+        S.ceoSessionCatalogBusy = true;
         renderCeoSessions();
         syncCeoPrimaryButton();
     }
@@ -5121,7 +5136,7 @@ async function refreshCeoSessions({ reconnect = false, background = false } = {}
         return payload;
     } finally {
         if (!background) {
-            S.ceoSessionBusy = false;
+            S.ceoSessionCatalogBusy = false;
             renderCeoSessions();
             syncCeoPrimaryButton();
         }
@@ -5170,7 +5185,7 @@ async function createNewCeoSession() {
         showToast({ title: "当前不可新建", text: "请先等待当前上传、暂停请求或会话切换操作完成后再新建会话。", kind: "warn" });
         return;
     }
-    S.ceoSessionBusy = true;
+    S.ceoSessionCatalogBusy = true;
     renderCeoSessions();
     syncCeoPrimaryButton();
     try {
@@ -5178,11 +5193,14 @@ async function createNewCeoSession() {
         const nextActiveId = applyCeoSessionsPayload(payload);
         closeCeoWs();
         resetCeoSessionState({ scrollToLatest: true });
-        if (nextActiveId) initCeoWs();
+        if (nextActiveId) {
+            S.ceoSessionBusy = true;
+            initCeoWs();
+        }
     } catch (e) {
         showToast({ title: "新建失败", text: e.message || "Unknown error", kind: "error" });
     } finally {
-        S.ceoSessionBusy = false;
+        S.ceoSessionCatalogBusy = false;
         renderCeoSessions();
         syncCeoPrimaryButton();
     }
@@ -5211,7 +5229,7 @@ async function handleRenameAccept() {
         return;
     }
     handleRenameCancel();
-    S.ceoSessionBusy = true;
+    S.ceoSessionCatalogBusy = true;
     renderCeoSessions();
     syncCeoPrimaryButton();
     showToast({ title: "正在重命名", text: "请稍候...", kind: "info", persistent: true });
@@ -5222,7 +5240,7 @@ async function handleRenameAccept() {
     } catch (e) {
         showToast({ title: "重命名失败", text: e.message || "Unknown error", kind: "error" });
     } finally {
-        S.ceoSessionBusy = false;
+        S.ceoSessionCatalogBusy = false;
         renderCeoSessions();
         syncCeoPrimaryButton();
     }
@@ -5273,7 +5291,7 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } 
     const targetId = String(sessionId || "").trim();
     if (!targetId) return;
     const wasActive = targetId === activeSessionId();
-    S.ceoSessionBusy = true;
+    S.ceoSessionCatalogBusy = true;
     renderCeoSessions();
     syncCeoPrimaryButton();
     try {
@@ -5283,7 +5301,10 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } 
         if (wasActive) {
             closeCeoWs();
             resetCeoSessionState({ scrollToLatest: true });
-            if (nextActiveId) initCeoWs();
+            if (nextActiveId) {
+                S.ceoSessionBusy = true;
+                initCeoWs();
+            }
         }
         clearCeoComposerDraft(targetId);
         if (S.view === "tasks") await loadTasks();
@@ -5299,7 +5320,7 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } 
         }
         showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
     } finally {
-        S.ceoSessionBusy = false;
+        S.ceoSessionCatalogBusy = false;
         renderCeoSessions();
         syncCeoPrimaryButton();
     }
@@ -5312,20 +5333,20 @@ async function requestDeleteCeoSession(sessionId) {
         showToast({ title: "当前不可删除", text: "请先等待当前回合完成或暂停后再操作。", kind: "warn" });
         return;
     }
-    S.ceoSessionBusy = true;
+    S.ceoSessionCatalogBusy = true;
     renderCeoSessions();
     syncCeoPrimaryButton();
     let deleteCheck = null;
     try {
         deleteCheck = await ApiClient.getCeoSessionDeleteCheck(current.session_id);
     } catch (e) {
-        S.ceoSessionBusy = false;
+        S.ceoSessionCatalogBusy = false;
         renderCeoSessions();
         syncCeoPrimaryButton();
         showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
         return;
     }
-    S.ceoSessionBusy = false;
+    S.ceoSessionCatalogBusy = false;
     renderCeoSessions();
     syncCeoPrimaryButton();
     if (deleteCheck?.can_delete === false) {
@@ -5408,7 +5429,7 @@ function sendCeoMessage() {
         requestCeoPause();
         return;
     }
-    if (S.ceoSessionBusy || !activeSessionId()) return;
+    if (S.ceoSessionBusy || S.ceoSessionCatalogBusy || !activeSessionId()) return;
     const text = String(U.ceoInput.value || "");
     const uploads = normalizeUploadList(S.ceoUploads);
     if (!text.trim() && !uploads.length) return;
@@ -5560,7 +5581,7 @@ function taskTokenSummaryLine(usage) {
     const parts = [
         `输入Token ${formatTokenCount(data.input_tokens)}`,
         `输出Token ${formatTokenCount(data.output_tokens)}`,
-        `缓存命中Token ${formatTokenCount(data.cache_hit_tokens)}`,
+        `缓存命中 ${formatTokenCount(data.cache_hit_tokens)}`,
     ];
     if (data.is_partial) parts.push("部分缺失");
     return parts.join(" · ");
@@ -5955,7 +5976,11 @@ function bind() {
         if (!scope || !allowDrop) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = dragState.source === "chain" ? "move" : "copy";
-        clearModelDragDecorations();
+        const hoverZoneKey = `chain:${scope}`;
+        if (dragState.hoverZoneKey !== hoverZoneKey) {
+            clearModelDragDecorations();
+            dragState.hoverZoneKey = hoverZoneKey;
+        }
         let targetItem = e.target.closest("[data-model-chain-ref]");
         if (!(targetItem instanceof Element) || targetItem.parentElement !== chainList) {
             targetItem = null;
@@ -5995,6 +6020,7 @@ function bind() {
         const zone = e.target instanceof Element ? (e.target.closest(".model-chain-card") || resolveModelChainDropList(e.target)) : null;
         if (!zone) return;
         if (!didModelDragLeaveZone(zone, e)) return;
+        dragState.hoverZoneKey = "";
         clearModelDragDecorations();
         stopModelAutoScroll();
     });
@@ -6016,7 +6042,11 @@ function bind() {
         if (!availableList) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
-        clearModelDragDecorations();
+        const hoverZoneKey = `available:${String(availableList.dataset.modelAvailableList || "")}`;
+        if (dragState.hoverZoneKey !== hoverZoneKey) {
+            clearModelDragDecorations();
+            dragState.hoverZoneKey = hoverZoneKey;
+        }
         const targetItem = e.target.closest("[data-model-available-key]");
         highlightModelAvailableZone(availableList, targetItem);
         startModelAutoScroll(availableList, e.clientY);
@@ -6039,6 +6069,7 @@ function bind() {
         const zone = e.target instanceof Element ? e.target.closest("[data-model-available-list]") : null;
         if (!zone) return;
         if (!didModelDragLeaveZone(zone, e)) return;
+        dragState.hoverZoneKey = "";
         clearModelDragDecorations();
         stopModelAutoScroll();
     });

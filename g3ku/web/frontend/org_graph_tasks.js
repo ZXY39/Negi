@@ -639,7 +639,7 @@ function renderTaskTokenStats() {
     if (!summary.tracked) {
         U.taskTokenContent.innerHTML = `
             <div class="task-token-topline">
-                <div class="task-token-stat"><strong>鏈粺璁?/strong><span>璇ヤ换鍔″垱寤轰簬缁熻涓婄嚎鍓嶏紝鏆傛棤绮剧‘鏁版嵁銆?/span></div>
+                <div class="task-token-stat"><strong>未统计</strong><span>该任务创建于统计上线前，暂无精确数据。</span></div>
             </div>
         `;
         return;
@@ -655,30 +655,30 @@ function renderTaskTokenStats() {
         ? S.currentTaskProgress.model_calls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
         : [];
     const partialNote = summary.is_partial
-        ? '<span class="task-token-badge warn">閮ㄥ垎妯″瀷鏈繑鍥?usage</span>'
-        : '<span class="task-token-badge success">缁熻瀹屾暣</span>';
+        ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
+        : '<span class="task-token-badge success">统计完整</span>';
     const topline = `
         <div class="task-token-topline">
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>输入Token</span></div>
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>输出Token</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>总输入</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>总输出</span></div>
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缓存命中</span></div>
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.call_count))}</strong><span>妯″瀷璋冪敤</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.call_count))}</strong><span>模型调用</span></div>
         </div>
         <div class="task-token-meta">
             ${partialNote}
-            <span class="task-token-subtle">鏈?usage ${esc(formatTokenCount(summary.calls_with_usage))} 路 缂哄け ${esc(formatTokenCount(summary.calls_without_usage))}</span>
+            <span class="task-token-subtle">有 usage ${esc(formatTokenCount(summary.calls_with_usage))} · 缺失 ${esc(formatTokenCount(summary.calls_without_usage))}</span>
         </div>
     `;
     if (!summary.call_count) {
-        U.taskTokenContent.innerHTML = `${topline}<div class="empty-state task-token-empty">灏氭湭鍙戠敓妯″瀷璋冪敤銆?/div>`;
+        U.taskTokenContent.innerHTML = `${topline}<div class="empty-state task-token-empty">尚未发生模型调用。</div>`;
         return;
     }
     const rowsMarkup = modelRows.length
         ? modelRows.map((item) => {
             const subtitleParts = [item.provider_id, item.provider_model].filter(Boolean);
             const badges = [];
-            if (item.is_partial) badges.push('<span class="task-token-badge warn">閮ㄥ垎缂哄け</span>');
-            if (!item.calls_without_usage) badges.push('<span class="task-token-badge success">瀹屾暣</span>');
+            if (item.is_partial) badges.push('<span class="task-token-badge warn">部分缺失</span>');
+            if (!item.calls_without_usage) badges.push('<span class="task-token-badge success">完整</span>');
             return `
                 <div class="task-token-model-item">
                     <div class="task-token-model-head">
@@ -689,8 +689,8 @@ function renderTaskTokenStats() {
                         <div class="task-token-model-badges">${badges.join("")}</div>
                     </div>
                     <div class="task-token-model-stats">
-                        <span>输入Token ${esc(formatTokenCount(item.input_tokens))}</span>
-                        <span>输出Token ${esc(formatTokenCount(item.output_tokens))}</span>
+                        <span>输入 ${esc(formatTokenCount(item.input_tokens))}</span>
+                        <span>输出 ${esc(formatTokenCount(item.output_tokens))}</span>
                         <span>缓存命中 ${esc(formatTokenCount(item.cache_hit_tokens))}</span>
                     </div>
                     <div class="task-token-model-meta">
@@ -699,7 +699,7 @@ function renderTaskTokenStats() {
                 </div>
             `;
         }).join("")
-        : '<div class="empty-state task-token-empty">褰撳墠鍙湁浠诲姟绾х粺璁★紝灏氭棤鎸夋ā鍨嬫槑缁嗐€?/div>';
+        : '<div class="empty-state task-token-empty">当前只有任务级统计，尚无按模型明细。</div>';
     const recentCallMarkup = recentModelCalls.length
         ? `
             <div class="task-token-call-card">
@@ -723,10 +723,10 @@ function renderTaskTokenStats() {
                         </thead>
                         <tbody>
                             ${recentModelCalls.map((item) => {
-            const modelNames = item.delta_usage_by_model.length
-                ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
-                : "n/a";
-            return `
+                                const modelNames = item.delta_usage_by_model.length
+                                    ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
+                                    : "n/a";
+                                return `
                                     <tr>
                                         <td>${esc(formatTokenCount(item.call_index))}</td>
                                         <td>${esc(formatTokenCount(item.prepared_message_chars))}</td>
@@ -738,7 +738,7 @@ function renderTaskTokenStats() {
                                         <td>${esc(modelNames)}</td>
                                     </tr>
                                 `;
-        }).join("")}
+                            }).join("")}
                         </tbody>
                     </table>
                 </div>

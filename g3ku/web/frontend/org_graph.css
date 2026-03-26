@@ -3797,6 +3797,7 @@ textarea {
     border: 2px dashed color-mix(in srgb, var(--brand-primary) 48%, var(--border-color));
     background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-app));
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+    pointer-events: none;
 }
 
 .model-chain-handle {

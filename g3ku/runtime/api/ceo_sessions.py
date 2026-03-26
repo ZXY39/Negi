@@ -82,14 +82,28 @@ def _build_catalog(session_manager, runtime_manager, *, active_session_id: str) 
     )
 
 
-def _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store) -> None:
+def _publish_ceo_sessions_snapshot(
+    agent,
+    session_manager,
+    runtime_manager,
+    state_store,
+    *,
+    catalog: dict[str, object] | None = None,
+    active_session_id: str | None = None,
+) -> None:
     service = getattr(agent, 'main_task_service', None)
     registry = getattr(service, 'registry', None) if service is not None else None
     if registry is None or not hasattr(registry, 'publish_global_ceo'):
         return
-    active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
-    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
-    seq_session_id = active_session_id or 'web:shared'
+    resolved_active_session_id = str(active_session_id or '').strip()
+    if not resolved_active_session_id:
+        resolved_active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
+    snapshot_catalog = catalog if isinstance(catalog, dict) else _build_catalog(
+        session_manager,
+        runtime_manager,
+        active_session_id=resolved_active_session_id,
+    )
+    seq_session_id = resolved_active_session_id or 'web:shared'
     registry.publish_global_ceo(
         build_envelope(
             channel='ceo',
@@ -97,10 +111,10 @@ def _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, stat
             seq=registry.next_ceo_seq(seq_session_id),
             type='ceo.sessions.snapshot',
             data={
-                'items': catalog.get('items') or [],
-                'channel_groups': catalog.get('channel_groups') or [],
-                'active_session_id': active_session_id,
-                'active_session_family': catalog.get('active_session_family') or 'local',
+                'items': snapshot_catalog.get('items') or [],
+                'channel_groups': snapshot_catalog.get('channel_groups') or [],
+                'active_session_id': resolved_active_session_id,
+                'active_session_family': snapshot_catalog.get('active_session_family') or 'local',
             },
         )
     )
@@ -188,7 +202,14 @@ async def create_ceo_session(payload: dict | None = Body(default=None)):
     state_store.set_active_session_id(session.key)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=session.key)
     item = next((entry for entry in list(catalog.get("items") or []) if entry["session_id"] == session.key), None)
-    _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
+    _publish_ceo_sessions_snapshot(
+        agent,
+        session_manager,
+        runtime_manager,
+        state_store,
+        catalog=catalog,
+        active_session_id=session.key,
+    )
     return {
         "ok": True,
         "item": item,
@@ -215,7 +236,14 @@ async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
     item = next((entry for entry in list(catalog.get("items") or []) if entry["session_id"] == session.key), None)
-    _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
+    _publish_ceo_sessions_snapshot(
+        agent,
+        session_manager,
+        runtime_manager,
+        state_store,
+        catalog=catalog,
+        active_session_id=active_session_id,
+    )
     return {
         "ok": True,
         "item": item,
@@ -265,16 +293,26 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
 @router.post("/ceo/sessions/{session_id}/activate")
 async def activate_ceo_session(session_id: str):
     agent, session_manager, runtime_manager, state_store = _sessions()
-    current_active = resolve_active_ceo_session_id(session_manager, state_store)
-    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=current_active)
-    item = find_ceo_session_catalog_item(catalog, session_id)
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=requested_session_id)
+    item = find_ceo_session_catalog_item(catalog, requested_session_id)
     if item is None:
         raise HTTPException(status_code=404, detail="session_not_found")
     target_id = str(item.get("session_id") or "").strip()
+    if target_id and target_id != requested_session_id:
+        catalog = _build_catalog(session_manager, runtime_manager, active_session_id=target_id)
+        item = find_ceo_session_catalog_item(catalog, target_id)
     state_store.set_active_session_id(target_id)
-    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=target_id)
-    item = find_ceo_session_catalog_item(catalog, target_id)
-    _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
+    _publish_ceo_sessions_snapshot(
+        agent,
+        session_manager,
+        runtime_manager,
+        state_store,
+        catalog=catalog,
+        active_session_id=target_id,
+    )
     return {
         "ok": True,
         "item": item,
@@ -336,7 +374,14 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
-    _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
+    _publish_ceo_sessions_snapshot(
+        agent,
+        session_manager,
+        runtime_manager,
+        state_store,
+        catalog=catalog,
+        active_session_id=active_session_id,
+    )
     return {
         "ok": True,
         "deleted": True,

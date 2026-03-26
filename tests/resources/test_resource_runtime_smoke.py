@@ -199,29 +199,39 @@ def _write_demo_external_tool(
     return tool_root
 
 
-def _write_demo_skill(root: Path, *, name: str = 'demo_skill', guide: str = 'Demo skill guide') -> Path:
+def _write_demo_skill(
+    root: Path,
+    *,
+    name: str = 'demo_skill',
+    guide: str = 'Demo skill guide',
+    allowed_roles: list[str] | None = None,
+) -> Path:
     skill_root = root / 'skills' / name
     skill_root.mkdir(parents=True, exist_ok=True)
-    (skill_root / 'resource.yaml').write_text(
-        textwrap.dedent(
-            f"""\
-            schema_version: 1
-            kind: skill
-            name: {name}
-            description: Demo skill for resource smoke tests.
-            trigger:
-              keywords: []
-            requires:
-              tools: []
-              bins: []
-              env: []
-            exposure:
-              agent: true
-              main_runtime: true
-            """
-        ),
-        encoding='utf-8',
+    manifest_lines = [
+        'schema_version: 1',
+        'kind: skill',
+        f'name: {name}',
+        'description: Demo skill for resource smoke tests.',
+        'trigger:',
+        '  keywords: []',
+        'requires:',
+        '  tools: []',
+        '  bins: []',
+        '  env: []',
+    ]
+    if allowed_roles:
+        manifest_lines.extend(['governance:', '  allowed_roles:'])
+        manifest_lines.extend([f'    - {role}' for role in allowed_roles])
+    manifest_lines.extend(
+        [
+            'exposure:',
+            '  agent: true',
+            '  main_runtime: true',
+            '',
+        ]
     )
+    (skill_root / 'resource.yaml').write_text('\n'.join(manifest_lines), encoding='utf-8')
     (skill_root / 'SKILL.md').write_text(
         f"# {name}\n\n{guide}\n",
         encoding='utf-8',
@@ -1639,6 +1649,61 @@ async def test_task_retrospective_skill_is_discovered_and_visible_only_to_ceo(tm
         assert 'task-retrospective' in ceo_visible
         assert 'task-retrospective' not in execution_visible
         assert 'task-retrospective' not in inspection_visible
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_node_messages_include_visible_skill_inventory(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _write_demo_skill(
+        workspace,
+        name='demo_visible_skill',
+        guide='Demo visible skill guide',
+        allowed_roles=['execution'],
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        visible = [item.skill_id for item in service.list_visible_skill_resources(actor_role='execution', session_id='web:shared')]
+        assert visible == ['demo_visible_skill']
+
+        record = await service.create_task('verify node visible skills', session_id='web:shared')
+        task = service.get_task(record.task_id)
+        node = service.get_node(record.root_node_id)
+        assert task is not None
+        assert node is not None
+
+        messages = await service.node_runner._build_messages(task=task, node=node)
+        payload = json.loads(messages[1]['content'])
+
+        assert payload['visible_skills'] == [
+            {
+                'skill_id': 'demo_visible_skill',
+                'display_name': 'demo_visible_skill',
+                'description': 'Demo skill for resource smoke tests.',
+            }
+        ]
+        assert payload['skill_usage_rules'] == {
+            'visible_only': True,
+            'skill_discovery_allowed': False,
+            'load_skill_context_requires_visible_skill_id': True,
+        }
     finally:
         await service.close()
         manager.close()

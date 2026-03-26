@@ -13,4 +13,5 @@ Load full context for a currently visible skill.
 - `l1`
 
 ## Usage
-Use `load_skill_context` only when it is the most direct way to complete the task.
+Use `load_skill_context` only for a skill that is already listed in the node's visible skill inventory.
+Do not use it to search for candidate skills.
