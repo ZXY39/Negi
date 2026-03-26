@@ -15,13 +15,13 @@ class CeoPromptBuilder:
         self._repo_prompt_dir = Path(__file__).resolve().parents[1] / 'prompts'
 
     def build(self, *, skills: list) -> str:
+        _ = skills
         project_environment = current_project_environment(workspace_root=getattr(self._loop, 'workspace', None))
         prompt = self._read_prompt('ceo_frontdoor.md')
         return self._render_prompt(
             prompt,
             {
                 'project_python_hint': project_environment.get('project_python_hint') or 'python',
-                'skill_inventory': self._skill_inventory(skills),
             },
         )
 
@@ -38,10 +38,3 @@ class CeoPromptBuilder:
             return str(context[key])
 
         return _PROMPT_TEMPLATE_VARIABLE.sub(replace, prompt).strip()
-
-    @staticmethod
-    def _skill_inventory(skills: list) -> str:
-        return '\n'.join(
-            f'- {skill.skill_id}: {skill.description or skill.display_name}'
-            for skill in skills
-        )

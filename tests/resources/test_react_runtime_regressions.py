@@ -177,10 +177,67 @@ async def test_enrich_node_messages_passes_visibility_filtered_allowlists() -> N
     assert captured["session_key"] == "web:ceo-origin"
     assert captured["channel"] == "web"
     assert captured["chat_id"] == "shared"
-    assert captured["allowed_context_types"] == ["memory", "resource", "skill"]
+    assert captured["allowed_context_types"] == ["memory", "skill", "resource"]
     assert captured["allowed_resource_record_ids"] == ["tool:filesystem", "tool:content"]
     assert captured["allowed_skill_record_ids"] == ["skill:skill-creator"]
     assert "memory block" in enriched[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_node_messages_uses_dense_only_scope_when_semantic_search_is_available() -> None:
+    captured: dict[str, object] = {}
+
+    class _MemoryManager:
+        def __init__(self) -> None:
+            self.store = SimpleNamespace(_dense_enabled=True)
+
+        def _feature_enabled(self, key: str) -> bool:
+            return key == "unified_context"
+
+        async def semantic_search_context_records(
+            self,
+            *,
+            namespace_prefix=None,
+            query: str,
+            limit: int = 8,
+            context_type: str | None = None,
+        ):
+            _ = namespace_prefix, query, limit
+            record_ids = ['skill:tmux'] if context_type == 'skill' else ['tool:content']
+            return [SimpleNamespace(record_id=record_id) for record_id in record_ids]
+
+        async def retrieve_block(self, **kwargs):
+            captured.update(kwargs)
+            return "semantic block"
+
+    service = object.__new__(MainRuntimeService)
+    service.memory_manager = _MemoryManager()
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem'),
+        SimpleNamespace(tool_id='content'),
+    ]
+    service.list_visible_skill_resources = lambda *, actor_role, session_id: [
+        SimpleNamespace(skill_id='skill-creator'),
+        SimpleNamespace(skill_id='tmux'),
+    ]
+
+    task = SimpleNamespace(
+        session_id="web:ceo-origin",
+        metadata={"memory_scope": {"channel": "web", "chat_id": "shared"}},
+    )
+    node = SimpleNamespace(prompt="terminal workflow", goal="terminal workflow", node_kind="execution")
+
+    enriched = await service._enrich_node_messages(
+        task=task,
+        node=node,
+        messages=[{"role": "system", "content": "base prompt"}],
+    )
+
+    assert captured["search_context_types"] == ["memory", "skill", "resource"]
+    assert captured["allowed_context_types"] == ["memory", "skill", "resource"]
+    assert captured["allowed_resource_record_ids"] == ["tool:content"]
+    assert captured["allowed_skill_record_ids"] == ["skill:tmux"]
+    assert "semantic block" in enriched[0]["content"]
 
 
 def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context() -> None:

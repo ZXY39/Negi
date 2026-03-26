@@ -1232,6 +1232,24 @@ class G3kuHybridStore(BaseStore):
             start = max(offset, 0)
             return out[start : start + max(limit, 1)]
 
+    def search_context_v2_dense(
+        self,
+        namespace_prefix: tuple[str, ...] | None,
+        *,
+        query: str | None,
+        limit: int = 8,
+        context_type: ContextType | None = None,
+    ) -> list[tuple[ContextRecordV2, float]]:
+        with self._lock:
+            if not query:
+                return []
+            return self._search_context_v2_dense(
+                namespace_prefix=namespace_prefix,
+                query=str(query or ""),
+                context_type=context_type,
+                limit=max(limit, 1),
+            )[: max(limit, 1)]
+
     def list_context_v2(
         self,
         namespace_prefix: tuple[str, ...] | None = None,
@@ -1580,6 +1598,23 @@ class _RagMemoryBackend:
 
     async def fetch_context_record(self, *, namespace: tuple[str, ...], record_id: str) -> ContextRecordV2 | None:
         return await asyncio.to_thread(self.store._fetch_context_v2, namespace, record_id)
+
+    async def semantic_search_context_records(
+        self,
+        *,
+        namespace_prefix: tuple[str, ...] | None = None,
+        query: str,
+        limit: int = 8,
+        context_type: ContextType | None = None,
+    ) -> list[ContextRecordV2]:
+        rows = await asyncio.to_thread(
+            self.store.search_context_v2_dense,
+            namespace_prefix,
+            query=str(query or ""),
+            limit=max(limit, 1),
+            context_type=context_type,
+        )
+        return [record for record, _score in rows]
 
     async def sync_catalog(
         self,
@@ -3666,6 +3701,28 @@ class MemoryManager:
             return []
         try:
             return await backend.list_context_records(namespace_prefix=namespace_prefix, limit=limit, offset=offset)
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+            return []
+
+    async def semantic_search_context_records(
+        self,
+        *,
+        namespace_prefix: tuple[str, ...] | None = None,
+        query: str,
+        limit: int = 8,
+        context_type: ContextType | None = None,
+    ) -> list[ContextRecordV2]:
+        backend = await self._ensure_backend()
+        if backend is None:
+            return []
+        try:
+            return await backend.semantic_search_context_records(
+                namespace_prefix=namespace_prefix,
+                query=query,
+                limit=limit,
+                context_type=context_type,
+            )
         except Exception as exc:
             self._mark_backend_failure(exc)
             return []

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
 from g3ku.runtime.context.summarizer import estimate_tokens, score_query, truncate_by_tokens
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.core_tools import resolve_core_tool_targets
@@ -31,7 +32,6 @@ class ContextAssemblyService:
     RESOURCE_RETRIEVAL_HINTS: tuple[str, ...] = ('tool', 'api', 'usage', 'install', 'update', 'load_tool_context')
     TARGETED_RETRIEVAL_SCORE_THRESHOLD: float = 2.0
     RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("wait_tool_execution", "stop_tool_execution")
-
     def __init__(self, *, loop, prompt_builder) -> None:
         self._loop = loop
         self._prompt_builder = prompt_builder
@@ -66,15 +66,24 @@ class ContextAssemblyService:
 
         visible_skills = list(exposure.get('skills') or [])
         visible_families = list(exposure.get('tool_families') or [])
+        semantic_frontdoor = await semantic_catalog_rankings(
+            memory_manager=memory_manager,
+            query_text=query_text,
+            visible_skills=visible_skills,
+            visible_families=visible_families,
+            skill_limit=max(inventory_top_k * 4, len(visible_skills), inventory_top_k, 8),
+            tool_limit=max(extension_top_k * 4, len(visible_families), extension_top_k, 8),
+        )
         selected_skills, skill_trace = self._select_skills(
             visible_skills=visible_skills,
             top_k=inventory_top_k,
             token_budget=inventory_budget,
+            ranked_skill_ids=semantic_frontdoor['skill_ids'],
         )
-        retrieval_scope = self._plan_retrieval_scope(
-            query_text=query_text,
+        retrieval_scope = plan_retrieval_scope(
             visible_skills=visible_skills,
             visible_families=visible_families,
+            semantic_frontdoor=semantic_frontdoor,
         )
         prompt_skills = list(selected_skills)
         system_prompt = self._prompt_builder.build(skills=prompt_skills)
@@ -125,6 +134,7 @@ class ContextAssemblyService:
             visible_families=visible_families,
             core_tools=core_tools,
             extension_top_k=extension_top_k,
+            ranked_tool_ids=semantic_frontdoor['tool_ids'],
         )
 
         frontdoor_context: dict[str, Any] = {}
@@ -159,6 +169,7 @@ class ContextAssemblyService:
             'query': query_text,
             'selected_skills': skill_trace,
             'selected_tools': tool_trace,
+            'semantic_frontdoor': semantic_frontdoor['trace'],
             'external_tools': external_trace,
             'archive_summaries': archive_trace,
             'frontdoor_context': {
@@ -168,6 +179,7 @@ class ContextAssemblyService:
                 'has_summary': bool(str(frontdoor_context.get('summary_text') or '').strip()),
             },
             'retrieval_scope': {
+                'mode': str(retrieval_scope.get('mode') or ''),
                 'search_context_types': list(retrieval_scope['search_context_types']),
                 'allowed_context_types': list(retrieval_scope['allowed_context_types']),
                 'allowed_resource_record_ids': list(retrieval_scope['allowed_resource_record_ids']),
@@ -200,89 +212,47 @@ class ContextAssemblyService:
             trace=trace,
         )
 
-    def _plan_retrieval_scope(
-        self,
-        *,
-        query_text: str,
-        visible_skills: list[Any],
-        visible_families: list[Any],
-    ) -> dict[str, list[str]]:
-        query_lower = str(query_text or '').strip().lower()
-        targeted_skill_ids: list[str] = []
-        targeted_tool_ids: list[str] = []
-
-        for item in list(visible_skills or []):
-            skill_id = str(getattr(item, 'skill_id', '') or '').strip()
-            if not skill_id:
-                continue
-            display_name = str(getattr(item, 'display_name', '') or '').strip()
-            score = score_query(
-                query_text,
-                getattr(item, 'description', ''),
-            )
-            if skill_id.lower() in query_lower or (display_name and display_name.lower() in query_lower) or score >= self.TARGETED_RETRIEVAL_SCORE_THRESHOLD:
-                targeted_skill_ids.append(skill_id)
-
-        for family in list(visible_families or []):
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            if not tool_id:
-                continue
-            display_name = str(getattr(family, 'display_name', '') or '').strip()
-            executor_names: list[str] = []
-            for action in list(getattr(family, 'actions', []) or []):
-                executor_names.extend(
-                    str(name or '').strip()
-                    for name in list(getattr(action, 'executor_names', []) or [])
-                    if str(name or '').strip()
-                )
-            score = score_query(
-                query_text,
-                getattr(family, 'description', ''),
-                ' '.join(executor_names),
-            )
-            if tool_id.lower() in query_lower or (display_name and display_name.lower() in query_lower) or score >= self.TARGETED_RETRIEVAL_SCORE_THRESHOLD:
-                targeted_tool_ids.append(tool_id)
-
-        if not targeted_skill_ids and any(hint.lower() in query_lower for hint in self.SKILL_RETRIEVAL_HINTS):
-            targeted_skill_ids = [
-                str(getattr(item, 'skill_id', '') or '').strip()
-                for item in list(visible_skills or [])
-                if str(getattr(item, 'skill_id', '') or '').strip()
-            ][:3]
-        if not targeted_tool_ids and any(hint.lower() in query_lower for hint in self.RESOURCE_RETRIEVAL_HINTS):
-            targeted_tool_ids = [
-                str(getattr(item, 'tool_id', '') or '').strip()
-                for item in list(visible_families or [])
-                if str(getattr(item, 'tool_id', '') or '').strip()
-            ][:3]
-
-        targeted_skill_ids = sorted(set(targeted_skill_ids))
-        targeted_tool_ids = sorted(set(targeted_tool_ids))
-
-        search_context_types = ['memory']
-        if targeted_skill_ids:
-            search_context_types.append('skill')
-        if targeted_tool_ids:
-            search_context_types.append('resource')
-
-        return {
-            'search_context_types': search_context_types,
-            'allowed_context_types': list(search_context_types),
-            'allowed_resource_record_ids': [f'tool:{item}' for item in targeted_tool_ids] if targeted_tool_ids else [],
-            'allowed_skill_record_ids': [f'skill:{item}' for item in targeted_skill_ids] if targeted_skill_ids else [],
-        }
-
     def _select_skills(
         self,
         *,
         visible_skills: list[Any],
         top_k: int,
         token_budget: int,
+        ranked_skill_ids: list[str] | None = None,
     ) -> tuple[list[Any], list[dict[str, Any]]]:
+        ordered_skills = list(visible_skills or [])
+        if ranked_skill_ids is not None:
+            skill_map = {
+                str(getattr(item, 'skill_id', '') or '').strip(): item
+                for item in list(visible_skills or [])
+                if str(getattr(item, 'skill_id', '') or '').strip()
+            }
+            ranked: list[Any] = []
+            seen: set[str] = set()
+            for skill_id in list(ranked_skill_ids or []):
+                item = skill_map.get(str(skill_id or '').strip())
+                if item is None:
+                    continue
+                normalized = str(getattr(item, 'skill_id', '') or '').strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                ranked.append(item)
+            ordered_skills = ranked + [
+                item
+                for item in list(visible_skills or [])
+                if str(getattr(item, 'skill_id', '') or '').strip() not in seen
+            ]
+
         selected: list[Any] = []
         trace: list[dict[str, Any]] = []
         used_tokens = 0
-        for item in list(visible_skills or []):
+        semantic_rank_map = {
+            str(skill_id or '').strip(): index + 1
+            for index, skill_id in enumerate(list(ranked_skill_ids or []))
+            if str(skill_id or '').strip()
+        }
+        for item in ordered_skills:
             line = f"- {getattr(item, 'skill_id', '')}: {getattr(item, 'description', '') or getattr(item, 'display_name', '')}"
             line_tokens = estimate_tokens(line)
             if len(selected) >= top_k:
@@ -295,11 +265,19 @@ class ContextAssemblyService:
                 {
                     'skill_id': getattr(item, 'skill_id', ''),
                     'tokens': line_tokens,
+                    'semantic_rank': semantic_rank_map.get(str(getattr(item, 'skill_id', '') or '').strip()),
                 }
             )
         if not selected:
-            selected = list(visible_skills or [])[:top_k]
-            trace = [{'skill_id': getattr(item, 'skill_id', ''), 'tokens': 0} for item in selected]
+            selected = ordered_skills[:top_k]
+            trace = [
+                {
+                    'skill_id': getattr(item, 'skill_id', ''),
+                    'tokens': 0,
+                    'semantic_rank': semantic_rank_map.get(str(getattr(item, 'skill_id', '') or '').strip()),
+                }
+                for item in selected
+            ]
         return selected, trace
 
     def _build_external_tool_block(
@@ -474,6 +452,7 @@ class ContextAssemblyService:
         visible_families: list[Any],
         core_tools: set[str],
         extension_top_k: int,
+        ranked_tool_ids: list[str] | None = None,
     ) -> tuple[list[str], dict[str, Any]]:
         visible_set = {str(name).strip() for name in visible_names if str(name).strip()}
         if not visible_set:
@@ -490,6 +469,59 @@ class ContextAssemblyService:
         if extension_top_k <= 0:
             ordered = reserved + [name for name in visible_names if name in selected]
             return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': []}
+
+        if ranked_tool_ids is not None:
+            family_map = {
+                str(getattr(family, 'tool_id', '') or '').strip(): family
+                for family in list(visible_families or [])
+                if str(getattr(family, 'tool_id', '') or '').strip()
+            }
+            picked_extension: list[str] = []
+            for tool_id in list(ranked_tool_ids or []):
+                family = family_map.get(str(tool_id or '').strip())
+                if family is None:
+                    continue
+                family_names = []
+                for action in list(getattr(family, 'actions', []) or []):
+                    for executor_name in list(getattr(action, 'executor_names', []) or []):
+                        name = str(executor_name or '').strip()
+                        if (
+                            name
+                            and name in visible_set
+                            and name not in core_resolution.executor_names
+                            and name not in raw_core_entries
+                            and name not in reserved_set
+                        ):
+                            family_names.append(name)
+                for name in sorted(set(family_names)):
+                    if name in selected or name in picked_extension:
+                        continue
+                    picked_extension.append(name)
+                    if len(picked_extension) >= extension_top_k:
+                        break
+                if len(picked_extension) >= extension_top_k:
+                    break
+
+            if len(picked_extension) < extension_top_k:
+                for name in visible_names:
+                    normalized = str(name or '').strip()
+                    if (
+                        normalized
+                        and normalized in visible_set
+                        and normalized not in selected
+                        and normalized not in picked_extension
+                        and normalized not in reserved_set
+                    ):
+                        picked_extension.append(normalized)
+                        if len(picked_extension) >= extension_top_k:
+                            break
+
+            ordered = (
+                reserved
+                + [name for name in visible_names if name in selected]
+                + [name for name in visible_names if name in picked_extension]
+            )
+            return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': picked_extension}
 
         ext_scored: list[tuple[float, list[str], str]] = []
         for family in visible_families:

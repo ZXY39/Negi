@@ -19,6 +19,10 @@ const CEO_TOOL_OUTPUT_PREVIEW_MAX_CHARS = 240;
 const CEO_TOOL_PROGRESS_MAX_LINES = 4;
 const CEO_TOOL_STEP_MAX = 5;
 const TASK_DETAIL_SESSION_KEY = "g3ku.task-detail.session.v1";
+const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v1";
+const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
+const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
+const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -57,10 +61,13 @@ const S = {
     ceoSessionMessageCounts: {},
     ceoSessionHydrated: false,
     ceoScrollToLatestOnSnapshot: false,
+    ceoSnapshotCache: {},
+    ceoSnapshotPersistId: null,
     ceoCatalogRefreshId: null,
     liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
+    ceoSessionSwitchToken: 0,
     taskDefaults: {
         scope: "global",
         maxDepth: 1,
@@ -728,6 +735,281 @@ function removeSessionJson(key) {
     try {
         window.sessionStorage?.removeItem?.(key);
     } catch {}
+}
+
+function cloneCeoSnapshotAttachments(items = []) {
+    return normalizeUploadList(items).map((item) => {
+        const next = { path: String(item?.path || "").trim() };
+        const name = String(item?.name || "").trim();
+        const mimeType = String(item?.mime_type || "").trim();
+        const kind = String(item?.kind || "").trim();
+        const size = Number(item?.size);
+        if (name) next.name = name;
+        if (mimeType) next.mime_type = mimeType;
+        if (kind) next.kind = kind;
+        if (Number.isFinite(size) && size > 0) next.size = size;
+        return next;
+    }).filter((item) => item.path);
+}
+
+function normalizeCeoSnapshotToolEvent(event = {}) {
+    if (!event || typeof event !== "object") return null;
+    const next = {};
+    ["status", "tool_name", "text", "timestamp", "tool_call_id", "kind"].forEach((key) => {
+        const value = String(event?.[key] || "").trim();
+        if (value) next[key] = value;
+    });
+    ["is_error", "is_update"].forEach((key) => {
+        if (typeof event?.[key] === "boolean") next[key] = event[key];
+    });
+    const elapsedSeconds = Number(event?.elapsed_seconds);
+    if (Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0) next.elapsed_seconds = elapsedSeconds;
+    return Object.keys(next).length ? next : null;
+}
+
+function normalizeCeoSnapshotMessage(message = {}) {
+    if (!message || typeof message !== "object") return null;
+    const role = String(message?.role || "").trim().toLowerCase();
+    if (!["user", "assistant", "system"].includes(role)) return null;
+    const next = {
+        role,
+        content: String(message?.content || ""),
+    };
+    const timestamp = String(message?.timestamp || "").trim();
+    if (timestamp) next.timestamp = timestamp;
+    const attachments = role === "user" ? cloneCeoSnapshotAttachments(message?.attachments) : [];
+    if (attachments.length) next.attachments = attachments;
+    if (role === "assistant") {
+        const toolEvents = (Array.isArray(message?.tool_events) ? message.tool_events : [])
+            .map((item) => normalizeCeoSnapshotToolEvent(item))
+            .filter(Boolean)
+            .slice(-CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT);
+        const interactionTrace = normalizeCeoInteractionTrace(message?.interaction_trace);
+        if (toolEvents.length) next.tool_events = toolEvents;
+        if (interactionTrace) next.interaction_trace = interactionTrace;
+        if (!String(next.content || "").trim() && !toolEvents.length && !interactionTrace) return null;
+        return next;
+    }
+    if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
+    if (role === "system" && !String(next.content || "").trim()) return null;
+    return next;
+}
+
+function normalizeCeoSnapshotStage(stage = null) {
+    if (!stage || typeof stage !== "object") return null;
+    const next = {};
+    const stageGoal = String(stage?.stage_goal || "").trim();
+    const stageStatus = String(stage?.status || "").trim();
+    const roundsUsed = Number(stage?.tool_rounds_used);
+    const roundBudget = Number(stage?.tool_round_budget);
+    if (stageGoal) next.stage_goal = stageGoal;
+    if (stageStatus) next.status = stageStatus;
+    if (Number.isFinite(roundsUsed) && roundsUsed >= 0) next.tool_rounds_used = roundsUsed;
+    if (Number.isFinite(roundBudget) && roundBudget >= 0) next.tool_round_budget = roundBudget;
+    return Object.keys(next).length ? next : null;
+}
+
+function normalizeCeoSnapshotInflight(snapshot = null) {
+    if (!snapshot || typeof snapshot !== "object") return null;
+    const next = {};
+    const source = String(snapshot?.source || "").trim().toLowerCase();
+    const status = String(snapshot?.status || "").trim().toLowerCase();
+    const assistantText = String(snapshot?.assistant_text || "");
+    if (source) next.source = source;
+    if (status) next.status = status;
+    if (assistantText.trim()) next.assistant_text = assistantText;
+    const userMessage = snapshot?.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
+    if (userMessage) {
+        const content = String(userMessage?.content || "");
+        const attachments = cloneCeoSnapshotAttachments(userMessage?.attachments);
+        if (content.trim() || attachments.length) {
+            next.user_message = { content };
+            if (attachments.length) next.user_message.attachments = attachments;
+        }
+    }
+    const toolEvents = (Array.isArray(snapshot?.tool_events) ? snapshot.tool_events : [])
+        .map((item) => normalizeCeoSnapshotToolEvent(item))
+        .filter(Boolean)
+        .slice(-CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT);
+    const interactionTrace = normalizeCeoInteractionTrace(snapshot?.interaction_trace);
+    const stage = normalizeCeoSnapshotStage(snapshot?.stage);
+    const errorMessage = String(snapshot?.last_error?.message || "").trim();
+    if (toolEvents.length) next.tool_events = toolEvents;
+    if (interactionTrace) next.interaction_trace = interactionTrace;
+    if (stage) next.stage = stage;
+    if (errorMessage) next.last_error = { message: errorMessage };
+    if (!ceoInflightTurnHasVisibleAssistantState(next) && !next.user_message) return null;
+    return next;
+}
+
+function trimCeoSessionSnapshotMessages(messages = []) {
+    const normalized = (Array.isArray(messages) ? messages : [])
+        .map((item) => normalizeCeoSnapshotMessage(item))
+        .filter(Boolean);
+    return normalized.slice(-CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT);
+}
+
+function normalizeCeoSessionSnapshotCacheEntry(sessionId, entry = {}) {
+    const key = String(sessionId || entry?.session_id || "").trim();
+    if (!key) return null;
+    const messages = trimCeoSessionSnapshotMessages(entry?.messages);
+    const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+    if (!messages.length && !inflightTurn) return null;
+    const next = {
+        session_id: key,
+        messages,
+        cached_at: String(entry?.cached_at || "").trim() || new Date().toISOString(),
+    };
+    if (inflightTurn) next.inflight_turn = inflightTurn;
+    const messageCount = Number(entry?.message_count);
+    if (Number.isFinite(messageCount) && messageCount >= 0) next.message_count = Math.floor(messageCount);
+    const updatedAt = String(entry?.updated_at || "").trim();
+    if (updatedAt) next.updated_at = updatedAt;
+    return next;
+}
+
+function cloneCeoSessionSnapshotCacheEntry(entry = null) {
+    if (!entry || typeof entry !== "object") return null;
+    return normalizeCeoSessionSnapshotCacheEntry(entry.session_id, entry);
+}
+
+function pruneCeoSessionSnapshotCache(cache = {}) {
+    const items = Object.values(cache || {})
+        .map((entry) => cloneCeoSessionSnapshotCacheEntry(entry))
+        .filter(Boolean)
+        .sort((left, right) => String(right?.cached_at || "").localeCompare(String(left?.cached_at || "")))
+        .slice(0, CEO_SESSION_SNAPSHOT_CACHE_LIMIT);
+    return items.reduce((acc, entry) => {
+        acc[entry.session_id] = entry;
+        return acc;
+    }, {});
+}
+
+function persistCeoSessionSnapshotCache() {
+    const items = Object.values(pruneCeoSessionSnapshotCache(S.ceoSnapshotCache || {}));
+    if (!items.length) {
+        removeSessionJson(CEO_SESSION_SNAPSHOT_CACHE_KEY);
+        return;
+    }
+    writeSessionJson(CEO_SESSION_SNAPSHOT_CACHE_KEY, { items });
+}
+
+function schedulePersistCeoSessionSnapshotCache() {
+    if (S.ceoSnapshotPersistId) window.clearTimeout(S.ceoSnapshotPersistId);
+    S.ceoSnapshotPersistId = window.setTimeout(() => {
+        S.ceoSnapshotPersistId = null;
+        persistCeoSessionSnapshotCache();
+    }, 160);
+}
+
+function flushCeoSessionSnapshotCachePersist() {
+    if (S.ceoSnapshotPersistId) {
+        window.clearTimeout(S.ceoSnapshotPersistId);
+        S.ceoSnapshotPersistId = null;
+    }
+    persistCeoSessionSnapshotCache();
+}
+
+function hydrateCeoSessionSnapshotCache() {
+    const raw = readSessionJson(CEO_SESSION_SNAPSHOT_CACHE_KEY);
+    const items = Array.isArray(raw?.items) ? raw.items : (Array.isArray(raw) ? raw : []);
+    const next = {};
+    items.forEach((entry) => {
+        const normalized = normalizeCeoSessionSnapshotCacheEntry(entry?.session_id, entry);
+        if (!normalized) return;
+        next[normalized.session_id] = normalized;
+    });
+    S.ceoSnapshotCache = pruneCeoSessionSnapshotCache(next);
+}
+
+function getCeoSessionSnapshotCache(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key) return null;
+    return cloneCeoSessionSnapshotCacheEntry(S.ceoSnapshotCache?.[key] || null);
+}
+
+function setCeoSessionSnapshotCache(sessionId, entry = {}) {
+    const key = String(sessionId || entry?.session_id || "").trim();
+    if (!key) return null;
+    const previous = S.ceoSnapshotCache?.[key] && typeof S.ceoSnapshotCache[key] === "object"
+        ? S.ceoSnapshotCache[key]
+        : {};
+    const normalized = normalizeCeoSessionSnapshotCacheEntry(key, {
+        ...previous,
+        ...(entry && typeof entry === "object" ? entry : {}),
+        session_id: key,
+        cached_at: new Date().toISOString(),
+    });
+    if (!normalized) {
+        clearCeoSessionSnapshotCache(key);
+        return null;
+    }
+    S.ceoSnapshotCache = pruneCeoSessionSnapshotCache({
+        ...(S.ceoSnapshotCache || {}),
+        [key]: normalized,
+    });
+    schedulePersistCeoSessionSnapshotCache();
+    return cloneCeoSessionSnapshotCacheEntry(normalized);
+}
+
+function patchCeoSessionSnapshotCache(sessionId, updater) {
+    if (typeof updater !== "function") return null;
+    const key = String(sessionId || "").trim();
+    if (!key) return null;
+    const current = getCeoSessionSnapshotCache(key);
+    const next = updater(current);
+    if (next === null) {
+        clearCeoSessionSnapshotCache(key);
+        return null;
+    }
+    return setCeoSessionSnapshotCache(key, {
+        ...(next && typeof next === "object" ? next : {}),
+        session_id: key,
+    });
+}
+
+function clearCeoSessionSnapshotCache(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key || !S.ceoSnapshotCache?.[key]) return false;
+    const next = { ...(S.ceoSnapshotCache || {}) };
+    delete next[key];
+    S.ceoSnapshotCache = pruneCeoSessionSnapshotCache(next);
+    schedulePersistCeoSessionSnapshotCache();
+    return true;
+}
+
+function appendCeoSessionSnapshotMessage(messages = [], message = null) {
+    const nextMessage = normalizeCeoSnapshotMessage(message);
+    const next = trimCeoSessionSnapshotMessages(messages);
+    if (!nextMessage) return next;
+    const previous = next[next.length - 1] || null;
+    const sameAttachments = JSON.stringify(previous?.attachments || []) === JSON.stringify(nextMessage.attachments || []);
+    if (
+        previous
+        && previous.role === nextMessage.role
+        && String(previous.content || "") === String(nextMessage.content || "")
+        && sameAttachments
+    ) {
+        if (nextMessage.tool_events) previous.tool_events = nextMessage.tool_events;
+        if (nextMessage.interaction_trace) previous.interaction_trace = nextMessage.interaction_trace;
+        return trimCeoSessionSnapshotMessages(next);
+    }
+    next.push(nextMessage);
+    return trimCeoSessionSnapshotMessages(next);
+}
+
+function renderCeoSessionLoadingState(sessionId, session = null) {
+    resetCeoFeed();
+    const title = String(session?.title || session?.channel_id || sessionId || "conversation").trim() || "conversation";
+    addMsg(`Loading ${title}...`, "system", { scrollMode: "bottom" });
+}
+
+function renderCeoSessionSnapshotFromCache(sessionId, { scrollToLatest = true } = {}) {
+    const entry = getCeoSessionSnapshotCache(sessionId);
+    if (!entry) return false;
+    if (scrollToLatest) S.ceoScrollToLatestOnSnapshot = true;
+    renderCeoSnapshot(entry.messages || [], entry.inflight_turn || null);
+    return true;
 }
 
 function isTaskDetailsViewActive() {
@@ -1725,6 +2007,17 @@ function handleCeoControlAck(payload = {}) {
     S.ceoTurnActive = false;
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     finalizePausedCeoTurn();
+    patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
+        const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+        if (!inflightTurn) return entry || {};
+        return {
+            ...(entry || {}),
+            inflight_turn: {
+                ...inflightTurn,
+                status: "paused",
+            },
+        };
+    });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
 }
@@ -1951,6 +2244,10 @@ function renderCeoSnapshot(messages = [], inflightTurn = null) {
     });
     restoreCeoInflightTurn(inflightTurn);
     if (shouldScrollToLatest) scrollCeoFeedToBottom();
+    setCeoSessionSnapshotCache(activeSessionId(), {
+        messages,
+        inflight_turn: inflightTurn,
+    });
 }
 
 function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
@@ -2150,6 +2447,7 @@ function patchCeoInflightTurn(snapshot = null) {
         turn.flowEl.open = hasTrace;
         icons();
     }, { scrollMode: "preserve" });
+    setCeoSessionSnapshotCache(activeSessionId(), { inflight_turn: snapshot });
     return true;
 }
 
@@ -2232,11 +2530,18 @@ function pullActiveCeoTurn(source = null) {
 function discardActiveCeoTurn({ source = "" } = {}) {
     const turn = pullActiveCeoTurn(source);
     if (!turn) return false;
-    return mutateCeoFeed(() => {
+    const discarded = mutateCeoFeed(() => {
         turn.finalized = true;
         turn.el?.remove?.();
         return true;
     }, { scrollMode: "preserve" });
+    if (discarded) {
+        patchCeoSessionSnapshotCache(activeSessionId(), (entry) => ({
+            ...(entry || {}),
+            inflight_turn: null,
+        }));
+    }
+    return discarded;
 }
 
 function hasRunningCeoToolStep(turn) {
@@ -2768,15 +3073,28 @@ function appendCeoToolEvent(event = {}) {
 }
 
 function finalizeCeoTurn(text, meta = {}) {
+    const sessionId = activeSessionId();
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
-    if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
+    if (patchCeoSessionRuntimeState(sessionId, false)) renderCeoSessions();
     syncCeoPrimaryButton();
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const turn = pullActiveCeoTurn(normalizedSource);
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
         discardPendingCeoTurns({ force: normalizedSource === "heartbeat" });
+        patchCeoSessionSnapshotCache(sessionId, (entry) => {
+            const messages = appendCeoSessionSnapshotMessage(entry?.messages, {
+                role: "assistant",
+                content: String(text || "").trim() || "Done.",
+                interaction_trace: meta?.interaction_trace || null,
+            });
+            return {
+                ...(entry || {}),
+                messages,
+                inflight_turn: null,
+            };
+        });
         return;
     }
     mutateCeoFeed(() => {
@@ -2802,6 +3120,29 @@ function finalizeCeoTurn(text, meta = {}) {
         icons();
     }, { scrollMode: "preserve" });
     discardPendingCeoTurns({ force: normalizedSource === "heartbeat" });
+    patchCeoSessionSnapshotCache(sessionId, (entry) => {
+        const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+        let messages = trimCeoSessionSnapshotMessages(entry?.messages);
+        const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
+        if (inflightTurn?.user_message && inflightSource === normalizedSource) {
+            messages = appendCeoSessionSnapshotMessage(messages, {
+                role: "user",
+                content: String(inflightTurn.user_message?.content || ""),
+                attachments: inflightTurn.user_message?.attachments || [],
+            });
+        }
+        messages = appendCeoSessionSnapshotMessage(messages, {
+            role: "assistant",
+            content: String(text || "").trim() || "Done.",
+            tool_events: inflightTurn?.tool_events || [],
+            interaction_trace: meta?.interaction_trace || inflightTurn?.interaction_trace || null,
+        });
+        return {
+            ...(entry || {}),
+            messages,
+            inflight_turn: null,
+        };
+    });
 }
 
 function addNotice(notice, _bump = true) {
@@ -4554,6 +4895,31 @@ function applyCeoSessionPatch(payload = {}) {
     renderCeoSessions();
 }
 
+function applyOptimisticCeoSessionSwitch(sessionId, session = null) {
+    const targetId = String(sessionId || "").trim();
+    const previousActiveId = activeSessionId();
+    if (!targetId || targetId === previousActiveId) {
+        return { previousActiveId, switched: false, renderedFromCache: false };
+    }
+    closeCeoWs();
+    S.activeSessionId = targetId;
+    S.activeSessionFamily = String(
+        session?.session_family
+        || (isChannelSessionItem(session) || targetId.startsWith("china:") ? "channel" : "local")
+    ).trim() || "local";
+    S.ceoSessionTab = S.activeSessionFamily === "channel" ? "channel" : "local";
+    ApiClient.setActiveSessionId(targetId);
+    resetCeoComposerForSessionChange(previousActiveId, targetId);
+    resetCeoSessionState({ scrollToLatest: true });
+    const renderedFromCache = renderCeoSessionSnapshotFromCache(targetId, { scrollToLatest: true });
+    if (!renderedFromCache) renderCeoSessionLoadingState(targetId, session);
+    renderCeoSessions();
+    syncCeoComposerReadonlyState();
+    syncCeoSessionActions();
+    syncCeoPrimaryButton();
+    return { previousActiveId, switched: true, renderedFromCache };
+}
+
 async function refreshCeoSessions({ reconnect = false, background = false } = {}) {
     if (!background) {
         S.ceoSessionBusy = true;
@@ -4583,22 +4949,31 @@ async function activateCeoSession(sessionId) {
     }
     const targetSession = S.ceoSessions.find((item) => String(item?.session_id || "") === targetId) || null;
     if (targetSession) markCeoSessionRead(targetId, { messageCount: sessionMessageCount(targetSession) });
+    const switchToken = ++S.ceoSessionSwitchToken;
     S.ceoSessionBusy = true;
-    renderCeoSessions();
-    syncCeoPrimaryButton();
-    try {
-        const payload = await ApiClient.activateCeoSession(targetId);
-        const nextActiveId = applyCeoSessionsPayload(payload);
-        closeCeoWs();
-        resetCeoComposerState();
-        resetCeoSessionState({ scrollToLatest: true });
-        if (nextActiveId) initCeoWs();
-    } catch (e) {
-        showToast({ title: "切换失败", text: e.message || "Unknown error", kind: "error" });
-    } finally {
+    const { previousActiveId, switched } = applyOptimisticCeoSessionSwitch(targetId, targetSession);
+    if (!switched) {
         S.ceoSessionBusy = false;
         renderCeoSessions();
         syncCeoPrimaryButton();
+        return;
+    }
+    initCeoWs();
+    try {
+        const payload = await ApiClient.activateCeoSession(targetId);
+        if (switchToken !== S.ceoSessionSwitchToken || activeSessionId() !== targetId) return;
+        applyCeoSessionsPayload(payload, { preferLocalActive: true });
+    } catch (e) {
+        if (switchToken !== S.ceoSessionSwitchToken || activeSessionId() !== targetId) return;
+        if (e?.status === 404 && previousActiveId && previousActiveId !== targetId) {
+            showToast({ title: "切换失败", text: e.message || "Unknown error", kind: "error" });
+            const previousSession = (S.ceoSessions || []).find((item) => String(item?.session_id || "").trim() === previousActiveId) || null;
+            S.ceoSessionBusy = true;
+            applyOptimisticCeoSessionSwitch(previousActiveId, previousSession);
+            initCeoWs();
+            return;
+        }
+        void refreshCeoSessions({ background: true });
     }
 }
 
@@ -4716,6 +5091,7 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } 
     syncCeoPrimaryButton();
     try {
         const payload = await ApiClient.deleteCeoSession(targetId, { delete_task_records: !!deleteTaskRecords });
+        clearCeoSessionSnapshotCache(targetId);
         const nextActiveId = applyCeoSessionsPayload(payload);
         if (wasActive) {
             closeCeoWs();
@@ -4797,8 +5173,15 @@ function initCeoWs() {
     socket.sessionId = requestedSessionId;
     S.ceoWs = socket;
     S.ceoWs.onmessage = (ev) => {
+        if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
         const payload = JSON.parse(ev.data);
-        if (payload.type === "snapshot.ceo") renderCeoSnapshot(payload.data?.messages || [], payload.data?.inflight_turn || null);
+        if (payload.type === "snapshot.ceo") {
+            renderCeoSnapshot(payload.data?.messages || [], payload.data?.inflight_turn || null);
+            S.ceoSessionBusy = false;
+            renderCeoSessions();
+            syncCeoSessionActions();
+            syncCeoPrimaryButton();
+        }
         if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {}, payload.data || {});
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
         if (payload.type === "ceo.turn.patch") patchCeoInflightTurn(payload.data?.inflight_turn || null);
@@ -4821,6 +5204,9 @@ function initCeoWs() {
         if (token !== S.ceoWsToken) return;
         S.ceoWs = null;
         S.ceoPauseBusy = false;
+        S.ceoSessionBusy = false;
+        renderCeoSessions();
+        syncCeoSessionActions();
         syncCeoPrimaryButton();
         window.setTimeout(() => {
             if (token !== S.ceoWsToken) return;
@@ -4870,6 +5256,16 @@ function sendCeoMessage() {
         if (turn) S.ceoPendingTurns.push(turn);
         S.ceoTurnActive = true;
         S.ceoPauseBusy = false;
+        setCeoSessionSnapshotCache(activeSessionId(), {
+            inflight_turn: {
+                source: "user",
+                status: "running",
+                user_message: {
+                    content: text,
+                    attachments: uploads,
+                },
+            },
+        });
         if (patchCeoSessionRuntimeState(activeSessionId(), true)) renderCeoSessions();
         syncCeoSessionActions();
         syncCeoPrimaryButton();
@@ -5622,13 +6018,18 @@ function init() {
     enhanceResourceSelects();
     configureTaskDetailSections();
     bind();
+    hydrateCeoSessionSnapshotCache();
     syncCeoCatalogPolling();
     startLiveDurationTicker();
     window.addEventListener("beforeunload", () => {
+        flushCeoSessionSnapshotCachePersist();
         flushTaskDetailSessionPersist();
         stopLiveDurationTicker();
     });
-    window.addEventListener("pagehide", flushTaskDetailSessionPersist);
+    window.addEventListener("pagehide", () => {
+        flushCeoSessionSnapshotCachePersist();
+        flushTaskDetailSessionPersist();
+    });
     window.addEventListener("resize", refreshTaskDetailScrollRegions);
     bindTreePan();
     icons();

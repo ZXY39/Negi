@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
 
@@ -48,7 +48,7 @@ def test_ceo_prompt_builder_mentions_clawhub_skill_manager(monkeypatch) -> None:
     prompt = CeoPromptBuilder(loop=SimpleNamespace(workspace=r'D:\projects\G3KU')).build(skills=[])
 
     assert 'clawhub-skill-manager' in prompt
-    assert '搜索 skill / 下载 skill / 安装 skill / 更新 skill' in prompt
+    assert 'load_skill_context(skill_id="clawhub-skill-manager")' in prompt
 
 
 def test_node_runner_runtime_context_and_guidance_include_project_python(monkeypatch) -> None:

@@ -24,6 +24,7 @@ from g3ku.resources.models import ResourceKind
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
+from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from main.governance import (
     GovernanceStore,
@@ -2623,25 +2624,31 @@ class MainRuntimeService:
         channel = str(memory_scope.get('channel') or 'unknown')
         chat_id = str(memory_scope.get('chat_id') or 'unknown')
         actor_role = self._actor_role_for_node(node)
-        allowed_resource_record_ids = [
-            f"tool:{str(getattr(item, 'tool_id', '') or '').strip()}"
-            for item in list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
-            if str(getattr(item, 'tool_id', '') or '').strip()
-        ]
-        allowed_skill_record_ids = [
-            f"skill:{str(getattr(item, 'skill_id', '') or '').strip()}"
-            for item in list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
-            if str(getattr(item, 'skill_id', '') or '').strip()
-        ]
+        visible_families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
+        visible_skills = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
+        semantic_frontdoor = await semantic_catalog_rankings(
+            memory_manager=manager,
+            query_text=query_text,
+            visible_skills=visible_skills,
+            visible_families=visible_families,
+            skill_limit=max(8, len(visible_skills)),
+            tool_limit=max(8, len(visible_families)),
+        )
+        retrieval_scope = plan_retrieval_scope(
+            visible_skills=visible_skills,
+            visible_families=visible_families,
+            semantic_frontdoor=semantic_frontdoor,
+        )
         try:
             block = await manager.retrieve_block(
                 query=query_text,
                 session_key=session_key,
                 channel=channel,
                 chat_id=chat_id,
-                allowed_context_types=['memory', 'resource', 'skill'],
-                allowed_resource_record_ids=allowed_resource_record_ids,
-                allowed_skill_record_ids=allowed_skill_record_ids,
+                search_context_types=retrieval_scope['search_context_types'],
+                allowed_context_types=retrieval_scope['allowed_context_types'],
+                allowed_resource_record_ids=retrieval_scope['allowed_resource_record_ids'],
+                allowed_skill_record_ids=retrieval_scope['allowed_skill_record_ids'],
             )
         except Exception:
             return messages
