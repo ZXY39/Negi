@@ -42,9 +42,9 @@ ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE = (
     'verify that those identifiers actually appear in the cited file lines or a targeted reopened local slice. '
     'If the cited identifiers drift from the cited source, reject the deliverable with failed+final.'
 )
-CORE_REQUIREMENT_NOTICE_TEMPLATE = '注意：你正在完成的任务是核心需求【{core_requirement}】的细分任务之一，不要做与核心需求或细分任务无关的事。'
+CORE_REQUIREMENT_NOTICE_TEMPLATE = '注意：你正在完成的任务是核心需求【{core_requirement}】的细分任务之一，不要做与核心需求或以下细分任务无关的事。'
 CORE_REQUIREMENT_NOTICE_PATTERN = re.compile(
-    r'^注意：你正在完成的任务是核心需求【.*】的细分任务之一，不要做与核心需求或细分任务无关的事。$'
+    r'^注意：你正在完成的任务是核心需求【.*】的细分任务之一，不要做与核心需求或以下细分任务无关的事。$'
 )
 
 

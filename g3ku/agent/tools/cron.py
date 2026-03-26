@@ -3,6 +3,7 @@
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.cron.conditions import cron_schedule_requires_stop_condition
 from g3ku.cron.service import CronService
 from g3ku.cron.types import CronSchedule
 
@@ -26,7 +27,11 @@ class CronTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Schedule reminders and recurring tasks. Actions: add, list, remove."
+        return (
+            "Schedule reminders and recurring tasks. Actions: add, list, remove. "
+            "Recurring jobs must include stop_condition written as "
+            "'此任务的具体退出条件+或用户要求取消'."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -39,6 +44,13 @@ class CronTool(Tool):
                     "description": "Action to perform",
                 },
                 "message": {"type": "string", "description": "Reminder message (for add)"},
+                "stop_condition": {
+                    "type": "string",
+                    "description": (
+                        "Required for recurring jobs. Write the specific exit condition and include "
+                        "'或用户要求取消'."
+                    ),
+                },
                 "every_seconds": {
                     "type": "integer",
                     "description": "Interval in seconds (for recurring tasks)",
@@ -64,6 +76,7 @@ class CronTool(Tool):
         self,
         action: str,
         message: str = "",
+        stop_condition: str | None = None,
         every_seconds: int | None = None,
         cron_expr: str | None = None,
         tz: str | None = None,
@@ -72,8 +85,24 @@ class CronTool(Tool):
         **kwargs: Any,
     ) -> str:
         runtime_context = kwargs.get("__g3ku_runtime") if isinstance(kwargs.get("__g3ku_runtime"), dict) else {}
+        if bool(runtime_context.get("cron_internal")):
+            current_job_id = str(runtime_context.get("cron_job_id") or "").strip()
+            if action != "remove":
+                return "Error: cron-internal runs may only remove the current job when the stop condition is met"
+            if not current_job_id:
+                return "Error: cron-internal remove is unavailable because the current job_id is missing"
+            if str(job_id or "").strip() != current_job_id:
+                return f"Error: cron-internal runs may only remove the current job_id '{current_job_id}'"
         if action == "add":
-            return self._add_job(message, every_seconds, cron_expr, tz, at, runtime_context=runtime_context)
+            return self._add_job(
+                message,
+                stop_condition,
+                every_seconds,
+                cron_expr,
+                tz,
+                at,
+                runtime_context=runtime_context,
+            )
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
@@ -83,6 +112,7 @@ class CronTool(Tool):
     def _add_job(
         self,
         message: str,
+        stop_condition: str | None,
         every_seconds: int | None,
         cron_expr: str | None,
         tz: str | None,
@@ -120,16 +150,25 @@ class CronTool(Tool):
         else:
             return "Error: either every_seconds, cron_expr, or at is required"
 
-        job = self._cron.add_job(
-            name=message[:30],
-            schedule=schedule,
-            message=message,
-            deliver=True,
-            channel=self._channel,
-            to=self._chat_id,
-            session_key=str((runtime_context or {}).get("session_key") or "").strip() or None,
-            delete_after_run=delete_after,
-        )
+        if cron_schedule_requires_stop_condition(schedule) and not str(stop_condition or "").strip():
+            return (
+                "Error: stop_condition is required for recurring jobs and must describe "
+                "the specific exit condition plus '或用户要求取消'"
+            )
+        try:
+            job = self._cron.add_job(
+                name=message[:30],
+                schedule=schedule,
+                message=message,
+                deliver=True,
+                channel=self._channel,
+                to=self._chat_id,
+                session_key=str((runtime_context or {}).get("session_key") or "").strip() or None,
+                stop_condition=stop_condition,
+                delete_after_run=delete_after,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
         return f"Created job '{job.name}' (id: {job.id})"
 
     def _list_jobs(self) -> str:

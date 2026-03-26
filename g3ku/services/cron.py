@@ -10,6 +10,10 @@ from typing import Any, Callable, Coroutine
 
 from loguru import logger
 
+from g3ku.cron.conditions import (
+    cron_schedule_requires_stop_condition,
+    normalize_cron_stop_condition,
+)
 from g3ku.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
 
 
@@ -104,6 +108,7 @@ class CronService:
                         payload=CronPayload(
                             kind=j["payload"].get("kind", "agent_turn"),
                             message=j["payload"].get("message", ""),
+                            stop_condition=j["payload"].get("stopCondition"),
                             deliver=j["payload"].get("deliver", False),
                             channel=j["payload"].get("channel"),
                             to=j["payload"].get("to"),
@@ -155,6 +160,7 @@ class CronService:
                     "payload": {
                         "kind": j.payload.kind,
                         "message": j.payload.message,
+                        "stopCondition": j.payload.stop_condition,
                         "deliver": j.payload.deliver,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
@@ -316,12 +322,19 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         session_key: str | None = None,
+        stop_condition: str | None = None,
         delete_after_run: bool = False,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
         _validate_schedule_for_add(schedule)
         now = _now_ms()
+        normalized_stop_condition: str | None = None
+        raw_stop_condition = str(stop_condition or "").strip()
+        if cron_schedule_requires_stop_condition(schedule):
+            normalized_stop_condition = normalize_cron_stop_condition(raw_stop_condition)
+        elif raw_stop_condition:
+            normalized_stop_condition = normalize_cron_stop_condition(raw_stop_condition)
 
         job = CronJob(
             id=str(uuid.uuid4())[:8],
@@ -331,6 +344,7 @@ class CronService:
             payload=CronPayload(
                 kind="agent_turn",
                 message=message,
+                stop_condition=normalized_stop_condition,
                 deliver=deliver,
                 channel=channel,
                 to=to,

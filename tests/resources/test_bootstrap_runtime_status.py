@@ -185,3 +185,37 @@ async def test_refresh_web_agent_runtime_restarts_china_bridge_when_config_chang
     assert changed is True
     assert stop_calls == ['stopped']
     assert started_with == ['next']
+
+
+def test_bootstrap_exit_stops_runtime_before_requesting_server_shutdown(monkeypatch):
+    calls: list[str] = []
+
+    class _Security:
+        def is_unlocked(self) -> bool:
+            return True
+
+    async def _snapshot() -> dict[str, object]:
+        return {
+            "has_running_work": False,
+            "running_sessions": [],
+            "running_tasks": [],
+            "summary_text": "idle",
+        }
+
+    async def _shutdown_runtime() -> None:
+        calls.append("shutdown_runtime")
+
+    monkeypatch.setattr(bootstrap_rest, "_service", lambda: _Security())
+    monkeypatch.setattr(bootstrap_rest, "_running_work_snapshot", _snapshot)
+    monkeypatch.setattr(bootstrap_rest, "shutdown_web_runtime", _shutdown_runtime)
+    monkeypatch.setattr(
+        bootstrap_rest,
+        "request_server_shutdown",
+        lambda: calls.append("request_server_shutdown") or True,
+    )
+
+    client = TestClient(_build_app())
+    response = client.post("/bootstrap/exit", json={})
+
+    assert response.status_code == 200
+    assert calls == ["shutdown_runtime", "request_server_shutdown"]

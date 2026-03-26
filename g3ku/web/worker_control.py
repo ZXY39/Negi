@@ -12,6 +12,7 @@ from typing import Any
 from loguru import logger
 
 from g3ku.security import BOOTSTRAP_MASTER_KEY_ENV, get_bootstrap_security_service
+from g3ku.web.windows_job import assign_process_to_kill_on_close_job
 
 
 WEB_AUTO_WORKER_ENV = "G3KU_WEB_AUTO_WORKER"
@@ -89,6 +90,8 @@ def start_managed_task_worker() -> bool:
             popen_kwargs["creationflags"] = creationflags
 
         process = subprocess.Popen([sys.executable, "-m", "g3ku", "worker"], **popen_kwargs)
+        if os.name == "nt" and not assign_process_to_kill_on_close_job(process):
+            logger.debug("Managed task worker job-object binding skipped pid={}", getattr(process, "pid", None))
         _MANAGED_WORKER_PROCESS = process
 
     logger.info("Started managed task worker pid={} cwd={}", process.pid, Path.cwd())

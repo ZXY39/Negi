@@ -107,6 +107,35 @@ def _filesystem_tool(*, description: str) -> _FilesystemTool:
     return _FilesystemTool(description=description)
 
 
+class _CronTool(Tool):
+    @property
+    def name(self) -> str:
+        return 'cron'
+
+    @property
+    def description(self) -> str:
+        return 'Schedule reminders and recurring tasks.'
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            'type': 'object',
+            'properties': {
+                'action': {'type': 'string'},
+                'job_id': {'type': 'string'},
+            },
+            'required': ['action'],
+        }
+
+    async def execute(self, action: str, job_id: str | None = None, **kwargs) -> str:
+        _ = kwargs
+        return f'{action}:{job_id or ""}'
+
+
+def _cron_tool() -> _CronTool:
+    return _CronTool()
+
+
 def test_frontdoor_context_resolution_falls_back_then_uses_metadata() -> None:
     session = Session(key='web:shared')
     for turn_index in range(1, 7):
@@ -219,6 +248,31 @@ def test_extract_frontdoor_recent_history_preserves_heartbeat_and_compact_traces
         f'{web_ceo_sessions.TASK_META_PREFIX}\n'
         '{"reason":"task_terminal","source":"heartbeat","task_ids":["task:trace-1"]}'
     )
+
+
+def test_extract_frontdoor_recent_history_skips_internal_cron_user_prompts() -> None:
+    session = Session(key='web:shared')
+    _append_turn(session, 1)
+    session.add_message(
+        'user',
+        'internal cron prompt',
+        metadata={'cron_internal': True, 'cron_job_id': 'job-77'},
+    )
+    session.add_message(
+        'assistant',
+        'scheduled progress update',
+        metadata={'source': 'cron', 'cron_job_id': 'job-77'},
+    )
+    _append_turn(session, 2)
+
+    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(session, raw_tail_turns=2)
+    context = web_ceo_sessions.build_frontdoor_context(session, raw_tail_turns=1, route_kind='direct_reply')
+
+    contents = [item['content'] for item in recent_history]
+    assert 'internal cron prompt' not in contents
+    assert any(str(item).startswith('scheduled progress update') for item in contents)
+    assert 'internal cron prompt' not in context['summary_text']
+    assert context['summary_turn_count'] == 1
 
 
 @pytest.mark.asyncio
@@ -506,6 +560,75 @@ async def test_ceo_frontdoor_runner_binds_session_stable_prompt_cache_key(monkey
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_uses_cron_internal_system_message_and_cron_only_tools(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder([LLMResponse(content='done', finish_reason='stop')])
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([
+            _filesystem_tool(description='Read files from disk'),
+            _cron_tool(),
+        ]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem', 'cron']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem', 'cron'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    user_input = SimpleNamespace(
+        content='检查当前发布状态',
+        metadata={
+            'cron_internal': True,
+            'cron_job_id': 'job-77',
+            'cron_stop_condition': '发布完成后或用户要求取消',
+            'cron_stop_condition_explicit': True,
+        },
+    )
+
+    output = await runner.run_turn(user_input=user_input, session=session)
+
+    assert output == 'done'
+    tools = backend.calls[0]['tools']
+    assert [item['function']['name'] for item in tools] == ['cron']
+    messages = backend.calls[0]['messages']
+    assert messages[0] == {'role': 'system', 'content': 'SYSTEM PROMPT'}
+    assert messages[1]['role'] == 'system'
+    assert 'Current cron job id: job-77' in str(messages[1]['content'])
+    assert 'Exit condition: 发布完成后或用户要求取消' in str(messages[1]['content'])
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_exposes_ordinary_tools_before_first_stage(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
@@ -749,12 +872,24 @@ async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_co
                         name='capture_runtime',
                         arguments={'value': 'ok'},
                     )
-                ],
-                finish_reason='tool_calls',
-            ),
-            LLMResponse(content='done', finish_reason='stop'),
-        ]
-    )
+                    ],
+                    finish_reason='tool_calls',
+                ),
+                LLMResponse(content='done', finish_reason='stop'),
+                LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='stage-2',
+                            name='submit_next_stage',
+                            arguments={'stage_goal': 'finish runtime capture', 'tool_round_budget': 1},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                ),
+                LLMResponse(content='done', finish_reason='stop'),
+            ]
+        )
 
     monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
     monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
@@ -1058,12 +1193,24 @@ async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_co
                         name='capture_runtime',
                         arguments={'value': 'ok'},
                     )
-                ],
-                finish_reason='tool_calls',
-            ),
-            LLMResponse(content='done', finish_reason='stop'),
-        ]
-    )
+                    ],
+                    finish_reason='tool_calls',
+                ),
+                LLMResponse(content='done', finish_reason='stop'),
+                LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='stage-2',
+                            name='submit_next_stage',
+                            arguments={'stage_goal': 'finish runtime capture', 'tool_round_budget': 1},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                ),
+                LLMResponse(content='done', finish_reason='stop'),
+            ]
+        )
 
     monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
     monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)

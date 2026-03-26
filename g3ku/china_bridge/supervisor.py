@@ -11,6 +11,7 @@ from typing import Any
 from g3ku.china_bridge.client import ChinaBridgeClient
 from g3ku.china_bridge.models import ChinaBridgeState
 from g3ku.china_bridge.status import ChinaBridgeStatusStore
+from g3ku.web.windows_job import assign_process_to_kill_on_close_job
 
 
 class _BuildRetryPending(Exception):
@@ -162,6 +163,12 @@ class ChinaBridgeSupervisor:
             for path in src_root.rglob("*.ts"):
                 if path.is_file():
                     latest = max(latest, path.stat().st_mtime)
+        scripts_root = host_root / "scripts"
+        if scripts_root.exists():
+            for pattern in ("*.js", "*.mjs", "*.cjs"):
+                for path in scripts_root.rglob(pattern):
+                    if path.is_file():
+                        latest = max(latest, path.stat().st_mtime)
         return latest
 
     def _host_build_required(self) -> bool:
@@ -319,6 +326,8 @@ class ChinaBridgeSupervisor:
             stdout=stdout_handle,
             stderr=stderr_handle,
         )
+        if os.name == "nt":
+            assign_process_to_kill_on_close_job(self._process)
         self._write_state(running=True, built=True, pid=int(self._process.pid or 0))
 
     async def _on_client_state(self, connected: bool, reason: str) -> None:

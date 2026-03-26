@@ -171,9 +171,9 @@ class RuntimeAgentSession:
         attachments: list[dict[str, Any]] = []
         timestamp: str | None = None
         if isinstance(prompt, UserInputMessage):
-            metadata = dict(prompt.metadata or {})
-            if bool(metadata.get('heartbeat_internal')):
+            if self._internal_prompt_source(prompt) is not None:
                 return None
+            metadata = dict(prompt.metadata or {})
             raw_text = metadata.get("web_ceo_raw_text")
             text = str(raw_text) if isinstance(raw_text, str) else self._history_text(prompt.content)
             attachments = self._normalize_web_uploads(metadata.get("web_ceo_uploads"))
@@ -189,12 +189,19 @@ class RuntimeAgentSession:
             payload["timestamp"] = timestamp.strip()
         return payload
 
-    def _is_heartbeat_internal_prompt(self, prompt: Any | None = None) -> bool:
+    def _internal_prompt_source(self, prompt: Any | None = None) -> str | None:
         current = self._last_prompt if prompt is None else prompt
         if not isinstance(current, UserInputMessage):
-            return False
+            return None
         metadata = dict(current.metadata or {})
-        return bool(metadata.get("heartbeat_internal"))
+        if bool(metadata.get("heartbeat_internal")):
+            return "heartbeat"
+        if bool(metadata.get("cron_internal")):
+            return "cron"
+        return None
+
+    def _is_heartbeat_internal_prompt(self, prompt: Any | None = None) -> bool:
+        return self._internal_prompt_source(prompt) == "heartbeat"
 
     def _interaction_flow_snapshot(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -282,10 +289,9 @@ class RuntimeAgentSession:
             "tool_events": self._interaction_flow_snapshot(),
         }
         prompt = self._last_prompt
-        if isinstance(prompt, UserInputMessage):
-            metadata = dict(prompt.metadata or {})
-            if bool(metadata.get("heartbeat_internal")):
-                snapshot["source"] = "heartbeat"
+        prompt_source = self._internal_prompt_source(prompt)
+        if prompt_source is not None:
+            snapshot["source"] = prompt_source
         user_message = self._pending_user_message_snapshot()
         if user_message is not None:
             snapshot["user_message"] = user_message
@@ -595,11 +601,13 @@ class RuntimeAgentSession:
             self._apply_live_context(live_context)
             await refresh_web_agent_runtime(force=False, reason="prompt")
             user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
-            heartbeat_internal = self._is_heartbeat_internal_prompt(user_input)
-            if heartbeat_internal:
+            internal_source = self._internal_prompt_source(user_input)
+            heartbeat_internal = internal_source == "heartbeat"
+            cron_internal = internal_source == "cron"
+            if internal_source is not None:
                 current_snapshot = self._current_inflight_turn_snapshot()
                 current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
-                if current_snapshot is not None and current_source != "heartbeat":
+                if current_snapshot is not None and current_source != internal_source:
                     self._preserved_inflight_turn = copy.deepcopy(current_snapshot)
             else:
                 self._preserved_inflight_turn = None
@@ -664,24 +672,30 @@ class RuntimeAgentSession:
                 if persist_transcript:
                     try:
                         persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-                        persisted_session.add_message(
-                            "user",
-                            user_text,
-                            attachments=list(user_input.attachments or []),
-                            metadata=dict(user_input.metadata or {}),
-                        )
+                        if internal_source is None:
+                            persisted_session.add_message(
+                                "user",
+                                user_text,
+                                attachments=list(user_input.attachments or []),
+                                metadata=dict(user_input.metadata or {}),
+                            )
                         assistant_payload: dict[str, Any] = {}
                         if interaction_flow:
                             assistant_payload["tool_events"] = interaction_flow
                         if interaction_trace is not None:
                             assistant_payload["interaction_trace"] = interaction_trace
+                        if cron_internal:
+                            assistant_payload["metadata"] = {
+                                "source": "cron",
+                                "cron_job_id": str((user_input.metadata or {}).get("cron_job_id") or "").strip(),
+                            }
                         persisted_session.add_message("assistant", output, **assistant_payload)
                         if self._state.session_key.startswith("web:"):
                             from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
 
                             update_ceo_session_after_turn(
                                 persisted_session,
-                                user_text=user_text,
+                                user_text="" if internal_source is not None else user_text,
                                 assistant_text=output,
                                 route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                             )
@@ -693,7 +707,7 @@ class RuntimeAgentSession:
                             kind="persistence_warning",
                             text="Session transcript persistence failed; response is still available in-memory.",
                         )
-                    if getattr(self._loop, "memory_manager", None) is not None:
+                    if internal_source is None and getattr(self._loop, "memory_manager", None) is not None:
                         try:
                             await self._loop.memory_manager.ingest_turn(
                                 session_key=self._state.session_key,
@@ -732,7 +746,8 @@ class RuntimeAgentSession:
                     "message_end",
                     role="assistant",
                     text=output,
-                    heartbeat_internal=self._is_heartbeat_internal_prompt(user_input),
+                    heartbeat_internal=heartbeat_internal,
+                    source=internal_source or "user",
                     interaction_trace=interaction_trace,
                     stage=stage_snapshot,
                 )

@@ -1205,25 +1205,56 @@ async function applySelectedArtifact() {
     await loadTaskArtifacts();
 }
 
+function showTaskNodeLoadingState(node) {
+    const compactHeading = compactNodeHeading(node);
+    S.currentNodeDetail = { ...node };
+    U.detail.style.display = "flex";
+    if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
+    setTaskSelectionEmptyVisible(false);
+    if (U.adRole) U.adRole.hidden = true;
+    U.adStatus.textContent = String(node?.display_state || node?.state || node?.status || "");
+    U.adStatus.dataset.status = node?.visual_state || node?.state || node?.status || "";
+    if (U.adRoundSummary) U.adRoundSummary.textContent = String(node?.roundSummary || "");
+    if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
+    renderFlowHeading(0);
+    renderFinalOutput("Loading node output...");
+    renderAcceptanceResult("Loading acceptance result...");
+    U.feedTitle.textContent = `Node: ${compactHeading}`;
+    U.feedTitle.title = compactHeading;
+    setTaskDetailOpen(true);
+    icons();
+    refreshTaskDetailScrollRegions();
+}
+
 async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
     const key = String(nodeId || "").trim();
-    if (!S.currentTaskId || !key) return null;
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!taskId || !key) return null;
     if (!force && S.taskNodeDetails[key]) return S.taskNodeDetails[key];
+    if (!force && S.taskNodeDetailRequests[key]) return S.taskNodeDetailRequests[key];
     S.taskNodeBusy = true;
-    try {
-        const detail = await ApiClient.getTaskNodeDetail(S.currentTaskId, key);
-        if (!detail) return null;
-        S.taskNodeDetails = { ...S.taskNodeDetails, [key]: detail };
-        if (String(S.selectedNodeId || "") === key) S.currentNodeDetail = detail;
-        return detail;
-    } catch (error) {
-        if (!isAbortLike(error)) {
-            showToast({ title: "Node load failed", text: error.message || "Unknown error", kind: "error" });
+    const request = (async () => {
+        try {
+            const detail = await ApiClient.getTaskNodeDetail(taskId, key);
+            if (!detail) return null;
+            if (String(S.currentTaskId || "").trim() !== taskId) return null;
+            S.taskNodeDetails = { ...S.taskNodeDetails, [key]: detail };
+            if (String(S.selectedNodeId || "") === key) S.currentNodeDetail = detail;
+            return detail;
+        } catch (error) {
+            if (!isAbortLike(error)) {
+                showToast({ title: "Node load failed", text: error.message || "Unknown error", kind: "error" });
+            }
+            return S.taskNodeDetails[key] || null;
+        } finally {
+            const nextRequests = { ...S.taskNodeDetailRequests };
+            if (nextRequests[key] === request) delete nextRequests[key];
+            S.taskNodeDetailRequests = nextRequests;
+            S.taskNodeBusy = Object.keys(nextRequests).length > 0;
         }
-        return S.taskNodeDetails[key] || null;
-    } finally {
-        S.taskNodeBusy = false;
-    }
+    })();
+    S.taskNodeDetailRequests = { ...S.taskNodeDetailRequests, [key]: request };
+    return request;
 }
 
 async function showAgent(node, { preserveViewState = true } = {}) {
@@ -1233,6 +1264,7 @@ async function showAgent(node, { preserveViewState = true } = {}) {
     S.taskDetailRenderToken = renderToken;
     const viewState = consumePendingTaskDetailRestore(nodeId)
         || (preserveViewState ? captureTaskDetailViewState() : getStoredTaskDetailViewState(S.currentTaskId, nodeId));
+    if (!S.taskNodeDetails[nodeId]) showTaskNodeLoadingState(node);
     const detail = await ensureTaskNodeDetail(nodeId);
     if (renderToken !== S.taskDetailRenderToken) return;
     if (String(S.selectedNodeId || "").trim() !== nodeId) return;

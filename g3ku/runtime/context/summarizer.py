@@ -116,29 +116,16 @@ def window_extract(query: str, text: str, window: int = 3, *, max_chars: int = 1
 def layered_body_payload(
     *,
     body: str,
-    level: str = 'l1',
-    query: str = '',
-    max_tokens: int | None = None,
     title: str = '',
     description: str = '',
     path: str = '',
+    **_unused: object,
 ) -> dict[str, str]:
-    normalized_level = str(level or 'l1').strip().lower()
-    if normalized_level not in {'l0', 'l1', 'l2'}:
-        normalized_level = 'l1'
     l0 = summarize_l0(body, title=title, description=description)
     l1 = summarize_l1(body, title=title, description=description)
-    effective_tokens = max(32, int(max_tokens or 300))
-    if normalized_level == 'l0':
-        content = truncate_by_tokens(l0, effective_tokens)
-    elif normalized_level == 'l1':
-        content = truncate_by_tokens(l1 or l0, effective_tokens)
-    else:
-        excerpt = window_extract(query, body, window=3, max_chars=max(200, effective_tokens * 4)) if query else str(body or '')
-        content = truncate_by_tokens(excerpt or body, effective_tokens)
     return {
-        'level': normalized_level,
-        'content': content,
+        'level': 'l2',
+        'content': str(body or ''),
         'l0': l0,
         'l1': l1,
         'path': str(Path(path)) if path else '',

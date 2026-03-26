@@ -34,7 +34,7 @@ class LoadSkillContextTool(_MainRuntimeTool):
 
     @property
     def description(self) -> str:
-        return 'Load layered context for a currently visible skill, or search visible skills by natural language using search_query.'
+        return 'Load full context for a currently visible skill, or search visible skills by natural language using search_query.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -44,9 +44,6 @@ class LoadSkillContextTool(_MainRuntimeTool):
                 'skill_id': {'type': 'string', 'description': 'The skill id to load.'},
                 'search_query': {'type': 'string', 'description': 'Optional natural-language query used to search visible skill candidates when skill_id is omitted.'},
                 'limit': {'type': 'integer', 'description': 'Optional candidate limit for search mode. Defaults to 5.'},
-                'level': {'type': 'string', 'enum': ['l0', 'l1', 'l2'], 'description': 'Requested context level. Defaults to l1.'},
-                'query': {'type': 'string', 'description': 'Optional query used to extract a focused L2 excerpt.'},
-                'max_tokens': {'type': 'integer', 'description': 'Optional output token budget for the returned content.'},
             },
             'required': [],
         }
@@ -56,9 +53,6 @@ class LoadSkillContextTool(_MainRuntimeTool):
         skill_id: str = '',
         search_query: str = '',
         limit: int | None = None,
-        level: str = 'l1',
-        query: str = '',
-        max_tokens: int | None = None,
         __g3ku_runtime: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
@@ -70,9 +64,6 @@ class LoadSkillContextTool(_MainRuntimeTool):
                 'actor_role': _runtime_actor_role(__g3ku_runtime),
                 'session_id': _runtime_session_key(__g3ku_runtime),
                 'skill_id': skill_name,
-                'level': str(level or 'l1').strip().lower() or 'l1',
-                'query': str(query or ''),
-                'max_tokens': max_tokens,
             }
             if search_text:
                 kwargs_v2['search_query'] = search_text
@@ -98,7 +89,7 @@ class LoadToolContextTool(_MainRuntimeTool):
 
     @property
     def description(self) -> str:
-        return 'Load layered context for a currently visible tool or registered external tool, or search visible tool candidates by natural language using search_query.'
+        return 'Load full context for a currently visible tool or registered external tool, or search visible tool candidates by natural language using search_query.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -108,9 +99,6 @@ class LoadToolContextTool(_MainRuntimeTool):
                 'tool_id': {'type': 'string', 'description': 'The tool id to load.'},
                 'search_query': {'type': 'string', 'description': 'Optional natural-language query used to search visible tool candidates when tool_id is omitted.'},
                 'limit': {'type': 'integer', 'description': 'Optional candidate limit for search mode. Defaults to 5.'},
-                'level': {'type': 'string', 'enum': ['l0', 'l1', 'l2'], 'description': 'Requested context level. Defaults to l1.'},
-                'query': {'type': 'string', 'description': 'Optional query used to extract a focused L2 excerpt.'},
-                'max_tokens': {'type': 'integer', 'description': 'Optional output token budget for the returned content.'},
             },
             'required': [],
         }
@@ -120,9 +108,6 @@ class LoadToolContextTool(_MainRuntimeTool):
         tool_id: str = '',
         search_query: str = '',
         limit: int | None = None,
-        level: str = 'l1',
-        query: str = '',
-        max_tokens: int | None = None,
         __g3ku_runtime: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
@@ -134,9 +119,6 @@ class LoadToolContextTool(_MainRuntimeTool):
                 'actor_role': _runtime_actor_role(__g3ku_runtime),
                 'session_id': _runtime_session_key(__g3ku_runtime),
                 'tool_id': tool_name,
-                'level': str(level or 'l1').strip().lower() or 'l1',
-                'query': str(query or ''),
-                'max_tokens': max_tokens,
             }
             if search_text:
                 kwargs_v2['search_query'] = search_text

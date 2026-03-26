@@ -215,11 +215,13 @@ function renderTasks() {
     syncTaskPagination(meta);
     const signature = taskGridRenderSignature(meta);
     if (signature === S.taskGridSignature) {
+        S.taskMetricAnimationTaskIds?.clear?.();
         updateTaskToolbar();
         return;
     }
     S.taskGridSignature = signature;
     U.taskGrid.innerHTML = "";
+    const metricAnimationTaskIds = S.taskMetricAnimationTaskIds || new Set();
     if (S.tasksWorkerOnline === false) {
         const warning = document.createElement("div");
         warning.className = "empty-state error";
@@ -247,9 +249,9 @@ function renderTasks() {
         const tokenUsage = taskTokenUsage(task);
         const previousMetrics = S.taskMetricSnapshot?.[taskId] || null;
         const metricItems = [
-            { key: "input_tokens", label: "输入", value: tokenUsage.tracked ? tokenUsage.input_tokens : null },
-            { key: "output_tokens", label: "输出", value: tokenUsage.tracked ? tokenUsage.output_tokens : null },
-            { key: "cache_hit_tokens", label: "缓存命中", value: tokenUsage.tracked ? tokenUsage.cache_hit_tokens : null },
+            { key: "input_tokens", label: "输入Token", value: tokenUsage.tracked ? tokenUsage.input_tokens : null },
+            { key: "output_tokens", label: "输出Token", value: tokenUsage.tracked ? tokenUsage.output_tokens : null },
+            { key: "cache_hit_tokens", label: "缓存命中Token", value: tokenUsage.tracked ? tokenUsage.cache_hit_tokens : null },
         ];
         nextTaskMetricSnapshot[taskId] = tokenUsage.tracked ? {
             input_tokens: Number(tokenUsage.input_tokens || 0),
@@ -259,7 +261,7 @@ function renderTasks() {
         const metricsMarkup = metricItems.map((item) => {
             const hasValue = Number.isFinite(item.value);
             const previousValue = previousMetrics && Number.isFinite(previousMetrics[item.key]) ? previousMetrics[item.key] : null;
-            const isIncreasing = previousValue !== null && hasValue && item.value > previousValue;
+            const isIncreasing = metricAnimationTaskIds.has(taskId) && previousValue !== null && hasValue && item.value > previousValue;
             return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
         }).join("");
         const cardActions = taskCardActions(task);
@@ -330,6 +332,7 @@ function renderTasks() {
         U.taskGrid.appendChild(el);
     });
     S.taskMetricSnapshot = nextTaskMetricSnapshot;
+    S.taskMetricAnimationTaskIds?.clear?.();
     updateTaskToolbar();
     icons();
 }
@@ -564,6 +567,7 @@ function resetTaskView() {
     S.currentTaskRuntimeSummary = null;
     S.currentNodeDetail = null;
     S.taskNodeDetails = {};
+    S.taskNodeDetailRequests = {};
     S.taskNodeBusy = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
@@ -655,9 +659,9 @@ function renderTaskTokenStats() {
         : '<span class="task-token-badge success">缁熻瀹屾暣</span>';
     const topline = `
         <div class="task-token-topline">
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>鎬昏緭鍏?/span></div>
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>鎬昏緭鍑?/span></div>
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缂撳瓨鍛戒腑</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>输入Token</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>输出Token</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缓存命中Token</span></div>
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.call_count))}</strong><span>妯″瀷璋冪敤</span></div>
         </div>
         <div class="task-token-meta">
@@ -685,9 +689,9 @@ function renderTaskTokenStats() {
                         <div class="task-token-model-badges">${badges.join("")}</div>
                     </div>
                     <div class="task-token-model-stats">
-                        <span>输入 ${esc(formatTokenCount(item.input_tokens))}</span>
-                        <span>输出 ${esc(formatTokenCount(item.output_tokens))}</span>
-                        <span>缓存命中 ${esc(formatTokenCount(item.cache_hit_tokens))}</span>
+                        <span>输入Token ${esc(formatTokenCount(item.input_tokens))}</span>
+                        <span>输出Token ${esc(formatTokenCount(item.output_tokens))}</span>
+                        <span>缓存命中Token ${esc(formatTokenCount(item.cache_hit_tokens))}</span>
                     </div>
                     <div class="task-token-model-meta">
                         调用 ${esc(formatTokenCount(item.call_count))} · 有 usage ${esc(formatTokenCount(item.calls_with_usage))} · 缺失 ${esc(formatTokenCount(item.calls_without_usage))}
@@ -888,6 +892,7 @@ function patchTaskListItem(task) {
     if (index >= 0) next[index] = { ...next[index], ...task };
     else next.unshift(task);
     S.tasks = next;
+    S.taskMetricAnimationTaskIds = new Set([taskId]);
     syncTaskSelection();
     renderTasks();
 }

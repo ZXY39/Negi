@@ -705,9 +705,36 @@ class TaskQueryService:
         return ''
 
     def _serialize_node(self, node: NodeRecord) -> dict[str, object]:
-        payload = node.model_dump(mode='json')
-        payload['execution_trace'] = self._execution_trace(node)
-        return payload
+        final_output = str(node.final_output or '')
+        acceptance_result = str(node.check_result or '')
+        return {
+            'node_id': node.node_id,
+            'task_id': node.task_id,
+            'parent_node_id': node.parent_node_id,
+            'root_node_id': node.root_node_id,
+            'depth': int(node.depth or 0),
+            'node_kind': str(node.node_kind or 'execution'),
+            'status': node.status,
+            'goal': str(node.goal or ''),
+            'title': str(node.goal or node.node_id),
+            'output': self._node_output_text(node),
+            'output_ref': self._node_output_ref(node),
+            'check_result': acceptance_result,
+            'check_result_ref': str(node.check_result_ref or ''),
+            'final_output': final_output,
+            'final_output_ref': str(getattr(node, 'final_output_ref', '') or ''),
+            'failure_reason': str(node.failure_reason or ''),
+            'updated_at': str(node.updated_at or ''),
+            'execution_trace': {
+                'initial_prompt': '',
+                'tool_steps': [],
+                'stages': [],
+                'live_tool_calls': [],
+                'live_child_pipelines': [],
+                'final_output': final_output,
+                'acceptance_result': acceptance_result,
+            },
+        }
 
     def _execution_trace(self, node: NodeRecord) -> dict[str, object]:
         return build_execution_trace(node)

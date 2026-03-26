@@ -3,26 +3,38 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 
 import { listRegisteredChannels } from "./channel_registry.js";
-import { loadHostConfig, type ChinaHostConfig } from "./config.js";
-import { dingtalkPlugin } from "./dingtalk/channel.js";
-import { feishuPlugin } from "./feishu-china/channel.js";
+import { type ChinaHostConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { qqbotPlugin } from "./qqbot/channel.js";
 import { G3kuRuntimeBridge } from "./runtime_bridge.js";
-import { wechatMpPlugin } from "./wechat-mp/channel.js";
-import { handleWechatMpWebhookRequest } from "./wechat-mp/webhook.js";
-import { wecomPlugin } from "./wecom/channel.js";
-import { handleWecomWebhookRequest } from "./wecom/monitor.js";
-import { wecomAppPlugin } from "./wecom-app/channel.js";
-import { handleWecomAppWebhookRequest } from "./wecom-app/monitor.js";
-import { wecomKfPlugin } from "./wecom-kf/channel.js";
-import { handleWecomKfWebhookRequest } from "./wecom-kf/webhook.js";
 
 type RouteHandler = {
   path: string;
   match: "exact" | "prefix";
   handler: (req: IncomingMessage, res: ServerResponse) => Promise<boolean> | boolean;
 };
+
+type ChannelPlugin = {
+  config: {
+    listAccountIds: (cfg: Record<string, unknown>) => string[];
+    resolveAccount: (cfg: Record<string, unknown>, accountId: string) => unknown;
+  };
+  gateway: {
+    startAccount: (params: {
+      cfg: Record<string, unknown>;
+      accountId: string;
+      account: unknown;
+      runtime: Record<string, unknown>;
+      channelRuntime: Record<string, unknown>;
+      abortSignal: AbortSignal;
+      log: unknown;
+      getStatus: () => Record<string, unknown>;
+      setStatus: (next: Record<string, unknown>) => void;
+    }) => Promise<unknown> | unknown;
+  };
+};
+
+type PluginLoader = () => Promise<ChannelPlugin>;
+type RouteHandlerLoader = () => Promise<RouteHandler["handler"]>;
 
 function normalizeRoutePath(pathValue: string | undefined, fallback: string): string {
   const trimmed = pathValue?.trim() ?? "";
@@ -54,24 +66,36 @@ function collectWecomRoutePaths(config: any): string[] {
   return [...routes];
 }
 
-const CHANNEL_PLUGIN_MAP: Record<string, any> = {
-  qqbot: qqbotPlugin,
-  dingtalk: dingtalkPlugin,
-  wecom: wecomPlugin,
-  "wecom-app": wecomAppPlugin,
-  "wecom-kf": wecomKfPlugin,
-  "wechat-mp": wechatMpPlugin,
-  "feishu-china": feishuPlugin,
+const CHANNEL_PLUGIN_LOADERS: Record<string, PluginLoader | undefined> = {
+  qqbot: async () => (await import("./qqbot/channel.js")).qqbotPlugin,
+  dingtalk: async () => (await import("./dingtalk/channel.js")).dingtalkPlugin,
+  wecom: async () => (await import("./wecom/channel.js")).wecomPlugin,
+  "wecom-app": async () => (await import("./wecom-app/channel.js")).wecomAppPlugin,
+  "wecom-kf": async () => (await import("./wecom-kf/channel.js")).wecomKfPlugin,
+  "wechat-mp": async () => (await import("./wechat-mp/channel.js")).wechatMpPlugin,
+  "feishu-china": async () => (await import("./feishu-china/channel.js")).feishuPlugin,
 };
 
 const CHANNEL_ROUTE_MAP: Record<
   string,
-  { collectPaths: (config: any) => string[]; handler: RouteHandler["handler"] } | undefined
+  { collectPaths: (config: any) => string[]; loadHandler: RouteHandlerLoader } | undefined
 > = {
-  wecom: { collectPaths: collectWecomRoutePaths, handler: handleWecomWebhookRequest },
-  "wecom-app": { collectPaths: (config) => collectRoutePaths(config, "/wecom-app"), handler: handleWecomAppWebhookRequest },
-  "wecom-kf": { collectPaths: (config) => collectRoutePaths(config, "/wecom-kf"), handler: handleWecomKfWebhookRequest },
-  "wechat-mp": { collectPaths: (config) => collectRoutePaths(config, "/wechat-mp"), handler: handleWechatMpWebhookRequest },
+  wecom: {
+    collectPaths: collectWecomRoutePaths,
+    loadHandler: async () => (await import("./wecom/monitor.js")).handleWecomWebhookRequest,
+  },
+  "wecom-app": {
+    collectPaths: (config) => collectRoutePaths(config, "/wecom-app"),
+    loadHandler: async () => (await import("./wecom-app/monitor.js")).handleWecomAppWebhookRequest,
+  },
+  "wecom-kf": {
+    collectPaths: (config) => collectRoutePaths(config, "/wecom-kf"),
+    loadHandler: async () => (await import("./wecom-kf/webhook.js")).handleWecomKfWebhookRequest,
+  },
+  "wechat-mp": {
+    collectPaths: (config) => collectRoutePaths(config, "/wechat-mp"),
+    loadHandler: async () => (await import("./wechat-mp/webhook.js")).handleWechatMpWebhookRequest,
+  },
 };
 
 export class ChinaChannelsHost {
@@ -125,10 +149,22 @@ export class ChinaChannelsHost {
   private registerRoutes(): void {
     for (const item of listRegisteredChannels()) {
       const channelId = String(item.id || "").trim();
+      const config = this.cfg.channels[channelId];
       const routeEntry = CHANNEL_ROUTE_MAP[channelId];
-      if (!channelId || !routeEntry) continue;
-      for (const routePath of routeEntry.collectPaths(this.cfg.channels[channelId])) {
-        this.routes.push({ path: routePath, match: "prefix", handler: routeEntry.handler });
+      if (!channelId || !routeEntry || !this.isEnabledChannelConfig(config)) continue;
+      const loadHandler = routeEntry.loadHandler;
+      let cachedHandler: RouteHandler["handler"] | null = null;
+      for (const routePath of routeEntry.collectPaths(config)) {
+        this.routes.push({
+          path: routePath,
+          match: "prefix",
+          handler: async (req, res) => {
+            if (!cachedHandler) {
+              cachedHandler = await loadHandler();
+            }
+            return cachedHandler(req, res);
+          },
+        });
       }
     }
   }
@@ -149,9 +185,10 @@ export class ChinaChannelsHost {
     const cfg = { channels: this.cfg.channels } as Record<string, unknown>;
     for (const item of listRegisteredChannels()) {
       const channelId = String(item.id || "").trim();
-      const plugin = CHANNEL_PLUGIN_MAP[channelId];
       const config = this.cfg.channels[channelId];
-      if (!channelId || !plugin || !config || config.enabled !== true) continue;
+      const loadPlugin = CHANNEL_PLUGIN_LOADERS[channelId];
+      if (!channelId || !loadPlugin || !this.isEnabledChannelConfig(config)) continue;
+      const plugin = await loadPlugin();
       const accountIds = plugin.config.listAccountIds(cfg);
       for (const accountId of accountIds) {
         const account = plugin.config.resolveAccount(cfg, accountId);
@@ -177,5 +214,9 @@ export class ChinaChannelsHost {
         this.tasks.set(`${channelId}:${accountId}`, task);
       }
     }
+  }
+
+  private isEnabledChannelConfig(config: any): boolean {
+    return Boolean(config && config.enabled === true);
   }
 }

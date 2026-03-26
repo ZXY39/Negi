@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 import g3ku.shells.web as web_shell
+from g3ku.agent.tools.cron import CronTool
 from g3ku.config.loader import get_data_dir
+from g3ku.core.messages import UserInputMessage
 from g3ku.cron.runtime_dispatch import dispatch_cron_job, resolve_cron_session_key
 from g3ku.cron.service import CronService
 from g3ku.cron.types import CronJob, CronJobState, CronPayload, CronSchedule
@@ -21,7 +23,7 @@ class _BridgeRecorder:
         self.output = output
         self.calls: list[dict[str, object]] = []
 
-    async def prompt(self, message: str, **kwargs):
+    async def prompt(self, message, **kwargs):
         self.calls.append({"message": message, **kwargs})
         return SimpleNamespace(output=self.output)
 
@@ -70,10 +72,28 @@ class _CronRecorder:
         return {"enabled": self.enabled}
 
 
+class _CronToolService:
+    def __init__(self) -> None:
+        self.add_calls: list[dict[str, object]] = []
+        self.removed: list[str] = []
+
+    def add_job(self, **kwargs):
+        self.add_calls.append(dict(kwargs))
+        return SimpleNamespace(name="job", id="job-1")
+
+    def list_jobs(self):
+        return []
+
+    def remove_job(self, job_id: str):
+        self.removed.append(str(job_id))
+        return True
+
+
 def _make_job(
     *,
     job_id: str = "job-1",
     message: str = "hello",
+    stop_condition: str | None = "任务完成后或用户要求取消",
     channel: str | None = "web",
     to: str | None = "shared",
     session_key: str | None = None,
@@ -85,6 +105,7 @@ def _make_job(
         payload=CronPayload(
             kind="agent_turn",
             message=message,
+            stop_condition=stop_condition,
             deliver=True,
             channel=channel,
             to=to,
@@ -131,6 +152,7 @@ def test_cron_service_loads_legacy_jobs_without_session_key(tmp_path: Path) -> N
 
     assert len(jobs) == 1
     assert jobs[0].payload.session_key is None
+    assert jobs[0].payload.stop_condition is None
 
 
 def test_cron_service_persists_session_key(tmp_path: Path) -> None:
@@ -145,12 +167,61 @@ def test_cron_service_persists_session_key(tmp_path: Path) -> None:
         channel="web",
         to="shared",
         session_key="web:demo",
+        stop_condition="发布完成后",
     )
 
     raw = json.loads(store_path.read_text(encoding="utf-8"))
 
     assert job.payload.session_key == "web:demo"
+    assert job.payload.stop_condition == "发布完成后或用户要求取消"
     assert raw["jobs"][0]["payload"]["sessionKey"] == "web:demo"
+    assert raw["jobs"][0]["payload"]["stopCondition"] == "发布完成后或用户要求取消"
+
+
+def test_cron_service_requires_stop_condition_for_recurring_jobs(tmp_path: Path) -> None:
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+
+    with pytest.raises(ValueError, match="stop_condition is required"):
+        service.add_job(
+            name="demo",
+            schedule=CronSchedule(kind="every", every_ms=60000),
+            message="hello",
+            deliver=True,
+            channel="web",
+            to="shared",
+        )
+
+
+@pytest.mark.asyncio
+async def test_cron_tool_limits_cron_internal_runs_to_self_removal() -> None:
+    service = _CronToolService()
+    tool = CronTool(service)
+    tool.set_context("web", "shared")
+
+    add_result = await tool.execute(
+        action="add",
+        message="hello",
+        stop_condition="任务完成后或用户要求取消",
+        every_seconds=60,
+        __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
+    )
+    wrong_remove_result = await tool.execute(
+        action="remove",
+        job_id="job-2",
+        __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
+    )
+    remove_result = await tool.execute(
+        action="remove",
+        job_id="job-1",
+        __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
+    )
+
+    assert "only remove the current job" in add_result
+    assert "only remove the current job_id 'job-1'" in wrong_remove_result
+    assert remove_result == "Removed job job-1"
+    assert service.add_calls == []
+    assert service.removed == ["job-1"]
 
 
 @pytest.mark.asyncio
@@ -169,15 +240,20 @@ async def test_dispatch_cron_job_resumes_original_session_when_it_exists(tmp_pat
     )
 
     assert result == "scheduled"
-    assert bridge.calls == [
-        {
-            "message": "hello",
-            "session_key": "web:demo",
-            "channel": "web",
-            "chat_id": "shared",
-            "register_task": None,
-        }
-    ]
+    assert len(bridge.calls) == 1
+    message = bridge.calls[0]["message"]
+    assert isinstance(message, UserInputMessage)
+    assert message.content == "hello"
+    assert message.metadata == {
+        "cron_internal": True,
+        "cron_job_id": "job-1",
+        "cron_stop_condition": "任务完成后或用户要求取消",
+        "cron_stop_condition_explicit": True,
+    }
+    assert bridge.calls[0]["session_key"] == "web:demo"
+    assert bridge.calls[0]["channel"] == "web"
+    assert bridge.calls[0]["chat_id"] == "shared"
+    assert bridge.calls[0]["register_task"] is None
     assert resolve_cron_session_key(job, session_manager=session_manager) == "web:demo"
 
 
@@ -185,7 +261,13 @@ async def test_dispatch_cron_job_resumes_original_session_when_it_exists(tmp_pat
 async def test_dispatch_cron_job_falls_back_to_cron_thread_when_session_missing(tmp_path: Path) -> None:
     session_manager = SessionManager(tmp_path)
     bridge = _BridgeRecorder(output="fallback")
-    job = _make_job(job_id="job-42", session_key="web:missing", channel=None, to=None)
+    job = _make_job(
+        job_id="job-42",
+        session_key="web:missing",
+        stop_condition=None,
+        channel=None,
+        to=None,
+    )
 
     result = await dispatch_cron_job(
         job,
@@ -194,15 +276,20 @@ async def test_dispatch_cron_job_falls_back_to_cron_thread_when_session_missing(
     )
 
     assert result == "fallback"
-    assert bridge.calls == [
-        {
-            "message": "hello",
-            "session_key": "cron:job-42",
-            "channel": "cli",
-            "chat_id": "direct",
-            "register_task": None,
-        }
-    ]
+    assert len(bridge.calls) == 1
+    message = bridge.calls[0]["message"]
+    assert isinstance(message, UserInputMessage)
+    assert message.content == "hello"
+    assert message.metadata == {
+        "cron_internal": True,
+        "cron_job_id": "job-42",
+        "cron_stop_condition": "用户要求取消",
+        "cron_stop_condition_explicit": False,
+    }
+    assert bridge.calls[0]["session_key"] == "cron:job-42"
+    assert bridge.calls[0]["channel"] == "cli"
+    assert bridge.calls[0]["chat_id"] == "direct"
+    assert bridge.calls[0]["register_task"] is None
     assert resolve_cron_session_key(job, session_manager=session_manager) == "cron:job-42"
 
 

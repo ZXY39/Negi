@@ -130,7 +130,7 @@ toolskill:
     )
 
 
-def _write_skill(workspace: Path, *, name: str = 'demo_skill') -> None:
+def _write_skill(workspace: Path, *, name: str = 'demo_skill', content: str | None = None) -> None:
     root = workspace / 'skills' / name
     root.mkdir(parents=True, exist_ok=True)
     (root / 'resource.yaml').write_text(
@@ -154,7 +154,7 @@ exposure:
         encoding='utf-8',
     )
     (root / 'SKILL.md').write_text(
-        '# Demo Skill\n\nThis skill is used by tests.\n',
+        content if content is not None else '# Demo Skill\n\nThis skill is used by tests.\n',
         encoding='utf-8',
     )
 
@@ -2053,6 +2053,93 @@ async def test_runtime_service_can_search_visible_tool_and_skill_candidates(tmp_
         assert skill_payload['candidates'][0]['skill_id'] == 'rollback_helper'
         assert skill_payload['candidates'][0]['matched_fields']
         assert 'load_skill_context(skill_id="' in skill_payload['next_action_hint']
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_load_skill_context_v2_returns_full_skill_body_by_default(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    skill_body = (
+        '# Full Body Skill\n\n'
+        'This is a long skill body used to verify that full-content mode bypasses excerpt truncation.\n\n'
+        '## Steps\n'
+        '1. Gather context from the workspace.\n'
+        '2. Compare the existing implementation with the requested behavior.\n'
+        '3. Return the entire document so nothing is silently truncated.\n\n'
+        '## Notes\n'
+        'The caller should still receive l0 and l1 summaries alongside the full body.\n'
+    )
+    _write_skill(workspace, name='full_body_skill', content=skill_body)
+    _copy_repo_tools(workspace, 'load_skill_context')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-full-skill-context')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+
+        payload = service.load_skill_context_v2(
+            actor_role='ceo',
+            session_id='web:shared',
+            skill_id='full_body_skill',
+        )
+        assert payload['ok'] is True
+        assert payload['level'] == 'l2'
+        assert payload['content'] == skill_body
+        assert payload['l0']
+        assert payload['l1']
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'content', 'load_tool_context')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-full-tool-context')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        expected = str((service.get_tool_toolskill('content') or {}).get('content') or '')
+
+        payload = service.load_tool_context_v2(
+            actor_role='ceo',
+            session_id='web:shared',
+            tool_id='content',
+        )
+
+        assert payload['ok'] is True
+        assert payload['level'] == 'l2'
+        assert payload['content'] == expected
+        assert payload['l0']
+        assert payload['l1']
     finally:
         await service.close()
         manager.close()

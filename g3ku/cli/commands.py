@@ -713,6 +713,11 @@ def cron_list(
 def cron_add(
     name: str = typer.Option(..., "--name", "-n", help="Job name"),
     message: str = typer.Option(..., "--message", "-m", help="Message for agent"),
+    stop_condition: str | None = typer.Option(
+        None,
+        "--stop-condition",
+        help="Required for recurring jobs: describe the specific exit condition; it will be normalized to include '或用户要求取消'.",
+    ),
     every: int = typer.Option(None, "--every", "-e", help="Run every N seconds"),
     cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression (e.g. '0 9 * * *')"),
     tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron (e.g. 'America/Vancouver')"),
@@ -751,6 +756,7 @@ def cron_add(
             name=name,
             schedule=schedule,
             message=message,
+            stop_condition=stop_condition,
             deliver=deliver,
             to=to,
             channel=channel,

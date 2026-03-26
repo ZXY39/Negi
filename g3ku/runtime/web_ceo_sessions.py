@@ -108,6 +108,16 @@ def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TAS
     return _normalize_task_ids(task_ids, limit=limit)
 
 
+def is_internal_ceo_user_message(message: Any) -> bool:
+    if not isinstance(message, dict):
+        return False
+    role = str(message.get('role') or '').strip().lower()
+    if role != 'user':
+        return False
+    metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
+    return bool(metadata.get('heartbeat_internal')) or bool(metadata.get('cron_internal'))
+
+
 def build_last_task_memory(session: Any) -> dict[str, Any]:
     remembered: list[str] = []
     source = ''
@@ -115,6 +125,8 @@ def build_last_task_memory(session: Any) -> dict[str, Any]:
     updated_at = ''
     for raw in reversed(list(getattr(session, 'messages', []) or [])):
         if not isinstance(raw, dict):
+            continue
+        if is_internal_ceo_user_message(raw):
             continue
         task_ids = _extract_task_ids_from_message(raw)
         if not task_ids:
@@ -248,6 +260,8 @@ def _complete_transcript_turns(session: Any) -> list[list[dict[str, Any]]]:
     for raw in list(getattr(session, "messages", []) or []):
         if not isinstance(raw, dict):
             continue
+        if is_internal_ceo_user_message(raw):
+            continue
         role = str(raw.get("role") or "").strip().lower()
         if role == "user":
             current_user = raw
@@ -337,7 +351,11 @@ def extract_frontdoor_recent_history(session: Any, *, raw_tail_turns: int = DEFA
     messages = [
         item
         for item in list(getattr(session, 'messages', []) or [])
-        if isinstance(item, dict) and str(item.get('role') or '').strip().lower() in {'user', 'assistant'}
+        if (
+            isinstance(item, dict)
+            and str(item.get('role') or '').strip().lower() in {'user', 'assistant'}
+            and not is_internal_ceo_user_message(item)
+        )
     ]
     normalized_tail_turns = max(1, int(raw_tail_turns or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS))
     if not messages:
@@ -662,7 +680,11 @@ def build_session_summary(
     inflight_turn: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ensure_ceo_session_metadata(session)
-    messages = list(getattr(session, "messages", []) or [])
+    messages = [
+        item
+        for item in list(getattr(session, "messages", []) or [])
+        if isinstance(item, dict) and not is_internal_ceo_user_message(item)
+    ]
     preview_text = str(session.metadata.get("last_preview_text") or "").strip()
     if not preview_text:
         for item in reversed(messages):
@@ -748,7 +770,11 @@ def _channel_title(parsed) -> str:
 
 
 def _channel_preview_text(session: Any, *, fallback_text: str = "") -> str:
-    messages = list(getattr(session, "messages", []) or [])
+    messages = [
+        item
+        for item in list(getattr(session, "messages", []) or [])
+        if isinstance(item, dict) and not is_internal_ceo_user_message(item)
+    ]
     for item in reversed(messages):
         content = item.get("content") if isinstance(item, dict) else ""
         preview = summarize_preview_text(content or "")
@@ -771,7 +797,11 @@ def _session_updated_at(session: Any) -> str:
     updated_at = _session_time_value(getattr(session, "updated_at", None))
     if updated_at:
         return updated_at
-    messages = list(getattr(session, "messages", []) or [])
+    messages = [
+        item
+        for item in list(getattr(session, "messages", []) or [])
+        if isinstance(item, dict) and not is_internal_ceo_user_message(item)
+    ]
     for item in reversed(messages):
         if isinstance(item, dict) and str(item.get("timestamp") or "").strip():
             return str(item.get("timestamp") or "").strip()
@@ -983,13 +1013,18 @@ def list_channel_ceo_sessions(
         session = session_manager.get_or_create(key)
         canonical_id = _canonical_china_session_id(parsed)
         canonical_parsed = parse_china_session_key(canonical_id) or parsed
+        visible_messages = [
+            entry
+            for entry in list(getattr(session, "messages", []) or [])
+            if isinstance(entry, dict) and not is_internal_ceo_user_message(entry)
+        ]
         summary = _channel_session_summary_from_entry(
             session_id=canonical_id,
             parsed=canonical_parsed,
             is_active=canonical_id == active_session_id,
             is_running=bool(callable(is_running_resolver) and is_running_resolver(canonical_id)),
             preview_text=_channel_preview_text(session),
-            message_count=len(list(getattr(session, "messages", []) or [])),
+            message_count=len(visible_messages),
             created_at=_session_created_at(session),
             updated_at=_session_updated_at(session),
             last_llm_output_at=_session_last_assistant_at(session),

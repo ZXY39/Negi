@@ -27,6 +27,7 @@
 - 安装目录固定在当前工作区的 `skills/<skill_id>/`。
 - 始终使用 `scripts/clawhub_skill_manager.py`，不要手工拼 `resource.yaml`。
 - 覆盖本地已有 skill 前，脚本会把旧目录备份到 `.tmp/clawhub-skill-manager/backups/`。
+- 搜索 / 详情 / 状态检查默认启用同进程请求节流、429/502/503/504 有界重试、`Retry-After` 解析，以及 `.tmp/clawhub-skill-manager/cache/` 下的文件缓存，降低连续请求触发限流的概率。
 
 ## 标准工作流
 
@@ -38,33 +39,52 @@
 4. **安装或更新后确认结果：**
    - 目标目录存在于 `skills/<skill_id>/`
    - 至少包含 `SKILL.md` 和 `resource.yaml`
-   - `resource.yaml` 里写入 `source.type=clawhub` 与 `current_version.version`
-5. **如果后续要立即使用新装的 skill，重新调用** `load_skill_context(skill_id="<installed_skill_id>")`。
+   - `resource.yaml` 中有 `x_g3ku.clawhub.installed_version`
+5. **向用户回报：**
+   - 选中的 slug / skill 名称
+   - 安装或更新到的版本
+   - 本地目录路径
+   - 若命中限流或上游暂时失败，说明脚本已自动节流、解析 `Retry-After` 并在边界内重试；达到上限时提示稍后重试。
 
-## 标准脚本入口
+## 标准命令
 
-遵循 CEO 前门提示词里的 Python 解释器规则：优先使用 `G3KU_PROJECT_PYTHON` 或前门提供的 Python hint；只有在缺失时才回退到裸 `python`。
+在工作区根目录执行：
 
-- 搜索：
-  - `python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py search --query "<query>" --limit 8`
-- 查看详情：
-  - `python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py inspect --slug "<slug>"`
-- 下载 / 安装：
-  - `python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py install --slug "<slug>"`
-- 检查本地状态：
-  - `python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py status --skill-id "<skill_id>"`
-- 更新：
-  - `python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py update --skill-id "<skill_id>"`
+```powershell
+python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py search --query "browser"
+python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py inspect --slug "browser-use-mcp"
+python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py install --slug "browser-use-mcp"
+python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py status --skill-id "browser-use-mcp"
+python skills/clawhub-skill-manager/scripts/clawhub_skill_manager.py update --skill-id "browser-use-mcp"
+```
 
-如果用户明确要覆盖已有目录，可以在安装 / 更新时追加 `--force`。
+常用参数：
 
-## 输出要求
+- `--skills-dir <path>`：覆盖默认安装目录
+- `--temp-root <path>`：覆盖 `.tmp/clawhub-skill-manager/` 根目录；其下会保存 staging、备份和 API 缓存
+- `--version <semver>`：安装 / 更新指定版本
+- `--force`：允许覆盖本地已有目录（会先备份）
+- `--allow-suspicious`：仅在用户明确接受风险时使用
+- `CLAWHUB_REQUEST_THROTTLE_SECONDS`：调整同进程请求最小间隔
+- `CLAWHUB_HTTP_MAX_RETRIES` / `CLAWHUB_BACKOFF_BASE_SECONDS` / `CLAWHUB_BACKOFF_MAX_SECONDS`：调整限流与 5xx 退避参数
+- `CLAWHUB_CACHE_TTL_SECONDS` / `CLAWHUB_CACHE_MAX_AGE_SECONDS`：调整 API 缓存命中和失败兜底的最大年龄
 
-- 搜索时返回候选列表、`slug`、`displayName`、`summary`、`version`。
-- 安装 / 更新时返回 `skill_id`、`installed_path`、`version`、`backup_path`、`detail_url`。
-- 如脚本返回 `ok=false`，先根据错误判断是 API、权限、下载、ZIP、manifest 还是本地目录冲突问题，再决定是否重试或修复本 skill。
+## 输出约定
 
-## 禁止事项
+脚本统一输出 JSON：
+
+- 成功：stdout 输出 `{ "ok": true, ... }`
+- 失败：stderr 输出 `{ "ok": false, "error": "..." }`
+
+关键字段：
+
+- `search`：`results[]` 内含 `slug`、`name`、`owner`、`latest_version`、`suspicious`、`blocked`、`url`
+- `inspect`：返回版本列表与 `moderation` 摘要
+- `install` / `download`：返回 `skill_id`、`installed_version`、`target_dir`、`manifest_path`、`backup_dir`
+- `status`：返回 `installed_version`、`latest_version`、`up_to_date`
+- `update`：返回是否实际更新、目标版本和备份目录
+
+## 边界与禁止事项
 
 - 不要把 ClawHub skill 直接解压到工作区根目录。
 - 不要跳过安全状态检查。

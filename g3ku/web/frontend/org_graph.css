@@ -4266,6 +4266,13 @@ textarea {
     z-index: 30;
 }
 
+.ceo-session-actions > .ceo-session-menu {
+    top: calc(100% + 6px);
+    left: auto;
+    right: 0;
+    min-width: 124px;
+}
+
 .toolbar-menu-item {
     display: flex;
     align-items: center;

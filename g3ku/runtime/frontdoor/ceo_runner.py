@@ -168,6 +168,30 @@ class CeoFrontDoorRunner:
         return "这次没有生成可展示的回复。请直接再发一次你的请求，我会继续处理。"
 
     @staticmethod
+    def _cron_internal_system_message(metadata: dict[str, Any]) -> dict[str, str] | None:
+        if not bool(metadata.get("cron_internal")):
+            return None
+        job_id = str(metadata.get("cron_job_id") or "").strip()
+        stop_condition = str(metadata.get("cron_stop_condition") or "用户要求取消").strip() or "用户要求取消"
+        explicit = bool(metadata.get("cron_stop_condition_explicit"))
+        lines = [
+            "You are handling a cron-internal recurring job turn.",
+            f"Current cron job id: {job_id or '(missing)'}",
+            f"Exit condition: {stop_condition}",
+            "Required behavior:",
+            "- First inspect the current conversation context and the user's prior requests.",
+            "- If the exit condition is already satisfied, or the user has clearly asked to stop/cancel this recurring task, immediately call the cron tool once with action='remove' and the current job_id.",
+            "- After removing the current job, return one short plain-text confirmation only.",
+            "- If the exit condition is not satisfied, do not call any tool and return plain text only.",
+            "- Never call the message tool. Never create, update, list, or remove any other cron job.",
+        ]
+        if not explicit:
+            lines.append(
+                "- This is a legacy cron job with no stored explicit exit condition; only '用户要求取消' can end it."
+            )
+        return {"role": "system", "content": "\n".join(lines)}
+
+    @staticmethod
     def _session_task_defaults(session_record: Any) -> dict[str, Any]:
         metadata = getattr(session_record, "metadata", None)
         if not isinstance(metadata, dict):
@@ -413,18 +437,19 @@ class CeoFrontDoorRunner:
         runtime_context: dict[str, Any],
         on_progress,
     ) -> tuple[str, str, str, str, float | None]:
-        if bool(runtime_context.get("stage_turn_granted")) and tool_name != STAGE_TOOL_NAME:
-            stage_gate = {"has_active_stage": True, "transition_required": False}
-        else:
-            stage_gate = self._stage_gate(runtime_context.get("interaction_trace"))
-        stage_gate_error = stage_gate_error_for_tool(
-            tool_name,
-            has_active_stage=bool(stage_gate.get("has_active_stage")),
-            transition_required=bool(stage_gate.get("transition_required")),
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
-        if stage_gate_error:
-            return f"Error: {stage_gate_error}", "error", "", "", None
+        if not bool(runtime_context.get("disable_stage_tool")):
+            if bool(runtime_context.get("stage_turn_granted")) and tool_name != STAGE_TOOL_NAME:
+                stage_gate = {"has_active_stage": True, "transition_required": False}
+            else:
+                stage_gate = self._stage_gate(runtime_context.get("interaction_trace"))
+            stage_gate_error = stage_gate_error_for_tool(
+                tool_name,
+                has_active_stage=bool(stage_gate.get("has_active_stage")),
+                transition_required=bool(stage_gate.get("transition_required")),
+                stage_tool_name=STAGE_TOOL_NAME,
+            )
+            if stage_gate_error:
+                return f"Error: {stage_gate_error}", "error", "", "", None
 
         errors = tool.validate_params(arguments)
         if errors:
@@ -519,6 +544,7 @@ class CeoFrontDoorRunner:
         route_kind = "direct_reply"
         used_tools: list[str] = []
         breaker = RepeatedActionCircuitBreaker()
+        stage_tool_enabled = not bool(runtime_context.get("disable_stage_tool"))
 
         async def _submit_stage(stage_goal: str, tool_round_budget: int) -> dict[str, Any]:
             nonlocal interaction_trace
@@ -530,25 +556,29 @@ class CeoFrontDoorRunner:
             self._sync_session_trace(session, interaction_trace)
             return dict(stage)
 
-        all_tools = {
-            **dict(tools or {}),
-            STAGE_TOOL_NAME: CeoSubmitNextStageTool(_submit_stage),
-        }
+        all_tools = dict(tools or {})
+        if stage_tool_enabled:
+            all_tools[STAGE_TOOL_NAME] = CeoSubmitNextStageTool(_submit_stage)
         chat_backend = self._resolve_chat_backend()
 
         for _attempt in range(limit):
-            stage_gate = self._stage_gate(interaction_trace)
-            visible_tools = visible_tools_for_stage_iteration(
-                all_tools,
-                has_active_stage=bool(stage_gate.get("has_active_stage")),
-                transition_required=bool(stage_gate.get("transition_required")),
-                stage_tool_name=STAGE_TOOL_NAME,
-            )
+            if stage_tool_enabled:
+                stage_gate = self._stage_gate(interaction_trace)
+                visible_tools = visible_tools_for_stage_iteration(
+                    all_tools,
+                    has_active_stage=bool(stage_gate.get("has_active_stage")),
+                    transition_required=bool(stage_gate.get("transition_required")),
+                    stage_tool_name=STAGE_TOOL_NAME,
+                )
+                request_messages = self._apply_stage_overlay(
+                    message_history,
+                    overlay_text=build_ceo_stage_overlay(self._stage_gate(interaction_trace)),
+                )
+            else:
+                stage_gate = {"has_active_stage": True, "transition_required": False, "active_stage": {}}
+                visible_tools = dict(all_tools)
+                request_messages = list(message_history)
             tool_schemas = [tool.to_schema() for tool in visible_tools.values()]
-            request_messages = self._apply_stage_overlay(
-                message_history,
-                overlay_text=build_ceo_stage_overlay(self._stage_gate(interaction_trace)),
-            )
             response = await chat_backend.chat(
                 messages=request_messages,
                 tools=tool_schemas or None,
@@ -596,7 +626,11 @@ class CeoFrontDoorRunner:
 
                 round_payload = None
                 active_stage_id = str((stage_gate.get("active_stage") or {}).get("stage_id") or "")
-                if bool(stage_gate.get("has_active_stage")) and not bool(stage_gate.get("transition_required")):
+                if (
+                    stage_tool_enabled
+                    and bool(stage_gate.get("has_active_stage"))
+                    and not bool(stage_gate.get("transition_required"))
+                ):
                     interaction_trace, round_payload = record_stage_round(
                         interaction_trace,
                         tool_calls=tool_call_payloads,
@@ -626,6 +660,7 @@ class CeoFrontDoorRunner:
                                 runtime_context={
                                     **runtime_context,
                                     "interaction_trace": interaction_trace,
+                                    "disable_stage_tool": not stage_tool_enabled,
                                     "stage_turn_granted": bool(
                                         stage_gate.get("has_active_stage")
                                         and not stage_gate.get("transition_required")
@@ -716,6 +751,7 @@ class CeoFrontDoorRunner:
         query_text = self._content_text(getattr(user_input, "content", ""))
         metadata = dict(getattr(user_input, "metadata", None) or {})
         heartbeat_internal = bool(metadata.get("heartbeat_internal"))
+        cron_internal = bool(metadata.get("cron_internal"))
         runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
         persisted_session = runtime_session
         main_service = getattr(self._loop, "main_task_service", None)
@@ -742,11 +778,16 @@ class CeoFrontDoorRunner:
             persisted_session=persisted_session,
         )
         tool_names = list(assembly.tool_names or list(exposure.get("tool_names") or []))
+        if cron_internal:
+            tool_names = ["cron"]
+        cron_system_message = self._cron_internal_system_message(metadata)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": assembly.system_prompt},
-            *list(assembly.recent_history or []),
-            {"role": "user", "content": self._model_content(getattr(user_input, "content", ""))},
         ]
+        if cron_system_message is not None:
+            messages.append(cron_system_message)
+        messages.extend(list(assembly.recent_history or []))
+        messages.append({"role": "user", "content": self._model_content(getattr(user_input, "content", ""))})
         project_environment = current_project_environment(workspace_root=getattr(self._loop, "workspace", None))
         session_task_defaults = self._session_task_defaults(runtime_session)
         model_refs = self._resolve_ceo_model_refs()
@@ -776,6 +817,10 @@ class CeoFrontDoorRunner:
             "project_path_entries": list(project_environment.get("project_path_entries") or []),
             "project_virtual_env": str(project_environment.get("project_virtual_env") or ""),
             "project_python_hint": str(project_environment.get("project_python_hint") or ""),
+            "cron_internal": cron_internal,
+            "cron_job_id": str(metadata.get("cron_job_id") or "").strip(),
+            "cron_stop_condition": str(metadata.get("cron_stop_condition") or "").strip(),
+            "disable_stage_tool": cron_internal,
         }
 
         setattr(session, "_last_route_kind", "direct_reply")

@@ -1,5 +1,9 @@
+import atexit
+import asyncio
 import mimetypes
 import os
+import signal
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,10 +24,76 @@ mimetypes.add_type('text/css', '.css')
 mimetypes.add_type('application/javascript', '.js')
 os.environ.setdefault('G3KU_TASK_RUNTIME_ROLE', 'web')
 
+_SHUTDOWN_HOOKS_LOCK = threading.RLock()
+_SHUTDOWN_HOOKS_INSTALLED = False
+_RUNTIME_SHUTDOWN_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _set_runtime_shutdown_loop(loop: asyncio.AbstractEventLoop | None) -> None:
+    global _RUNTIME_SHUTDOWN_LOOP
+    _RUNTIME_SHUTDOWN_LOOP = loop
+
+
+def _schedule_runtime_shutdown(reason: str = "process_exit") -> bool:
+    _ = reason
+    request_server_shutdown()
+    loop = _RUNTIME_SHUTDOWN_LOOP
+    if loop is not None and loop.is_running() and not loop.is_closed():
+        try:
+            asyncio.run_coroutine_threadsafe(shutdown_web_runtime(), loop)
+            return True
+        except Exception as exc:
+            logger.debug("runtime shutdown scheduling skipped: {}", exc)
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    if running_loop is not None and running_loop.is_running() and not running_loop.is_closed():
+        try:
+            running_loop.create_task(shutdown_web_runtime())
+            return True
+        except Exception as exc:
+            logger.debug("runtime shutdown task scheduling skipped: {}", exc)
+    return False
+
+
+def _sync_runtime_shutdown(reason: str = "process_exit") -> None:
+    if _schedule_runtime_shutdown(reason):
+        return
+    try:
+        asyncio.run(shutdown_web_runtime())
+    except RuntimeError:
+        logger.debug("runtime shutdown fallback skipped because no compatible event loop was available")
+    except Exception as exc:
+        logger.debug("runtime shutdown fallback failed: {}", exc)
+
+
+def _handle_process_shutdown_signal(signum, _frame) -> None:
+    _sync_runtime_shutdown(f"signal:{int(signum)}")
+
+
+def _install_process_shutdown_hooks() -> None:
+    global _SHUTDOWN_HOOKS_INSTALLED
+    with _SHUTDOWN_HOOKS_LOCK:
+        if _SHUTDOWN_HOOKS_INSTALLED:
+            return
+        for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+            signal_value = getattr(signal, signal_name, None)
+            if signal_value is None:
+                continue
+            try:
+                signal.signal(signal_value, _handle_process_shutdown_signal)
+            except Exception:
+                continue
+        atexit.register(_sync_runtime_shutdown, "atexit")
+        _SHUTDOWN_HOOKS_INSTALLED = True
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     restore_asyncio_filter = install_windows_connection_reset_filter()
+    _install_process_shutdown_hooks()
+    _set_runtime_shutdown_loop(asyncio.get_running_loop())
     try:
         security = get_bootstrap_security_service()
         if security.is_unlocked():
@@ -34,6 +104,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         await shutdown_web_runtime()
+        _set_runtime_shutdown_loop(None)
         restore_asyncio_filter()
 
 
@@ -110,6 +181,7 @@ def run():
 
 
 def run_server(*, host: str, port: int, reload: bool, log_level: str = 'info') -> None:
+    _install_process_shutdown_hooks()
     if reload:
         uvicorn.run('g3ku.web.main:app', host=host, port=port, reload=True, log_level=log_level)
         return

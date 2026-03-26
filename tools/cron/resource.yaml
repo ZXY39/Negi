@@ -1,14 +1,14 @@
 schema_version: 1
 kind: tool
 name: cron
-description: 安排提醒和周期任务。动作：add、list、remove。
+description: 安排提醒和周期任务。动作：add、list、remove。循环任务创建时必须提供 `stop_condition`，写成“此任务的具体退出条件+或用户要求取消”。
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: 当前版本表示仓库内置实现；更新时需同步代码、参数契约和资源描述。
-  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文案不单独视为版本升级。
+  summary: 当前版本表示仓库内置实现；更新时需要同步代码、参数契约和资源描述。
+  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文档不单独视为版本升级。
   source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
 requires:
   tools: []
@@ -26,25 +26,28 @@ parameters:
       - add
       - list
       - remove
-      description: 要执行的动作
+      description: 要执行的动作。
     message:
       type: string
-      description: 提醒消息（用于 add）
+      description: 提醒或任务内容，仅填写用户可见文本。
+    stop_condition:
+      type: string
+      description: 循环任务必填。写成“此任务的具体退出条件+或用户要求取消”。
     every_seconds:
       type: integer
-      description: 周期任务的间隔秒数
+      description: 周期任务的间隔秒数。
     cron_expr:
       type: string
-      description: Cron 表达式，例如 '0 9 * * *'（定时任务）
+      description: Cron 表达式，例如 '0 9 * * *'。
     tz:
       type: string
-      description: Cron 表达式的 IANA 时区（例如 'America/Vancouver'）
+      description: Cron 表达式的 IANA 时区，例如 'America/Vancouver'。
     at:
       type: string
-      description: 一次性执行的 ISO datetime（例如 '2026-02-12T10:30:00'）
+      description: 一次性执行的 ISO datetime，例如 '2026-02-12T10:30:00'。
     job_id:
       type: string
-      description: 任务 ID（用于 remove）
+      description: 任务 ID，用于 remove。
   required:
   - action
 exposure:

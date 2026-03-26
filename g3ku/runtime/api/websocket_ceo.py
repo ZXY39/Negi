@@ -18,12 +18,13 @@ from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_ceo_session_catalog,
     build_session_summary,
-    read_inflight_turn_snapshot,
     create_web_ceo_session,
     ensure_active_web_ceo_session,
     ensure_ceo_session_metadata,
     find_ceo_session_catalog_item,
+    is_internal_ceo_user_message,
     list_web_ceo_sessions,
+    read_inflight_turn_snapshot,
     resolve_active_ceo_session_id,
     upload_dir_for_session,
     workspace_path,
@@ -407,6 +408,8 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
     for raw in list(messages or []):
         if not isinstance(raw, dict):
             continue
+        if is_internal_ceo_user_message(raw):
+            continue
         role = str(raw.get('role') or '').strip().lower()
         if role not in {'user', 'assistant', 'system'}:
             continue
@@ -678,6 +681,7 @@ async def ceo_websocket(websocket: WebSocket):
                 'ceo.reply.final',
                 {
                     'text': text,
+                    'source': str(payload.get('source') or 'user').strip().lower() or 'user',
                     'interaction_trace': _serialize_interaction_trace(payload.get('interaction_trace')),
                     'stage': dict(payload.get('stage') or {}) if isinstance(payload.get('stage'), dict) else None,
                 },

@@ -1605,6 +1605,39 @@ def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_pat
     assert root_progress_node["execution_trace"]["final_output"] == ""
 
 
+def test_task_snapshot_progress_nodes_are_compact_summaries(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+
+    assert root is not None
+    assert snapshot is not None
+
+    root_progress_node = next(
+        item for item in snapshot["progress"]["nodes"] if item["node_id"] == record.root_node_id
+    )
+
+    assert root_progress_node["goal"] == root.goal
+    assert root_progress_node["title"] == root.goal
+    assert root_progress_node["status"] == root.status
+    assert root_progress_node["execution_trace"]["tool_steps"] == []
+    assert root_progress_node["execution_trace"]["stages"] == []
+    assert "prompt" not in root_progress_node
+    assert "input" not in root_progress_node
+    assert "metadata" not in root_progress_node
+
+
 def test_task_projection_backfills_when_projection_version_is_stale(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

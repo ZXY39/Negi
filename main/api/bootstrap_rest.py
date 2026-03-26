@@ -6,7 +6,13 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException
 
 from g3ku.security import get_bootstrap_security_service
-from g3ku.shells.web import describe_web_runtime_services, ensure_web_runtime_services, get_agent, get_runtime_manager
+from g3ku.shells.web import (
+    describe_web_runtime_services,
+    ensure_web_runtime_services,
+    get_agent,
+    get_runtime_manager,
+    shutdown_web_runtime,
+)
 from g3ku.web.server_control import request_server_shutdown
 
 router = APIRouter()
@@ -207,6 +213,7 @@ async def bootstrap_exit(payload: dict | None = Body(default=None)):
             stopped = await _stop_running_work()
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await shutdown_web_runtime()
     if not request_server_shutdown():
         raise HTTPException(status_code=503, detail="server_shutdown_unavailable")
     return {

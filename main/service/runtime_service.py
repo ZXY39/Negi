@@ -1475,9 +1475,7 @@ class MainRuntimeService:
         skill_id: str = '',
         search_query: str = '',
         limit: int | None = None,
-        level: str = 'l1',
-        query: str = '',
-        max_tokens: int | None = None,
+        **_unused: Any,
     ) -> dict[str, Any]:
         skill_name = str(skill_id or '').strip()
         if not skill_name:
@@ -1497,9 +1495,6 @@ class MainRuntimeService:
         content = path.read_text(encoding='utf-8') if path and path.exists() else ''
         payload = layered_body_payload(
             body=content,
-            level=level,
-            query=query,
-            max_tokens=max_tokens,
             title=str(getattr(record, 'display_name', '') or ''),
             description=str(getattr(record, 'description', '') or ''),
             path=str(path) if path else '',
@@ -1562,9 +1557,7 @@ class MainRuntimeService:
         tool_id: str = '',
         search_query: str = '',
         limit: int | None = None,
-        level: str = 'l1',
-        query: str = '',
-        max_tokens: int | None = None,
+        **_unused: Any,
     ) -> dict[str, Any]:
         tool_name = str(tool_id or '').strip()
         if not tool_name:
@@ -1586,9 +1579,6 @@ class MainRuntimeService:
         resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
         payload = layered_body_payload(
             body=content,
-            level=level,
-            query=query,
-            max_tokens=max_tokens,
             title=str(toolskill.get('tool_id') or tool_name),
             description=str(toolskill.get('description') or ''),
             path=str(toolskill.get('path') or ''),

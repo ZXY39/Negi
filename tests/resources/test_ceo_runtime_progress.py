@@ -461,6 +461,81 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_hides_cron_internal_prompt_but_persists_reply(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    captured: dict[str, object] = {}
+
+    class _FakeRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input
+            await on_progress(
+                "cron started",
+                event_kind="tool_start",
+                event_data={"tool_name": "cron"},
+            )
+            captured["snapshot"] = session.inflight_turn_snapshot()
+            return "Scheduled progress update."
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_FakeRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+    await session.prompt(
+        UserInputMessage(
+            content="Please query task 27255d28379d and report progress.",
+            metadata={"cron_internal": True, "cron_job_id": "job-77"},
+        )
+    )
+
+    inflight = captured["snapshot"]
+    assert isinstance(inflight, dict)
+    assert inflight["source"] == "cron"
+    assert "user_message" not in inflight
+    assert [item["tool_name"] for item in inflight["tool_events"]] == ["cron"]
+
+    persisted = loop.sessions.get_or_create("web:shared")
+    assert [message["role"] for message in persisted.messages] == ["assistant"]
+    assert persisted.messages[0]["content"] == "Scheduled progress update."
+    assert persisted.messages[0]["metadata"] == {"source": "cron", "cron_job_id": "job-77"}
+
+    message_end = next(event for event in events if event.type == "message_end")
+    assert message_end.payload["source"] == "cron"
+    assert message_end.payload["heartbeat_internal"] is False
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_pause_emits_single_pause_ack_and_snapshot(monkeypatch) -> None:
     async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
         _ = force, reason
@@ -833,6 +908,27 @@ def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": HEARTBEAT_OK}
     ) is False
+
+
+def test_ceo_snapshot_filters_internal_cron_user_message() -> None:
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {"role": "user", "content": "visible user"},
+            {"role": "assistant", "content": "visible answer"},
+            {
+                "role": "user",
+                "content": "internal cron prompt",
+                "metadata": {"cron_internal": True, "cron_job_id": "job-77"},
+            },
+            {"role": "assistant", "content": "scheduled update", "metadata": {"source": "cron"}},
+        ]
+    )
+
+    assert [item["content"] for item in snapshot] == [
+        "visible user",
+        "visible answer",
+        "scheduled update",
+    ]
 
 
 @pytest.mark.asyncio

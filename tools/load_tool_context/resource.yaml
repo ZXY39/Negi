@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: load_tool_context
-description: Load detailed context for a visible tool or registered external tool, or search visible tool candidates with natural-language search_query.
+description: Load full context for a visible tool or registered external tool, or search visible tool candidates with natural-language search_query.
 source:
   type: ''
   url: ''
@@ -29,16 +29,6 @@ parameters:
     limit:
       type: integer
       description: Optional candidate limit for search mode. Defaults to 5.
-    level:
-      type: string
-      enum: [l0, l1, l2]
-      description: Requested context level for detail mode. Defaults to l1.
-    query:
-      type: string
-      description: Optional query used to extract a focused L2 excerpt for detail mode.
-    max_tokens:
-      type: integer
-      description: Optional output token budget.
   required: []
 exposure:
   agent: true
