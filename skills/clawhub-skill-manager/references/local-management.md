@@ -5,6 +5,12 @@
 - 所有通过本 skill 安装的 ClawHub skill 都落到：`<workspace>/skills/<skill_id>/`
 - `skill_id` 默认由 slug 归一化得到
 
+## 适配前提
+
+- 通过本 skill 下载到本地的内容，默认是来自 ClawHub 的上游第三方 skill，不应直接视为已经适配 G3KU 的原生 skill。
+- 如果用户目标是在当前项目中长期使用该 skill，安装前必须先考虑是否需要重写 `SKILL.md`、`resource.yaml`、触发规则、工具依赖、命令路径或输出约定。
+- 如果判断需要适配，则本 skill 的安装动作只负责把上游素材安全引入本地；后续应转 `skill-creator` 做 G3KU 化改造。
+
 ## 脚本负责的事情
 
 `scripts/clawhub_skill_manager.py` 统一负责：
@@ -46,6 +52,8 @@
 - `current_version.installed_at`
 
 后续更新时，脚本依赖这些字段识别“这是一个由 ClawHub 管理的本地 skill”。
+
+这些字段只表示来源与版本可追踪，不表示该 skill 已经满足 G3KU 项目的行为规范或文档要求。
 
 ## 更新判断
 

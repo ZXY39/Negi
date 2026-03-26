@@ -217,7 +217,7 @@ class NodeRunner:
 
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
-        if node.node_kind == KIND_EXECUTION:
+        if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             tools['submit_next_stage'] = SubmitNextStageTool(
                 lambda stage_goal, tool_round_budget: self._submit_next_stage(
                     task_id=task.task_id,
@@ -226,6 +226,9 @@ class NodeRunner:
                     tool_round_budget=tool_round_budget,
                 )
             )
+        else:
+            tools.pop('submit_next_stage', None)
+        if node.node_kind == KIND_EXECUTION:
             if node.can_spawn_children:
                 tools['spawn_child_nodes'] = SpawnChildNodesTool(
                     lambda children, call_id=None: self._spawn_children(
@@ -238,7 +241,6 @@ class NodeRunner:
             else:
                 tools.pop('spawn_child_nodes', None)
         else:
-            tools.pop('submit_next_stage', None)
             tools.pop('spawn_child_nodes', None)
         return tools
 
@@ -255,7 +257,7 @@ class NodeRunner:
             'core_requirement': self._resolve_core_requirement(task),
             'runtime_environment': self._runtime_environment_payload(),
         }
-        if node.node_kind == KIND_EXECUTION:
+        if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             payload['execution_stage'] = self._execution_stage_payload(task=task, node=node)
         completion_contract = self._completion_contract_payload(task=task, node=node)
         if completion_contract is not None:

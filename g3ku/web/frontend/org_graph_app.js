@@ -23,6 +23,8 @@ const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v1";
 const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
+const CEO_COMPOSER_DRAFT_CACHE_KEY = "g3ku.ceo.composer-drafts.v1";
+const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -63,6 +65,8 @@ const S = {
     ceoScrollToLatestOnSnapshot: false,
     ceoSnapshotCache: {},
     ceoSnapshotPersistId: null,
+    ceoComposerDrafts: {},
+    ceoComposerDraftPersistId: null,
     ceoCatalogRefreshId: null,
     liveDurationIntervalId: null,
     activeSessionId: "",
@@ -325,7 +329,22 @@ const U = {
 };
 
 const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-const icons = () => window.lucide && lucide.createIcons();
+let __iconsRafId = 0;
+const icons = (force = false) => {
+    if (!window.lucide || typeof lucide.createIcons !== "function") return;
+    if (force) {
+        if (__iconsRafId) window.cancelAnimationFrame(__iconsRafId);
+        __iconsRafId = 0;
+        lucide.createIcons();
+        return;
+    }
+    if (__iconsRafId) return;
+    __iconsRafId = window.requestAnimationFrame(() => {
+        __iconsRafId = 0;
+        if (!window.lucide || typeof lucide.createIcons !== "function") return;
+        lucide.createIcons();
+    });
+};
 const roleKey = (v) => (["ceo", "inspection", "checker"].includes(String(v).toLowerCase()) ? (String(v).toLowerCase() === "ceo" ? "ceo" : "inspection") : "execution");
 const roleLabel = (v) => ({ ceo: "主Agent", execution: "执行", inspection: "检验" }[roleKey(v)]);
 const pStatus = (v) => String(v || "").trim().toLowerCase();
@@ -737,6 +756,147 @@ function removeSessionJson(key) {
     try {
         window.sessionStorage?.removeItem?.(key);
     } catch {}
+}
+
+function normalizeCeoComposerDraftEntry(sessionId, entry = {}) {
+    const key = String(sessionId || entry?.session_id || "").trim();
+    if (!key) return null;
+    const text = String(entry?.text || "");
+    const uploads = cloneCeoSnapshotAttachments(entry?.uploads);
+    if (!text.trim() && !uploads.length) return null;
+    return {
+        session_id: key,
+        text,
+        uploads,
+        cached_at: String(entry?.cached_at || "").trim() || new Date().toISOString(),
+    };
+}
+
+function cloneCeoComposerDraftEntry(entry = null) {
+    if (!entry || typeof entry !== "object") return null;
+    return normalizeCeoComposerDraftEntry(entry.session_id, entry);
+}
+
+function pruneCeoComposerDraftCache(cache = {}) {
+    const entries = Object.values(cache || {})
+        .map((entry) => cloneCeoComposerDraftEntry(entry))
+        .filter(Boolean)
+        .sort((left, right) => String(right.cached_at || "").localeCompare(String(left.cached_at || "")))
+        .slice(0, CEO_COMPOSER_DRAFT_CACHE_LIMIT);
+    return entries.reduce((acc, entry) => {
+        acc[entry.session_id] = entry;
+        return acc;
+    }, {});
+}
+
+function persistCeoComposerDraftCache() {
+    const items = Object.values(pruneCeoComposerDraftCache(S.ceoComposerDrafts || {}));
+    if (!items.length) {
+        removeSessionJson(CEO_COMPOSER_DRAFT_CACHE_KEY);
+        return;
+    }
+    writeSessionJson(CEO_COMPOSER_DRAFT_CACHE_KEY, { items });
+}
+
+function schedulePersistCeoComposerDraftCache() {
+    if (S.ceoComposerDraftPersistId) window.clearTimeout(S.ceoComposerDraftPersistId);
+    S.ceoComposerDraftPersistId = window.setTimeout(() => {
+        S.ceoComposerDraftPersistId = null;
+        persistCeoComposerDraftCache();
+    }, 120);
+}
+
+function flushCeoComposerDraftCachePersist() {
+    if (S.ceoComposerDraftPersistId) {
+        window.clearTimeout(S.ceoComposerDraftPersistId);
+        S.ceoComposerDraftPersistId = null;
+    }
+    persistCeoComposerDraftCache();
+}
+
+function hydrateCeoComposerDraftCache() {
+    const raw = readSessionJson(CEO_COMPOSER_DRAFT_CACHE_KEY);
+    const items = Array.isArray(raw?.items) ? raw.items : (Array.isArray(raw) ? raw : []);
+    const next = {};
+    items.forEach((entry) => {
+        const normalized = normalizeCeoComposerDraftEntry(entry?.session_id, entry);
+        if (!normalized) return;
+        next[normalized.session_id] = normalized;
+    });
+    S.ceoComposerDrafts = pruneCeoComposerDraftCache(next);
+}
+
+function getCeoComposerDraft(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key) return null;
+    return cloneCeoComposerDraftEntry(S.ceoComposerDrafts?.[key] || null);
+}
+
+function setCeoComposerDraft(sessionId, entry = {}) {
+    const key = String(sessionId || entry?.session_id || "").trim();
+    if (!key) return null;
+    const previous = S.ceoComposerDrafts?.[key] && typeof S.ceoComposerDrafts[key] === "object"
+        ? S.ceoComposerDrafts[key]
+        : {};
+    const normalized = normalizeCeoComposerDraftEntry(key, {
+        ...previous,
+        ...(entry && typeof entry === "object" ? entry : {}),
+        session_id: key,
+        cached_at: new Date().toISOString(),
+    });
+    if (!normalized) {
+        clearCeoComposerDraft(key);
+        return null;
+    }
+    S.ceoComposerDrafts = pruneCeoComposerDraftCache({
+        ...(S.ceoComposerDrafts || {}),
+        [key]: normalized,
+    });
+    schedulePersistCeoComposerDraftCache();
+    return cloneCeoComposerDraftEntry(normalized);
+}
+
+function clearCeoComposerDraft(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key || !S.ceoComposerDrafts?.[key]) return false;
+    const next = { ...(S.ceoComposerDrafts || {}) };
+    delete next[key];
+    S.ceoComposerDrafts = pruneCeoComposerDraftCache(next);
+    schedulePersistCeoComposerDraftCache();
+    return true;
+}
+
+function captureCeoComposerDraftFromUi() {
+    return {
+        text: String(U.ceoInput?.value || ""),
+        uploads: normalizeUploadList(S.ceoUploads),
+    };
+}
+
+function syncActiveCeoComposerDraft() {
+    const sessionId = activeSessionId();
+    if (!sessionId) return null;
+    return setCeoComposerDraft(sessionId, captureCeoComposerDraftFromUi());
+}
+
+function restoreCeoComposerDraftForSession(sessionId) {
+    const key = String(sessionId || "").trim();
+    const draft = key ? getCeoComposerDraft(key) : null;
+    S.ceoUploadBusy = false;
+    S.ceoUploads = normalizeUploadList(draft?.uploads);
+    if (U.ceoInput) U.ceoInput.value = String(draft?.text || "");
+    if (U.ceoFileInput) U.ceoFileInput.value = "";
+    renderPendingCeoUploads();
+    syncCeoInputHeight();
+}
+
+function switchCeoComposerDraft(previousSessionId, nextSessionId) {
+    const previousId = String(previousSessionId || "").trim();
+    const nextId = String(nextSessionId || "").trim();
+    if (previousId === nextId) return false;
+    if (previousId) setCeoComposerDraft(previousId, captureCeoComposerDraftFromUi());
+    restoreCeoComposerDraftForSession(nextId);
+    return true;
 }
 
 function cloneCeoSnapshotAttachments(items = []) {
@@ -2075,6 +2235,7 @@ async function handleCeoFileSelection(event) {
     try {
         const uploaded = await ApiClient.uploadCeoFiles(files, activeSessionId());
         S.ceoUploads = [...normalizeUploadList(S.ceoUploads), ...normalizeUploadList(uploaded)];
+        syncActiveCeoComposerDraft();
         renderPendingCeoUploads();
         showToast({ title: "上传完成", text: `已添加 ${uploaded.length} 个附件`, kind: "success" });
     } catch (e) {
@@ -2091,6 +2252,7 @@ function removePendingCeoUpload(index) {
     if (index < 0 || index >= next.length) return;
     next.splice(index, 1);
     S.ceoUploads = next;
+    syncActiveCeoComposerDraft();
     renderPendingCeoUploads();
 }
 
@@ -2104,9 +2266,33 @@ function scrollCeoFeedToBottom() {
     window.requestAnimationFrame(applyBottom);
 }
 
+let ceoFeedBatchDepth = 0;
+
+function withCeoFeedBatch(mutator, { scrollMode = "preserve" } = {}) {
+    if (typeof mutator !== "function") return null;
+    if (!U.ceoFeed) return mutator();
+    const prevTop = U.ceoFeed.scrollTop;
+    ceoFeedBatchDepth += 1;
+    let result = null;
+    try {
+        result = mutator();
+    } finally {
+        ceoFeedBatchDepth = Math.max(0, ceoFeedBatchDepth - 1);
+    }
+    if (ceoFeedBatchDepth > 0) return result;
+    if (scrollMode === "bottom") {
+        scrollCeoFeedToBottom();
+    } else {
+        const maxTop = Math.max(0, U.ceoFeed.scrollHeight - U.ceoFeed.clientHeight);
+        U.ceoFeed.scrollTop = Math.max(0, Math.min(prevTop, maxTop));
+    }
+    return result;
+}
+
 function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     if (typeof mutator !== "function") return null;
     if (!U.ceoFeed) return mutator();
+    if (ceoFeedBatchDepth > 0) return mutator();
     const prevTop = U.ceoFeed.scrollTop;
     const result = mutator();
     if (scrollMode === "bottom") {
@@ -2223,32 +2409,35 @@ function renderPersistedCeoAssistantTurn(item = {}) {
 function renderCeoSnapshot(messages = [], inflightTurn = null) {
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
-    resetCeoFeed();
-    messages.forEach((item) => {
-        const role = String(item?.role || "").trim().toLowerCase();
-        const content = String(item?.content || "");
-        const attachments = normalizeUploadList(item?.attachments);
-        if (role === "user") {
-            if (!content.trim() && !attachments.length) return;
-            addMsg(hasRenderableText(content) ? content : summarizeUploads(attachments), "user", {
-                attachments,
-                scrollMode: "preserve",
-            });
-            return;
-        }
-        if (role === "assistant") {
-            renderPersistedCeoAssistantTurn(item);
-            return;
-        }
-        if (role === "system" && content.trim()) {
-            addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
-        }
-    });
-    restoreCeoInflightTurn(inflightTurn);
-    if (shouldScrollToLatest) scrollCeoFeedToBottom();
-    setCeoSessionSnapshotCache(activeSessionId(), {
-        messages,
-        inflight_turn: inflightTurn,
+    withCeoFeedBatch(() => {
+        resetCeoFeed();
+        messages.forEach((item) => {
+            const role = String(item?.role || "").trim().toLowerCase();
+            const content = String(item?.content || "");
+            const attachments = normalizeUploadList(item?.attachments);
+            if (role === "user") {
+                if (!content.trim() && !attachments.length) return;
+                addMsg(hasRenderableText(content) ? content : summarizeUploads(attachments), "user", {
+                    attachments,
+                    scrollMode: "preserve",
+                });
+                return;
+            }
+            if (role === "assistant") {
+                renderPersistedCeoAssistantTurn(item);
+                return;
+            }
+            if (role === "system" && content.trim()) {
+                addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+            }
+        });
+        restoreCeoInflightTurn(inflightTurn);
+        setCeoSessionSnapshotCache(activeSessionId(), {
+            messages,
+            inflight_turn: inflightTurn,
+        });
+    }, {
+        scrollMode: shouldScrollToLatest ? "bottom" : "preserve",
     });
 }
 
@@ -4603,21 +4792,18 @@ async function deleteModelDetail(modelKey) {
     }
 }
 
-function resetCeoComposerState() {
+function resetCeoComposerState({ clearDraft = false, sessionId = activeSessionId() } = {}) {
     S.ceoUploads = [];
     S.ceoUploadBusy = false;
     if (U.ceoInput) U.ceoInput.value = "";
     if (U.ceoFileInput) U.ceoFileInput.value = "";
+    if (clearDraft) clearCeoComposerDraft(sessionId);
     renderPendingCeoUploads();
     syncCeoInputHeight();
 }
 
 function resetCeoComposerForSessionChange(previousSessionId, nextSessionId) {
-    const previousId = String(previousSessionId || "").trim();
-    const nextId = String(nextSessionId || "").trim();
-    if (previousId === nextId) return false;
-    resetCeoComposerState();
-    return true;
+    return switchCeoComposerDraft(previousSessionId, nextSessionId);
 }
 
 function resetCeoSessionState({ scrollToLatest = false } = {}) {
@@ -4991,7 +5177,6 @@ async function createNewCeoSession() {
         const payload = await ApiClient.createCeoSession({});
         const nextActiveId = applyCeoSessionsPayload(payload);
         closeCeoWs();
-        resetCeoComposerState();
         resetCeoSessionState({ scrollToLatest: true });
         if (nextActiveId) initCeoWs();
     } catch (e) {
@@ -5097,10 +5282,10 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } 
         const nextActiveId = applyCeoSessionsPayload(payload);
         if (wasActive) {
             closeCeoWs();
-            resetCeoComposerState();
             resetCeoSessionState({ scrollToLatest: true });
             if (nextActiveId) initCeoWs();
         }
+        clearCeoComposerDraft(targetId);
         if (S.view === "tasks") await loadTasks();
     } catch (e) {
         const blockedDelete = e?.status === 409 && e?.data && typeof e.data === "object" && e.data.code === "session_has_unfinished_tasks";
@@ -5252,6 +5437,7 @@ function sendCeoMessage() {
         addMsg(hasRenderableText(text) ? text : summarizeUploads(uploads), "user", { attachments: uploads, scrollMode: "bottom" });
         U.ceoInput.value = "";
         S.ceoUploads = [];
+        clearCeoComposerDraft(activeSessionId());
         syncCeoInputHeight();
         renderPendingCeoUploads();
         const turn = createPendingCeoTurn("user", { scrollMode: "bottom" });
@@ -5692,6 +5878,7 @@ function bind() {
     });
     U.ceoInput?.addEventListener("input", () => {
         syncCeoInputHeight();
+        syncActiveCeoComposerDraft();
         syncCeoPrimaryButton();
     });
     U.modelRefresh?.addEventListener("click", () => void loadModels());
@@ -6020,15 +6207,19 @@ function init() {
     enhanceResourceSelects();
     configureTaskDetailSections();
     bind();
+    hydrateCeoComposerDraftCache();
     hydrateCeoSessionSnapshotCache();
+    restoreCeoComposerDraftForSession(activeSessionId());
     syncCeoCatalogPolling();
     startLiveDurationTicker();
     window.addEventListener("beforeunload", () => {
+        flushCeoComposerDraftCachePersist();
         flushCeoSessionSnapshotCachePersist();
         flushTaskDetailSessionPersist();
         stopLiveDurationTicker();
     });
     window.addEventListener("pagehide", () => {
+        flushCeoComposerDraftCachePersist();
         flushCeoSessionSnapshotCachePersist();
         flushTaskDetailSessionPersist();
     });

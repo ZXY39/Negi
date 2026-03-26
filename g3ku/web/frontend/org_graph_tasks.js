@@ -661,7 +661,7 @@ function renderTaskTokenStats() {
         <div class="task-token-topline">
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.input_tokens))}</strong><span>输入Token</span></div>
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.output_tokens))}</strong><span>输出Token</span></div>
-            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缓存命中Token</span></div>
+            <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.cache_hit_tokens))}</strong><span>缓存命中</span></div>
             <div class="task-token-stat"><strong>${esc(formatTokenCount(summary.call_count))}</strong><span>妯″瀷璋冪敤</span></div>
         </div>
         <div class="task-token-meta">
@@ -691,7 +691,7 @@ function renderTaskTokenStats() {
                     <div class="task-token-model-stats">
                         <span>输入Token ${esc(formatTokenCount(item.input_tokens))}</span>
                         <span>输出Token ${esc(formatTokenCount(item.output_tokens))}</span>
-                        <span>缓存命中Token ${esc(formatTokenCount(item.cache_hit_tokens))}</span>
+                        <span>缓存命中 ${esc(formatTokenCount(item.cache_hit_tokens))}</span>
                     </div>
                     <div class="task-token-model-meta">
                         调用 ${esc(formatTokenCount(item.call_count))} · 有 usage ${esc(formatTokenCount(item.calls_with_usage))} · 缺失 ${esc(formatTokenCount(item.calls_without_usage))}
@@ -723,10 +723,10 @@ function renderTaskTokenStats() {
                         </thead>
                         <tbody>
                             ${recentModelCalls.map((item) => {
-                                const modelNames = item.delta_usage_by_model.length
-                                    ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
-                                    : "n/a";
-                                return `
+            const modelNames = item.delta_usage_by_model.length
+                ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
+                : "n/a";
+            return `
                                     <tr>
                                         <td>${esc(formatTokenCount(item.call_index))}</td>
                                         <td>${esc(formatTokenCount(item.prepared_message_chars))}</td>
@@ -738,7 +738,7 @@ function renderTaskTokenStats() {
                                         <td>${esc(modelNames)}</td>
                                     </tr>
                                 `;
-                            }).join("")}
+        }).join("")}
                         </tbody>
                     </table>
                 </div>

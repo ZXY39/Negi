@@ -8,7 +8,7 @@
 - 默认优先产出 **G3KU 本地资源**；只有用户明确需要跨平台分发时，才追加开放标准 `SKILL.md` 技能。
 - 主 `SKILL.md` 只保留入口、分流规则和关键决策；细节步骤、模板和检查项放到 `references/`。
 - 能复用已有脚本、示例和上游资料就复用，不要重复造轮子。
-- 当用户要从 ClawHub 搜索、下载、安装或更新现成 skill 时，不在本工作流中处理；转用 `clawhub-skill-manager`。
+- 当用户要从 ClawHub 搜索、下载、安装或更新现成 skill 时，不在本工作流中处理；转用 `clawhub-skill-manager`。ClawHub 来源的 skill 默认视为第三方项目 skill；若后续要在 G3KU 内使用，通常仍需评估并重写相关内容后，再继续本工作流。
 - 当用户明确要“从 GitHub repo/path 安装现成 skill”时，不要先输出迁移方案或等待用户二次确认；优先直接调用 `skill-installer` 工具。只有安装后仍需改造结构、补充资源或重写触发规则时，才继续本工作流。
 
 ## 优先转交给 skill-installer

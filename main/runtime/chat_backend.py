@@ -8,9 +8,13 @@ from g3ku.config.schema import Config
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
+    exhausted_model_chain_error,
     is_retryable_model_error,
     normalized_retry_count,
+    response_requires_fallback,
     response_requires_retry,
+    sanitize_terminal_model_error,
+    should_fallback_model_error,
 )
 
 _COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
@@ -137,7 +141,15 @@ class ConfigChatBackend:
         last_response: LLMResponse | None = None
         attempts: list[LLMModelAttempt] = []
         for index, ref in enumerate(refs):
-            target = build_provider_from_model_key(self._config, ref)
+            try:
+                target = build_provider_from_model_key(self._config, ref)
+            except Exception as exc:
+                last_error = exc
+                if should_fallback_model_error(exc) and index < len(refs) - 1:
+                    continue
+                if should_fallback_model_error(exc):
+                    raise exhausted_model_chain_error(exc) from exc
+                raise
             retry_count = normalized_retry_count(getattr(target, "retry_count", 0))
             move_to_next_model = False
             stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, target.model_id))
@@ -164,9 +176,11 @@ class ConfigChatBackend:
                     if retryable and retry_index < retry_count:
                         retry_index += 1
                         continue
-                    if retryable and index < len(refs) - 1:
+                    if should_fallback_model_error(exc) and index < len(refs) - 1:
                         move_to_next_model = True
                         break
+                    if should_fallback_model_error(exc):
+                        raise exhausted_model_chain_error(exc) from exc
                     raise
                 response.usage = normalize_usage_payload(response.usage)
                 response.request_message_count = request_message_count
@@ -185,19 +199,25 @@ class ConfigChatBackend:
                 attempts.extend(response_attempts)
                 response.attempts = list(attempts)
                 last_response = response
-                if response_requires_retry(response, retry_on=target.retry_on):
+                retryable_response = response_requires_retry(response, retry_on=target.retry_on)
+                fallback_response = response_requires_fallback(response)
+                if retryable_response:
                     if retry_index < retry_count:
                         retry_index += 1
                         continue
-                    if index < len(refs) - 1:
-                        move_to_next_model = True
-                        break
+                if fallback_response and index < len(refs) - 1:
+                    move_to_next_model = True
+                    break
+                if fallback_response:
+                    return sanitize_terminal_model_error(response)
                 return response
             if move_to_next_model:
                 continue
         if last_error is not None:
+            if should_fallback_model_error(last_error):
+                raise exhausted_model_chain_error(last_error) from last_error
             raise last_error
         if last_response is None:
             raise RuntimeError('chat backend returned no response')
         last_response.attempts = list(attempts)
-        return last_response
+        return sanitize_terminal_model_error(last_response)

@@ -21,7 +21,7 @@ class SubmitNextStageTool(Tool):
 
     @property
     def description(self) -> str:
-        return '创建或切换到下一个执行阶段。开始工作前必须先创建阶段；当当前阶段预算耗尽时，也必须先调用它。'
+        return '创建或切换到当前节点的下一个阶段。开始工作前必须先创建阶段；当当前阶段预算耗尽时，也必须先调用它。'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -30,7 +30,7 @@ class SubmitNextStageTool(Tool):
             'properties': {
                 'stage_goal': {
                     'type': 'string',
-                    'description': '当前阶段的简短目标，必须写清楚哪些工作优先派生子节点，哪些工作由当前节点自行完成。',
+                    'description': '当前阶段的简短目标。执行节点要写清楚哪些工作优先派生子节点、哪些工作由当前节点自行完成；验收节点要写清楚本阶段重点核验哪些证据与结论。',
                     'minLength': 1,
                 },
                 'tool_round_budget': {

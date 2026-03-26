@@ -123,6 +123,83 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
         await service.close()
 
 
+@pytest.mark.asyncio
+async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    ordinary = _StaticTool('ordinary_tool')
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=root,
+            goal='accept root output',
+            acceptance_prompt='verify the root output',
+            parent_node_id=root.node_id,
+        )
+        tools = service.node_runner._build_tools(task=task, node=acceptance)
+        assert 'submit_next_stage' in tools
+        assert 'spawn_child_nodes' not in tools
+
+        runtime_context = {
+            'task_id': record.task_id,
+            'node_id': acceptance.node_id,
+            'node_kind': 'acceptance',
+            'actor_role': 'inspection',
+        }
+
+        blocked = await service._react_loop._execute_tool(
+            tools={'ordinary_tool': ordinary},
+            tool_name='ordinary_tool',
+            arguments={},
+            runtime_context=runtime_context,
+        )
+        assert blocked.startswith('Error: no active stage')
+
+        service.log_service.submit_next_stage(
+            record.task_id,
+            acceptance.node_id,
+            stage_goal='inspect evidence lines and final verdict consistency',
+            tool_round_budget=1,
+        )
+
+        allowed = await service._react_loop._execute_tool(
+            tools={'ordinary_tool': ordinary},
+            tool_name='ordinary_tool',
+            arguments={},
+            runtime_context=runtime_context,
+        )
+        assert allowed == 'ok'
+
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            acceptance.node_id,
+            tool_calls=[{'id': 'call:ordinary', 'name': 'ordinary_tool', 'arguments': {}}],
+            created_at=now_iso(),
+        )
+
+        exhausted = await service._react_loop._execute_tool(
+            tools={'ordinary_tool': ordinary},
+            tool_name='ordinary_tool',
+            arguments={},
+            runtime_context=runtime_context,
+        )
+        assert exhausted.startswith('Error: current stage budget is exhausted')
+    finally:
+        await service.close()
+
+
 def test_stage_visibility_keeps_all_tools_visible_before_stage_and_after_budget() -> None:
     tools = {
         STAGE_TOOL_NAME: _StaticTool(STAGE_TOOL_NAME),

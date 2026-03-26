@@ -47,6 +47,7 @@ _RESULT_REQUIRED_KEYS = (
     'remaining_work',
     'blocking_reason',
 )
+_STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
 
 
 class RepeatedActionCircuitBreaker:
@@ -332,7 +333,7 @@ class ReActToolLoop:
         raise RuntimeError('node exceeded maximum ReAct iterations')
 
     def _execution_stage_gate(self, *, task_id: str, node_id: str, node_kind: str) -> dict[str, Any]:
-        if str(node_kind or '').strip().lower() != 'execution':
+        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
             return {'enabled': False, 'has_active_stage': False, 'transition_required': False, 'active_stage': None}
         getter = getattr(self._log_service, 'execution_stage_gate_snapshot', None)
         if not callable(getter):
@@ -344,7 +345,7 @@ class ReActToolLoop:
 
     @staticmethod
     def _visible_tools_for_iteration(*, tools: dict[str, Tool], node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Tool]:
-        if str(node_kind or '').strip().lower() != 'execution':
+        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
             return dict(tools or {})
         if not bool(stage_gate.get('enabled')):
             return dict(tools or {})
@@ -357,7 +358,7 @@ class ReActToolLoop:
 
     @staticmethod
     def _execution_stage_frame_payload(*, node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Any]:
-        if str(node_kind or '').strip().lower() != 'execution':
+        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
             return {}
         if not bool(stage_gate.get('enabled')):
             return {}
@@ -378,7 +379,7 @@ class ReActToolLoop:
 
     @staticmethod
     def _should_record_execution_stage_round(*, node_kind: str, stage_gate: dict[str, Any], response_tool_calls: list[dict[str, Any]]) -> bool:
-        if str(node_kind or '').strip().lower() != 'execution':
+        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
             return False
         if not bool(stage_gate.get('enabled')):
             return False
@@ -604,7 +605,7 @@ class ReActToolLoop:
 
     def _execution_tool_gate_error(self, *, tool_name: str, runtime_context: dict[str, Any]) -> str:
         node_kind = str(runtime_context.get('node_kind') or '').strip().lower()
-        if node_kind != 'execution':
+        if node_kind not in _STAGE_BUDGET_NODE_KINDS:
             return ''
         normalized_tool_name = str(tool_name or '').strip()
         if normalized_tool_name in self._CONTROL_TOOL_NAMES or normalized_tool_name == STAGE_TOOL_NAME:

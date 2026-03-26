@@ -9,6 +9,24 @@ from loguru import logger
 from g3ku.config.schema import Config
 from g3ku.providers.base import LLMProvider, LLMResponse
 
+PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting the configured fallback chain."
+_INTERNAL_RUNTIME_ERROR_TOKENS = (
+    "sqlite",
+    "database",
+    "cursor",
+    "checkpointer",
+    "aiosqlite",
+    "programmingerror",
+    "no active connection",
+    "cannot operate on a closed database",
+)
+
+
+class ModelProviderExhaustedError(RuntimeError):
+    def __init__(self, *, raw_message: str = "") -> None:
+        super().__init__(PUBLIC_PROVIDER_FAILURE_MESSAGE)
+        self.raw_message = str(raw_message or "")
+
 
 def exception_chain_text(exc: Exception) -> str:
     parts: list[str] = []
@@ -30,22 +48,18 @@ def exception_chain_text(exc: Exception) -> str:
     return " | ".join(parts).lower()
 
 
+def is_internal_runtime_model_error(error: Exception | str) -> bool:
+    text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "").lower()
+    return any(token in text for token in _INTERNAL_RUNTIME_ERROR_TOKENS)
+
+
 def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None = None) -> bool:
     retry_on = [str(item or "").strip().lower() for item in (retry_on or ["network", "429", "5xx"]) if str(item or "").strip()]
     if not retry_on:
         return False
 
     text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "").lower()
-    if any(token in text for token in [
-        "sqlite",
-        "database",
-        "cursor",
-        "checkpointer",
-        "aiosqlite",
-        "programmingerror",
-        "no active connection",
-        "cannot operate on a closed database",
-    ]):
+    if is_internal_runtime_model_error(text):
         return False
 
     token_map = {
@@ -88,11 +102,36 @@ def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None 
     return False
 
 
+def should_fallback_model_error(error: Exception | str) -> bool:
+    return not is_internal_runtime_model_error(error)
+
+
 def response_requires_retry(response: LLMResponse, retry_on: list[str] | None = None) -> bool:
     if str(response.finish_reason or "").lower() != "error":
         return False
     error_source = str(response.error_text or response.content or "")
     return is_retryable_model_error(error_source, retry_on=retry_on)
+
+
+def response_requires_fallback(response: LLMResponse) -> bool:
+    if str(response.finish_reason or "").lower() != "error":
+        return False
+    error_source = str(response.error_text or response.content or "")
+    return should_fallback_model_error(error_source)
+
+
+def sanitize_terminal_model_error(response: LLMResponse) -> LLMResponse:
+    if response_requires_fallback(response):
+        response.error_text = PUBLIC_PROVIDER_FAILURE_MESSAGE
+    return response
+
+
+def exhausted_model_chain_error(error: Exception | str | None = None) -> ModelProviderExhaustedError:
+    if isinstance(error, Exception):
+        raw_message = exception_chain_text(error)
+    else:
+        raw_message = str(error or "")
+    return ModelProviderExhaustedError(raw_message=raw_message)
 
 
 def normalized_retry_count(value: int | None) -> int:
@@ -142,6 +181,8 @@ class FallbackProvider(LLMProvider):
                 if len(chain) > 1:
                     logger.warning("Model target init failed for {}: {}", model_key, exc)
                     continue
+                if should_fallback_model_error(exc):
+                    raise exhausted_model_chain_error(exc) from exc
                 raise
 
             effective_max_tokens = int(max_tokens)
@@ -177,7 +218,7 @@ class FallbackProvider(LLMProvider):
                             exc,
                         )
                         continue
-                    if retryable and model_key != chain[-1]:
+                    if should_fallback_model_error(exc) and model_key != chain[-1]:
                         logger.warning(
                             "Model fallback triggered for {} after {} retries: {}",
                             model_key,
@@ -186,9 +227,13 @@ class FallbackProvider(LLMProvider):
                         )
                         move_to_next_model = True
                         break
+                    if should_fallback_model_error(exc):
+                        raise exhausted_model_chain_error(exc) from exc
                     raise
 
-                if response_requires_retry(response, retry_on=target.retry_on):
+                retryable_response = response_requires_retry(response, retry_on=target.retry_on)
+                fallback_response = response_requires_fallback(response)
+                if retryable_response:
                     last_response = response
                     if retry_index < retry_count:
                         logger.warning(
@@ -199,23 +244,27 @@ class FallbackProvider(LLMProvider):
                             response.content or response.finish_reason,
                         )
                         continue
-                    if model_key != chain[-1]:
-                        logger.warning(
-                            "Model fallback triggered for {} after {} retries: {}",
-                            model_key,
-                            retry_count,
-                            response.content or response.finish_reason,
-                        )
-                        move_to_next_model = True
-                        break
+                if fallback_response and model_key != chain[-1]:
+                    logger.warning(
+                        "Model fallback triggered for {} after {} retries: {}",
+                        model_key,
+                        retry_count,
+                        response.content or response.finish_reason,
+                    )
+                    move_to_next_model = True
+                    break
+                if fallback_response:
+                    return sanitize_terminal_model_error(response)
                 return response
 
             if move_to_next_model:
                 continue
 
         if last_response is not None:
-            return last_response
+            return sanitize_terminal_model_error(last_response)
         if last_error is not None:
+            if should_fallback_model_error(last_error):
+                raise exhausted_model_chain_error(last_error) from last_error
             raise last_error
         return LLMResponse(content="Error: no model candidate available", finish_reason="error")
 

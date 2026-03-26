@@ -601,8 +601,7 @@ class TaskQueryService:
         stage_goals = self._node_stage_goal_map(task_id, live_state=live_state)
 
         def _walk(node: TaskTreeNodeSummary, prefix: str = '', *, is_root: bool = False) -> None:
-            stage_goal = self._tree_display_stage_goal(node, stage_goals)
-            label = f'({node.node_id},{node.status},{stage_goal})'
+            label = self._tree_text_label(node, stage_goals)
             lines.append(label if is_root else f'{prefix}|-{label}')
             child_prefix = '' if is_root else f'{prefix}  '
             for child in list(node.children or []):
@@ -658,10 +657,22 @@ class TaskQueryService:
 
     @staticmethod
     def _tree_display_stage_goal(node: TaskTreeNodeSummary, stage_goals: dict[str, str]) -> str:
+        stage_goal = str(stage_goals.get(str(node.node_id or '').strip()) or '').strip()
+        if stage_goal:
+            return stage_goal
         if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() == 'acceptance':
             return '检验中'
-        stage_goal = str(stage_goals.get(str(node.node_id or '').strip()) or '').strip()
-        return stage_goal or '无阶段目标'
+        return '无阶段目标'
+
+    @classmethod
+    def _tree_text_label(cls, node: TaskTreeNodeSummary, stage_goals: dict[str, str]) -> str:
+        node_id = str(getattr(node, 'node_id', '') or '').strip()
+        status = str(getattr(node, 'status', '') or '').strip()
+        stage_goal = cls._tree_display_stage_goal(node, stage_goals)
+        if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() == 'acceptance':
+            parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip() or '?'
+            return f'([验收上层父节点:{parent_node_id}] {node_id},{status},{stage_goal})'
+        return f'({node_id},{status},{stage_goal})'
 
     def _latest_node(self, nodes: list[NodeRecord]) -> LatestTaskNodeOutput | None:
         if not nodes:

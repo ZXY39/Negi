@@ -1515,10 +1515,55 @@ def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: P
         "Task status: in_progress\n"
         f"({root.node_id},in_progress,根阶段目标)\n"
         f"|-({child.node_id},in_progress,子阶段目标)\n"
-        f"  |-({acceptance.node_id},in_progress,检验中)"
+        f"  |-([验收上层父节点:{child.node_id}] {acceptance.node_id},in_progress,检验中)"
     )
     assert "Latest node output" not in text
     assert "Active parallel work:" not in text
+
+
+def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=root,
+        goal="accept root",
+        acceptance_prompt="verify root output",
+        parent_node_id=root.node_id,
+    )
+    service.log_service.submit_next_stage(
+        record.task_id,
+        acceptance.node_id,
+        stage_goal="validate cited evidence before final verdict",
+        tool_round_budget=1,
+    )
+
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    acceptance_detail = service.get_node_detail_payload(record.task_id, acceptance.node_id)
+
+    assert snapshot is not None
+    assert acceptance_detail is not None
+    assert (
+        f"|-([验收上层父节点:{root.node_id}] {acceptance.node_id},in_progress,validate cited evidence before final verdict)"
+        in snapshot["progress"]["tree_text"]
+    )
+    assert acceptance_detail["item"]["execution_trace"]["stages"][0]["stage_goal"] == "validate cited evidence before final verdict"
 
 
 def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tmp_path: Path):

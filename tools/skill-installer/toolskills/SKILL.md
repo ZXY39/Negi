@@ -3,7 +3,7 @@
 把一个现成 GitHub repo/path 里的 skill 安装到当前工作区的 `skills/` 目录。
 
 这条工具链只负责 **GitHub repo/path -> 本地 `skills/`**。
-如果用户要从 `clawhub.ai` 搜索、下载、安装或更新现成 skill，不要继续使用本工具；转到 `load_skill_context(skill_id="clawhub-skill-manager")`，按 `clawhub-skill-manager` 的唯一工作流处理。
+如果用户要从 `clawhub.ai` 搜索、下载、安装或更新现成 skill，不要继续使用本工具；转到 `load_skill_context(skill_id="clawhub-skill-manager")`，按 `clawhub-skill-manager` 的唯一工作流处理。ClawHub 来源的 skill 默认是面向第三方项目的上游素材，安装前要先评估是否需要按 G3KU 要求重写。
 
 ## 何时使用
 
@@ -17,7 +17,7 @@
 - 用户要“搜索 skill / 下载 skill / 安装 skill / 更新 skill”，且来源是 ClawHub
 - 用户要检查某个由 ClawHub 安装到本地的 skill 是否有新版
 
-如果用户要的是“重写/拆分/重新设计 skill”，先安装，再决定是否继续走 `skill-creator`。
+如果用户要的是“重写/拆分/重新设计 skill”，先安装，再决定是否继续走 `skill-creator`。对于来自 ClawHub 的 skill，这种二次适配通常是常态而不是例外。
 
 ## 使用
 

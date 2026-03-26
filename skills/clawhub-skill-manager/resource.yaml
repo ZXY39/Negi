@@ -1,7 +1,7 @@
 schema_version: 1
 kind: skill
 name: clawhub-skill-manager
-description: 面向 G3KU 主 Agent 统一搜索、下载、安装、更新 `clawhub.ai` 上的现成 skill。基于 ClawHub `/api/v1/search`、`/api/v1/skills/{slug}` 与 `/api/v1/download` 做候选检索、版本判断、下载解压、生成/刷新 `skills/<skill_id>/resource.yaml`，并把来源与版本写回本地 manifest。适用于从 ClawHub 安装 skill、检查更新、刷新本地 skill；不用于手写新 skill 或从 GitHub repo/path 导入 skill。
+description: 面向 G3KU 主 Agent 统一搜索、下载、安装、更新 `clawhub.ai` 上的现成 skill。基于 ClawHub `/api/v1/search`、`/api/v1/skills/{slug}` 与 `/api/v1/download` 做候选检索、版本判断、下载解压、生成/刷新 `skills/<skill_id>/resource.yaml`，并把来源与版本写回本地 manifest。ClawHub 来源的 skill 默认视为面向第三方项目的上游 skill，安装前需评估是否要按 G3KU 要求重写或补齐内容；安装本身不代表已经适配本项目。适用于从 ClawHub 安装 skill、检查更新、刷新本地 skill；不用于手写新 skill 或从 GitHub repo/path 导入 skill。
 trigger:
   keywords:
     - clawhub-skill-manager

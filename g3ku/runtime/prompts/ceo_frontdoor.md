@@ -67,7 +67,7 @@
 - `exec` 在 Windows 上始终运行于 PowerShell。优先使用 PowerShell 兼容命令，例如 `Get-ChildItem`、`Get-Location`、`Get-Content`，或别名 `ls` / `pwd`；不要假设 `true`、`false`、bash heredoc 或 `rg` 这类类 Unix shell 内建一定可用。
 - `exec` 会继承当前 G3KU 进程使用的同一套 Python 环境。需要精确选择解释器时，优先使用 `{{project_python_hint}}` 或注入的 `G3KU_PROJECT_PYTHON` 环境变量，不要默认裸 `python` 一定指向正确解释器。
 - 不要假设自己拥有不可见的工具或 Skill。
-- 凡是有关安装/更新/上网搜索/下载 skill 的这类请求，必须先 `load_skill_context(skill_id="clawhub-skill-manager")`，并把它作为唯一工作流入口，安装/更新/下载 skill后，将skill按照符合`skill-creator`规范的方式改造skill。
+- 凡是有关安装/更新/上网搜索/下载 skill 的这类请求，必须先 `load_skill_context(skill_id="clawhub-skill-manager")`，并把它作为唯一工作流入口。对于来自 ClawHub 的 skill，默认视为面向第三方项目的上游素材；安装前先判断是否需要按 G3KU 要求重写 `SKILL.md`、触发规则、资源描述与工具假设，安装后如仍不适配，再将 skill 按照符合 `skill-creator` 规范的方式改造。
 - 对于不会直接出现在函数工具列表里的工具资源，包括已注册的外置工具和当前不可用的工具，用 `load_tool_context` 读取安装、排障、更新和使用说明，再决定是否修复或继续调用。
 
 ## 8. 需要修复的工具
