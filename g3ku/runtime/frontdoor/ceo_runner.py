@@ -119,6 +119,7 @@ class CeoTurnResult:
 class CeoFrontDoorRunner:
     _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
     _CEO_NON_BUDGET_TOOLS = {"create_async_task"}
+    _EMPTY_RESPONSE_RETRY_LIMIT = 1
 
     def __init__(self, *, loop) -> None:
         self._loop = loop
@@ -268,6 +269,51 @@ class CeoFrontDoorRunner:
             }
             for call in list(response_tool_calls or [])
         ]
+
+    @staticmethod
+    def _route_kind_for_turn(*, used_tools: list[str], stage_created: bool, default: str) -> str:
+        normalized = [str(name or '').strip() for name in list(used_tools or []) if str(name or '').strip()]
+        if 'create_async_task' in normalized:
+            return 'task_dispatch'
+        if normalized:
+            return 'self_execute'
+        if stage_created:
+            return 'stage_only'
+        return str(default or 'direct_reply')
+
+    @staticmethod
+    def _empty_response_retry_message(*, has_active_stage: bool, visible_tool_names: list[str]) -> str:
+        visible = ', '.join(f'`{name}`' for name in list(visible_tool_names or [])[:8]) or '(none)'
+        if has_active_stage:
+            return (
+                'System note: your previous model turn was empty: no visible text and no tool calls. '
+                'Continue the active CEO stage now. Do not return an empty reply. '
+                'Either call one visible tool for this stage or provide the final visible answer. '
+                f'Visible tools this turn: {visible}.'
+            )
+        return (
+            'System note: your previous model turn was empty: no visible text and no tool calls. '
+            'Do not return an empty reply. '
+            'If tools are needed, call `submit_next_stage` first; otherwise provide the final visible answer. '
+            f'Visible tools this turn: {visible}.'
+        )
+
+    @staticmethod
+    def _empty_response_explanation(*, has_active_stage: bool, stage_created: bool, used_tools: list[str]) -> str:
+        created_task = 'create_async_task' in {
+            str(name or '').strip()
+            for name in list(used_tools or [])
+            if str(name or '').strip()
+        }
+        parts = ['本轮内部执行遇到空响应：模型没有返回可展示文本，也没有继续调用工具。']
+        if has_active_stage or stage_created:
+            parts.append('当前 CEO 阶段已经创建，但后续动作没有成功推进。')
+        if created_task:
+            parts.append('本轮已经触发创建异步任务，但最终确认文本未产出。')
+        else:
+            parts.append('本轮尚未创建异步任务。')
+        parts.append('系统已自动停止本轮，避免把空结果误显示为成功回复。')
+        return ''.join(parts)
 
     @staticmethod
     def _tool_invocation_hint(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -543,6 +589,8 @@ class CeoFrontDoorRunner:
         interaction_trace = new_interaction_trace()
         route_kind = "direct_reply"
         used_tools: list[str] = []
+        stage_created = False
+        empty_response_retries = 0
         breaker = RepeatedActionCircuitBreaker()
         stage_tool_enabled = not bool(runtime_context.get("disable_stage_tool"))
 
@@ -699,17 +747,22 @@ class CeoFrontDoorRunner:
                 }
                 message_history.append(assistant_message)
                 message_history.extend(tool_messages)
+                stage_created = stage_created or any(
+                    str(payload.get('name') or '').strip() == STAGE_TOOL_NAME
+                    for payload in tool_call_payloads
+                )
                 used_tools.extend(
                     [
                         str(payload.get("name") or "").strip()
                         for payload in tool_call_payloads
-                        if str(payload.get("name") or "").strip()
+                        if str(payload.get("name") or "").strip() and str(payload.get("name") or "").strip() != STAGE_TOOL_NAME
                     ]
                 )
-                if "create_async_task" in used_tools:
-                    route_kind = "task_dispatch"
-                elif used_tools:
-                    route_kind = "self_execute"
+                route_kind = self._route_kind_for_turn(
+                    used_tools=used_tools,
+                    stage_created=stage_created,
+                    default=route_kind,
+                )
                 continue
 
             text = self._content_text(getattr(response, "content", ""))
@@ -724,10 +777,11 @@ class CeoFrontDoorRunner:
                     status=CEO_STAGE_STATUS_COMPLETED,
                 )
                 self._sync_session_trace(session, interaction_trace)
-                if "create_async_task" in used_tools:
-                    route_kind = "task_dispatch"
-                elif used_tools:
-                    route_kind = "self_execute"
+                route_kind = self._route_kind_for_turn(
+                    used_tools=used_tools,
+                    stage_created=stage_created,
+                    default=route_kind,
+                )
                 return CeoTurnResult(
                     output=text.strip(),
                     route_kind=route_kind,
@@ -736,9 +790,33 @@ class CeoFrontDoorRunner:
 
             if str(getattr(response, "finish_reason", "") or "").strip().lower() == "error":
                 raise RuntimeError(str(getattr(response, "error_text", None) or response.content or "model response failed"))
+            if tool_schemas and empty_response_retries < self._EMPTY_RESPONSE_RETRY_LIMIT:
+                empty_response_retries += 1
+                message_history.append(
+                    {
+                        'role': 'user',
+                        'content': self._empty_response_retry_message(
+                            has_active_stage=bool(stage_gate.get('has_active_stage')),
+                            visible_tool_names=list(visible_tools.keys()),
+                        ),
+                    }
+                )
+                continue
+            if interaction_trace.get('stages'):
+                interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
+                self._sync_session_trace(session, interaction_trace)
+            route_kind = self._route_kind_for_turn(
+                used_tools=used_tools,
+                stage_created=stage_created,
+                default=route_kind,
+            )
             return CeoTurnResult(
-                output="",
-                route_kind="task_dispatch" if "create_async_task" in used_tools else ("self_execute" if used_tools else route_kind),
+                output=self._empty_response_explanation(
+                    has_active_stage=bool(stage_gate.get('has_active_stage')),
+                    stage_created=stage_created,
+                    used_tools=used_tools,
+                ),
+                route_kind=route_kind,
                 interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
             )
 

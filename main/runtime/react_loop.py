@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections import deque
+from types import SimpleNamespace
 from typing import Any
 
 import json_repair
@@ -103,6 +104,17 @@ class ReActToolLoop:
         while attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
+            resumed_history = await self._resume_pending_tool_turn_if_needed(
+                task=task,
+                node=node,
+                message_history=message_history,
+                tools=tools,
+                runtime_context=runtime_context,
+            )
+            if resumed_history is not None:
+                message_history = resumed_history
+                attempts = max(0, attempts - 1)
+                continue
             stage_gate = self._execution_stage_gate(
                 task_id=task.task_id,
                 node_id=node.node_id,
@@ -332,6 +344,239 @@ class ReActToolLoop:
             raise RuntimeError('result contract violation: ' + '; '.join(last_contract_violations))
         raise RuntimeError('node exceeded maximum ReAct iterations')
 
+    async def _resume_pending_tool_turn_if_needed(
+        self,
+        *,
+        task,
+        node,
+        message_history: list[dict[str, Any]],
+        tools: dict[str, Tool],
+        runtime_context: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        frame = self._runtime_frame(task.task_id, node.node_id)
+        if not isinstance(frame, dict):
+            return None
+        pending_tool_calls = [
+            dict(item)
+            for item in list(frame.get('pending_tool_calls') or [])
+            if isinstance(item, dict) and str(item.get('id') or '').strip() and str(item.get('name') or '').strip()
+        ]
+        if not pending_tool_calls:
+            return None
+
+        live_tool_map = {
+            str(item.get('tool_call_id') or '').strip(): dict(item)
+            for item in list(frame.get('tool_calls') or [])
+            if isinstance(item, dict) and str(item.get('tool_call_id') or '').strip()
+        }
+        assistant_content = self._pending_tool_turn_content(node=node, pending_tool_calls=pending_tool_calls)
+        assistant_tool_calls = [
+            {
+                'id': str(item.get('id') or ''),
+                'type': 'function',
+                'function': {
+                    'name': str(item.get('name') or ''),
+                    'arguments': json.dumps(dict(item.get('arguments') or {}), ensure_ascii=False),
+                },
+            }
+            for item in pending_tool_calls
+        ]
+        allowed_content_refs = self._collect_content_refs(message_history)
+        replay_calls: list[Any] = []
+        ordered_results: list[dict[str, Any] | None] = []
+        result_indexes_by_call_id: dict[str, list[int]] = {}
+
+        for index, item in enumerate(pending_tool_calls):
+            call_id = str(item.get('id') or '').strip()
+            tool_name = str(item.get('name') or '').strip()
+            live_state = dict(live_tool_map.get(call_id) or {})
+            result_content = str(live_state.get('result_content') or '').strip()
+            status = str(live_state.get('status') or '').strip().lower()
+            if status in {'success', 'error'} and result_content:
+                ordered_results.append(
+                    {
+                        'live_state': self._resume_live_tool_state(live_state, call_id=call_id, tool_name=tool_name),
+                        'tool_message': self._resume_tool_message(
+                            live_state,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            content=result_content,
+                        ),
+                    }
+                )
+                continue
+            ordered_results.append(None)
+            result_indexes_by_call_id.setdefault(call_id, []).append(index)
+            replay_calls.append(
+                SimpleNamespace(
+                    id=call_id,
+                    name=tool_name,
+                    arguments=dict(item.get('arguments') or {}),
+                )
+            )
+
+        if replay_calls:
+            replay_results = await self._execute_tool_calls(
+                task=task,
+                node=node,
+                response_tool_calls=replay_calls,
+                tools=tools,
+                allowed_content_refs=allowed_content_refs,
+                runtime_context={
+                    **runtime_context,
+                    'stage_turn_granted': True,
+                },
+                prior_overflow_signatures=self._overflowed_search_signatures(message_history),
+            )
+            for result in replay_results:
+                tool_message = dict(result.get('tool_message') or {})
+                call_id = str(tool_message.get('tool_call_id') or '').strip()
+                for index in result_indexes_by_call_id.pop(call_id, []):
+                    ordered_results[index] = result
+
+        for index, item in enumerate(ordered_results):
+            if item is not None:
+                continue
+            pending_item = pending_tool_calls[index]
+            call_id = str(pending_item.get('id') or '').strip()
+            tool_name = str(pending_item.get('name') or '').strip()
+            ordered_results[index] = {
+                'live_state': self._resume_live_tool_state(
+                    live_tool_map.get(call_id),
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    status='error',
+                ),
+                'tool_message': self._resume_tool_message(
+                    live_tool_map.get(call_id),
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    content=f'Error: failed to resume tool call: {tool_name}',
+                    status='error',
+                ),
+            }
+
+        resumed_history = list(message_history)
+        resumed_history.append(
+            {
+                'role': 'assistant',
+                'content': assistant_content,
+                'tool_calls': assistant_tool_calls,
+            }
+        )
+        tool_messages = self._dedupe_tool_messages(
+            [dict(item.get('tool_message') or {}) for item in ordered_results if isinstance(item, dict)],
+            existing_messages=resumed_history,
+        )
+        resumed_history.extend(tool_messages)
+        prepared_history = self._prepare_messages(resumed_history, runtime_context=runtime_context)
+        self._log_service.update_node_input(
+            task.task_id,
+            node.node_id,
+            json.dumps(prepared_history, ensure_ascii=False, indent=2),
+        )
+        self._log_service.update_frame(
+            task.task_id,
+            node.node_id,
+            lambda current: {
+                **current,
+                'depth': node.depth,
+                'node_kind': node.node_kind,
+                'phase': 'waiting_tool_results',
+                'messages': resumed_history,
+                'pending_tool_calls': [],
+                'tool_calls': [dict(item.get('live_state') or {}) for item in ordered_results if isinstance(item, dict)],
+                **self._execution_stage_frame_payload(
+                    node_kind=node.node_kind,
+                    stage_gate=self._execution_stage_gate(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        node_kind=node.node_kind,
+                    ),
+                ),
+                'last_error': '',
+            },
+            publish_snapshot=True,
+        )
+        return resumed_history
+
+    def _runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        state = self._log_service.read_runtime_state(task_id) or {}
+        for frame in list(state.get('frames') or []):
+            if str(frame.get('node_id') or '').strip() == str(node_id or '').strip():
+                return dict(frame)
+        return None
+
+    def _pending_tool_turn_content(self, *, node, pending_tool_calls: list[dict[str, Any]]) -> str:
+        pending_ids = [str(item.get('id') or '').strip() for item in list(pending_tool_calls or []) if str(item.get('id') or '').strip()]
+        for entry in reversed(list(getattr(node, 'output', []) or [])):
+            entry_tool_calls = [
+                str(item.get('id') or '').strip()
+                for item in list(getattr(entry, 'tool_calls', []) or [])
+                if isinstance(item, dict) and str(item.get('id') or '').strip()
+            ]
+            if pending_ids and entry_tool_calls != pending_ids:
+                continue
+            ref = str(getattr(entry, 'content_ref', '') or '').strip()
+            if ref:
+                resolved = self._resolve_content_ref(ref)
+                if str(resolved or '').strip():
+                    return str(resolved or '')
+            text = str(getattr(entry, 'content', '') or '')
+            if text.strip():
+                return text
+        return ''
+
+    def _resolve_content_ref(self, ref: str) -> str:
+        content_store = getattr(self._log_service, '_content_store', None)
+        resolver = getattr(content_store, '_resolve', None) if content_store is not None else None
+        if not callable(resolver):
+            return ''
+        try:
+            text, _handle = resolver(ref=ref, path=None)
+        except Exception:
+            return ''
+        return str(text or '')
+
+    @staticmethod
+    def _resume_live_tool_state(
+        live_state: dict[str, Any] | None,
+        *,
+        call_id: str,
+        tool_name: str,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(live_state or {})
+        payload['tool_call_id'] = str(call_id or '')
+        payload['tool_name'] = str(payload.get('tool_name') or tool_name or 'tool')
+        payload['status'] = str(status or payload.get('status') or 'error')
+        payload.setdefault('started_at', '')
+        payload.setdefault('finished_at', '')
+        payload.setdefault('elapsed_seconds', None)
+        return payload
+
+    @staticmethod
+    def _resume_tool_message(
+        live_state: dict[str, Any] | None,
+        *,
+        call_id: str,
+        tool_name: str,
+        content: str,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(live_state or {})
+        message_status = str(status or payload.get('status') or '').strip().lower()
+        return {
+            'role': 'tool',
+            'tool_call_id': str(call_id or ''),
+            'name': str(tool_name or payload.get('tool_name') or 'tool'),
+            'content': str(content or ''),
+            'started_at': str(payload.get('started_at') or ''),
+            'finished_at': str(payload.get('finished_at') or ''),
+            'elapsed_seconds': payload.get('elapsed_seconds'),
+            'status': message_status,
+        }
+
     def _execution_stage_gate(self, *, task_id: str, node_id: str, node_kind: str) -> dict[str, Any]:
         if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
             return {'enabled': False, 'has_active_stage': False, 'transition_required': False, 'active_stage': None}
@@ -477,6 +722,7 @@ class ReActToolLoop:
                     started_at=started_at,
                     finished_at=finished_at,
                     elapsed_seconds=elapsed_seconds,
+                    result_content=tool_content,
                 )
                 return {
                     'index': index,
@@ -512,6 +758,7 @@ class ReActToolLoop:
         started_at: str,
         finished_at: str,
         elapsed_seconds: float | None,
+        result_content: str | None = None,
     ) -> None:
         def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
             next_calls: list[dict[str, Any]] = []
@@ -528,18 +775,21 @@ class ReActToolLoop:
                             'elapsed_seconds': elapsed_seconds,
                         }
                     )
+                    if result_content is not None:
+                        payload['result_content'] = result_content
                 next_calls.append(payload)
             if not matched:
-                next_calls.append(
-                    {
-                        'tool_call_id': str(tool_call_id or ''),
-                        'tool_name': 'tool',
-                        'status': status,
-                        'started_at': started_at,
-                        'finished_at': finished_at,
-                        'elapsed_seconds': elapsed_seconds,
-                    }
-                )
+                payload = {
+                    'tool_call_id': str(tool_call_id or ''),
+                    'tool_name': 'tool',
+                    'status': status,
+                    'started_at': started_at,
+                    'finished_at': finished_at,
+                    'elapsed_seconds': elapsed_seconds,
+                }
+                if result_content is not None:
+                    payload['result_content'] = result_content
+                next_calls.append(payload)
             frame['tool_calls'] = next_calls
             frame['phase'] = 'waiting_tool_results'
             return frame

@@ -160,10 +160,16 @@ function communicationToastKind(status) {
     return ({ success: "success", warning: "warn", error: "error", disabled: "info" }[String(status || "").toLowerCase()] || "info");
 }
 
+function communicationBridgeError(runtime) {
+    if (runtime?.connected) return "";
+    return String(runtime?.last_error || "").trim();
+}
+
 function communicationRuntimeStatusKey(item) {
     const runtime = item?.runtime || {};
     if (!item?.enabled) return "blocked";
     if (runtime.connected) return "success";
+    if (communicationBridgeError(runtime)) return "failed";
     if (runtime.running) return "running";
     return "pending";
 }
@@ -172,9 +178,18 @@ function communicationRuntimeLabel(item) {
     const runtime = item?.runtime || {};
     if (!item?.enabled) return "已禁用";
     if (runtime.connected) return "已连接";
+    if (communicationBridgeError(runtime)) return "桥接异常";
     if (runtime.running) return "桥接运行中";
     if (runtime.status_exists) return "桥接待连接";
     return "待测试";
+}
+
+function communicationBridgeConnectionText(runtime) {
+    const error = communicationBridgeError(runtime);
+    if (runtime?.connected) return "内部控制链路已连接";
+    if (error) return `桥接异常：${error}`;
+    if (runtime?.running) return "桥接宿主运行中，等待连接";
+    return "桥接宿主未运行或尚未连通";
 }
 
 function normalizeCommunicationJsonText(text) {
@@ -485,9 +500,10 @@ function renderCommunicationBridgeSummary() {
         U.communicationBridgeSummary.innerHTML = '<div class="empty-state">正在加载桥接状态...</div>';
         return;
     }
-    const statusKey = bridge.connected ? "success" : bridge.running ? "running" : bridge.enabled ? "pending" : "blocked";
-    const statusLabel = bridge.connected ? "已连接" : bridge.running ? "运行中" : bridge.enabled ? "待连接" : "未启用";
-    const statusText = bridge.last_error ? `${statusLabel} · ${bridge.last_error}` : statusLabel;
+    const bridgeError = communicationBridgeError(bridge);
+    const statusKey = bridge.connected ? "success" : bridgeError ? "failed" : bridge.running ? "running" : bridge.enabled ? "pending" : "blocked";
+    const statusLabel = bridge.connected ? "已连接" : bridgeError ? "异常" : bridge.running ? "运行中" : bridge.enabled ? "待连接" : "未启用";
+    const statusText = bridgeError ? `${statusLabel} · ${bridgeError}` : statusLabel;
     U.communicationBridgeSummary.innerHTML = `
         <div class="resource-list-item communication-summary-card">
             <div class="panel-header">
@@ -571,7 +587,7 @@ function renderCommunicationDetail() {
                     </div>
                     <div class="resource-copy-block">
                         <strong>桥接状态</strong><br>
-                        ${esc(runtime.connected ? "内部控制链路已连接" : runtime.running ? "桥接宿主运行中，等待连接" : "桥接宿主未运行或尚未连通")}
+                        ${esc(communicationBridgeConnectionText(runtime))}
                     </div>
                 </div>
                 <label class="communication-toggle">

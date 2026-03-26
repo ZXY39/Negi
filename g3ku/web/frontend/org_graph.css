@@ -1189,23 +1189,88 @@ textarea {
     color: var(--text-muted);
 }
 
-.execution-tree-round-select {
+.execution-tree-node-rounds .resource-select-shell {
     flex: 1 1 auto;
     min-width: 0;
-    min-height: 32px;
-    padding: 0 12px;
+}
+
+.execution-tree-node-rounds .resource-select-trigger {
+    min-height: 34px;
+    padding: 0 10px 0 12px;
+    border-radius: 12px;
+    background-color: color-mix(in srgb, var(--bg-app) 72%, var(--bg-panel) 28%);
+    font-size: 0.78rem;
+    font-weight: 600;
+    gap: 8px;
+}
+
+.execution-tree-node-rounds .resource-select-trigger:hover {
+    background-color: color-mix(in srgb, var(--bg-app) 58%, var(--bg-panel) 42%);
+}
+
+.execution-tree-node-rounds .resource-select-trigger:focus-visible,
+.execution-tree-node-rounds .resource-select-shell.is-open .resource-select-trigger {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent), var(--shadow-sm);
+}
+
+.execution-tree-node-rounds .resource-select-icon,
+.execution-tree-node-rounds .resource-select-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.execution-tree-node-rounds .resource-select-menu {
+    top: calc(100% + 6px);
+    z-index: 40;
+    padding: 6px;
+    border-radius: 14px;
+    gap: 4px;
+}
+
+.execution-tree-node-rounds .resource-select-option {
+    min-height: 36px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    font-size: 0.78rem;
+}
+
+.execution-tree-round-select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    cursor: pointer;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 34px;
+    padding: 0 40px 0 12px;
     border-radius: 12px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: color-mix(in srgb, var(--bg-app) 80%, var(--bg-panel) 20%);
+    background-color: color-mix(in srgb, var(--bg-app) 72%, var(--bg-panel) 28%);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6.25L8 10.25L12 6.25' stroke='%2394A3B8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-position: calc(100% - 12px) 50%;
+    background-repeat: no-repeat;
+    background-size: 16px 16px;
     color: var(--text-primary);
     font-size: 0.78rem;
     font-weight: 600;
     box-shadow: var(--shadow-sm);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+.execution-tree-round-select:hover {
+    border-color: color-mix(in srgb, var(--brand-primary) 24%, var(--border-color));
+    background-color: color-mix(in srgb, var(--bg-app) 58%, var(--bg-panel) 42%);
+}
+
+.execution-tree-round-select option {
+    background-color: var(--bg-panel);
+    color: var(--text-primary);
 }
 
 .execution-tree-round-select:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--brand-primary) 72%, transparent);
-    outline-offset: 2px;
+    outline: 0;
+    border-color: color-mix(in srgb, var(--brand-primary) 48%, var(--border-color));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent), var(--shadow-sm);
 }
 
 .detail-drawer.project-detail-drawer {
@@ -6681,6 +6746,12 @@ textarea {
     background-color: color-mix(in srgb, #22c55e 15%, var(--bg-surface-inner));
     color: #22c55e;
     border-color: color-mix(in srgb, #22c55e 30%, transparent);
+}
+
+.meta-tag.status-failed {
+    background-color: color-mix(in srgb, #ef4444 15%, var(--bg-surface-inner));
+    color: #f87171;
+    border-color: color-mix(in srgb, #ef4444 30%, transparent);
 }
 
 .meta-tag.status-pending,

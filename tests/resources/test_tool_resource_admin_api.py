@@ -1677,6 +1677,45 @@ def test_china_bridge_channel_test_reports_disabled_or_validated(tmp_path: Path,
     assert validated.json()['result']['status'] in {'success', 'warning'}
 
 
+def test_china_bridge_channels_endpoint_hides_stale_host_pid(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    state_dir = workspace / '.g3ku' / 'china-bridge'
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / 'status.json').write_text(
+        json.dumps(
+            {
+                'enabled': True,
+                'running': True,
+                'connected': True,
+                'pid': 4242,
+                'last_error': '',
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr(admin_rest, '_process_exists', lambda pid: False)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.get('/api/china-bridge/channels')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['bridge']['running'] is False
+    assert payload['bridge']['connected'] is False
+    assert payload['bridge']['pid'] == 4242
+    assert payload['bridge']['pid_alive'] is False
+    assert payload['bridge']['state_stale'] is True
+    assert payload['bridge']['last_error'] == 'china bridge host process is not running'
+
+
 @pytest.mark.asyncio
 async def test_write_skill_file_async_triggers_targeted_catalog_sync(tmp_path: Path):
     skill_file = tmp_path / 'demo' / 'SKILL.md'

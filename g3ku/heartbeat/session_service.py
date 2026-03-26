@@ -21,10 +21,11 @@ from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
 from main.service.task_stall_callback import normalize_task_stall_payload
 from main.service.task_stall_notifier import stalled_minutes_since, stall_bucket_minutes
-from main.service.task_terminal_callback import build_task_terminal_payload, normalize_task_terminal_payload
+from main.service.task_terminal_callback import build_task_terminal_payload, enrich_task_terminal_payload, normalize_task_terminal_payload
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
 HeartbeatReplyNotifier = Callable[[str, str], Awaitable[None] | None]
+_TASK_TERMINAL_OUTPUT_INLINE_LIMIT = 4000
 
 
 @lru_cache(maxsize=1)
@@ -87,10 +88,20 @@ class WebSessionHeartbeatService:
         record = task if isinstance(task, TaskRecord) else None
         if record is None:
             return
-        self.enqueue_task_terminal_payload(build_task_terminal_payload(record))
+        self.enqueue_task_terminal_payload(
+            enrich_task_terminal_payload(
+                build_task_terminal_payload(record),
+                task=record,
+                node_detail_getter=getattr(self._main_task_service, 'get_node_detail_payload', None),
+            )
+        )
 
     def enqueue_task_terminal_payload(self, payload: dict[str, Any] | None) -> bool:
-        normalized_payload = normalize_task_terminal_payload(payload)
+        normalized_payload = enrich_task_terminal_payload(
+            payload,
+            task_getter=getattr(self._main_task_service, 'get_task', None),
+            node_detail_getter=getattr(self._main_task_service, 'get_node_detail_payload', None),
+        )
         session_id = str(normalized_payload.get("session_id") or "").strip()
         task_id = str(normalized_payload.get("task_id") or "").strip()
         status = str(normalized_payload.get("status") or "").strip().lower()
@@ -466,6 +477,28 @@ class WebSessionHeartbeatService:
             lines.append(f"- Task {title} ({task_id}) completed")
             lines.append(f"  Status: {status}")
             lines.append(f"  Summary: {summary}")
+            terminal_node_id = str(payload.get("terminal_node_id") or "").strip()
+            terminal_node_kind = str(payload.get("terminal_node_kind") or "").strip() or 'execution'
+            terminal_reason = str(payload.get("terminal_node_reason") or "").strip()
+            terminal_output = str(payload.get("terminal_output") or "").strip()
+            terminal_output_ref = str(payload.get("terminal_output_ref") or "").strip()
+            terminal_check_result = str(payload.get("terminal_check_result") or "").strip()
+            terminal_failure_reason = str(payload.get("terminal_failure_reason") or "").strip()
+            if terminal_node_id:
+                lines.append(f"  Result node: {terminal_node_kind} {terminal_node_id}")
+            if terminal_reason:
+                lines.append(f"  Result source: {terminal_reason}")
+            if terminal_output:
+                if len(terminal_output) > _TASK_TERMINAL_OUTPUT_INLINE_LIMIT:
+                    lines.append(f"  Result output excerpt: {terminal_output[:_TASK_TERMINAL_OUTPUT_INLINE_LIMIT].rstrip()}...")
+                else:
+                    lines.append(f"  Result output: {terminal_output}")
+            if terminal_output_ref:
+                lines.append(f"  Result output ref: {terminal_output_ref}")
+            if terminal_check_result:
+                lines.append(f"  Result check: {terminal_check_result}")
+            if terminal_failure_reason and terminal_failure_reason != summary:
+                lines.append(f"  Result failure reason: {terminal_failure_reason}")
         return "\n".join(lines).strip()
 
     @staticmethod
@@ -606,18 +639,49 @@ class WebSessionHeartbeatService:
             clear_inflight_turn_snapshot(session_id)
         return source
 
-    def _persist_assistant_reply(self, session_id: str, *, text: str, task_ids: list[str], reason: str) -> None:
+    @staticmethod
+    def _task_terminal_result_metadata(events: list[SessionHeartbeatEvent]) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for event in WebSessionHeartbeatService._task_terminal_events(events):
+            payload = dict(event.payload or {})
+            task_id = str(payload.get('task_id') or '').strip()
+            node_id = str(payload.get('terminal_node_id') or '').strip()
+            if not task_id:
+                continue
+            key = (task_id, node_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = {
+                'task_id': task_id,
+                'node_id': node_id,
+                'node_kind': str(payload.get('terminal_node_kind') or '').strip(),
+                'node_reason': str(payload.get('terminal_node_reason') or '').strip(),
+                'output': str(payload.get('terminal_output') or '').strip(),
+                'output_ref': str(payload.get('terminal_output_ref') or '').strip(),
+                'check_result': str(payload.get('terminal_check_result') or '').strip(),
+                'failure_reason': str(payload.get('terminal_failure_reason') or '').strip(),
+            }
+            items.append({key: value for key, value in item.items() if value})
+        return items
+
+    def _persist_assistant_reply(self, session_id: str, *, text: str, task_ids: list[str], reason: str, task_results: list[dict[str, str]] | None = None) -> None:
         if not self._session_exists(session_id):
             return
         session = self._session_manager.get_or_create(session_id)
+        metadata = {
+            "source": "heartbeat",
+            "reason": reason,
+            "task_ids": list(task_ids),
+        }
+        normalized_results = [dict(item) for item in list(task_results or []) if isinstance(item, dict)]
+        if normalized_results:
+            metadata['task_results'] = normalized_results
         session.add_message(
             "assistant",
             text,
-            metadata={
-                "source": "heartbeat",
-                "reason": reason,
-                "task_ids": list(task_ids),
-            },
+            metadata=metadata,
         )
         update_ceo_session_after_turn(session, user_text="", assistant_text=text)
         self._session_manager.save(session)
@@ -735,10 +799,17 @@ class WebSessionHeartbeatService:
             for event in events
             if str((event.payload or {}).get("task_id") or "").strip()
         ]
+        task_results = self._task_terminal_result_metadata(events)
         preserved_source = self._clear_preserved_inflight_turn(key, session)
         if preserved_source:
             self._publish_ceo(key, "ceo.turn.discard", {"source": preserved_source})
-        self._persist_assistant_reply(key, text=output, task_ids=task_ids, reason=heartbeat_reason)
+        self._persist_assistant_reply(
+            key,
+            text=output,
+            task_ids=task_ids,
+            reason=heartbeat_reason,
+            task_results=task_results,
+        )
         self._publish_ceo(key, "ceo.reply.final", {"text": output, "source": "heartbeat"})
         await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}

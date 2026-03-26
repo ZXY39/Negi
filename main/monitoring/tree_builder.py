@@ -160,7 +160,7 @@ class TaskTreeBuilder:
                 TaskSpawnRound(
                     round_id=str(spec.get('round_id') or ''),
                     round_index=index,
-                    label=f'Round {index}',
+                    label=f'第{index}轮树',
                     is_latest=False,
                     created_at=str(spec.get('created_at') or ''),
                     child_node_ids=round_child_ids,

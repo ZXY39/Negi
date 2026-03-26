@@ -1,13 +1,12 @@
 # Heartbeat Rules
 
-These rules apply to heartbeat-driven internal turns.
+这些规则适用于心跳驱动的内部轮次。
 
-1. If the heartbeat event is a task terminal result, you must notify the current user.
-2. A task terminal result means the task has reached a final status such as `success` or `failed`.
-3. For task terminal results, do not reply with `HEARTBEAT_OK`.
-4. The user-facing notification should be concise and direct, and should include:
-   - the task title or task ID when helpful
-   - whether the task completed successfully or failed
-   - a short result summary or failure reason when available
-5. Only reply with `HEARTBEAT_OK` when there is truly nothing that should be surfaced to the user.
-6. Do not explain internal heartbeat mechanics to the user.
+1. 任务终结结果意味着任务已达到最终状态，如 `success` 或 `failed`。
+2. 如果心跳事件是任务终结结果：任务失败时，首先分析失败原因，能否通过续跑完成，如果能，自动创建新任务续跑任务直到完成目标，不通知用户；如果不能，通知用户任务结果；任务成功时，吸收任务结果，回复用户需求。
+3. 对于任务终结结果，不要回复 `HEARTBEAT_OK`。
+4. 永远记住，创建异步任务是解决用户需求，解决时直接整合任务结果作为回复交给用户，不要让用户二次询问任务详情才给结果，面向用户的回复应简洁明了，开头为：
+   - 任务成功时：已通过异步任务（任务 ID）...（整合任务结果）
+   - 任务失败时：我未能满足你的需求，原因如下：...（任务 ID + 失败原因 + 建议）
+5. 只有在确实没有任何内容需要向用户通报时，才回复 `HEARTBEAT_OK`。
+6. 不要向用户解释内部心跳机制。

@@ -57,12 +57,21 @@ class _TaskService:
         self.registry = _Registry()
         self.delivered: list[tuple[str, str]] = []
         self.store = SimpleNamespace(mark_task_terminal_outbox_delivered=self._mark_task_terminal_outbox_delivered)
+        self.tasks: dict[str, object] = {}
+        self.node_details: dict[tuple[str, str], dict[str, object]] = {}
 
     async def startup(self) -> None:
         return None
 
     def _mark_task_terminal_outbox_delivered(self, dedupe_key: str, *, delivered_at: str) -> None:
         self.delivered.append((str(dedupe_key or ""), str(delivered_at or "")))
+
+    def get_task(self, task_id: str):
+        return self.tasks.get(str(task_id or "").strip())
+
+    def get_node_detail_payload(self, task_id: str, node_id: str):
+        key = (str(task_id or "").strip(), str(node_id or "").strip())
+        return self.node_details.get(key)
 
 
 class _RuntimeManager:
@@ -1104,6 +1113,158 @@ async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_retur
     assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
     assert "demo-terminal" in str(reloaded.messages[-1]["content"])
     assert "已完成" in str(reloaded.messages[-1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_metadata(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-root-output"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    task_service = _TaskService()
+    task_id = "task:demo-root-output"
+    task_service.tasks[task_id] = SimpleNamespace(
+        task_id=task_id,
+        root_node_id="node:root",
+        metadata={},
+        final_output="Top 3 recommendation list",
+        final_output_ref="artifact:artifact:root-output",
+        failure_reason="",
+    )
+    task_service.node_details[(task_id, "node:root")] = {
+        "item": {
+            "node_id": "node:root",
+            "task_id": task_id,
+            "node_kind": "execution",
+            "final_output": "Top 3 recommendation list",
+            "final_output_ref": "artifact:artifact:root-output",
+            "check_result": "accepted",
+            "failure_reason": "",
+        }
+    }
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    accepted = service.enqueue_task_terminal_payload(
+        {
+            "task_id": task_id,
+            "session_id": session_id,
+            "title": "demo root output task",
+            "status": "success",
+            "brief_text": "task finished successfully",
+            "finished_at": "2026-03-27T01:34:32+08:00",
+            "dedupe_key": "task-terminal:task:demo-root-output:success:2026-03-27T01:34:32+08:00",
+        }
+    )
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    prompt_text = str(live_session.prompts[0].content)
+    assert "Result node: execution node:root" in prompt_text
+    assert "Result output: Top 3 recommendation list" in prompt_text
+    assert "Result output ref: artifact:artifact:root-output" in prompt_text
+
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.messages[-1]["metadata"]["task_results"] == [
+        {
+            "task_id": task_id,
+            "node_id": "node:root",
+            "node_kind": "execution",
+            "node_reason": "root_terminal",
+            "output": "Top 3 recommendation list",
+            "output_ref": "artifact:artifact:root-output",
+            "check_result": "accepted",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_prefers_acceptance_output_when_final_acceptance_failed(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-acceptance-output"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    task_service = _TaskService()
+    task_id = "task:demo-acceptance-output"
+    task_service.tasks[task_id] = SimpleNamespace(
+        task_id=task_id,
+        root_node_id="node:root",
+        metadata={
+            "final_acceptance": {
+                "required": True,
+                "prompt": "检查最终结果",
+                "node_id": "node:acceptance",
+                "status": "failed",
+            }
+        },
+        final_output="Execution Deliverable: root answer",
+        final_output_ref="artifact:artifact:root-output",
+        failure_reason="Acceptance Failure: evidence mismatch",
+    )
+    task_service.node_details[(task_id, "node:acceptance")] = {
+        "item": {
+            "node_id": "node:acceptance",
+            "task_id": task_id,
+            "node_kind": "acceptance",
+            "final_output": "Acceptance node full output",
+            "final_output_ref": "artifact:artifact:accept-output",
+            "check_result": "acceptance failed",
+            "failure_reason": "Acceptance Failure: evidence mismatch",
+        }
+    }
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    accepted = service.enqueue_task_terminal_payload(
+        {
+            "task_id": task_id,
+            "session_id": session_id,
+            "title": "demo acceptance output task",
+            "status": "failed",
+            "brief_text": "acceptance failed",
+            "failure_reason": "Acceptance Failure: evidence mismatch",
+            "finished_at": "2026-03-27T01:35:32+08:00",
+            "dedupe_key": "task-terminal:task:demo-acceptance-output:failed:2026-03-27T01:35:32+08:00",
+        }
+    )
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    prompt_text = str(live_session.prompts[0].content)
+    assert "Result node: acceptance node:acceptance" in prompt_text
+    assert "Result source: acceptance_failed" in prompt_text
+    assert "Result output: Acceptance node full output" in prompt_text
+    assert "Result output ref: artifact:artifact:accept-output" in prompt_text
+
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.messages[-1]["metadata"]["task_results"] == [
+        {
+            "task_id": task_id,
+            "node_id": "node:acceptance",
+            "node_kind": "acceptance",
+            "node_reason": "acceptance_failed",
+            "output": "Acceptance node full output",
+            "output_ref": "artifact:artifact:accept-output",
+            "check_result": "acceptance failed",
+            "failure_reason": "Acceptance Failure: evidence mismatch",
+        }
+    ]
 
 
 @pytest.mark.asyncio

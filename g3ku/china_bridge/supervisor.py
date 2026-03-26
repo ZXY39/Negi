@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import time
@@ -34,6 +35,7 @@ class ChinaBridgeSupervisor:
         self._status_store = ChinaBridgeStatusStore(state_root / "status.json")
         self._runner_task: asyncio.Task | None = None
         self._client_task: asyncio.Task | None = None
+        self._client: ChinaBridgeClient | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._host_stdout_handle = None
         self._host_stderr_handle = None
@@ -68,10 +70,7 @@ class ChinaBridgeSupervisor:
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._client_task is not None:
-            self._client_task.cancel()
-            await asyncio.gather(self._client_task, return_exceptions=True)
-            self._client_task = None
+        await self._stop_client_task()
         if self._process is not None:
             try:
                 self._process.terminate()
@@ -93,6 +92,19 @@ class ChinaBridgeSupervisor:
             self._runner_task = None
         self._write_state(running=False, connected=False, pid=None)
 
+    async def _stop_client_task(self) -> None:
+        client = self._client
+        self._client = None
+        if client is not None:
+            try:
+                await client.stop()
+            except Exception:
+                pass
+        if self._client_task is not None:
+            self._client_task.cancel()
+            await asyncio.gather(self._client_task, return_exceptions=True)
+            self._client_task = None
+
     def status_payload(self) -> dict[str, Any]:
         return asdict(self._state)
 
@@ -108,21 +120,26 @@ class ChinaBridgeSupervisor:
                     on_frame=self._transport.handle_frame,
                     on_state=self._on_client_state,
                 )
+                self._client = client
                 self._transport.set_sender(client.send_frame)
                 self._client_task = asyncio.create_task(client.run_forever())
-                await self._process.wait()
-                await asyncio.gather(self._client_task, return_exceptions=True)
-                self._client_task = None
+                process = self._process
+                await process.wait()
+                return_code = process.returncode
+                self._process = None
+                await self._stop_client_task()
                 self._close_host_log_handles()
                 if self._stop.is_set():
                     break
-                self._write_state(running=False, connected=False, pid=None, last_error="china bridge host exited")
+                exit_message = "china bridge host exited" if return_code in (None, 0) else f"china bridge host exited ({return_code})"
+                self._write_state(running=False, connected=False, pid=None, last_error=exit_message)
                 await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 raise
             except _BuildRetryPending:
                 continue
             except Exception as exc:
+                await self._stop_client_task()
                 self._close_host_log_handles()
                 self._write_state(running=False, connected=False, pid=None, last_error=str(exc))
                 await asyncio.sleep(1.0)
@@ -135,6 +152,44 @@ class ChinaBridgeSupervisor:
 
     def _node_modules_dir(self) -> Path:
         return self._host_root() / "node_modules"
+
+    def _install_stamp_path(self) -> Path:
+        return self._state_root / "deps.installed.json"
+
+    def _latest_host_dependency_mtime(self) -> float:
+        host_root = self._host_root()
+        latest = 0.0
+        for relative in ("package.json", "pnpm-lock.yaml", "package-lock.json", "npm-shrinkwrap.json"):
+            path = host_root / relative
+            if path.exists():
+                latest = max(latest, path.stat().st_mtime)
+        return latest
+
+    def _host_install_required(self) -> bool:
+        if not self._node_modules_dir().exists():
+            return True
+        stamp_path = self._install_stamp_path()
+        if not stamp_path.exists():
+            return True
+        try:
+            stamp_mtime = stamp_path.stat().st_mtime
+        except OSError:
+            return True
+        return self._latest_host_dependency_mtime() > stamp_mtime
+
+    def _mark_host_dependencies_installed(self, package_manager_name: str) -> None:
+        self._state_root.mkdir(parents=True, exist_ok=True)
+        self._install_stamp_path().write_text(
+            json.dumps(
+                {
+                    "package_manager": package_manager_name,
+                    "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     def _resolve_package_manager(self) -> tuple[str, str]:
         preferred = str(self._app_config.china_bridge.npm_client or "pnpm").strip() or "pnpm"
@@ -262,7 +317,9 @@ class ChinaBridgeSupervisor:
 
     async def _ensure_host_build(self) -> Path:
         dist_entry = self._dist_entry()
-        if not self._host_build_required():
+        install_required = self._host_install_required()
+        build_required = self._host_build_required()
+        if not install_required and not build_required:
             self._write_state(built=True)
             return dist_entry
 
@@ -278,7 +335,7 @@ class ChinaBridgeSupervisor:
         package_manager_path, package_manager_name = self._resolve_package_manager()
 
         try:
-            if not self._node_modules_dir().exists():
+            if install_required:
                 self._write_state(
                     running=False,
                     connected=False,
@@ -290,15 +347,17 @@ class ChinaBridgeSupervisor:
                 if package_manager_name == "npm":
                     install_args.append("--no-package-lock")
                 await self._run_host_command(*install_args)
+                self._mark_host_dependencies_installed(package_manager_name)
 
-            self._write_state(
-                running=False,
-                connected=False,
-                built=False,
-                pid=None,
-                last_error=f"building china bridge host via {package_manager_name} run build",
-            )
-            await self._run_host_command(package_manager_path, "run", "build")
+            if build_required:
+                self._write_state(
+                    running=False,
+                    connected=False,
+                    built=False,
+                    pid=None,
+                    last_error=f"building china bridge host via {package_manager_name} run build",
+                )
+                await self._run_host_command(package_manager_path, "run", "build")
         except Exception:
             self._next_build_attempt_at = time.monotonic() + 10.0
             raise

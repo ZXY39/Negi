@@ -54,6 +54,7 @@ from main.service.create_async_task_contract import (
 )
 from main.service.task_terminal_callback import (
     build_task_terminal_payload,
+    enrich_task_terminal_payload,
     normalize_task_terminal_payload,
     resolve_task_terminal_callback_token,
     resolve_task_terminal_callback_url,
@@ -820,7 +821,11 @@ class MainRuntimeService:
     def _enqueue_task_terminal_callback(self, task: TaskRecord) -> None:
         if self.execution_mode != 'worker':
             return
-        payload = normalize_task_terminal_payload(build_task_terminal_payload(task))
+        payload = enrich_task_terminal_payload(
+            build_task_terminal_payload(task),
+            task=task,
+            node_detail_getter=self.get_node_detail_payload,
+        )
         if not payload:
             return
         dedupe_key = str(payload.get('dedupe_key') or '').strip()

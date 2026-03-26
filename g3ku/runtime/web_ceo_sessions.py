@@ -22,12 +22,12 @@ DEFAULT_TASK_HARD_MAX_DEPTH = 4
 DEFAULT_FRONTDOOR_RAW_TAIL_TURNS = 4
 FRONTDOOR_CONTEXT_VERSION = 1
 FRONTDOOR_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
-TASK_MEMORY_VERSION = 1
+TASK_MEMORY_VERSION = 2
 TASK_MEMORY_PREFIX = '[[G3KU_TASK_MEMORY_V1]]'
 TASK_META_PREFIX = '[[G3KU_TASK_META_V1]]'
 TOOL_TRACE_PREFIX = '[[G3KU_TOOL_TRACE_V1]]'
 STAGE_TRACE_PREFIX = '[[G3KU_STAGE_TRACE_V1]]'
-_FRONTDOOR_ROUTE_KINDS = {"direct_reply", "self_execute", "task_dispatch"}
+_FRONTDOOR_ROUTE_KINDS = {"direct_reply", "self_execute", "task_dispatch", "stage_only"}
 _FRONTDOOR_SUMMARY_MAX_CHARS = 2_400
 _FRONTDOOR_TURN_SUMMARY_MAX_CHARS = 240
 _TASK_MEMORY_MAX_IDS = 3
@@ -35,6 +35,8 @@ _TASK_ID_PATTERN = re.compile(r'task:[A-Za-z0-9][\w:-]*')
 _RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
 _RECENT_HISTORY_TOOL_TEXT_MAX_CHARS = 96
 _RECENT_HISTORY_STAGE_GOAL_MAX_CHARS = 120
+_TASK_RESULT_OUTPUT_MAX_CHARS = 480
+_TASK_RESULT_REASON_MAX_CHARS = 180
 
 
 def _normalize_frontdoor_route_kind(value: Any) -> str:
@@ -90,7 +92,43 @@ def normalize_task_memory(payload: Any) -> dict[str, Any]:
         'source': str(source.get('source') or '').strip(),
         'reason': str(source.get('reason') or '').strip(),
         'updated_at': str(source.get('updated_at') or '').strip(),
+        'task_results': _normalize_task_results(source.get('task_results', source.get('taskResults'))),
     }
+
+
+def _normalize_task_results(values: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[dict[str, str]]:
+    items = list(values) if isinstance(values, (list, tuple, set)) else [values]
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        task_id = _normalize_task_ids(raw.get('task_id') or raw.get('taskId'), limit=1)
+        task_id_text = task_id[0] if task_id else ''
+        node_id = str(raw.get('node_id') or raw.get('nodeId') or '').strip()
+        if not task_id_text:
+            continue
+        dedupe_key = (task_id_text, node_id)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        item = {
+            'task_id': task_id_text,
+            'node_id': node_id,
+            'node_kind': str(raw.get('node_kind') or raw.get('nodeKind') or '').strip(),
+            'node_reason': str(raw.get('node_reason') or raw.get('nodeReason') or '').strip(),
+            'output_excerpt': summarize_preview_text(
+                raw.get('output_excerpt') or raw.get('output') or '',
+                max_chars=_TASK_RESULT_OUTPUT_MAX_CHARS,
+            ),
+            'output_ref': str(raw.get('output_ref') or raw.get('outputRef') or '').strip(),
+            'check_result': summarize_preview_text(raw.get('check_result') or raw.get('checkResult') or '', max_chars=_TASK_RESULT_REASON_MAX_CHARS),
+            'failure_reason': summarize_preview_text(raw.get('failure_reason') or raw.get('failureReason') or '', max_chars=_TASK_RESULT_REASON_MAX_CHARS),
+        }
+        normalized.append({key: value for key, value in item.items() if value})
+        if len(normalized) >= max(1, int(limit or _TASK_MEMORY_MAX_IDS)):
+            break
+    return normalized
 
 
 def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[str]:
@@ -120,6 +158,7 @@ def is_internal_ceo_user_message(message: Any) -> bool:
 
 def build_last_task_memory(session: Any) -> dict[str, Any]:
     remembered: list[str] = []
+    remembered_results: list[dict[str, str]] = []
     source = ''
     reason = ''
     updated_at = ''
@@ -137,6 +176,9 @@ def build_last_task_memory(session: Any) -> dict[str, Any]:
                 if len(remembered) >= _TASK_MEMORY_MAX_IDS:
                     break
         metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
+        for item in _normalize_task_results(metadata.get('task_results')):
+            if item not in remembered_results:
+                remembered_results.append(item)
         if not source:
             source = str(metadata.get('source') or '').strip() or 'transcript'
         if not reason:
@@ -151,6 +193,7 @@ def build_last_task_memory(session: Any) -> dict[str, Any]:
             'source': source,
             'reason': reason,
             'updated_at': updated_at,
+            'task_results': remembered_results,
         }
     )
 
@@ -167,6 +210,8 @@ def build_task_memory_message(task_memory: Any) -> dict[str, Any] | None:
         payload['source'] = normalized['source']
     if normalized['reason']:
         payload['reason'] = normalized['reason']
+    if normalized['task_results']:
+        payload['task_results'] = list(normalized['task_results'])
     return {
         'role': 'assistant',
         'content': f"{TASK_MEMORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}",
@@ -185,6 +230,9 @@ def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None
     reason = str(metadata.get('reason') or '').strip()
     if reason:
         payload['reason'] = reason
+    task_results = _normalize_task_results(metadata.get('task_results'))
+    if task_results:
+        payload['task_results'] = task_results
     return payload or None
 
 

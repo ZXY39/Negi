@@ -194,6 +194,59 @@ def test_update_ceo_session_after_turn_persists_last_task_memory() -> None:
         'source': 'transcript',
         'reason': '',
         'updated_at': session.messages[-1]['timestamp'],
+        'task_results': [],
+    }
+
+
+def test_update_ceo_session_after_turn_persists_last_task_result_handles() -> None:
+    session = Session(key='web:shared')
+    session.add_message('user', 'show recommendation result')
+    session.add_message(
+        'assistant',
+        'task finished',
+        metadata={
+            'source': 'heartbeat',
+            'reason': 'task_terminal',
+            'task_ids': ['task:demo123'],
+            'task_results': [
+                {
+                    'task_id': 'task:demo123',
+                    'node_id': 'node:root',
+                    'node_kind': 'execution',
+                    'node_reason': 'root_terminal',
+                    'output': 'Top 3 recommendation list with rationale',
+                    'output_ref': 'artifact:artifact:root-output',
+                    'check_result': 'accepted',
+                }
+            ],
+        },
+    )
+
+    changed = web_ceo_sessions.update_ceo_session_after_turn(
+        session,
+        user_text='show recommendation result',
+        assistant_text='task finished',
+        route_kind='direct_reply',
+    )
+
+    assert changed is True
+    assert session.metadata['last_task_memory'] == {
+        'version': web_ceo_sessions.TASK_MEMORY_VERSION,
+        'task_ids': ['task:demo123'],
+        'source': 'heartbeat',
+        'reason': 'task_terminal',
+        'updated_at': session.messages[-1]['timestamp'],
+        'task_results': [
+            {
+                'task_id': 'task:demo123',
+                'node_id': 'node:root',
+                'node_kind': 'execution',
+                'node_reason': 'root_terminal',
+                'output_excerpt': 'Top 3 recommendation list with rationale',
+                'output_ref': 'artifact:artifact:root-output',
+                'check_result': 'accepted',
+            }
+        ],
     }
 
 
@@ -1363,3 +1416,90 @@ async def test_provider_chat_model_adapter_forwards_prompt_cache_key() -> None:
     await adapter._agenerate([HumanMessage(content='hello')], prompt_cache_key='stable-frontdoor-key')
 
     assert provider.calls[0]['prompt_cache_key'] == 'stable-frontdoor-key'
+
+
+def test_build_frontdoor_context_preserves_stage_only_route_kind() -> None:
+    session = Session(key='web:shared')
+    _append_turn(session, 1)
+
+    context = web_ceo_sessions.build_frontdoor_context(session, raw_tail_turns=1, route_kind='stage_only')
+
+    assert context['last_route_kind'] == 'stage_only'
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_retries_empty_stage_turn_and_returns_structured_message(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'load skill guidance', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(content='', finish_reason='stop'),
+            LLMResponse(content='', finish_reason='stop'),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='install a skill'), session=session)
+
+    assert '空响应' in output
+    assert '尚未创建异步任务' in output
+    assert len(backend.calls) == 3
+    retry_messages = list(backend.calls[2].get('messages') or [])
+    assert any(
+        str(item.get('role') or '') == 'user'
+        and 'previous model turn was empty' in str(item.get('content') or '')
+        for item in retry_messages
+    )
+    assert getattr(session, '_last_route_kind', '') == 'stage_only'
+    trace = getattr(session, '_interaction_trace', None)
+    assert trace is not None
+    assert list(trace.get('stages') or [])[0]['status'] == 'failed'

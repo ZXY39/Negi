@@ -580,7 +580,12 @@ function renderExecutionStageRounds(stage) {
                 open: false,
                 bodyHtml: [
                     renderTraceField("参数", step.arguments_text, "无参数"),
-                    renderTraceField("工具输出", step.output_text, step.status === "running" ? "等待工具输出..." : "暂无工具输出"),
+                    renderTraceField(
+                        "工具输出",
+                        step.output_text,
+                        step.status === "running" ? "等待工具输出..." : "暂无工具输出",
+                        { decodeEscapes: true },
+                    ),
                 ].join(""),
             })).join("")
             : renderTraceField("工具", "", "本轮暂无工具记录");
@@ -692,12 +697,22 @@ function traceStepSummaryHeight(step) {
 
 function refreshTaskDetailScrollRegions() {
     const traceList = U.adFlow?.querySelector(".task-trace-list");
+    const preservedDetailScrollTop = U.detail instanceof HTMLElement ? U.detail.scrollTop : null;
+    const preservedTraceScrollTop = traceList instanceof HTMLElement ? traceList.scrollTop : null;
+    const preservedArtifactListScrollTop = U.artifactList instanceof HTMLElement ? U.artifactList.scrollTop : null;
     if (traceList instanceof HTMLElement) {
         setScrollViewportLimit(traceList, ".task-trace-step", 10, traceStepSummaryHeight, true);
     }
     if (U.artifactList instanceof HTMLElement) {
         setScrollViewportLimit(U.artifactList, ".artifact-item", 5);
     }
+    const restoreScrollPositions = () => {
+        if (preservedDetailScrollTop !== null) setElementScrollTop(U.detail, preservedDetailScrollTop);
+        if (preservedTraceScrollTop !== null) setElementScrollTop(traceList, preservedTraceScrollTop);
+        if (preservedArtifactListScrollTop !== null) setElementScrollTop(U.artifactList, preservedArtifactListScrollTop);
+    };
+    restoreScrollPositions();
+    window.requestAnimationFrame(restoreScrollPositions);
 }
 
 function renderExecutionTrace(node) {
@@ -795,6 +810,15 @@ function renderLiveChildFields(childPipelines) {
     ].join("")).join("");
 }
 
+function buildTraceRenderSignature(stepDescriptors) {
+    return (Array.isArray(stepDescriptors) ? stepDescriptors : []).map((step) => [
+        String(step?.traceKey || ""),
+        String(step?.title || ""),
+        String(step?.status || ""),
+        String(step?.bodyHtml || ""),
+    ].join("\u0002")).join("\u0001");
+}
+
 function renderExecutionTrace(node, { viewState = null } = {}) {
     if (!U.adFlow) return;
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
@@ -814,7 +838,15 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         U.adFlow.innerHTML = "";
         U.adFlow.appendChild(traceList);
     }
-    traceList.innerHTML = steps.join("");
+    const renderSignature = buildTraceRenderSignature(stepDescriptors);
+    const renderNodeId = String(node?.node_id || "").trim();
+    const shouldReplace = traceList.dataset.renderSignature !== renderSignature
+        || traceList.dataset.renderNodeId !== renderNodeId;
+    if (shouldReplace) {
+        traceList.innerHTML = steps.join("");
+        traceList.dataset.renderSignature = renderSignature;
+        traceList.dataset.renderNodeId = renderNodeId;
+    }
     renderFlowHeading(stepDescriptors.length);
     const traceItems = Array.from(traceList.querySelectorAll(".task-trace-step"));
     traceItems.forEach((item) => {
@@ -823,7 +855,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     });
     refreshTaskDetailScrollRegions();
-    if (effectiveViewState) {
+    if (effectiveViewState && shouldReplace) {
         const restoreTraceScroll = () => {
             const currentTraceList = U.adFlow?.querySelector(".task-trace-list");
             if (!(currentTraceList instanceof HTMLElement)) return;
@@ -836,23 +868,40 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         });
     }
     refreshLiveDurationBadges();
+    return shouldReplace;
 }
 
 function renderFinalOutput(text) {
     if (!U.adOutput) return;
-    U.adOutput.textContent = readableText(text, { decodeEscapes: true, emptyText: "暂无最终输出" });
+    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无最终输出" });
+    const changed = U.adOutput.textContent !== nextText;
+    if (changed) U.adOutput.textContent = nextText;
+    return changed;
 }
 
 function renderAcceptanceResult(text) {
     if (!U.adAcceptance) return;
-    U.adAcceptance.textContent = readableText(text, { decodeEscapes: true, emptyText: "暂无验收结果" });
+    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无验收结果" });
+    const changed = U.adAcceptance.textContent !== nextText;
+    if (changed) U.adAcceptance.textContent = nextText;
+    return changed;
+}
+
+function formatRoundLabel(label, roundIndex) {
+    const normalizedLabel = String(label || "").trim();
+    const normalizedIndex = normalizeInt(roundIndex, 0);
+    const fallbackLabel = normalizedIndex > 0 ? `第${normalizedIndex}轮树` : "轮次";
+    if (!normalizedLabel) return fallbackLabel;
+    const matchedRound = normalizedLabel.match(/^Round\s+(\d+)$/i);
+    if (matchedRound) return `第${matchedRound[1]}轮树`;
+    return normalizedLabel;
 }
 
 function buildNodeRoundState(node) {
     const rounds = rawNodeRounds(node).map((round) => ({
         roundId: String(round.round_id || ""),
         roundIndex: normalizeInt(round.round_index, 0),
-        label: String(round.label || "").trim() || `Round ${normalizeInt(round.round_index, 0)}`,
+        label: formatRoundLabel(round.label, round.round_index),
         isLatest: !!round.is_latest,
         childCount: Array.isArray(round.children) ? round.children.length : Math.max(0, normalizeInt(round.child_node_ids?.length, 0)),
         createdAt: String(round.created_at || ""),
@@ -1051,8 +1100,8 @@ function renderTree() {
             label.className = "execution-tree-round-label";
             label.textContent = "轮次";
             const select = document.createElement("select");
-            select.className = "execution-tree-round-select";
-            select.setAttribute("aria-label", `${fullTitle} 轮次`);
+            select.className = "execution-tree-round-select resource-select";
+            select.dataset.resourceSelectLabel = `${fullTitle} 轮次`;
             roundOptions.forEach((round) => {
                 const option = document.createElement("option");
                 option.value = round.roundId;
@@ -1085,6 +1134,7 @@ function renderTree() {
     U.tree.innerHTML = "";
     if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));
     U.tree.appendChild(wrapper);
+    if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
     if (S.selectedNodeId) {
         const selected = findTreeNode(S.treeView, S.selectedNodeId);
         if (selected) {
@@ -1257,15 +1307,18 @@ async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
     return request;
 }
 
-async function showAgent(node, { preserveViewState = true } = {}) {
+async function showAgent(node, { preserveViewState = true, forceRefresh = false } = {}) {
     const nodeId = String(node?.node_id || "").trim();
     if (!nodeId) return;
     const renderToken = (Number(S.taskDetailRenderToken || 0) || 0) + 1;
     S.taskDetailRenderToken = renderToken;
+    const previousDetailNodeId = String(S.currentNodeDetail?.node_id || "").trim();
+    const hadVisibleCurrentDetail = U.detail?.style?.display !== "none"
+        && String(S.currentNodeDetail?.node_id || "").trim() === nodeId;
     const viewState = consumePendingTaskDetailRestore(nodeId)
         || (preserveViewState ? captureTaskDetailViewState() : getStoredTaskDetailViewState(S.currentTaskId, nodeId));
-    if (!S.taskNodeDetails[nodeId]) showTaskNodeLoadingState(node);
-    const detail = await ensureTaskNodeDetail(nodeId);
+    if (!S.taskNodeDetails[nodeId] && !hadVisibleCurrentDetail) showTaskNodeLoadingState(node);
+    const detail = await ensureTaskNodeDetail(nodeId, { force: forceRefresh });
     if (renderToken !== S.taskDetailRenderToken) return;
     if (String(S.selectedNodeId || "").trim() !== nodeId) return;
     const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
@@ -1284,16 +1337,22 @@ async function showAgent(node, { preserveViewState = true } = {}) {
     U.adStatus.textContent = String(mergedNode.display_state || mergedNode.state || mergedNode.status || "");
     U.adStatus.dataset.status = mergedNode.visual_state || mergedNode.state || mergedNode.status || node.visual_state || node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
-    renderExecutionTrace(mergedNode, { viewState });
-    renderFinalOutput(mergedNode.executionTrace?.final_output || "");
-    renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
+    const traceChanged = !!renderExecutionTrace(mergedNode, { viewState });
+    const outputChanged = !!renderFinalOutput(mergedNode.executionTrace?.final_output || "");
+    const acceptanceChanged = !!renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
     U.feedTitle.textContent = `Node: ${compactHeading}`;
     U.feedTitle.title = compactHeading;
     setTaskDetailOpen(true);
     icons();
-    restoreTaskDetailViewState(viewState);
-    stashTaskDetailViewState({ nodeId, viewState });
-    void syncArtifactsForSelectedNode();
+    if (!hadVisibleCurrentDetail || traceChanged || outputChanged || acceptanceChanged) {
+        restoreTaskDetailViewState(viewState);
+        stashTaskDetailViewState({ nodeId, viewState });
+    } else {
+        stashTaskDetailViewState({ nodeId });
+    }
+    if (!hadVisibleCurrentDetail || previousDetailNodeId !== nodeId) {
+        void syncArtifactsForSelectedNode();
+    }
 }
 
 function hideAgent() {

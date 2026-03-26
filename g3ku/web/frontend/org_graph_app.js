@@ -576,13 +576,16 @@ function decodeEscapedDisplayText(value) {
 
     const actualLineBreaks = countMatches(raw, /\r\n|\r|\n/g);
     const escapedLineBreaks = countMatches(raw, /\\r\\n|\\n|\\r/g);
+    const plainEscapedLineBreaks = countMatches(raw, /(^|[^\\])(?:\\r\\n|\\n|\\r)/g);
     const escapedQuotes = countMatches(raw, /\\"/g);
     const escapedUnicode = countMatches(raw, /\\u[0-9a-fA-F]{4}/g);
     const likelyStructured = /^[\s"'[{(]/.test(raw);
-    const shouldDecodeEscapes = actualLineBreaks === 0 && (
-        escapedLineBreaks >= 2
-        || (escapedLineBreaks >= 1 && (escapedQuotes > 0 || escapedUnicode > 0 || likelyStructured))
-        || escapedUnicode > 0
+    const shouldDecodeEscapes = plainEscapedLineBreaks >= 1 || (
+        actualLineBreaks === 0 && (
+            escapedLineBreaks >= 2
+            || (escapedLineBreaks >= 1 && (escapedQuotes > 0 || escapedUnicode > 0 || likelyStructured))
+            || escapedUnicode > 0
+        )
     );
 
     if (!shouldDecodeEscapes) return raw;
@@ -2554,7 +2557,12 @@ function buildCeoTraceBundle(trace = null) {
                     showRuntime: true,
                     bodyHtml: [
                         renderTraceField("参数", tool.arguments_text, "无参数"),
-                        renderTraceField("工具输出", tool.output_text, tool.status === "running" ? "等待工具输出..." : "暂无工具输出"),
+                        renderTraceField(
+                            "工具输出",
+                            tool.output_text,
+                            tool.status === "running" ? "等待工具输出..." : "暂无工具输出",
+                            { decodeEscapes: true },
+                        ),
                     ].join(""),
                 });
             }).join("") || renderTraceField("工具", "", "本轮暂无工具记录");
@@ -2987,7 +2995,7 @@ function renderCeoToolIcon(iconWrap, iconName = "loader-circle") {
 }
 
 function normalizeInteractionDetailText(text = "") {
-    return String(text || "").replace(/\r\n?/g, "\n").trim();
+    return readableText(text, { decodeEscapes: true, emptyText: "" }).replace(/\r\n?/g, "\n").trim();
 }
 
 function buildInteractionPreviewText(text = "", maxLines = CEO_TOOL_OUTPUT_PREVIEW_LINES) {

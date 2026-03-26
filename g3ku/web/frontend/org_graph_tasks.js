@@ -845,12 +845,13 @@ function handleTaskEvent(payload) {
         const nodeId = String(payload.data?.node_id || "").trim();
         if (nodeId) {
             if (String(S.selectedNodeId || "") === nodeId) {
-                stashTaskDetailViewState({ nodeId, viewState: captureTaskDetailViewState() });
-            }
-            delete S.taskNodeDetails[nodeId];
-            if (String(S.selectedNodeId || "") === nodeId) {
+                const currentViewState = captureTaskDetailViewState();
+                stashTaskDetailViewState({ nodeId, viewState: currentViewState });
+                S.pendingTaskDetailRestore = { nodeId, viewState: currentViewState };
                 const selected = findTreeNode(S.treeView || S.tree, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
-                void showAgent(selected, { preserveViewState: false });
+                void showAgent(selected, { preserveViewState: true, forceRefresh: true });
+            } else {
+                delete S.taskNodeDetails[nodeId];
             }
         }
         return;

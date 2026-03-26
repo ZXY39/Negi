@@ -1,11 +1,12 @@
 ﻿from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import json
+import errno
+import os
 import shutil
 import httpx
+from pathlib import Path
+from typing import Any
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from g3ku.china_bridge.registry import (
@@ -134,10 +135,53 @@ def _china_bridge_status_payload() -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _china_bridge_status_pid(status: dict[str, Any]) -> int | None:
+    try:
+        pid = int(status.get('pid') or 0)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _process_exists(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    if os.name == 'nt':
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            process = kernel32.OpenProcess(0x1000 | 0x00100000, False, int(pid))
+            if not process:
+                return False
+            try:
+                return kernel32.WaitForSingleObject(process, 0) == 0x00000102
+            finally:
+                kernel32.CloseHandle(process)
+        except Exception:
+            return False
+    try:
+        os.kill(int(pid), 0)
+    except OSError as exc:
+        return exc.errno == errno.EPERM
+    except Exception:
+        return False
+    return True
+
+
 def _china_bridge_runtime_summary(cfg: Config) -> dict[str, Any]:
     status = _china_bridge_status_payload() or {}
     dist_entry = cfg.workspace_path / 'subsystems' / 'china_channels_host' / 'dist' / 'index.js'
     node_path = shutil.which(cfg.china_bridge.node_bin)
+    raw_running = bool(status.get('running'))
+    pid = _china_bridge_status_pid(status)
+    pid_alive = _process_exists(pid) if pid is not None else False
+    running = raw_running if pid is None else (raw_running and pid_alive)
+    connected = bool(status.get('connected')) and running
+    stale_state = raw_running and pid is not None and not pid_alive
+    last_error = str(status.get('last_error') or '').strip()
+    if stale_state and not last_error:
+        last_error = 'china bridge host process is not running'
     return {
         'enabled': bool(cfg.china_bridge.enabled),
         'public_port': int(cfg.china_bridge.public_port),
@@ -147,11 +191,14 @@ def _china_bridge_runtime_summary(cfg: Config) -> dict[str, Any]:
         'node_path': node_path,
         'dist_entry': str(dist_entry),
         'dist_exists': dist_entry.exists(),
-        'running': bool(status.get('running')),
-        'connected': bool(status.get('connected')),
+        'running': running,
+        'connected': connected,
+        'pid': pid,
+        'pid_alive': pid_alive,
+        'state_stale': stale_state,
         'status_path': str(_china_bridge_status_path()),
         'status_exists': bool(status),
-        'last_error': str(status.get('last_error') or '').strip() or None,
+        'last_error': last_error or None,
     }
 
 

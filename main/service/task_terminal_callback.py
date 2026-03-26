@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from main.models import normalize_final_acceptance_metadata
 
 
 TASK_TERMINAL_CALLBACK_PATH = '/api/internal/task-terminal'
@@ -62,12 +64,86 @@ def build_task_terminal_dedupe_key(*, task_id: str, status: str, finished_at: st
     return f'task-terminal:{str(task_id or '').strip()}:{str(status or '').strip().lower()}:{str(finished_at or '').strip()}'
 
 
+def _normalize_task_terminal_text(value: Any) -> str:
+    return str(value or '').strip()
+
+
+def _task_terminal_delivery_payload(
+    task: Any,
+    *,
+    node_detail_getter: Callable[[str, str], dict[str, Any] | None] | None = None,
+) -> dict[str, str]:
+    task_id = _normalize_task_terminal_text(getattr(task, 'task_id', ''))
+    root_node_id = _normalize_task_terminal_text(getattr(task, 'root_node_id', ''))
+    metadata = getattr(task, 'metadata', None) if isinstance(getattr(task, 'metadata', None), dict) else {}
+    final_acceptance = normalize_final_acceptance_metadata((metadata or {}).get('final_acceptance'))
+    acceptance_node_id = _normalize_task_terminal_text(getattr(final_acceptance, 'node_id', ''))
+    acceptance_failed = bool(
+        getattr(final_acceptance, 'required', False)
+        and _normalize_task_terminal_text(getattr(final_acceptance, 'status', '')).lower() == 'failed'
+        and acceptance_node_id
+    )
+    terminal_node_id = acceptance_node_id if acceptance_failed else root_node_id
+    terminal_node_kind = 'acceptance' if acceptance_failed else 'execution'
+    terminal_node_reason = 'acceptance_failed' if acceptance_failed else 'root_terminal'
+    terminal_output = ''
+    terminal_output_ref = ''
+    terminal_check_result = ''
+    terminal_failure_reason = ''
+
+    detail_item = None
+    if task_id and terminal_node_id and callable(node_detail_getter):
+        try:
+            detail_payload = node_detail_getter(task_id, terminal_node_id)
+        except Exception:
+            detail_payload = None
+        if isinstance(detail_payload, dict) and isinstance(detail_payload.get('item'), dict):
+            detail_item = dict(detail_payload.get('item') or {})
+
+    if isinstance(detail_item, dict):
+        terminal_output = _normalize_task_terminal_text(
+            detail_item.get('final_output')
+            or detail_item.get('output')
+            or detail_item.get('check_result')
+            or detail_item.get('failure_reason')
+        )
+        terminal_output_ref = _normalize_task_terminal_text(
+            detail_item.get('final_output_ref')
+            or detail_item.get('output_ref')
+            or detail_item.get('check_result_ref')
+        )
+        terminal_check_result = _normalize_task_terminal_text(detail_item.get('check_result'))
+        terminal_failure_reason = _normalize_task_terminal_text(detail_item.get('failure_reason'))
+
+    if not terminal_output:
+        if acceptance_failed:
+            terminal_output = _normalize_task_terminal_text(getattr(task, 'failure_reason', ''))
+        else:
+            terminal_output = _normalize_task_terminal_text(getattr(task, 'final_output', ''))
+    if not terminal_output_ref and not acceptance_failed:
+        terminal_output_ref = _normalize_task_terminal_text(getattr(task, 'final_output_ref', ''))
+    if not terminal_failure_reason:
+        terminal_failure_reason = _normalize_task_terminal_text(getattr(task, 'failure_reason', ''))
+
+    return {
+        'root_node_id': root_node_id,
+        'acceptance_node_id': acceptance_node_id,
+        'terminal_node_id': terminal_node_id,
+        'terminal_node_kind': terminal_node_kind,
+        'terminal_node_reason': terminal_node_reason,
+        'terminal_output': terminal_output,
+        'terminal_output_ref': terminal_output_ref,
+        'terminal_check_result': terminal_check_result,
+        'terminal_failure_reason': terminal_failure_reason,
+    }
+
+
 def build_task_terminal_payload(task: Any) -> dict[str, str]:
     task_id = str(getattr(task, 'task_id', '') or '').strip()
     session_id = str(getattr(task, 'session_id', '') or '').strip()
     status = str(getattr(task, 'status', '') or '').strip().lower()
     finished_at = str(getattr(task, 'finished_at', '') or '').strip()
-    return {
+    payload = {
         'dedupe_key': build_task_terminal_dedupe_key(task_id=task_id, status=status, finished_at=finished_at),
         'task_id': task_id,
         'session_id': session_id,
@@ -77,6 +153,30 @@ def build_task_terminal_payload(task: Any) -> dict[str, str]:
         'failure_reason': str(getattr(task, 'failure_reason', '') or '').strip(),
         'finished_at': finished_at,
     }
+    payload.update(_task_terminal_delivery_payload(task))
+    return payload
+
+
+def enrich_task_terminal_payload(
+    payload: dict[str, Any] | None,
+    *,
+    task: Any | None = None,
+    task_getter: Callable[[str], Any | None] | None = None,
+    node_detail_getter: Callable[[str, str], dict[str, Any] | None] | None = None,
+) -> dict[str, str]:
+    normalized = normalize_task_terminal_payload(payload)
+    if not normalized:
+        return {}
+    task_record = task
+    if task_record is None and callable(task_getter):
+        try:
+            task_record = task_getter(str(normalized.get('task_id') or '').strip())
+        except Exception:
+            task_record = None
+    if task_record is None:
+        return normalized
+    normalized.update(_task_terminal_delivery_payload(task_record, node_detail_getter=node_detail_getter))
+    return normalize_task_terminal_payload(normalized)
 
 
 def normalize_task_terminal_payload(payload: dict[str, Any] | None) -> dict[str, str]:
@@ -101,4 +201,13 @@ def normalize_task_terminal_payload(payload: dict[str, Any] | None) -> dict[str,
         'brief_text': str(source.get('brief_text') or source.get('briefText') or '').strip(),
         'failure_reason': str(source.get('failure_reason') or source.get('failureReason') or '').strip(),
         'finished_at': finished_at,
+        'root_node_id': _normalize_task_terminal_text(source.get('root_node_id') or source.get('rootNodeId')),
+        'acceptance_node_id': _normalize_task_terminal_text(source.get('acceptance_node_id') or source.get('acceptanceNodeId')),
+        'terminal_node_id': _normalize_task_terminal_text(source.get('terminal_node_id') or source.get('terminalNodeId')),
+        'terminal_node_kind': _normalize_task_terminal_text(source.get('terminal_node_kind') or source.get('terminalNodeKind')),
+        'terminal_node_reason': _normalize_task_terminal_text(source.get('terminal_node_reason') or source.get('terminalNodeReason')),
+        'terminal_output': _normalize_task_terminal_text(source.get('terminal_output') or source.get('terminalOutput')),
+        'terminal_output_ref': _normalize_task_terminal_text(source.get('terminal_output_ref') or source.get('terminalOutputRef')),
+        'terminal_check_result': _normalize_task_terminal_text(source.get('terminal_check_result') or source.get('terminalCheckResult')),
+        'terminal_failure_reason': _normalize_task_terminal_text(source.get('terminal_failure_reason') or source.get('terminalFailureReason')),
     }
