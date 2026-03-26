@@ -1497,6 +1497,8 @@ textarea {
 
 /* 5. CEO Chat View */
 .ceo-shell {
+    --ceo-session-panel-motion-duration: 440ms;
+    --ceo-session-panel-motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
     flex: 1;
     min-height: 0;
     display: grid;
@@ -1519,7 +1521,7 @@ textarea {
     background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
     box-shadow: var(--shadow-md);
     overflow: hidden;
-    transition: width 220ms cubic-bezier(0.16, 1, 0.3, 1), padding 220ms cubic-bezier(0.16, 1, 0.3, 1), gap 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+    transition: width var(--ceo-session-panel-motion-duration) var(--ceo-session-panel-motion-ease), padding var(--ceo-session-panel-motion-duration) var(--ceo-session-panel-motion-ease), gap 360ms ease, background-color 180ms ease, box-shadow 180ms ease;
 }
 
 .ceo-shell.is-session-panel-expanded .ceo-session-panel {
@@ -1718,7 +1720,7 @@ textarea {
 
 .ceo-shell.is-session-panel-expanded .ceo-session-list {
     align-items: stretch;
-    padding: 4px 8px 4px 4px;
+    padding: 4px 14px 4px 4px;
     scrollbar-gutter: stable;
 }
 
@@ -1767,6 +1769,10 @@ textarea {
     border: 1px solid transparent;
     background: transparent;
     transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+
+.ceo-session-card.is-menu-open {
+    z-index: 12;
 }
 
 .ceo-shell.is-session-panel-expanded .ceo-session-card {

@@ -1333,6 +1333,7 @@ function closeCeoSessionMenus({ restoreFocus = false } = {}) {
     let closed = false;
     openMenus.forEach((shell) => {
         shell.classList.remove("is-open");
+        shell.closest(".ceo-session-card")?.classList.remove("is-menu-open");
         shell.querySelector(".ceo-session-menu")?.setAttribute("hidden", "hidden");
         const trigger = shell.querySelector("[data-session-menu-toggle]");
         if (trigger) {
@@ -1355,6 +1356,7 @@ function setCeoSessionMenuOpen(sessionId, open, { restoreFocus = false } = {}) {
         const menu = shell.querySelector(".ceo-session-menu");
         if (currentId === targetId) matched = true;
         shell.classList.toggle("is-open", shouldOpen);
+        shell.closest(".ceo-session-card")?.classList.toggle("is-menu-open", shouldOpen);
         if (menu) {
             if (shouldOpen) menu.removeAttribute("hidden");
             else menu.setAttribute("hidden", "hidden");
