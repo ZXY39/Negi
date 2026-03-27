@@ -143,6 +143,15 @@ class MainRuntimeService:
     ) -> None:
         self._chat_backend = chat_backend
         self._app_config = app_config
+        resolved_max_iterations = self._normalize_optional_limit(max_iterations, default=16)
+        resolved_execution_max_iterations = self._normalize_optional_limit(
+            execution_max_iterations,
+            default=resolved_max_iterations,
+        )
+        resolved_acceptance_max_iterations = self._normalize_optional_limit(
+            acceptance_max_iterations,
+            default=resolved_execution_max_iterations,
+        )
         normalized_mode = str(execution_mode or 'embedded').strip().lower() or 'embedded'
         if normalized_mode not in {'embedded', 'web', 'worker'}:
             normalized_mode = 'embedded'
@@ -186,7 +195,7 @@ class MainRuntimeService:
         react_loop = ReActToolLoop(
             chat_backend=chat_backend,
             log_service=self.log_service,
-            max_iterations=max_iterations,
+            max_iterations=resolved_max_iterations,
             parallel_tool_calls_enabled=parallel_enabled,
             max_parallel_tool_calls=max_parallel_tool_calls,
         )
@@ -199,12 +208,8 @@ class MainRuntimeService:
             tool_provider=self._tool_provider,
             execution_model_refs=list(execution_model_refs or ['execution']),
             acceptance_model_refs=list(acceptance_model_refs or execution_model_refs or ['inspection']),
-            execution_max_iterations=execution_max_iterations if execution_max_iterations is not _UNSET else max_iterations,
-            acceptance_max_iterations=(
-                acceptance_max_iterations
-                if acceptance_max_iterations is not _UNSET
-                else (execution_max_iterations if execution_max_iterations is not _UNSET else max_iterations)
-            ),
+            execution_max_iterations=resolved_execution_max_iterations,
+            acceptance_max_iterations=resolved_acceptance_max_iterations,
             max_parallel_child_pipelines=max_parallel_child_pipelines,
             execution_max_concurrency=execution_max_concurrency,
             acceptance_max_concurrency=acceptance_max_concurrency,
@@ -1131,6 +1136,16 @@ class MainRuntimeService:
 
     @staticmethod
     def _normalize_optional_parallel_limit(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return max(0, int(value))
+
+    @staticmethod
+    def _normalize_optional_limit(value: Any, *, default: int | None) -> int | None:
+        if value is _UNSET:
+            value = default
         if value is None:
             return None
         if isinstance(value, str) and not value.strip():
