@@ -4,6 +4,7 @@ from fastapi import APIRouter, Header, HTTPException
 
 from g3ku.shells.web import ensure_web_runtime_services, get_agent, get_web_heartbeat_service
 from main.protocol import now_iso
+from main.service.task_event_callback import normalize_task_event_payload
 from main.service.task_stall_callback import normalize_task_stall_payload
 from main.service.task_terminal_callback import (
     normalize_task_terminal_payload,
@@ -11,6 +12,29 @@ from main.service.task_terminal_callback import (
 )
 
 router = APIRouter()
+
+
+@router.post('/internal/task-event')
+async def post_task_event_callback(
+    payload: dict,
+    x_g3ku_internal_token: str | None = Header(default=None, alias='x-g3ku-internal-token'),
+):
+    expected_token = resolve_task_terminal_callback_token()
+    if expected_token and str(x_g3ku_internal_token or '').strip() != expected_token:
+        raise HTTPException(status_code=403, detail='internal_callback_forbidden')
+
+    normalized = normalize_task_event_payload(payload)
+    if not normalized:
+        raise HTTPException(status_code=400, detail='task_event_payload_invalid')
+
+    agent = get_agent()
+    service = getattr(agent, 'main_task_service', None)
+    if service is None:
+        raise HTTPException(status_code=503, detail='main_task_service_unavailable')
+
+    await ensure_web_runtime_services(agent)
+    accepted = bool(getattr(service, 'forward_live_task_event', lambda _payload: False)(normalized))
+    return {'ok': True, 'accepted': accepted, 'event_type': normalized.get('event_type')}
 
 
 @router.post('/internal/task-terminal')

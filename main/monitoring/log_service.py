@@ -65,6 +65,7 @@ class TaskLogService:
         self._registry = registry
         self._content_store = content_store
         self._snapshot_payload_builder = None
+        self._live_snapshot_publishers: list[Callable[[TaskRecord, dict[str, Any], bool], None]] = []
         self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
         self._task_visible_output_listeners: list[Callable[[str, str], None]] = []
         self._task_locks: dict[str, threading.RLock] = {}
@@ -76,6 +77,10 @@ class TaskLogService:
 
     def ensure_task_projection(self, task_id: str) -> None:
         self._projection_service.ensure_task_projection(task_id)
+
+    def add_live_snapshot_publisher(self, publisher: Callable[[TaskRecord, dict[str, Any], bool], None]) -> None:
+        if callable(publisher):
+            self._live_snapshot_publishers.append(publisher)
 
     def add_task_terminal_listener(self, listener: Callable[[TaskRecord], None]) -> None:
         if callable(listener):
@@ -1369,17 +1374,24 @@ class TaskLogService:
         if self._registry is not None:
             payload = self._snapshot_payload_builder(current_task.task_id) if callable(self._snapshot_payload_builder) else None
             if payload is not None:
-                self._registry.publish_global_task(
-                    current_task.task_id,
-                    build_envelope(
-                        channel='task',
-                        session_id=current_task.session_id,
-                        task_id=current_task.task_id,
-                        seq=self._registry.next_global_task_seq(current_task.task_id),
-                        type='task.snapshot.internal',
-                        data=payload,
-                    ),
-                )
+                if self._live_snapshot_publishers:
+                    for publisher in list(self._live_snapshot_publishers):
+                        try:
+                            publisher(current_task, payload, bool(publish_summary))
+                        except Exception:
+                            continue
+                else:
+                    self._registry.publish_global_task(
+                        current_task.task_id,
+                        build_envelope(
+                            channel='task',
+                            session_id=current_task.session_id,
+                            task_id=current_task.task_id,
+                            seq=self._registry.next_global_task_seq(current_task.task_id),
+                            type='task.snapshot.internal',
+                            data=payload,
+                        ),
+                    )
         if publish_summary:
             self._append_task_event(
                 task=current_task,

@@ -860,6 +860,10 @@ function handleTaskEvent(payload) {
         void loadTaskArtifacts();
         return;
     }
+    if (payload.type === "task.deleted") {
+        removeTaskListItem(payload.data?.task_id || payload.task_id || "");
+        return;
+    }
     if (payload.type === "task.terminal" && payload.data?.task) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
         renderTaskTokenStats();
@@ -879,10 +883,41 @@ function applyTaskListResponse(payload = {}) {
     renderTasks();
 }
 
+function resolveTaskWorkerOnlineState({
+    worker = S.tasksWorker,
+    reportedOnline = S.tasksWorkerReportedOnline,
+    staleAfterSeconds = S.tasksWorkerStaleAfterSeconds,
+} = {}) {
+    const record = worker && typeof worker === "object" ? worker : null;
+    const status = String(record?.status || record?.state || "").trim().toLowerCase();
+    if (["stopped", "offline", "dead"].includes(status)) return false;
+    const updatedAt = String(record?.updated_at || "").trim();
+    const staleWindowSeconds = Number(staleAfterSeconds);
+    if (updatedAt && Number.isFinite(staleWindowSeconds) && staleWindowSeconds > 0) {
+        const updatedMs = Date.parse(updatedAt);
+        if (Number.isFinite(updatedMs)) {
+            return Math.max(0, Date.now() - updatedMs) <= staleWindowSeconds * 1000;
+        }
+    }
+    return reportedOnline !== false;
+}
+
+function refreshTaskWorkerOnlineState({ render = true, force = false } = {}) {
+    const next = resolveTaskWorkerOnlineState();
+    const changed = next !== S.tasksWorkerOnline;
+    S.tasksWorkerOnline = next;
+    if (render && (force || changed)) renderTasks();
+    return changed;
+}
+
 function applyTaskWorkerStatus(payload = {}, { render = true } = {}) {
-    S.tasksWorkerOnline = payload?.worker_online !== false;
+    S.tasksWorkerReportedOnline = payload?.worker_online !== false;
     S.tasksWorker = payload?.worker || null;
-    if (render) renderTasks();
+    const staleAfterSeconds = Number(payload?.worker_stale_after_seconds);
+    if (Number.isFinite(staleAfterSeconds) && staleAfterSeconds > 0) {
+        S.tasksWorkerStaleAfterSeconds = staleAfterSeconds;
+    }
+    refreshTaskWorkerOnlineState({ render, force: true });
 }
 
 function patchTaskListItem(task) {

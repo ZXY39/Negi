@@ -88,7 +88,6 @@ const S = {
     ceoSnapshotPersistId: null,
     ceoComposerDrafts: {},
     ceoComposerDraftPersistId: null,
-    ceoCatalogRefreshId: null,
     liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
@@ -121,7 +120,9 @@ const S = {
     pendingTaskDetailRestore: null,
     taskNodeBusy: false,
     tasksWorkerOnline: true,
+    tasksWorkerReportedOnline: true,
     tasksWorker: null,
+    tasksWorkerStaleAfterSeconds: 15,
     taskTokenStatsOpen: false,
     taskArtifacts: [],
     selectedArtifactId: "",
@@ -3208,6 +3209,9 @@ function refreshLiveDurationBadges() {
         if (!(runtimeEl instanceof HTMLElement)) return;
         updateRuntimeBadge(item, runtimeEl);
     });
+    if (typeof refreshTaskWorkerOnlineState === "function") {
+        refreshTaskWorkerOnlineState({ render: S.view === "tasks" });
+    }
 }
 
 function startLiveDurationTicker() {
@@ -4716,19 +4720,22 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
 function renderRoleLimitControl({ scopeKey, kind, label, value, editing }) {
     const modeName = `model-role-${kind}-mode-${scopeKey}`;
     const inputValue = value == null ? "" : String(value);
+    const isCustom = value != null;
     return `
         <div class="model-role-limit-field" data-model-role-limit-kind="${esc(kind)}" data-model-role-limit-scope="${esc(scopeKey)}">
             <span class="model-role-iterations-label">${esc(label)}</span>
             <div class="model-role-limit-options">
-                <label class="model-role-limit-option">
-                    <input type="radio" name="${esc(modeName)}" value="unlimited" ${value == null ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}">
-                    <span>无限制</span>
-                </label>
-                <label class="model-role-limit-option">
-                    <input type="radio" name="${esc(modeName)}" value="custom" ${value != null ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}">
-                    <span>自定义</span>
-                </label>
-                <input class="model-role-iterations-input model-role-limit-input spinless-number-input" type="number" min="0" step="1" inputmode="numeric" value="${esc(inputValue)}" placeholder="0" ${editing && value != null ? "" : "disabled"} data-model-role-limit-input="${esc(kind)}">
+                <div class="llm-segmented-control">
+                    <label class="llm-segmented-option">
+                        <input type="radio" name="${esc(modeName)}" value="unlimited" ${!isCustom ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}" class="llm-segmented-radio">
+                        <span class="llm-segmented-label">无限制</span>
+                    </label>
+                    <label class="llm-segmented-option">
+                        <input type="radio" name="${esc(modeName)}" value="custom" ${isCustom ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}" class="llm-segmented-radio">
+                        <span class="llm-segmented-label">自定义</span>
+                    </label>
+                </div>
+                <input class="model-role-iterations-input model-role-limit-input spinless-number-input" type="number" min="0" step="1" inputmode="numeric" value="${esc(inputValue)}" placeholder="0" ${editing && isCustom ? "" : "disabled"} data-model-role-limit-input="${esc(kind)}">
             </div>
         </div>`;
 }
@@ -4760,7 +4767,11 @@ function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
             }
             return;
         }
-        const rawValue = String(input.value || "").trim();
+        let rawValue = String(input.value || "").trim();
+        if (rawValue === "" && mode === "custom" && !requireValid) {
+            rawValue = "0";
+            input.value = "0";
+        }
         const cleanValue = Number.parseInt(rawValue, 10);
         const invalid = !rawValue || !Number.isInteger(cleanValue) || cleanValue < 0;
         const label = kind === "iterations" ? "最大轮数" : "最大并发数";
@@ -5979,21 +5990,6 @@ function clearCommunicationSelection() {
     renderCommunicationDetail();
 }
 
-function syncCeoCatalogPolling() {
-    if (S.view === "ceo") {
-        if (S.ceoCatalogRefreshId === null) {
-            S.ceoCatalogRefreshId = window.setInterval(() => {
-                void refreshCeoSessions({ background: true });
-            }, 15000);
-        }
-        return;
-    }
-    if (S.ceoCatalogRefreshId !== null) {
-        window.clearInterval(S.ceoCatalogRefreshId);
-        S.ceoCatalogRefreshId = null;
-    }
-}
-
 function switchView(view) {
     const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, communications: U.viewCommunications, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
@@ -6025,7 +6021,6 @@ function switchView(view) {
     if (view === "tools") void loadTools();
     if (view === "models") void loadModels();
     if (view === "communications") void loadCommunications();
-    syncCeoCatalogPolling();
 }
 
 function toggleTheme() {
@@ -6455,7 +6450,6 @@ function init() {
     hydrateCeoComposerDraftCache();
     hydrateCeoSessionSnapshotCache();
     restoreCeoComposerDraftForSession(activeSessionId());
-    syncCeoCatalogPolling();
     startLiveDurationTicker();
     window.addEventListener("beforeunload", () => {
         flushCeoComposerDraftCachePersist();

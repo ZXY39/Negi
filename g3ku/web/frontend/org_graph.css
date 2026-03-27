@@ -5048,10 +5048,12 @@ textarea {
 
 .model-role-limit-field {
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 8px;
-    min-width: min(100%, 320px);
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    min-width: 0;
+    padding: 6px 0;
     font-size: 0.82rem;
     font-weight: 600;
     color: var(--text-secondary);
@@ -5062,14 +5064,105 @@ textarea {
     align-items: center;
     justify-content: flex-end;
     gap: 10px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
 }
 
-.model-role-limit-option {
+.llm-segmented-control {
+    display: inline-flex;
+    background: color-mix(in srgb, var(--bg-panel) 50%, var(--bg-app) 50%);
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
+    align-items: center;
+}
+
+.llm-segmented-option {
+    position: relative;
+    cursor: pointer;
+    margin: 0;
+}
+
+.llm-segmented-radio {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    margin: 0;
+}
+
+.llm-segmented-label {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    justify-content: center;
+    padding: 4px 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
     color: var(--text-secondary);
+    border-radius: 6px;
+    transition: all 0.2s ease;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.llm-segmented-radio:checked + .llm-segmented-label {
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.llm-segmented-radio:disabled + .llm-segmented-label {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.llm-segmented-control {
+    display: inline-flex;
+    background: color-mix(in srgb, var(--bg-panel) 50%, var(--bg-app) 50%);
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
+    align-items: center;
+}
+
+.llm-segmented-option {
+    position: relative;
+    cursor: pointer;
+    margin: 0;
+}
+
+.llm-segmented-radio {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    margin: 0;
+}
+
+.llm-segmented-label {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 14px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    border-radius: 6px;
+    transition: all 0.2s ease;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.llm-segmented-radio:checked + .llm-segmented-label {
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.llm-segmented-radio:disabled + .llm-segmented-label {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .model-role-iterations-input {
@@ -5085,7 +5178,22 @@ textarea {
 }
 
 .model-role-limit-input {
-    width: 96px;
+    width: 80px;
+    text-align: center;
+}
+
+.model-role-iterations-input {
+    transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, padding 0.3s ease, border-width 0.3s ease, margin 0.3s ease;
+}
+
+.model-role-limit-options:has(.llm-segmented-radio[value="unlimited"]:checked) .model-role-limit-input {
+    width: 0;
+    opacity: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-width: 0;
+    pointer-events: none;
+    margin: 0;
 }
 
 .model-role-iterations-input:disabled {

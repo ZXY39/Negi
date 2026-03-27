@@ -9,10 +9,12 @@ class TaskEventRegistry:
     def __init__(self) -> None:
         self._ceo_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._task_subscribers: dict[tuple[str, str], set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
+        self._task_list_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._ceo_global_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._global_task_subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._ceo_seq: dict[str, int] = defaultdict(int)
         self._task_seq: dict[tuple[str, str], int] = defaultdict(int)
+        self._task_list_seq: dict[str, int] = defaultdict(int)
         self._global_task_seq: dict[str, int] = defaultdict(int)
         self._lock = asyncio.Lock()
 
@@ -56,6 +58,21 @@ class TaskEventRegistry:
                 if not queues:
                     self._task_subscribers.pop(key, None)
 
+    async def subscribe_task_list(self, session_id: str) -> asyncio.Queue[dict[str, Any]]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        async with self._lock:
+            self._task_list_subscribers[str(session_id or 'all')].add(queue)
+        return queue
+
+    async def unsubscribe_task_list(self, session_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        async with self._lock:
+            key = str(session_id or 'all')
+            queues = self._task_list_subscribers.get(key)
+            if queues is not None:
+                queues.discard(queue)
+                if not queues:
+                    self._task_list_subscribers.pop(key, None)
+
     async def subscribe_global_task(self, task_id: str) -> asyncio.Queue[dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         async with self._lock:
@@ -81,6 +98,17 @@ class TaskEventRegistry:
         self._task_seq[key] += 1
         return self._task_seq[key]
 
+    def next_task_list_seq(self, session_id: str) -> int:
+        key = str(session_id or 'all')
+        self._task_list_seq[key] += 1
+        return self._task_list_seq[key]
+
+    def current_task_list_seq(self, session_id: str) -> int:
+        return self._task_list_seq[str(session_id or 'all')]
+
+    def current_global_task_seq(self, task_id: str) -> int:
+        return self._global_task_seq[str(task_id or '')]
+
     def next_global_task_seq(self, task_id: str) -> int:
         key = str(task_id or '')
         self._global_task_seq[key] += 1
@@ -100,6 +128,14 @@ class TaskEventRegistry:
         for queue in list(self._task_subscribers.get(key, set())):
             queue.put_nowait(dict(payload))
 
+    def publish_task_list(self, session_id: str, payload: dict[str, Any]) -> None:
+        key = str(session_id or 'all')
+        for queue in list(self._task_list_subscribers.get(key, set())):
+            queue.put_nowait(dict(payload))
+
+    def task_list_channels(self) -> list[str]:
+        return list(self._task_list_subscribers.keys())
+
     def publish_global_task(self, task_id: str, payload: dict[str, Any]) -> None:
         key = str(task_id or '')
         for queue in list(self._global_task_subscribers.get(key, set())):
@@ -118,8 +154,10 @@ class TaskEventRegistry:
         async with self._lock:
             self._ceo_subscribers.clear()
             self._task_subscribers.clear()
+            self._task_list_subscribers.clear()
             self._ceo_global_subscribers.clear()
             self._global_task_subscribers.clear()
             self._ceo_seq.clear()
             self._task_seq.clear()
+            self._task_list_seq.clear()
             self._global_task_seq.clear()

@@ -40,8 +40,7 @@ async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1
         'session_id': 'all' if effective_session_id is None else effective_session_id,
         'scope': int(scope),
         'items': [item.model_dump(mode='json') for item in items],
-        'worker': service.latest_worker_status(),
-        'worker_online': service.is_worker_online(),
+        **service.worker_status_payload(),
     }
 
 

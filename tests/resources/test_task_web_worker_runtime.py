@@ -80,13 +80,7 @@ def _unlock_task_websocket_runtime(monkeypatch):
 
 
 def _mark_worker_online(service: MainRuntimeService, *, active_task_count: int = 0) -> None:
-    service.store.upsert_worker_status(
-        worker_id="worker:test",
-        role="task_worker",
-        status="running",
-        updated_at=now_iso(),
-        payload={"execution_mode": "worker", "active_task_count": int(active_task_count)},
-    )
+    _mark_worker_at(service, now_iso(), active_task_count=active_task_count)
 
 
 def _receive_until_type(ws, expected_type: str) -> dict[str, object]:
@@ -108,12 +102,32 @@ def _mark_worker_at(
     status: str = "running",
     active_task_count: int = 0,
 ) -> None:
+    item = {
+        "worker_id": "worker:test",
+        "role": "task_worker",
+        "status": status,
+        "updated_at": updated_at,
+        "payload": {"execution_mode": "worker", "active_task_count": int(active_task_count)},
+    }
     service.store.upsert_worker_status(
-        worker_id="worker:test",
-        role="task_worker",
-        status=status,
-        updated_at=updated_at,
-        payload={"execution_mode": "worker", "active_task_count": int(active_task_count)},
+        worker_id=str(item["worker_id"]),
+        role=str(item["role"]),
+        status=str(item["status"]),
+        updated_at=str(item["updated_at"]),
+        payload=dict(item["payload"]),
+    )
+    service.publish_worker_status_event(item=item)
+
+
+def _publish_task_snapshot(service: MainRuntimeService, task_id: str) -> None:
+    task = service.get_task(task_id)
+    payload = service.get_task_detail_payload(task_id, mark_read=False)
+    assert task is not None
+    assert payload is not None
+    service._publish_task_snapshot_event(
+        session_id=task.session_id,
+        task_id=task.task_id,
+        data=payload,
     )
 
 
@@ -222,6 +236,48 @@ def test_internal_task_stall_callback_persists_pending_outbox_and_dedupes(tmp_pa
     assert entry is not None
     assert entry["delivery_state"] == "pending"
     assert len(heartbeat.stall_payloads) == 1
+
+
+def test_internal_task_event_callback_forwards_live_snapshot(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+
+    client = TestClient(_build_app())
+    record = asyncio.run(_create_web_task(service))
+    with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "task.snapshot"
+
+        payload = {
+            "event_type": "task.snapshot",
+            "session_id": record.session_id,
+            "task_id": record.task_id,
+            "data": service.get_task_detail_payload(record.task_id, mark_read=False),
+        }
+        response = client.post(
+            "/api/internal/task-event",
+            json=payload,
+            headers={"x-g3ku-internal-token": "secret-token"},
+        )
+        assert response.status_code == 200
+        assert response.json()["accepted"] is True
+
+        pushed = _receive_until_type(ws, "task.snapshot")
+        assert pushed["data"]["task"]["task_id"] == record.task_id
 
 
 @pytest.mark.asyncio
@@ -492,12 +548,9 @@ def test_global_tasks_websocket_reads_sqlite_events(tmp_path: Path, monkeypatch)
         assert snapshot["type"] == "task.list.snapshot"
         assert snapshot["data"]["items"][0]["task_id"] == record.task_id
 
-        service.store.append_task_event(
-            task_id=record.task_id,
+        service._publish_task_list_patch_event(
             session_id=record.session_id,
-            event_type="task.list.patch",
-            created_at=now_iso(),
-            payload={"task": {"task_id": record.task_id, "brief": "patched"}},
+            task_payload={"task_id": record.task_id, "session_id": record.session_id, "brief": "patched"},
         )
 
         patch_event = _receive_until_type(ws, "task.list.patch")
@@ -525,13 +578,42 @@ def test_global_tasks_websocket_pushes_worker_status_recovery(tmp_path: Path, mo
         snapshot = ws.receive_json()
         assert snapshot["type"] == "task.list.snapshot"
         assert snapshot["data"]["worker_online"] is False
+        assert float(snapshot["data"]["worker_stale_after_seconds"]) > 0
 
         _mark_worker_online(service)
 
         worker_event = _receive_until_type(ws, "task.worker.status")
         assert worker_event["type"] == "task.worker.status"
         assert worker_event["data"]["worker_online"] is True
+        assert float(worker_event["data"]["worker_stale_after_seconds"]) > 0
         assert worker_event["data"]["worker"]["worker_id"] == "worker:test"
+
+
+def test_tasks_rest_includes_worker_stale_after_seconds(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    _mark_worker_online(service)
+    asyncio.run(_create_web_task(service))
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    client = TestClient(_build_app())
+    response = client.get("/api/tasks?session_id=all&scope=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert isinstance(payload["worker"], dict)
+    assert payload["worker_online"] is True
+    assert float(payload["worker_stale_after_seconds"]) > 0
 
 
 def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
@@ -615,12 +697,9 @@ def test_global_tasks_websocket_does_not_replay_historical_patches_after_snapsho
         snapshot = ws.receive_json()
         assert snapshot["type"] == "task.list.snapshot"
 
-        service.store.append_task_event(
-            task_id=record.task_id,
+        service._publish_task_list_patch_event(
             session_id=record.session_id,
-            event_type="task.list.patch",
-            created_at=now_iso(),
-            payload={"task": {"task_id": record.task_id, "brief": "fresh"}},
+            task_payload={"task_id": record.task_id, "session_id": record.session_id, "brief": "fresh"},
         )
 
         patch_event = _receive_until_type(ws, "task.list.patch")
@@ -652,17 +731,18 @@ def test_task_detail_websocket_streams_runtime_updates(tmp_path: Path, monkeypat
         assert snapshot["type"] == "task.snapshot"
         assert snapshot["data"]["task"]["task_id"] == record.task_id
 
-        service.store.append_task_event(
-            task_id=record.task_id,
-            session_id=record.session_id,
-            event_type="task.runtime.updated",
-            created_at=now_iso(),
-            payload={"task_id": record.task_id, "runtime_summary": {"active_node_ids": [record.root_node_id], "runnable_node_ids": [], "waiting_node_ids": [], "frames": []}},
+        service.log_service.update_runtime_state(
+            record.task_id,
+            active_node_ids=[record.root_node_id],
+            runnable_node_ids=[],
+            waiting_node_ids=[],
+            frames=[],
         )
+        _publish_task_snapshot(service, record.task_id)
 
-        runtime_event = _receive_until_type(ws, "task.runtime.updated")
-        assert runtime_event["type"] == "task.runtime.updated"
-        assert runtime_event["data"]["runtime_summary"]["active_node_ids"] == [record.root_node_id]
+        runtime_event = _receive_until_type(ws, "task.snapshot")
+        assert runtime_event["type"] == "task.snapshot"
+        assert runtime_event["data"]["progress"]["live_state"]["active_node_ids"] == [record.root_node_id]
 
 
 def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_snapshot(tmp_path: Path, monkeypatch):
@@ -694,16 +774,17 @@ def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_
         snapshot = ws.receive_json()
         assert snapshot["type"] == "task.snapshot"
 
-        service.store.append_task_event(
-            task_id=record.task_id,
-            session_id=record.session_id,
-            event_type="task.runtime.updated",
-            created_at=now_iso(),
-            payload={"task_id": record.task_id, "runtime_summary": {"active_node_ids": [record.root_node_id], "runnable_node_ids": [], "waiting_node_ids": [], "frames": []}},
+        service.log_service.update_runtime_state(
+            record.task_id,
+            active_node_ids=[record.root_node_id],
+            runnable_node_ids=[],
+            waiting_node_ids=[],
+            frames=[],
         )
+        _publish_task_snapshot(service, record.task_id)
 
-        runtime_event = _receive_until_type(ws, "task.runtime.updated")
-        assert runtime_event["data"]["runtime_summary"]["active_node_ids"] == [record.root_node_id]
+        runtime_event = _receive_until_type(ws, "task.snapshot")
+        assert runtime_event["data"]["progress"]["live_state"]["active_node_ids"] == [record.root_node_id]
 
 
 def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: Path, monkeypatch):
@@ -783,9 +864,10 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
                 "delta_usage_by_model": [],
             },
         )
+        _publish_task_snapshot(service, record.task_id)
 
-        event = _receive_until_type(ws, "task.model.call")
-        assert event["data"]["call_index"] == 4
+        event = _receive_until_type(ws, "task.snapshot")
+        assert event["data"]["progress"]["model_calls"][-1]["call_index"] == 4
 
 
 def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path: Path):

@@ -41,7 +41,7 @@ from main.models import NodeRecord, TaskArtifactRecord, TaskRecord, TokenUsageSu
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.query_service import TaskQueryService
-from main.protocol import now_iso
+from main.protocol import build_envelope, now_iso
 from main.monitoring.tree_builder import TaskTreeBuilder
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.node_runner import NodeRunner
@@ -63,6 +63,11 @@ from main.service.task_stall_callback import (
     normalize_task_stall_payload,
     resolve_task_stall_callback_token,
     resolve_task_stall_callback_url,
+)
+from main.service.task_event_callback import (
+    normalize_task_event_payload,
+    resolve_task_event_callback_token,
+    resolve_task_event_callback_url,
 )
 from main.service.task_stall_notifier import (
     TaskStallNotifier,
@@ -174,6 +179,7 @@ class MainRuntimeService:
             registry=self.registry,
             content_store=self.content_store,
         )
+        self.log_service.add_live_snapshot_publisher(self._publish_live_snapshot)
         self.task_stall_notifier = TaskStallNotifier(service=self)
         self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
@@ -227,6 +233,7 @@ class MainRuntimeService:
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_event_dispatch_tasks: set[asyncio.Task[Any]] = set()
         if self.execution_mode == 'worker':
             self.log_service.add_task_terminal_listener(self._enqueue_task_terminal_callback)
 
@@ -403,6 +410,8 @@ class MainRuntimeService:
         return cleaned
 
     async def _worker_command_loop(self) -> None:
+        idle_delays = [0.25, 0.5, 1.0, 2.0]
+        idle_index = 0
         while True:
             try:
                 commands = self.store.claim_pending_task_commands(
@@ -411,34 +420,49 @@ class MainRuntimeService:
                     limit=20,
                 )
                 if not commands:
-                    await asyncio.sleep(0.25)
+                    await asyncio.sleep(idle_delays[min(idle_index, len(idle_delays) - 1)])
+                    idle_index = min(idle_index + 1, len(idle_delays) - 1)
                     continue
+                idle_index = 0
                 for command in commands:
                     await self._process_worker_command(command)
             except asyncio.CancelledError:
                 raise
             except Exception:
+                idle_index = 0
                 await asyncio.sleep(0.5)
 
     async def _worker_heartbeat_loop(self) -> None:
         while True:
             try:
+                active_task_count = sum(
+                    1
+                    for task in self.store.list_tasks()
+                    if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
+                    and not bool(getattr(task, 'is_paused', False))
+                )
+                updated_at = now_iso()
+                payload = {
+                    'execution_mode': self.execution_mode,
+                    'active_task_count': active_task_count,
+                }
                 self.store.upsert_worker_status(
                     worker_id=self.worker_id or 'worker',
                     role='task_worker',
                     status='running',
-                    updated_at=now_iso(),
-                    payload={
-                        'execution_mode': self.execution_mode,
-                        'active_task_count': sum(
-                            1
-                            for task in self.store.list_tasks()
-                            if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
-                            and not bool(getattr(task, 'is_paused', False))
-                        ),
-                    },
+                    updated_at=updated_at,
+                    payload=payload,
                 )
-                await asyncio.sleep(1.0)
+                self.publish_worker_status_event(
+                    item={
+                        'worker_id': self.worker_id or 'worker',
+                        'role': 'task_worker',
+                        'status': 'running',
+                        'updated_at': updated_at,
+                        'payload': payload,
+                    }
+                )
+                await asyncio.sleep(1.0 if active_task_count > 0 else 5.0)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -696,6 +720,7 @@ class MainRuntimeService:
             created_at=now_iso(),
             payload={'task_id': task.task_id},
         )
+        self._publish_task_deleted_event(session_id=task.session_id, task_id=task.task_id)
         await self.registry.forget_task(task.session_id, task_id)
         return task
 
@@ -730,10 +755,22 @@ class MainRuntimeService:
             return _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS
         return _WORKER_STATUS_STALE_AFTER_SECONDS
 
-    def is_worker_online(self, *, stale_after_seconds: float | None = None) -> bool:
+    def worker_status_stale_after_seconds(
+        self,
+        *,
+        item: dict[str, Any] | None = None,
+        override_seconds: float | None = None,
+    ) -> float:
+        return float(self._worker_status_stale_after_seconds(item, override_seconds=override_seconds))
+
+    def _worker_online_from_item(
+        self,
+        item: dict[str, Any] | None,
+        *,
+        stale_after_seconds: float | None = None,
+    ) -> bool:
         if self.execution_mode in {'embedded', 'worker'}:
             return True
-        item = self.latest_worker_status()
         if not item:
             return False
         status = str(item.get('status') or item.get('state') or '').strip().lower()
@@ -751,6 +788,249 @@ class MainRuntimeService:
         age_seconds = max(0.0, (datetime.now(timezone.utc) - updated_dt.astimezone(timezone.utc)).total_seconds())
         stale_window_seconds = self._worker_status_stale_after_seconds(item, override_seconds=stale_after_seconds)
         return age_seconds <= stale_window_seconds
+
+    def is_worker_online(self, *, stale_after_seconds: float | None = None) -> bool:
+        return self._worker_online_from_item(
+            self.latest_worker_status(),
+            stale_after_seconds=stale_after_seconds,
+        )
+
+    def worker_status_payload(
+        self,
+        *,
+        item: dict[str, Any] | None = None,
+        stale_after_seconds: float | None = None,
+    ) -> dict[str, object]:
+        current = dict(item or self.latest_worker_status() or {})
+        window_seconds = self.worker_status_stale_after_seconds(
+            item=current if current else None,
+            override_seconds=stale_after_seconds,
+        )
+        return {
+            'worker': current or None,
+            'worker_online': self._worker_online_from_item(
+                current if current else None,
+                stale_after_seconds=window_seconds,
+            ),
+            'worker_stale_after_seconds': window_seconds,
+        }
+
+    def _publish_task_list_envelope(
+        self,
+        *,
+        target_session_id: str,
+        session_id: str,
+        event_type: str,
+        data: dict[str, Any],
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = build_envelope(
+            channel='task',
+            session_id=session_id,
+            task_id=(str(task_id or '').strip() or None),
+            seq=self.registry.next_task_list_seq(target_session_id),
+            type=event_type,
+            data=data,
+        )
+        self.registry.publish_task_list(target_session_id, payload)
+        return payload
+
+    def _schedule_task_event_callback(self, payload: dict[str, Any] | None) -> None:
+        if self.execution_mode != 'worker':
+            return
+        normalized = normalize_task_event_payload(payload)
+        if not normalized:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        suffix = str(normalized.get('task_id') or normalized.get('event_type') or 'task-event').strip() or 'task-event'
+        task = loop.create_task(
+            self._deliver_task_event_callback(normalized),
+            name=f'main-runtime-task-event:{suffix}',
+        )
+        self._task_event_dispatch_tasks.add(task)
+        task.add_done_callback(self._task_event_dispatch_tasks.discard)
+
+    async def _deliver_task_event_callback(self, payload: dict[str, Any]) -> None:
+        callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
+        if not callback_url:
+            return
+        headers: dict[str, str] = {}
+        callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
+        if callback_token:
+            headers['x-g3ku-internal-token'] = callback_token
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                await client.post(callback_url, json=payload, headers=headers)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug('task event callback delivery skipped: {}', payload.get('event_type'))
+
+    def publish_worker_status_event(
+        self,
+        *,
+        item: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+        bridge: bool = False,
+    ) -> dict[str, object]:
+        data = dict(payload or self.worker_status_payload(item=item))
+        channels = self.registry.task_list_channels() or ['all']
+        for channel in channels:
+            self._publish_task_list_envelope(
+                target_session_id=channel,
+                session_id=channel,
+                event_type='task.worker.status',
+                data=data,
+            )
+        if self.execution_mode == 'worker' and not bridge:
+            self._schedule_task_event_callback(
+                {
+                    'event_type': 'task.worker.status',
+                    'session_id': 'all',
+                    'data': data,
+                }
+            )
+        return data
+
+    def _publish_task_snapshot_event(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        data: dict[str, Any],
+        bridge: bool = False,
+    ) -> dict[str, Any]:
+        payload = build_envelope(
+            channel='task',
+            session_id=session_id,
+            task_id=task_id,
+            seq=self.registry.next_global_task_seq(task_id),
+            type='task.snapshot',
+            data=data,
+        )
+        self.registry.publish_global_task(task_id, payload)
+        if self.execution_mode == 'worker' and not bridge:
+            self._schedule_task_event_callback(
+                {
+                    'event_type': 'task.snapshot',
+                    'session_id': session_id,
+                    'task_id': task_id,
+                    'data': data,
+                }
+            )
+        return payload
+
+    def _publish_task_list_patch_event(
+        self,
+        *,
+        session_id: str,
+        task_payload: dict[str, Any],
+        bridge: bool = False,
+    ) -> None:
+        normalized_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+        normalized_task_payload = dict(task_payload or {})
+        normalized_task_id = self.normalize_task_id(
+            str(
+                normalized_task_payload.get('task_id')
+                or normalized_task_payload.get('taskId')
+                or ''
+            ).strip()
+        )
+        normalized_task_payload['task_id'] = normalized_task_id
+        data = {'task': normalized_task_payload}
+        for target_session_id in {normalized_session_id, 'all'}:
+            self._publish_task_list_envelope(
+                target_session_id=target_session_id,
+                session_id=normalized_session_id,
+                task_id=normalized_task_id,
+                event_type='task.list.patch',
+                data=data,
+            )
+        if self.execution_mode == 'worker' and not bridge:
+            self._schedule_task_event_callback(
+                {
+                    'event_type': 'task.list.patch',
+                    'session_id': normalized_session_id,
+                    'task_id': normalized_task_id,
+                    'data': data,
+                }
+            )
+
+    def _publish_task_deleted_event(self, *, session_id: str, task_id: str) -> None:
+        normalized_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+        normalized_task_id = self.normalize_task_id(task_id)
+        data = {'task_id': normalized_task_id}
+        for target_session_id in {normalized_session_id, 'all'}:
+            self._publish_task_list_envelope(
+                target_session_id=target_session_id,
+                session_id=normalized_session_id,
+                task_id=normalized_task_id,
+                event_type='task.deleted',
+                data=data,
+            )
+        payload = build_envelope(
+            channel='task',
+            session_id=normalized_session_id,
+            task_id=normalized_task_id,
+            seq=self.registry.next_global_task_seq(normalized_task_id),
+            type='task.deleted',
+            data=data,
+        )
+        self.registry.publish_global_task(normalized_task_id, payload)
+
+    def _publish_task_artifact_applied_event(self, *, task: TaskRecord, artifact_id: str, path: str) -> None:
+        payload = build_envelope(
+            channel='task',
+            session_id=task.session_id,
+            task_id=task.task_id,
+            seq=self.registry.next_global_task_seq(task.task_id),
+            type='task.artifact.applied',
+            data={'artifact_id': artifact_id, 'path': path, 'applied': True, 'task_id': task.task_id},
+        )
+        self.registry.publish_global_task(task.task_id, payload)
+
+    def _publish_live_snapshot(self, task: TaskRecord, payload: dict[str, Any], publish_summary: bool) -> None:
+        self._publish_task_snapshot_event(
+            session_id=task.session_id,
+            task_id=task.task_id,
+            data=payload,
+        )
+        if publish_summary:
+            self._publish_task_list_patch_event(
+                session_id=task.session_id,
+                task_payload=self.log_service._task_summary_payload(task),
+            )
+
+    def forward_live_task_event(self, payload: dict[str, Any] | None) -> bool:
+        normalized = normalize_task_event_payload(payload)
+        if not normalized:
+            return False
+        event_type = str(normalized.get('event_type') or '').strip()
+        session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
+        task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip()) if normalized.get('task_id') else ''
+        data = dict(normalized.get('data') or {})
+        if event_type == 'task.snapshot' and task_id:
+            self._publish_task_snapshot_event(
+                session_id=session_id,
+                task_id=task_id,
+                data=data,
+                bridge=True,
+            )
+            return True
+        if event_type == 'task.list.patch':
+            self._publish_task_list_patch_event(
+                session_id=session_id,
+                task_payload=dict(data.get('task') or {}),
+                bridge=True,
+            )
+            return True
+        if event_type == 'task.worker.status':
+            self.publish_worker_status_event(payload=data, bridge=True)
+            return True
+        return False
 
     def _assert_worker_available(self) -> None:
         if self.execution_mode == 'web' and not self.is_worker_online():
@@ -2617,6 +2897,11 @@ class MainRuntimeService:
                 created_at=now_iso(),
                 payload={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True, 'task_id': task.task_id},
             )
+            self._publish_task_artifact_applied_event(
+                task=task,
+                artifact_id=artifact.artifact_id,
+                path=str(target_path),
+            )
         return {'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True}
 
     def _actor_role_for_node(self, node: NodeRecord) -> str:
@@ -2793,15 +3078,29 @@ class MainRuntimeService:
         if stall_delivery_tasks:
             await asyncio.gather(*stall_delivery_tasks, return_exceptions=True)
         self._task_stall_delivery_tasks.clear()
+        callback_tasks = [task for task in list(self._task_event_dispatch_tasks) if task is not None and not task.done()]
+        for task in callback_tasks:
+            task.cancel()
+        if callback_tasks:
+            await asyncio.gather(*callback_tasks, return_exceptions=True)
+        self._task_event_dispatch_tasks.clear()
         await self.task_stall_notifier.close()
         if self.execution_mode == 'worker' and self.worker_id:
+            stopped_item = {
+                'worker_id': self.worker_id,
+                'role': 'task_worker',
+                'status': 'stopped',
+                'updated_at': now_iso(),
+                'payload': {'execution_mode': self.execution_mode},
+            }
             self.store.upsert_worker_status(
-                worker_id=self.worker_id,
-                role='task_worker',
-                status='stopped',
-                updated_at=now_iso(),
-                payload={'execution_mode': self.execution_mode},
+                worker_id=str(stopped_item['worker_id']),
+                role=str(stopped_item['role']),
+                status=str(stopped_item['status']),
+                updated_at=str(stopped_item['updated_at']),
+                payload=dict(stopped_item['payload']),
             )
+            self.publish_worker_status_event(item=stopped_item)
         await self.task_runner.close()
         await self.registry.close()
         self.governance_store.close()

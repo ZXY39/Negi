@@ -372,7 +372,8 @@ class TaskQueryService:
     def _projection_live_state(self, task_id: str) -> TaskLiveState | None:
         frames = self._store.list_task_runtime_frames(task_id)
         if not frames:
-            return None
+            runtime_state = self._log_service.read_runtime_state(task_id)
+            return self._live_state(runtime_state or {})
         live_frames: list[TaskLiveFrame] = []
         active_node_ids: list[str] = []
         runnable_node_ids: list[str] = []
