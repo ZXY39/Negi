@@ -81,6 +81,7 @@ class RuntimeAgentSession:
     def set_interaction_trace(self, trace: dict[str, Any] | None, *, stage: dict[str, Any] | None = None) -> None:
         self._interaction_trace = copy.deepcopy(trace) if isinstance(trace, dict) and trace else None
         self._current_stage = copy.deepcopy(stage) if isinstance(stage, dict) and stage else None
+        self._sync_persisted_inflight_turn()
 
     def clear_interaction_trace(self) -> None:
         self._interaction_trace = None

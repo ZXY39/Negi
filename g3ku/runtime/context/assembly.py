@@ -9,6 +9,7 @@ from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.web_ceo_sessions import (
     DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
+    build_active_tasks_message,
     build_last_task_memory,
     build_frontdoor_compact_history_message,
     build_task_memory_message,
@@ -142,6 +143,15 @@ class ContextAssemblyService:
         frontdoor_summary_message: dict[str, Any] | None = None
         frontdoor_summary_tokens = 0
         recent_history = []
+        active_task_message: dict[str, Any] | None = None
+        active_task_count = 0
+        list_active_task_snapshots = getattr(main_service, 'list_active_task_snapshots_for_session', None)
+        if callable(list_active_task_snapshots):
+            active_tasks = list_active_task_snapshots(getattr(session.state, 'session_key', ''), limit=3)
+            active_task_count = len(list(active_tasks or []))
+            active_task_message = build_active_tasks_message(active_tasks, limit=3)
+            if active_task_message is not None:
+                recent_history.append(active_task_message)
         if persisted_session is not None:
             frontdoor_context, frontdoor_context_source = resolve_frontdoor_context(
                 persisted_session,
@@ -184,6 +194,10 @@ class ContextAssemblyService:
                 'allowed_context_types': list(retrieval_scope['allowed_context_types']),
                 'allowed_resource_record_ids': list(retrieval_scope['allowed_resource_record_ids']),
                 'allowed_skill_record_ids': list(retrieval_scope['allowed_skill_record_ids']),
+            },
+            'active_tasks': {
+                'count': active_task_count,
+                'included': bool(active_task_message),
             },
             'recent_history_count': len(recent_history),
             'tokens': {

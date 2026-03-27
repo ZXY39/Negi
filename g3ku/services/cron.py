@@ -14,6 +14,7 @@ from g3ku.cron.conditions import (
     cron_schedule_requires_stop_condition,
     normalize_cron_stop_condition,
 )
+from g3ku.cron.timezones import resolve_timezone, validate_timezone_name
 from g3ku.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
 
 
@@ -34,12 +35,10 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
 
     if schedule.kind == "cron" and schedule.expr:
         try:
-            from zoneinfo import ZoneInfo
-
             from croniter import croniter
             # Use caller-provided reference time for deterministic scheduling
             base_time = now_ms / 1000
-            tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            tz = resolve_timezone(schedule.tz)
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
             cron = croniter(schedule.expr, base_dt)
             next_dt = cron.get_next(datetime)
@@ -57,11 +56,9 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
 
     if schedule.kind == "cron" and schedule.tz:
         try:
-            from zoneinfo import ZoneInfo
-
-            ZoneInfo(schedule.tz)
-        except Exception:
-            raise ValueError(f"unknown timezone '{schedule.tz}'") from None
+            validate_timezone_name(schedule.tz)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
 
 
 class CronService:

@@ -13,6 +13,7 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.web_ceo_sessions import (
+    _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
     normalize_ceo_metadata,
     update_ceo_session_after_turn,
@@ -533,11 +534,35 @@ class WebSessionHeartbeatService:
             if status == "success":
                 lines.append(f"任务 `{short_task_id}` 已完成：{summary}")
             else:
-                lines.append(f"任务 `{short_task_id}` 已失败：{summary}")
+                continuation_task = self._find_continuation_task_for_event(event)
+                if continuation_task is not None:
+                    continuation_task_id = str(getattr(continuation_task, "task_id", "") or "").strip()
+                    short_continuation_id = (
+                        continuation_task_id[5:]
+                        if continuation_task_id.startswith("task:")
+                        else continuation_task_id or "task"
+                    )
+                    lines.append(f"任务 `{short_task_id}` 已失败，已自动续跑为 `{short_continuation_id}`，我会继续推进。")
+                else:
+                    lines.append(f"任务 `{short_task_id}` 已失败：{summary}")
         remaining = len(task_events) - min(3, len(task_events))
         if remaining > 0:
             lines.append(f"另有 {remaining} 个任务终态已处理。")
         return "\n".join(lines).strip()
+
+    def _find_continuation_task_for_event(self, event: SessionHeartbeatEvent) -> TaskRecord | None:
+        payload = dict(event.payload or {})
+        session_id = str(payload.get("session_id") or event.session_id or "").strip()
+        task_id = str(payload.get("task_id") or "").strip()
+        if not session_id or not task_id:
+            return None
+        finder = getattr(self._main_task_service, "find_reusable_continuation_task", None)
+        if not callable(finder):
+            return None
+        try:
+            return finder(session_id=session_id, continuation_of_task_id=task_id)
+        except Exception:
+            return None
 
     def _ack_task_terminal_events(self, events: list[SessionHeartbeatEvent]) -> None:
         task_events = self._task_terminal_events(events)
@@ -670,10 +695,16 @@ class WebSessionHeartbeatService:
         if not self._session_exists(session_id):
             return
         session = self._session_manager.get_or_create(session_id)
+        normalized_task_ids: list[str] = []
+        for task_id in list(task_ids or []) + _extract_task_ids_from_text(text):
+            task_id_text = str(task_id or "").strip()
+            if not task_id_text or not task_id_text.startswith("task:") or task_id_text in normalized_task_ids:
+                continue
+            normalized_task_ids.append(task_id_text)
         metadata = {
             "source": "heartbeat",
             "reason": reason,
-            "task_ids": list(task_ids),
+            "task_ids": normalized_task_ids,
         }
         normalized_results = [dict(item) for item in list(task_results or []) if isinstance(item, dict)]
         if normalized_results:
@@ -799,6 +830,11 @@ class WebSessionHeartbeatService:
             for event in events
             if str((event.payload or {}).get("task_id") or "").strip()
         ]
+        for event in task_terminal_events:
+            continuation_task = self._find_continuation_task_for_event(event)
+            continuation_task_id = str(getattr(continuation_task, "task_id", "") or "").strip()
+            if continuation_task_id and continuation_task_id not in task_ids:
+                task_ids.append(continuation_task_id)
         task_results = self._task_terminal_result_metadata(events)
         preserved_source = self._clear_preserved_inflight_turn(key, session)
         if preserved_source:

@@ -5,6 +5,7 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.cron.conditions import cron_schedule_requires_stop_condition
 from g3ku.cron.service import CronService
+from g3ku.cron.timezones import validate_timezone_name
 from g3ku.cron.types import CronSchedule
 
 
@@ -127,12 +128,10 @@ class CronTool(Tool):
         if tz and not cron_expr:
             return "Error: tz can only be used with cron_expr"
         if tz:
-            from zoneinfo import ZoneInfo
-
             try:
-                ZoneInfo(tz)
-            except (KeyError, Exception):
-                return f"Error: unknown timezone '{tz}'"
+                validate_timezone_name(tz)
+            except ValueError as exc:
+                return f"Error: {exc}"
 
         # Build schedule
         delete_after = False

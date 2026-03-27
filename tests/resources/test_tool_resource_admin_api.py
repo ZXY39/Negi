@@ -692,6 +692,171 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
 
 
 @pytest.mark.asyncio
+async def test_create_async_task_tool_reuses_existing_continuation_task():
+    captured: dict[str, object] = {}
+
+    class _StubService:
+        def find_reusable_continuation_task(self, *, session_id: str, continuation_of_task_id: str):
+            captured['session_id'] = session_id
+            captured['continuation_of_task_id'] = continuation_of_task_id
+            return SimpleNamespace(task_id='task:cont-1')
+
+        async def create_task(self, *args, **kwargs):
+            raise AssertionError('create_task should not be called when a continuation task can be reused')
+
+    tool = CreateAsyncTaskTool(_StubService())
+    result = await tool.execute(
+        '继续完成失败任务',
+        core_requirement='继续完成打开网页的自动化流程',
+        continuation_of_task_id='task:old-1',
+        __g3ku_runtime={'session_key': 'web:ceo-demo'},
+    )
+
+    assert result == '复用进行中任务task:cont-1'
+    assert captured == {
+        'session_id': 'web:ceo-demo',
+        'continuation_of_task_id': 'task:old-1',
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_async_task_tool_creates_continuation_task_with_metadata_when_no_existing_match(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    service.task_runner.start_background = lambda task_id: None
+
+    try:
+        tool = CreateAsyncTaskTool(service)
+        result = await tool.execute(
+            '继续完成失败任务',
+            core_requirement='继续完成打开网页的自动化流程',
+            continuation_of_task_id='task:old-2',
+            __g3ku_runtime={'session_key': 'web:ceo-demo', 'heartbeat_internal': True},
+        )
+
+        task_id = result.removeprefix('创建任务成功')
+        record = service.get_task(task_id)
+        assert record is not None
+        assert record.metadata['continuation_of_task_id'] == 'task:old-2'
+        assert record.metadata['created_by_source'] == 'heartbeat_auto_continue'
+        assert record.metadata['core_requirement'] == '继续完成打开网页的自动化流程'
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_create_async_task_tool_keeps_session_task_count_when_reusing_existing_continuation(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    service.task_runner.start_background = lambda task_id: None
+
+    try:
+        original = await service.create_task(
+            '打开网页',
+            session_id='web:shared',
+            metadata={'core_requirement': '打开目标网页'},
+        )
+        service.store.update_task(
+            original.task_id,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'failed',
+                    'updated_at': '2026-03-28T10:00:00+08:00',
+                    'finished_at': '2026-03-28T10:00:00+08:00',
+                    'failure_reason': 'Model provider call failed after exhausting the configured fallback chain.',
+                }
+            ),
+        )
+        continuation = await service.create_task(
+            '续跑失败任务',
+            session_id='web:shared',
+            metadata={
+                'core_requirement': '继续完成打开目标网页',
+                'continuation_of_task_id': original.task_id,
+                'created_by_source': 'heartbeat_auto_continue',
+            },
+        )
+
+        tool = CreateAsyncTaskTool(service)
+        result = await tool.execute(
+            '重建任务，继续完成',
+            core_requirement='继续完成打开目标网页',
+            continuation_of_task_id=original.task_id,
+            __g3ku_runtime={'session_key': 'web:shared'},
+        )
+
+        assert result == f'复用进行中任务{continuation.task_id}'
+        assert len(service.list_tasks_for_session('web:shared')) == 2
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_main_runtime_service_prefers_latest_reusable_continuation_task(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    service.task_runner.start_background = lambda task_id: None
+
+    try:
+        original = await service.create_task(
+            '打开网页',
+            session_id='web:shared',
+            metadata={'core_requirement': '打开目标网页'},
+        )
+        first = await service.create_task(
+            '续跑任务 A',
+            session_id='web:shared',
+            metadata={
+                'core_requirement': '继续完成打开目标网页',
+                'continuation_of_task_id': original.task_id,
+                'created_by_source': 'heartbeat_auto_continue',
+            },
+        )
+        second = await service.create_task(
+            '续跑任务 B',
+            session_id='web:shared',
+            metadata={
+                'core_requirement': '继续完成打开目标网页',
+                'continuation_of_task_id': original.task_id,
+                'created_by_source': 'ceo_user_rebuild',
+            },
+        )
+        service.store.update_task(
+            first.task_id,
+            lambda record: record.model_copy(update={'updated_at': '2026-03-28T10:00:01+08:00'}),
+        )
+        service.store.update_task(
+            second.task_id,
+            lambda record: record.model_copy(update={'updated_at': '2026-03-28T10:00:02+08:00'}),
+        )
+
+        reusable = service.find_reusable_continuation_task('web:shared', original.task_id)
+
+        assert reusable is not None
+        assert reusable.task_id == second.task_id
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_main_runtime_service_falls_back_core_requirement_to_task_prompt(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

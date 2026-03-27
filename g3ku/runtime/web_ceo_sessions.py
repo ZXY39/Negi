@@ -24,6 +24,7 @@ FRONTDOOR_CONTEXT_VERSION = 1
 FRONTDOOR_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
 TASK_MEMORY_VERSION = 2
 TASK_MEMORY_PREFIX = '[[G3KU_TASK_MEMORY_V1]]'
+ACTIVE_TASKS_PREFIX = '[[G3KU_ACTIVE_TASKS_V1]]'
 TASK_META_PREFIX = '[[G3KU_TASK_META_V1]]'
 TOOL_TRACE_PREFIX = '[[G3KU_TOOL_TRACE_V1]]'
 STAGE_TRACE_PREFIX = '[[G3KU_STAGE_TRACE_V1]]'
@@ -215,6 +216,40 @@ def build_task_memory_message(task_memory: Any) -> dict[str, Any] | None:
     return {
         'role': 'assistant',
         'content': f"{TASK_MEMORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}",
+    }
+
+
+def build_active_tasks_message(active_tasks: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> dict[str, Any] | None:
+    items = list(active_tasks or []) if isinstance(active_tasks, (list, tuple)) else [active_tasks]
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        task_id = str(raw.get('task_id') or '').strip()
+        if not task_id or task_id in seen:
+            continue
+        seen.add(task_id)
+        item = {
+            'task_id': task_id,
+            'title': summarize_preview_text(raw.get('title') or '', max_chars=96),
+            'core_requirement': summarize_preview_text(raw.get('core_requirement') or '', max_chars=140),
+            'continuation_of_task_id': str(raw.get('continuation_of_task_id') or '').strip(),
+            'status': str(raw.get('status') or '').strip(),
+            'updated_at': str(raw.get('updated_at') or '').strip(),
+        }
+        normalized.append({key: value for key, value in item.items() if value})
+        if len(normalized) >= max(1, int(limit or _TASK_MEMORY_MAX_IDS)):
+            break
+    if not normalized:
+        return None
+    payload = {
+        'kind': 'active_tasks',
+        'tasks': normalized,
+    }
+    return {
+        'role': 'assistant',
+        'content': f"{ACTIVE_TASKS_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}",
     }
 
 
@@ -1001,7 +1036,10 @@ def list_local_ceo_sessions(
     for key in sorted(session_keys):
         if not key.startswith("web:"):
             continue
-        session = session_manager.get_or_create(key)
+        try:
+            session = session_manager.get_or_create(key)
+        except Exception:
+            continue
         if ensure_ceo_session_metadata(session):
             if key in persisted_keys:
                 changed_keys.append(key)

@@ -7,13 +7,13 @@
 <style>
 :root.theme-dark {
     --bg-app: #09090b;
-    --bg-panel: #18181b;
-    --bg-surface-inner: #27272a;
+    --bg-panel: #1e1e24; /* Distinctly lighter than bg-app */
+    --bg-surface-inner: #2a2a32;
     --text-primary: #f8fafc;
     --text-secondary: #a1a1aa;
     --text-muted: #71717a;
-    --border-color: #27272a;
-    --border-strong: #3f3f46;
+    --border-color: #3a3a40;
+    --border-strong: #52525b;
     --brand-primary: #3b82f6;
     --brand-primary-hover: #2563eb;
     --risk-low-bg: rgba(34, 197, 94, 0.15);
@@ -26,14 +26,14 @@
 }
 
 :root.theme-light {
-    --bg-app: #f8fafc;
+    --bg-app: #f1f5f9; /* Distinctly gray background */
     --bg-panel: #ffffff;
-    --bg-surface-inner: #f1f5f9;
+    --bg-surface-inner: #e2e8f0;
     --text-primary: #0f172a;
     --text-secondary: #64748b;
     --text-muted: #94a3b8;
-    --border-color: #e2e8f0;
-    --border-strong: #cbd5e1;
+    --border-color: #cbd5e1;
+    --border-strong: #94a3b8;
     --brand-primary: #2563eb;
     --risk-low-bg: rgba(34, 197, 94, 0.15);
     --risk-low-text: #16a34a;
@@ -87,8 +87,8 @@ header h1 {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    background: color-mix(in srgb, var(--bg-panel) 40%, transparent);
-    border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 95%, transparent); /* Increased opacity from 40% to 95% */
+    border: 1px solid var(--border-color); /* Kept border solid */
     border-radius: 20px;
     padding: 16px;
     backdrop-filter: blur(12px);
@@ -173,8 +173,8 @@ header h1 {
 .model-chain-card {
     display: flex;
     flex-direction: column;
-    background: color-mix(in srgb, var(--bg-panel) 70%, transparent);
-    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 95%, transparent); /* Increased opacity from 70% to 95% */
+    border: 1px solid var(--border-color);
     border-radius: 20px;
     padding: 24px;
     box-shadow: var(--shadow-md);

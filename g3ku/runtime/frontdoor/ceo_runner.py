@@ -571,12 +571,6 @@ class CeoFrontDoorRunner:
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
         status = self._tool_status(rendered)
-        await self._emit_progress(
-            on_progress,
-            rendered,
-            event_kind="tool_result" if status == "success" else "tool_error",
-            event_data={"tool_name": tool_name},
-        )
         return rendered, status, started_at, finished_at, elapsed_seconds
 
     async def _run_react_turn(
@@ -738,6 +732,12 @@ class CeoFrontDoorRunner:
                             elapsed_seconds=elapsed_seconds,
                         )
                         self._sync_session_trace(session, interaction_trace)
+                    await self._emit_progress(
+                        runtime_context.get("on_progress"),
+                        result_text,
+                        event_kind="tool_result" if status == "success" else "tool_error",
+                        event_data={"tool_name": tool_name},
+                    )
                     return self._tool_result_message(
                         tool_call_id=str(payload.get("id") or ""),
                         tool_name=tool_name or "tool",
@@ -913,6 +913,7 @@ class CeoFrontDoorRunner:
             "project_path_entries": list(project_environment.get("project_path_entries") or []),
             "project_virtual_env": str(project_environment.get("project_virtual_env") or ""),
             "project_python_hint": str(project_environment.get("project_python_hint") or ""),
+            "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
             "cron_job_id": str(metadata.get("cron_job_id") or "").strip(),
             "cron_stop_condition": str(metadata.get("cron_stop_condition") or "").strip(),

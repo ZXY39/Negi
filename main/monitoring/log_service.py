@@ -162,6 +162,19 @@ class TaskLogService:
         )
         return active_ids, runnable_ids, waiting_ids
 
+    @staticmethod
+    def _is_terminal_status(status: Any) -> bool:
+        return str(status or '').strip().lower() in {'success', 'failed'}
+
+    @classmethod
+    def _coerce_terminal_runtime_state(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        state = dict(payload or {})
+        state['active_node_ids'] = []
+        state['runnable_node_ids'] = []
+        state['waiting_node_ids'] = []
+        state['frames'] = []
+        return cls._sanitize_runtime_state(state)
+
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
         with self._task_lock(task.task_id):
             paths = self._file_store.paths_for_task(task.task_id)
@@ -1053,6 +1066,8 @@ class TaskLogService:
             current['pause_requested'] = bool(current.get('pause_requested', task.pause_requested))
             current['cancel_requested'] = bool(current.get('cancel_requested', task.cancel_requested))
             current = self._sanitize_runtime_state(current)
+            if self._is_terminal_status(task.status):
+                current = self._coerce_terminal_runtime_state(current)
             self._store.upsert_runtime_state(
                 task_id=task.task_id,
                 session_id=task.session_id,
@@ -1166,6 +1181,7 @@ class TaskLogService:
                 output_fields=output_fields,
             )
             task_token_usage, _task_token_usage_by_model = aggregate_node_token_usage(nodes, tracked=bool(getattr(task.token_usage, 'tracked', False)))
+            terminal_transition = self._is_terminal_status(next_status) and not self._is_terminal_status(previous_status)
             updated = task.model_copy(
                 update={
                     'status': next_status,
@@ -1186,6 +1202,8 @@ class TaskLogService:
                 runtime_state['paused'] = bool(updated.is_paused)
                 runtime_state['pause_requested'] = bool(updated.pause_requested)
                 runtime_state['cancel_requested'] = bool(updated.cancel_requested)
+                if self._is_terminal_status(next_status):
+                    runtime_state = self._coerce_terminal_runtime_state(runtime_state)
                 self._store.upsert_runtime_state(
                     task_id=updated.task_id,
                     session_id=updated.session_id,
@@ -1198,7 +1216,15 @@ class TaskLogService:
                 nodes=nodes,
                 runtime_state=runtime_state,
             )
-            self._publish_snapshot(updated.task_id, task=updated, nodes=nodes, root=root, tree_text=tree_text, publish_summary=True)
+            self._publish_snapshot(
+                updated.task_id,
+                task=updated,
+                nodes=nodes,
+                root=root,
+                tree_text=tree_text,
+                publish_summary=True,
+                emit_terminal_event=terminal_transition,
+            )
             self._notify_task_terminal(updated, previous_status=previous_status)
             return updated
 
@@ -1340,6 +1366,7 @@ class TaskLogService:
         root=None,
         tree_text: str | None = None,
         publish_summary: bool = False,
+        emit_terminal_event: bool = False,
     ) -> None:
         current_task = task or self._store.get_task(task_id)
         if current_task is None:
@@ -1365,7 +1392,7 @@ class TaskLogService:
                 'default_selected_node_id': self._default_selected_node_id(current_root),
             },
         )
-        if str(current_task.status or '').strip().lower() in {'success', 'failed'}:
+        if emit_terminal_event:
             self._append_task_event(
                 task=current_task,
                 event_type='task.terminal',

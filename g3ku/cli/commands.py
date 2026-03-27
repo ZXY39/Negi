@@ -682,7 +682,7 @@ def cron_list(
 
     import time
     from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
+    from g3ku.cron.timezones import resolve_timezone
     for job in jobs:
         # Format schedule
         if job.schedule.kind == "every":
@@ -697,7 +697,7 @@ def cron_list(
         if job.state.next_run_at_ms:
             ts = job.state.next_run_at_ms / 1000
             try:
-                tz = ZoneInfo(job.schedule.tz) if job.schedule.tz else None
+                tz = resolve_timezone(job.schedule.tz) if job.schedule.tz else None
                 next_run = _dt.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M")
             except Exception:
                 next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))

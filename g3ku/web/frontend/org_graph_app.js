@@ -4724,19 +4724,17 @@ function renderRoleLimitControl({ scopeKey, kind, label, value, editing }) {
     return `
         <div class="model-role-limit-field" data-model-role-limit-kind="${esc(kind)}" data-model-role-limit-scope="${esc(scopeKey)}">
             <span class="model-role-iterations-label">${esc(label)}</span>
-            <div class="model-role-limit-options">
-                <div class="llm-segmented-control">
-                    <label class="llm-segmented-option">
-                        <input type="radio" name="${esc(modeName)}" value="unlimited" ${!isCustom ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}" class="llm-segmented-radio">
-                        <span class="llm-segmented-label">无限制</span>
-                    </label>
-                    <label class="llm-segmented-option">
-                        <input type="radio" name="${esc(modeName)}" value="custom" ${isCustom ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}" class="llm-segmented-radio">
-                        <span class="llm-segmented-label">自定义</span>
-                    </label>
-                </div>
-                <input class="model-role-iterations-input model-role-limit-input spinless-number-input" type="number" min="0" step="1" inputmode="numeric" value="${esc(inputValue)}" placeholder="0" ${editing && isCustom ? "" : "disabled"} data-model-role-limit-input="${esc(kind)}">
+            <div class="llm-segmented-control">
+                <label class="llm-segmented-option">
+                    <input type="radio" name="${esc(modeName)}" value="unlimited" ${!isCustom ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}" class="llm-segmented-radio">
+                    <span class="llm-segmented-label">无限制</span>
+                </label>
+                <label class="llm-segmented-option">
+                    <input type="radio" name="${esc(modeName)}" value="custom" ${isCustom ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}" class="llm-segmented-radio">
+                    <span class="llm-segmented-label">自定义</span>
+                </label>
             </div>
+            <input class="model-role-iterations-input model-role-limit-input spinless-number-input" type="number" min="0" step="1" inputmode="numeric" value="${esc(inputValue)}" placeholder="0" ${editing && isCustom ? "" : "disabled"} data-model-role-limit-input="${esc(kind)}">
         </div>`;
 }
 

@@ -977,6 +977,11 @@ class ReActToolLoop:
         task = self._log_service._store.get_task(task_id)
         if task is None:
             return
+        status = str(getattr(task, 'status', '') or '').strip().lower()
+        if status == 'failed':
+            raise RuntimeError(str(getattr(task, 'failure_reason', '') or 'task failed').strip() or 'task failed')
+        if status == 'success':
+            raise RuntimeError('task already completed')
         if bool(task.cancel_requested):
             raise RuntimeError('canceled')
         if bool(task.pause_requested):

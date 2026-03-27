@@ -854,19 +854,14 @@
       const maxConcurrency = modelScopeConcurrency(scope.key);
       return `
         <section class="model-chain-card">
-          <div class="panel-header">
-            <div>
-              <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
-              <p class="subtitle">${escv(chain[0] ? `默认：${chain[0]}` : "尚未配置")}</p>
-            </div>
-            <div class="model-chain-card-meta">
-              <span class="policy-chip neutral">${chain.length} 个模型</span>
-              ${renderRoleLimitControl({ scopeKey: scope.key, kind: "iterations", label: "最大轮数", value: maxIterations, editing })}
-              ${renderRoleLimitControl({ scopeKey: scope.key, kind: "concurrency", label: "最大并发数", value: maxConcurrency, editing })}
-            </div>
+          <div class="card-header">
+            <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
+            <p class="subtitle">${escv(chain[0] ? `当前首选 ${chain[0]}` : "尚未配置")}</p>
           </div>
-          <div class="model-role-section">
-            <div class="model-role-section-title">ROLE CHAIN</div>
+          ${renderRoleLimitControl({ scopeKey: scope.key, kind: "iterations", label: "最大轮数", value: maxIterations, editing })}
+          ${renderRoleLimitControl({ scopeKey: scope.key, kind: "concurrency", label: "最大并发数", value: maxConcurrency, editing })}
+          <div class="role-chain-section">
+            <div class="role-chain-title">ROLE CHAIN · ${chain.length} 个模型</div>
             <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
               const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
               const key = trim(item?.key || ref);

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import Session, SessionManager
+from main.service.runtime_service import CreateAsyncTaskTool
 
 
 class _PromptBuilder:
@@ -505,6 +507,48 @@ class _BackendRecorder:
         return self.responses.pop(0)
 
 
+class _AsyncTaskService:
+    def __init__(self) -> None:
+        self.created: list[dict[str, object]] = []
+
+    async def startup(self) -> None:
+        return None
+
+    def find_reusable_continuation_task(self, *, session_id: str, continuation_of_task_id: str):
+        if session_id == 'web:shared' and continuation_of_task_id == 'task:old-1':
+            return SimpleNamespace(task_id='task:cont-1')
+        return None
+
+    async def create_task(self, task: str, *, session_id: str = 'web:shared', max_depth: int | None = None, **kwargs):
+        self.created.append(
+            {
+                'task': task,
+                'session_id': session_id,
+                'max_depth': max_depth,
+                'kwargs': kwargs,
+            }
+        )
+        return SimpleNamespace(task_id='task:new-1')
+
+
+class _ErrorTool(Tool):
+    @property
+    def name(self) -> str:
+        return "error_tool"
+
+    @property
+    def description(self) -> str:
+        return "Return an error-shaped result"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, **kwargs) -> str:
+        _ = kwargs
+        return "Error: simulated tool failure"
+
+
 @pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_binds_session_stable_prompt_cache_key(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
@@ -737,6 +781,98 @@ async def test_ceo_frontdoor_runner_exposes_ordinary_tools_before_first_stage(mo
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_reuses_existing_continuation_task_when_user_rebuilds(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'reuse active continuation task', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='tool-1',
+                        name='create_async_task',
+                        arguments={
+                            'task': '继续完成失败任务，不要从零开始',
+                            'core_requirement': '继续完成打开网页的自动化流程',
+                            'continuation_of_task_id': 'task:old-1',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(content='已沿用进行中的续跑任务。', finish_reason='stop'),
+        ]
+    )
+    async_task_service = _AsyncTaskService()
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=async_task_service,
+        tools=_FakeToolRegistry([CreateAsyncTaskTool(async_task_service)]),
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['create_async_task']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[
+                {
+                    'role': 'assistant',
+                    'content': (
+                        f'{web_ceo_sessions.ACTIVE_TASKS_PREFIX}\n'
+                        '{"kind":"active_tasks","tasks":[{"task_id":"task:cont-1","continuation_of_task_id":"task:old-1","status":"in_progress","updated_at":"2026-03-28T10:00:00+08:00"}]}'
+                    ),
+                }
+            ],
+            tool_names=['create_async_task'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='重建任务，继续完成'), session=session)
+
+    assert output == '已沿用进行中的续跑任务。'
+    assert async_task_service.created == []
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_blocks_final_text_when_stage_budget_is_exhausted(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
@@ -841,6 +977,126 @@ async def test_ceo_frontdoor_runner_blocks_final_text_when_stage_budget_is_exhau
     assert stages[0]['tool_rounds_used'] == 1
     assert stages[1]['tool_round_budget'] == 1
     assert stages[1]['status'] == 'completed'
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_emits_tool_error_after_trace_sync(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    error_tool = _ErrorTool()
+    tool_registry = _FakeToolRegistry([error_tool])
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="stage-1",
+                        name="submit_next_stage",
+                        arguments={"stage_goal": "trigger tool failure", "tool_round_budget": 1},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tool-1",
+                        name="error_tool",
+                        arguments={},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="stage-2",
+                        name="submit_next_stage",
+                        arguments={"stage_goal": "wrap up after failure", "tool_round_budget": 1},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=tool_registry,
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["error_tool"]}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt="SYSTEM PROMPT",
+            recent_history=[],
+            tool_names=["error_tool"],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    class _Session:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(session_key="web:shared")
+            self._memory_channel = "web"
+            self._memory_chat_id = "shared"
+            self._channel = "web"
+            self._chat_id = "shared"
+            self._active_cancel_token = None
+            self._interaction_trace = None
+            self.trace_snapshots: list[dict[str, object] | None] = []
+
+        def inflight_turn_snapshot(self):
+            return None
+
+        def set_interaction_trace(self, trace, *, stage=None) -> None:
+            self._interaction_trace = copy.deepcopy(trace)
+            self._current_stage = copy.deepcopy(stage)
+            self.trace_snapshots.append(copy.deepcopy(trace))
+
+    session = _Session()
+    observed_error_trace: list[dict[str, object] | None] = []
+
+    async def _on_progress(content: str, *, event_kind: str | None = None, event_data=None, **kwargs) -> None:
+        _ = content, event_data, kwargs
+        if event_kind == "tool_error":
+            observed_error_trace.append(copy.deepcopy(session._interaction_trace))
+
+    output = await runner.run_turn(
+        user_input=SimpleNamespace(content="do the failing thing"),
+        session=session,
+        on_progress=_on_progress,
+    )
+
+    assert output == "done"
+    assert observed_error_trace
+    trace = observed_error_trace[-1]
+    assert trace is not None
+    stage = list(trace.get("stages") or [])[0]
+    tool = list(stage.get("rounds") or [])[0]["tools"][0]
+    assert tool["tool_name"] == "error_tool"
+    assert tool["status"] == "error"
+    assert tool["output_text"] == "Error: simulated tool failure"
 
 
 @pytest.mark.asyncio

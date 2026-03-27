@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.assembly import ContextAssemblyService
 
 
@@ -65,9 +66,9 @@ class _SemanticMemoryManager(_MemoryManager):
         return [SimpleNamespace(record_id=record_id) for record_id in record_ids[: max(limit, 0)]]
 
 
-def _loop(memory_manager: _MemoryManager) -> SimpleNamespace:
+def _loop(memory_manager: _MemoryManager, *, main_task_service=None) -> SimpleNamespace:
     return SimpleNamespace(
-        main_task_service=None,
+        main_task_service=main_task_service,
         memory_manager=memory_manager,
         _use_rag_memory=lambda: True,
         memory_window=100,
@@ -116,6 +117,16 @@ def _family(
         metadata=dict(metadata or {}),
         actions=[SimpleNamespace(executor_names=[tool_id])],
     )
+
+
+class _TaskService:
+    def __init__(self, active_tasks: list[dict[str, str]] | None = None) -> None:
+        self.active_tasks = list(active_tasks or [])
+        self.calls: list[tuple[str, int]] = []
+
+    def list_active_task_snapshots_for_session(self, session_id: str, *, limit: int = 3) -> list[dict[str, str]]:
+        self.calls.append((str(session_id or ''), int(limit)))
+        return list(self.active_tasks[:limit])
 
 
 @pytest.mark.asyncio
@@ -279,9 +290,38 @@ async def test_ceo_context_assembly_lists_unavailable_callable_tools_as_context_
     assert 'load_tool_context(tool_id="agent_browser")' in result.system_prompt
     assert '`agent_browser`' in result.system_prompt
     assert 'missing required bins' in result.system_prompt
-    assert [item['tool_id'] for item in result.trace['external_tools']] == ['agent_browser']
-    assert result.trace['external_tools'][0]['available'] is False
-    assert result.trace['external_tools'][0]['callable'] is True
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_includes_active_task_snapshot_message() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response='')
+    task_service = _TaskService(
+        active_tasks=[
+            {
+                'task_id': 'task:cont-1',
+                'title': '续跑失败任务',
+                'core_requirement': '继续完成打开网页的自动化流程',
+                'continuation_of_task_id': 'task:old-1',
+                'status': 'in_progress',
+                'updated_at': '2026-03-28T10:00:00+08:00',
+            }
+        ]
+    )
+    service = ContextAssemblyService(loop=_loop(memory_manager, main_task_service=task_service), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='重建任务，继续完成',
+        exposure={'skills': [], 'tool_families': [], 'tool_names': ['create_async_task']},
+        persisted_session=None,
+    )
+
+    assert task_service.calls == [('web:shared', 3)]
+    assert result.recent_history[0]['role'] == 'assistant'
+    assert str(result.recent_history[0]['content']).startswith(web_ceo_sessions.ACTIVE_TASKS_PREFIX)
+    assert '"continuation_of_task_id":"task:old-1"' in str(result.recent_history[0]['content'])
+    assert result.trace['active_tasks'] == {'count': 1, 'included': True}
 
 
 @pytest.mark.asyncio

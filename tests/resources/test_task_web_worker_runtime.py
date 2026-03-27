@@ -2185,3 +2185,168 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         assert "child done" in results[0].node_output
     finally:
         await restarted.close()
+
+
+def test_terminal_task_clears_runtime_frames_and_rejects_late_runtime_updates(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+    )
+    service.log_service.update_runtime_state(
+        record.task_id,
+        active_node_ids=[root.node_id, child.node_id],
+        runnable_node_ids=[root.node_id, child.node_id],
+        waiting_node_ids=[],
+        frames=[
+            service.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase="before_model"),
+            service.log_service._default_frame(node_id=child.node_id, depth=child.depth, node_kind=child.node_kind, phase="before_model"),
+        ],
+    )
+
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="failed",
+        failure_reason="root failed",
+    )
+
+    runtime_state = service.log_service.read_runtime_state(record.task_id)
+    latest_task = service.get_task(record.task_id)
+
+    assert latest_task is not None
+    assert latest_task.status == "failed"
+    assert runtime_state is not None
+    assert runtime_state["active_node_ids"] == []
+    assert runtime_state["runnable_node_ids"] == []
+    assert runtime_state["waiting_node_ids"] == []
+    assert runtime_state["frames"] == []
+
+    service.log_service.update_runtime_state(
+        record.task_id,
+        active_node_ids=[child.node_id],
+        runnable_node_ids=[child.node_id],
+        waiting_node_ids=[],
+        frames=[
+            service.log_service._default_frame(node_id=child.node_id, depth=child.depth, node_kind=child.node_kind, phase="before_model"),
+        ],
+    )
+
+    runtime_state = service.log_service.read_runtime_state(record.task_id)
+
+    assert runtime_state is not None
+    assert runtime_state["active_node_ids"] == []
+    assert runtime_state["runnable_node_ids"] == []
+    assert runtime_state["waiting_node_ids"] == []
+    assert runtime_state["frames"] == []
+
+
+def test_terminal_event_emits_once_even_if_late_node_updates_arrive(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+    )
+
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="failed",
+        failure_reason="root failed",
+    )
+
+    terminal_events = [
+        item
+        for item in service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
+        if item.get("event_type") == "task.terminal"
+    ]
+    assert len(terminal_events) == 1
+
+    service.log_service.update_node_status(
+        record.task_id,
+        child.node_id,
+        status="failed",
+        failure_reason="late child update",
+    )
+
+    terminal_events = [
+        item
+        for item in service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
+        if item.get("event_type") == "task.terminal"
+    ]
+    assert len(terminal_events) == 1
+
+
+async def test_run_node_short_circuits_when_task_is_already_terminal(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = await _create_web_task(service)
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+    )
+
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="failed",
+        failure_reason="root failed",
+    )
+
+    result = await service.node_runner.run_node(record.task_id, child.node_id)
+    latest_child = service.get_node(child.node_id)
+
+    assert result.status == "failed"
+    assert latest_child is not None
+    assert latest_child.status == "failed"
+    assert latest_child.failure_reason == "root failed"

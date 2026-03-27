@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
 
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.cron import CronTool
+import g3ku.cron.timezones as cron_timezones
 from g3ku.config.loader import get_data_dir
 from g3ku.core.messages import UserInputMessage
 from g3ku.cron.runtime_dispatch import dispatch_cron_job, resolve_cron_session_key
@@ -191,6 +194,45 @@ def test_cron_service_requires_stop_condition_for_recurring_jobs(tmp_path: Path)
             channel="web",
             to="shared",
         )
+
+
+@pytest.mark.asyncio
+async def test_cron_tool_accepts_asia_shanghai_without_zoneinfo_tzdata(monkeypatch) -> None:
+    service = _CronToolService()
+    tool = CronTool(service)
+    tool.set_context("web", "shared")
+
+    class _MissingZoneInfo:
+        def __init__(self, key: str) -> None:
+            raise ZoneInfoNotFoundError(key)
+
+    monkeypatch.setattr(cron_timezones, "ZoneInfo", _MissingZoneInfo)
+
+    result = await tool.execute(
+        action="add",
+        message="hello",
+        cron_expr="0 10 * * *",
+        tz="Asia/Shanghai",
+        stop_condition="任务完成后或用户要求取消",
+    )
+
+    assert result == "Created job 'job' (id: job-1)"
+    assert service.add_calls[-1]["schedule"].tz == "Asia/Shanghai"
+
+
+def test_resolve_timezone_reports_missing_tzdata_helpfully(monkeypatch) -> None:
+    class _MissingZoneInfo:
+        def __init__(self, key: str) -> None:
+            raise ZoneInfoNotFoundError(key)
+
+    monkeypatch.setattr(cron_timezones, "ZoneInfo", _MissingZoneInfo)
+    monkeypatch.setattr(cron_timezones, "_tzdata_available", lambda: False)
+
+    with pytest.raises(ValueError, match="tzdata"):
+        cron_timezones.resolve_timezone("America/Vancouver")
+
+    fallback = cron_timezones.resolve_timezone("Etc/GMT-8")
+    assert fallback.utcoffset(None) == timedelta(hours=8)
 
 
 @pytest.mark.asyncio

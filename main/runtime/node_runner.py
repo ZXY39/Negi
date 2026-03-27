@@ -88,6 +88,43 @@ class NodeRunner:
         self._parallel_child_pipelines_enabled = True
         self._context_enricher = context_enricher
 
+    @staticmethod
+    def _normalized_status(value: Any) -> str:
+        return str(value or '').strip().lower()
+
+    def _task_terminal_reason(self, task_id: str, *, task=None) -> str:
+        current = self._store.get_task(task_id) or task
+        if current is None:
+            return ''
+        status = self._normalized_status(getattr(current, 'status', ''))
+        if status == STATUS_FAILED:
+            return str(getattr(current, 'failure_reason', '') or getattr(current, 'brief_text', '') or 'task failed').strip() or 'task failed'
+        if status == STATUS_SUCCESS:
+            return 'task already completed'
+        return ''
+
+    def _node_terminal_reason(self, node: NodeRecord | None, *, default_failed: str, default_success: str) -> str:
+        if node is None:
+            return ''
+        status = self._normalized_status(getattr(node, 'status', ''))
+        if status == STATUS_FAILED:
+            return str(getattr(node, 'failure_reason', '') or getattr(node, 'final_output', '') or default_failed).strip() or default_failed
+        if status == STATUS_SUCCESS:
+            return default_success
+        return ''
+
+    def _spawn_abort_result(self, goal: str, reason: str) -> SpawnChildResult:
+        text = str(reason or 'task terminated').strip() or 'task terminated'
+        error_text = f'Error: {text}'
+        return SpawnChildResult(
+            goal=goal,
+            check_result=error_text,
+            node_output='',
+            node_output_summary='',
+            node_output_ref='',
+            failure_info=self._runtime_spawn_failure_info(error_text),
+        )
+
     async def run_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         task = self._store.get_task(task_id)
         node = self._store.get_node(node_id)
@@ -98,6 +135,9 @@ class NodeRunner:
         if self._pause_requested(task_id):
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             raise TaskPausedError(task_id)
+        terminal_reason = self._task_terminal_reason(task_id, task=task)
+        if terminal_reason:
+            return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
         if task.cancel_requested:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         try:
@@ -117,6 +157,9 @@ class NodeRunner:
                 self._mark_finished(task_id, node.node_id, result)
                 self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
                 raise TaskPausedError(task_id)
+            terminal_reason = self._task_terminal_reason(task_id, task=task)
+            if terminal_reason:
+                return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
             if (self._store.get_task(task_id) or task).cancel_requested:
                 return self._mark_failed(task_id, node.node_id, reason='canceled')
             return self._mark_finished(task_id, node.node_id, result)
@@ -553,6 +596,14 @@ class NodeRunner:
         if isinstance(existing_result, dict) and str(entry.get('status') or '').strip().lower() in {'success', 'error'}:
             return SpawnChildResult.model_validate(existing_result)
 
+        stop_reason = self._task_terminal_reason(task.task_id, task=task) or self._node_terminal_reason(
+            self._store.get_node(parent.node_id) or parent,
+            default_failed='parent node failed',
+            default_success='parent node already completed',
+        )
+        if stop_reason:
+            return self._spawn_abort_result(spec.goal, stop_reason)
+
         requires_acceptance = bool(entry.get('requires_acceptance'))
         started_at = str(entry.get('started_at') or _now())
         self._update_spawn_entry(
@@ -625,6 +676,14 @@ class NodeRunner:
                     result=result.model_dump(mode='json', exclude_none=True),
                 )
                 return result
+
+            stop_reason = self._task_terminal_reason(task.task_id, task=task) or self._node_terminal_reason(
+                self._store.get_node(parent.node_id) or parent,
+                default_failed='parent node failed',
+                default_success='parent node already completed',
+            )
+            if stop_reason:
+                return self._spawn_abort_result(spec.goal, stop_reason)
 
             if not requires_acceptance:
                 self._log_service.update_node_check_result(task.task_id, child.node_id, SKIPPED_CHECK_RESULT)
@@ -791,6 +850,14 @@ class NodeRunner:
         return entry
 
     def _save_spawn_cache(self, task_id: str, parent_node_id: str, cache_key: str, payload: dict[str, Any]) -> None:
+        task = self._store.get_task(task_id)
+        parent = self._store.get_node(parent_node_id)
+        if task is None or parent is None:
+            return
+        if self._task_terminal_reason(task_id, task=task):
+            return
+        if self._node_terminal_reason(parent, default_failed='parent node failed', default_success='parent node already completed'):
+            return
         payload_copy = copy.deepcopy(payload)
 
         def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:

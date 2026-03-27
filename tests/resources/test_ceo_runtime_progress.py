@@ -59,6 +59,7 @@ class _TaskService:
         self.store = SimpleNamespace(mark_task_terminal_outbox_delivered=self._mark_task_terminal_outbox_delivered)
         self.tasks: dict[str, object] = {}
         self.node_details: dict[tuple[str, str], dict[str, object]] = {}
+        self.continuation_tasks: dict[tuple[str, str], object] = {}
 
     async def startup(self) -> None:
         return None
@@ -72,6 +73,10 @@ class _TaskService:
     def get_node_detail_payload(self, task_id: str, node_id: str):
         key = (str(task_id or "").strip(), str(node_id or "").strip())
         return self.node_details.get(key)
+
+    def find_reusable_continuation_task(self, *, session_id: str, continuation_of_task_id: str):
+        key = (str(session_id or '').strip(), str(continuation_of_task_id or '').strip())
+        return self.continuation_tasks.get(key)
 
 
 class _RuntimeManager:
@@ -1197,7 +1202,7 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
     assert "tool-exec:1" in str(prompt.content)
     assert "already been refreshed" in str(prompt.content)
     assert "Do not call wait_tool_execution" in str(prompt.content)
-    assert "task terminal result means the task has reached a final status" in str(prompt.content)
+    assert "任务终结结果意味着任务已达到最终状态" in str(prompt.content)
     assert manager.calls == [("tool-exec:1", 0.1)]
     published_types = [envelope["type"] for _session_id, envelope in task_service.registry.published]
     assert "ceo.turn.discard" in published_types
@@ -1303,6 +1308,51 @@ async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_retur
     assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
     assert "demo-terminal" in str(reloaded.messages[-1]["content"])
     assert "已完成" in str(reloaded.messages[-1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_reports_auto_continuation_task_in_fallback_reply(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-continuation"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    task_service = _TaskService()
+    task_service.continuation_tasks[(session_id, "task:demo-failed")] = SimpleNamespace(task_id="task:cont-2")
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    payload = {
+        "task_id": "task:demo-failed",
+        "session_id": session_id,
+        "title": "demo failed task",
+        "status": "failed",
+        "brief_text": "model provider failed",
+        "failure_reason": "Model provider call failed after exhausting the configured fallback chain.",
+        "finished_at": "2026-03-28T01:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-failed:failed:2026-03-28T01:34:32+08:00",
+    }
+    accepted = service.enqueue_task_terminal_payload(payload)
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert len(task_service.registry.published) == 1
+    published_session, envelope = task_service.registry.published[0]
+    assert published_session == session_id
+    assert envelope["type"] == "ceo.reply.final"
+    assert envelope["data"]["text"] == "任务 `demo-failed` 已失败，已自动续跑为 `cont-2`，我会继续推进。"
+
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
+    assert reloaded.messages[-1]["metadata"]["task_ids"] == ["task:demo-failed", "task:cont-2"]
+    assert reloaded.messages[-1]["content"] == "任务 `demo-failed` 已失败，已自动续跑为 `cont-2`，我会继续推进。"
 
 
 @pytest.mark.asyncio

@@ -82,6 +82,7 @@ _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
 _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
 _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
+_CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
 
 
 class ResourceDeleteBlockedError(ValueError):
@@ -1040,6 +1041,16 @@ class MainRuntimeService:
     def _normalize_session_key(session_id: str | None) -> str:
         return str(session_id or 'web:shared').strip() or 'web:shared'
 
+    @staticmethod
+    def _normalize_continuation_task_id(value: Any) -> str:
+        task_id = str(value or '').strip()
+        return task_id if task_id.startswith('task:') else ''
+
+    @staticmethod
+    def _normalize_continuation_created_by_source(value: Any) -> str:
+        source = str(value or '').strip()
+        return source if source in _CONTINUATION_TASK_CREATED_BY_SOURCES else ''
+
     def _task_origin_session_id(self, task: TaskRecord | None) -> str:
         if task is None:
             return 'web:shared'
@@ -1059,6 +1070,55 @@ class MainRuntimeService:
             for task in self.list_tasks_for_session(session_id)
             if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
         ]
+
+    def find_reusable_continuation_task(self, session_id: str, continuation_of_task_id: str) -> TaskRecord | None:
+        key = self._normalize_session_key(session_id)
+        target_task_id = self._normalize_continuation_task_id(continuation_of_task_id)
+        if not target_task_id:
+            return None
+        matches: list[TaskRecord] = []
+        for task in self.list_unfinished_tasks_for_session(key):
+            metadata = task.metadata if isinstance(task.metadata, dict) else {}
+            if self._normalize_session_key(self._task_origin_session_id(task)) != key:
+                continue
+            if self._normalize_continuation_task_id(metadata.get('continuation_of_task_id')) != target_task_id:
+                continue
+            matches.append(task)
+        if not matches:
+            return None
+        matches.sort(
+            key=lambda item: (
+                str(getattr(item, 'updated_at', '') or ''),
+                str(getattr(item, 'created_at', '') or ''),
+                str(getattr(item, 'task_id', '') or ''),
+            ),
+            reverse=True,
+        )
+        return matches[0]
+
+    def list_active_task_snapshots_for_session(self, session_id: str, *, limit: int = 3) -> list[dict[str, str]]:
+        unfinished = list(self.list_unfinished_tasks_for_session(session_id))
+        unfinished.sort(
+            key=lambda item: (
+                str(getattr(item, 'updated_at', '') or ''),
+                str(getattr(item, 'created_at', '') or ''),
+                str(getattr(item, 'task_id', '') or ''),
+            ),
+            reverse=True,
+        )
+        snapshots: list[dict[str, str]] = []
+        for task in unfinished[: max(1, int(limit or 3))]:
+            metadata = task.metadata if isinstance(task.metadata, dict) else {}
+            item = {
+                'task_id': str(getattr(task, 'task_id', '') or '').strip(),
+                'title': str(getattr(task, 'title', '') or '').strip(),
+                'core_requirement': str(metadata.get('core_requirement') or '').strip(),
+                'continuation_of_task_id': self._normalize_continuation_task_id(metadata.get('continuation_of_task_id')),
+                'status': str(getattr(task, 'status', '') or '').strip(),
+                'updated_at': str(getattr(task, 'updated_at', '') or '').strip(),
+            }
+            snapshots.append({key: value for key, value in item.items() if value})
+        return snapshots
 
     def get_session_task_counts(self, session_id: str) -> dict[str, int]:
         tasks = self.list_tasks_for_session(session_id)
@@ -1481,6 +1541,16 @@ class MainRuntimeService:
                 payload.get('memory_scope'),
                 fallback_session_key=raw_session_id,
             )
+        continuation_of_task_id = self._normalize_continuation_task_id(payload.get('continuation_of_task_id'))
+        if continuation_of_task_id:
+            payload['continuation_of_task_id'] = continuation_of_task_id
+        else:
+            payload.pop('continuation_of_task_id', None)
+        created_by_source = self._normalize_continuation_created_by_source(payload.get('created_by_source'))
+        if continuation_of_task_id and created_by_source:
+            payload['created_by_source'] = created_by_source
+        else:
+            payload.pop('created_by_source', None)
         core_requirement = str(payload.get('core_requirement') or '').strip() or str(task_prompt or '').strip()
         if core_requirement:
             payload['core_requirement'] = core_requirement
@@ -3282,6 +3352,12 @@ class CreateAsyncTaskTool(Tool):
             core_requirement = str((params or {}).get('core_requirement') or '').strip()
             if not core_requirement:
                 errors.append('core_requirement must not be empty')
+        if 'continuation_of_task_id' in (params or {}):
+            continuation_of_task_id = str((params or {}).get('continuation_of_task_id') or '').strip()
+            if not continuation_of_task_id:
+                errors.append('continuation_of_task_id must not be empty when provided')
+            elif not continuation_of_task_id.startswith('task:'):
+                errors.append('continuation_of_task_id must start with task:')
         requires_final_acceptance = (params or {}).get('requires_final_acceptance')
         final_acceptance_prompt = str((params or {}).get('final_acceptance_prompt') or '').strip()
         if requires_final_acceptance is True and not final_acceptance_prompt:
@@ -3304,12 +3380,32 @@ class CreateAsyncTaskTool(Tool):
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))
+        continuation_of_task_id = MainRuntimeService._normalize_continuation_task_id(kwargs.get('continuation_of_task_id'))
+        raw_reuse_existing = kwargs.get('reuse_existing')
+        reuse_existing = True if raw_reuse_existing in (None, '') else bool(raw_reuse_existing)
+        created_by_source = ''
+        if continuation_of_task_id:
+            created_by_source = 'heartbeat_auto_continue' if bool(runtime.get('heartbeat_internal')) else 'ceo_user_rebuild'
+            if reuse_existing:
+                finder = getattr(self._service, 'find_reusable_continuation_task', None)
+                existing = (
+                    finder(
+                        session_id=session_id,
+                        continuation_of_task_id=continuation_of_task_id,
+                    )
+                    if callable(finder)
+                    else None
+                )
+                if existing is not None:
+                    return f'复用进行中任务{existing.task_id}'
         record = await self._service.create_task(
             str(task or ''),
             session_id=session_id,
             max_depth=explicit_max_depth,
             metadata={
                 'core_requirement': normalized_core_requirement,
+                'continuation_of_task_id': continuation_of_task_id,
+                'created_by_source': created_by_source,
                 'final_acceptance': {
                     'required': requires_final_acceptance,
                     'prompt': final_acceptance_prompt,
