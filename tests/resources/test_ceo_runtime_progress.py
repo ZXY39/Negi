@@ -121,6 +121,65 @@ class _FakeLiveSession:
         return SimpleNamespace(output="I will keep waiting for the install.")
 
 
+class _FakeErrorSession:
+    def __init__(self) -> None:
+        self.state = SimpleNamespace(status="idle", is_running=False)
+        self._listeners = set()
+        self._snapshot = {
+            "status": "error",
+            "source": "user",
+            "user_message": {"content": "Open bilibili"},
+            "interaction_trace": {
+                "stages": [
+                    {
+                        "stage_id": "ceo-stage-1",
+                        "stage_index": 1,
+                        "mode": "self_execute",
+                        "status": "failed",
+                        "stage_goal": "Open bilibili",
+                        "tool_round_budget": 3,
+                        "tool_rounds_used": 1,
+                        "created_at": "2026-03-18T12:00:00+08:00",
+                        "finished_at": "2026-03-18T12:00:05+08:00",
+                        "rounds": [],
+                    }
+                ],
+                "final_output": "",
+            },
+            "last_error": {"message": "CEO frontdoor exceeded maximum iterations"},
+        }
+
+    def subscribe(self, listener):
+        self._listeners.add(listener)
+
+        def _unsubscribe() -> None:
+            self._listeners.discard(listener)
+
+        return _unsubscribe
+
+    def state_dict(self) -> dict[str, object]:
+        return {"status": self.state.status, "is_running": self.state.is_running}
+
+    def inflight_turn_snapshot(self):
+        return copy.deepcopy(self._snapshot)
+
+    async def _emit(self, event_type: str, **payload) -> None:
+        event = AgentEvent(type=event_type, timestamp="2026-03-18T12:00:00", payload=payload)
+        for listener in list(self._listeners):
+            result = listener(event)
+            if hasattr(result, "__await__"):
+                await result
+
+    async def prompt(self, user_message) -> SimpleNamespace:
+        _ = user_message
+        self.state.status = "running"
+        self.state.is_running = True
+        await self._emit("state_snapshot", state=self.state_dict())
+        self.state.status = "error"
+        self.state.is_running = False
+        raise RuntimeError("CEO frontdoor exceeded maximum iterations")
+
+
 class _FakeHeartbeatSession:
     def __init__(self, *, output: str = HEARTBEAT_OK) -> None:
         self.state = SimpleNamespace(status="idle", is_running=False)
@@ -758,6 +817,98 @@ async def test_runtime_agent_session_persists_tool_events_into_session_transcrip
     assert reloaded_session.messages[1]["tool_events"][0]["tool_name"] == "skill-installer"
 
 
+@pytest.mark.asyncio
+async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _FakeRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input
+            session.set_interaction_trace(
+                {
+                    "stages": [
+                        {
+                            "stage_id": "ceo-stage-1",
+                            "stage_index": 1,
+                            "mode": "self_execute",
+                            "status": "failed",
+                            "stage_goal": "Open bilibili",
+                            "tool_round_budget": 3,
+                            "tool_rounds_used": 1,
+                            "created_at": "2026-03-18T12:00:00+08:00",
+                            "finished_at": "2026-03-18T12:00:05+08:00",
+                            "rounds": [],
+                        }
+                    ],
+                    "final_output": "",
+                },
+                stage={
+                    "stage_id": "ceo-stage-1",
+                    "stage_index": 1,
+                    "mode": "self_execute",
+                    "status": "failed",
+                },
+            )
+            await on_progress(
+                "agent_browser started",
+                event_kind="tool_start",
+                event_data={"tool_name": "agent_browser"},
+            )
+            raise RuntimeError("CEO frontdoor exceeded maximum iterations")
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_FakeRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session_id = "web:ceo-persist-failed-turn"
+    session = RuntimeAgentSession(loop, session_key=session_id, channel="web", chat_id="ceo-persist-failed-turn")
+
+    with pytest.raises(RuntimeError, match="CEO frontdoor exceeded maximum iterations"):
+        await session.prompt("Open bilibili")
+
+    reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
+    assert reloaded_session.messages[0]["content"] == "Open bilibili"
+    assert reloaded_session.messages[1]["content"] == "运行出错：CEO frontdoor exceeded maximum iterations"
+    assert reloaded_session.messages[1]["metadata"] == {
+        "source": "runtime_error",
+        "error_code": "legacy_session_error",
+        "error_message": "CEO frontdoor exceeded maximum iterations",
+        "recoverable": True,
+    }
+    assert [item["status"] for item in reloaded_session.messages[1]["tool_events"]] == ["running"]
+    assert reloaded_session.messages[1]["interaction_trace"]["stages"][-1]["stage_goal"] == "Open bilibili"
+
+    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(reloaded_session, raw_tail_turns=4)
+    assert recent_history[-2] == {"role": "user", "content": "Open bilibili"}
+    assert "运行出错：CEO frontdoor exceeded maximum iterations" in recent_history[-1]["content"]
+    assert web_ceo_sessions.STAGE_TRACE_PREFIX in recent_history[-1]["content"]
+
+
 def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
@@ -793,6 +944,45 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
     assert len(final_events) == 1
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
+
+
+def test_ceo_websocket_error_payload_carries_interaction_trace(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+    session_id = "web:ceo-live-error-trace"
+    session_manager = SessionManager(tmp_path)
+    live_session = _FakeErrorSession()
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        main_task_service=_TaskService(),
+    )
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.state"
+
+        ws.send_json({"type": "client.user_message", "text": "Open bilibili"})
+
+        messages = []
+        for _ in range(6):
+            payload = ws.receive_json()
+            messages.append(payload)
+            if payload.get("type") == "ceo.error":
+                break
+
+    error_events = [item for item in messages if item["type"] == "ceo.error"]
+    assert len(error_events) == 1
+    assert error_events[0]["data"]["message"] == "CEO frontdoor exceeded maximum iterations"
+    assert error_events[0]["data"]["source"] == "user"
+    assert error_events[0]["data"]["interaction_trace"]["stages"][0]["stage_goal"] == "Open bilibili"
 
 
 def test_ceo_websocket_restores_paused_inflight_turn_after_runtime_session_reset(tmp_path: Path, monkeypatch) -> None:

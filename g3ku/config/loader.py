@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from g3ku.china_bridge.registry import china_channel_attr, china_channel_ids, china_channel_spec
-from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_ITERATIONS
+from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_CONCURRENCY, DEFAULT_ROLE_MAX_ITERATIONS
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
 from g3ku.security import (
     apply_config_secret_entries,
@@ -98,26 +98,19 @@ def _load_json_text(raw: str, source: str) -> dict[str, Any]:
 def ensure_startup_config_ready(config_path: Path | None = None) -> bool:
     """Apply safe first-start bootstrap tweaks before loading runtime config.
 
-    If the project config file does not exist, bootstrap it from a project-local
-    `.g3ku/config.example.json` when present, otherwise fall back to the bundled
-    example shipped inside the package. The user still needs to fill in real API
-    keys before LLM features will work.
+    If the project config file does not exist, create a strict workspace-local
+    config with no managed models configured yet. This keeps freshly cloned
+    environments blank until the user adds their own model bindings.
     """
     path = Path(config_path) if config_path is not None else get_config_path()
     if not path.exists():
-        try:
-            raw_example, source = _read_example_config_text()
-        except FileNotFoundError:
-            return False
-        _load_json_text(raw_example, source)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(raw_example.rstrip() + "\n", encoding="utf-8")
+        blank_config = Config()
+        save_config(blank_config, path)
         from loguru import logger
 
         logger.info(
-            "Config bootstrapped from example: {} -> {}. "
-            "Please configure your API keys before using LLM features.",
-            source,
+            "Config bootstrapped with an empty model catalog: {}. "
+            "Add your own model bindings before using LLM features.",
             path,
         )
         return True
@@ -306,14 +299,16 @@ def _binding_auth_mode(provider_id: str) -> str:
 
 
 def _normalize_inline_model_bindings(cfg: Config) -> bool:
+    pending_items = [item for item in cfg.models.catalog if not str(item.llm_config_id or "").strip()]
+    if not pending_items:
+        return False
+
     from g3ku.llm_config.models import ProviderConfigDraft
     from g3ku.llm_config.facade import LLMConfigFacade
 
     facade = LLMConfigFacade(cfg.workspace_path)
     changed = False
-    for item in cfg.models.catalog:
-        if str(item.llm_config_id or "").strip():
-            continue
+    for item in pending_items:
         provider_id, model_id = cfg.parse_provider_model(str(item.provider_model or "").strip())
         provider_cfg = getattr(cfg.providers, provider_id, None)
         draft = ProviderConfigDraft(
@@ -411,6 +406,11 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "execution": cfg.get_role_max_iterations("execution"),
                 "inspection": cfg.get_role_max_iterations("inspection"),
             },
+            "roleConcurrency": {
+                "ceo": cfg.get_role_max_concurrency("ceo"),
+                "execution": cfg.get_role_max_concurrency("execution"),
+                "inspection": cfg.get_role_max_concurrency("inspection"),
+            },
             "multiAgent": {
                 "orchestratorModelKey": cfg.agents.multi_agent.orchestrator_model_key,
             },
@@ -505,25 +505,52 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         )
 
 
-def _ensure_role_iterations_defaults(raw_data: dict[str, Any]) -> bool:
+def _ensure_role_limit_defaults(
+    raw_data: dict[str, Any],
+    *,
+    camel_key: str,
+    snake_key: str,
+    defaults: dict[str, int | None],
+) -> bool:
     agents = raw_data.get("agents")
     if not isinstance(agents, dict):
         return False
-    current = agents.get("roleIterations")
-    fallback = current if isinstance(current, dict) else agents.get("role_iterations")
+    current = agents.get(camel_key)
+    fallback = current if isinstance(current, dict) else agents.get(snake_key)
     fallback_payload = fallback if isinstance(fallback, dict) else {}
-    next_payload: dict[str, int] = {}
-    for scope, default in DEFAULT_ROLE_MAX_ITERATIONS.items():
+    next_payload: dict[str, int | None] = {}
+    for scope, default in defaults.items():
         value = fallback_payload.get(scope, default)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            next_payload[scope] = default
+            continue
         try:
             normalized = int(value)
         except (TypeError, ValueError):
             normalized = default
-        next_payload[scope] = normalized if normalized >= 2 else default
+        next_payload[scope] = normalized if normalized is not None and normalized >= 0 else default
     if current == next_payload:
         return False
-    agents["roleIterations"] = next_payload
+    agents[camel_key] = next_payload
     return True
+
+
+def _ensure_role_iterations_defaults(raw_data: dict[str, Any]) -> bool:
+    return _ensure_role_limit_defaults(
+        raw_data,
+        camel_key="roleIterations",
+        snake_key="role_iterations",
+        defaults=DEFAULT_ROLE_MAX_ITERATIONS,
+    )
+
+
+def _ensure_role_concurrency_defaults(raw_data: dict[str, Any]) -> bool:
+    return _ensure_role_limit_defaults(
+        raw_data,
+        camel_key="roleConcurrency",
+        snake_key="role_concurrency",
+        defaults=DEFAULT_ROLE_MAX_CONCURRENCY,
+    )
 
 
 def build_project_config_from_example(example_path: Path | None = None) -> Config:
@@ -550,6 +577,7 @@ def load_config(config_path: Path | None = None) -> Config:
         raw_data = migrated_llm
     changed = changed or llm_changed
     changed = _ensure_role_iterations_defaults(raw_data) or changed
+    changed = _ensure_role_concurrency_defaults(raw_data) or changed
     security = get_bootstrap_security_service(Path.cwd())
     migrated = _migrate_config(
         apply_config_secret_entries(deepcopy(raw_data), security.current_overlay())

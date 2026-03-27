@@ -48,6 +48,9 @@ CORE_REQUIREMENT_NOTICE_PATTERN = re.compile(
 )
 
 
+_UNSET = object()
+
+
 class NodeRunner:
     def __init__(
         self,
@@ -58,9 +61,11 @@ class NodeRunner:
         tool_provider,
         execution_model_refs: list[str],
         acceptance_model_refs: list[str],
-        execution_max_iterations: int = 16,
-        acceptance_max_iterations: int | None = None,
-        max_parallel_child_pipelines: int = 10,
+        execution_max_iterations: int | None | object = _UNSET,
+        acceptance_max_iterations: int | None | object = _UNSET,
+        max_parallel_child_pipelines: int | None | object = _UNSET,
+        execution_max_concurrency: int | None = None,
+        acceptance_max_concurrency: int | None = None,
         context_enricher=None,
     ) -> None:
         self._store = store
@@ -69,9 +74,18 @@ class NodeRunner:
         self._tool_provider = tool_provider
         self._execution_model_refs = list(execution_model_refs or [])
         self._acceptance_model_refs = list(acceptance_model_refs or []) or list(execution_model_refs or [])
-        self._execution_max_iterations = max(2, int(execution_max_iterations or 16))
-        self._acceptance_max_iterations = max(2, int(acceptance_max_iterations or self._execution_max_iterations))
-        self._max_parallel_child_pipelines = max(1, int(max_parallel_child_pipelines or 1))
+        self._execution_max_iterations = self._normalize_optional_limit(execution_max_iterations, default=16)
+        self._acceptance_max_iterations = self._normalize_optional_limit(
+            acceptance_max_iterations,
+            default=self._execution_max_iterations,
+        )
+        self._max_parallel_child_pipelines = self._normalize_optional_limit(max_parallel_child_pipelines, default=10)
+        self._execution_max_concurrency = self._normalize_optional_limit(execution_max_concurrency, default=None)
+        self._acceptance_max_concurrency = self._normalize_optional_limit(
+            acceptance_max_concurrency,
+            default=self._execution_max_concurrency,
+        )
+        self._parallel_child_pipelines_enabled = True
         self._context_enricher = context_enricher
 
     async def run_node(self, task_id: str, node_id: str) -> NodeFinalResult:
@@ -97,6 +111,7 @@ class NodeRunner:
                 model_refs=self._model_refs_for(node),
                 runtime_context=self._runtime_context(task=task, node=node),
                 max_iterations=self._max_iterations_for(node),
+                max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),
             )
             if self._pause_requested(task_id):
                 self._mark_finished(task_id, node.node_id, result)
@@ -297,8 +312,20 @@ class NodeRunner:
     def _model_refs_for(self, node: NodeRecord) -> list[str]:
         return list(self._acceptance_model_refs if node.node_kind == KIND_ACCEPTANCE else self._execution_model_refs)
 
-    def _max_iterations_for(self, node: NodeRecord) -> int:
-        return int(self._acceptance_max_iterations if node.node_kind == KIND_ACCEPTANCE else self._execution_max_iterations)
+    def _max_iterations_for(self, node: NodeRecord) -> int | None:
+        return self._acceptance_max_iterations if node.node_kind == KIND_ACCEPTANCE else self._execution_max_iterations
+
+    def _max_parallel_tool_calls_for(self, node: NodeRecord) -> int | None:
+        role_limit = self._acceptance_max_concurrency if node.node_kind == KIND_ACCEPTANCE else self._execution_max_concurrency
+        if role_limit is not None:
+            return role_limit
+        return getattr(self._react_loop, '_max_parallel_tool_calls', None)
+
+    def _max_parallel_child_pipelines_for(self, node: NodeRecord) -> int | None:
+        role_limit = self._acceptance_max_concurrency if node.node_kind == KIND_ACCEPTANCE else self._execution_max_concurrency
+        if role_limit is not None:
+            return role_limit
+        return self._max_parallel_child_pipelines
 
     def _runtime_context(self, *, task, node: NodeRecord) -> dict[str, Any]:
         memory_scope = normalize_memory_scope(
@@ -467,7 +494,13 @@ class NodeRunner:
         cached_payload['completed'] = False
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
 
-        semaphore = asyncio.Semaphore(self._max_parallel_child_pipelines)
+        semaphore = asyncio.Semaphore(
+            self._parallel_slot_count(
+                self._max_parallel_child_pipelines_for(parent),
+                len(specs),
+                enabled=self._parallel_child_pipelines_enabled,
+            )
+        )
 
         async def _run_spec(index: int, spec: SpawnChildSpec) -> SpawnChildResult:
             async with semaphore:
@@ -485,6 +518,24 @@ class NodeRunner:
         cached_payload['completed'] = True
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
         return list(results)
+
+    @staticmethod
+    def _normalize_optional_limit(value: int | None | object, *, default: int | None) -> int | None:
+        if value is _UNSET:
+            value = default
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return max(0, int(value))
+
+    @staticmethod
+    def _parallel_slot_count(limit: int | None, item_count: int, *, enabled: bool) -> int:
+        if not enabled or item_count <= 1:
+            return 1
+        if limit is None:
+            return max(1, item_count)
+        return max(1, int(limit) if int(limit) > 0 else 1)
 
     async def _run_child_pipeline(
         self,

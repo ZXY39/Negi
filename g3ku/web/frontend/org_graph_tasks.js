@@ -349,9 +349,9 @@ async function loadTasks() {
     } catch (e) {
         if (isAbortLike(e)) return;
         if (!(S.tasks || []).length) {
-            U.taskGrid.innerHTML = `<div class="empty-state error" style="grid-column: 1/-1;">Failed to load tasks: ${esc(e.message)}</div>`;
+            U.taskGrid.innerHTML = `<div class="empty-state error" style="grid-column: 1/-1;">任务加载失败：${esc(ApiClient.friendlyErrorMessage(e, e.message || "未知错误"))}</div>`;
         }
-        showToast({ title: "Load failed", text: e.message || "Unknown error", kind: "error" });
+        showToast({ title: "加载失败", text: ApiClient.friendlyErrorMessage(e, e.message || "未知错误"), kind: "error" });
     }
 }
 

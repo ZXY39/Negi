@@ -16,9 +16,14 @@ ROLE_SCOPE_ALIASES = {
 
 REQUIRED_MODEL_ROLES = ("ceo", "execution", "inspection")
 DEFAULT_ROLE_MAX_ITERATIONS = {
-    "ceo": 40,
-    "execution": 16,
-    "inspection": 16,
+    "ceo": None,
+    "execution": None,
+    "inspection": None,
+}
+DEFAULT_ROLE_MAX_CONCURRENCY = {
+    "ceo": None,
+    "execution": None,
+    "inspection": None,
 }
 
 
@@ -170,17 +175,34 @@ class AgentDefaults(Base):
 class RoleIterationConfig(Base):
     """Per-role loop limits for CEO, execution, and inspection runtimes."""
 
-    ceo: int = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["ceo"], ge=2)
-    execution: int = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["execution"], ge=2)
-    inspection: int = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["inspection"], ge=2)
+    ceo: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["ceo"], ge=0)
+    execution: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["execution"], ge=0)
+    inspection: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["inspection"], ge=0)
 
     @field_validator("ceo", "execution", "inspection", mode="before")
     @classmethod
-    def _normalize_iterations(cls, value: Any, info: ValidationInfo) -> int:
+    def _normalize_iterations(cls, value: Any, info: ValidationInfo) -> int | None:
         if value is None:
             return DEFAULT_ROLE_MAX_ITERATIONS[info.field_name]
         if isinstance(value, str) and not value.strip():
             return DEFAULT_ROLE_MAX_ITERATIONS[info.field_name]
+        return int(value)
+
+
+class RoleConcurrencyConfig(Base):
+    """Per-role parallel work caps for CEO, execution, and inspection runtimes."""
+
+    ceo: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["ceo"], ge=0)
+    execution: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["execution"], ge=0)
+    inspection: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["inspection"], ge=0)
+
+    @field_validator("ceo", "execution", "inspection", mode="before")
+    @classmethod
+    def _normalize_concurrency(cls, value: Any, info: ValidationInfo) -> int | None:
+        if value is None:
+            return DEFAULT_ROLE_MAX_CONCURRENCY[info.field_name]
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_ROLE_MAX_CONCURRENCY[info.field_name]
         return int(value)
 
 
@@ -381,13 +403,15 @@ class NodeParallelismConfig(Base):
     """Per-node parallel tool and child pipeline execution controls."""
 
     enabled: bool = True
-    max_parallel_tool_calls_per_node: int = 10
-    max_parallel_child_pipelines_per_node: int = 10
+    max_parallel_tool_calls_per_node: int | None = None
+    max_parallel_child_pipelines_per_node: int | None = None
 
     @field_validator("max_parallel_tool_calls_per_node", "max_parallel_child_pipelines_per_node")
     @classmethod
-    def _clamp_parallel_limit(cls, value: int) -> int:
-        return max(1, int(value or 1))
+    def _clamp_parallel_limit(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        return max(0, int(value))
 
 
 class AgentsConfig(Base):
@@ -395,6 +419,7 @@ class AgentsConfig(Base):
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
     role_iterations: RoleIterationConfig = Field(default_factory=RoleIterationConfig)
+    role_concurrency: RoleConcurrencyConfig = Field(default_factory=RoleConcurrencyConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     node_parallelism: NodeParallelismConfig = Field(default_factory=NodeParallelismConfig)
 
@@ -639,9 +664,6 @@ class Config(BaseSettings):
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":
         catalog = list(self.models.catalog or [])
-        if not catalog:
-            raise ValueError("models.catalog must be non-empty")
-
         catalog_by_key: dict[str, ManagedModelConfig] = {}
         for item in catalog:
             key = str(item.key or "").strip()
@@ -652,8 +674,6 @@ class Config(BaseSettings):
 
         for scope in REQUIRED_MODEL_ROLES:
             chain = getattr(self.models.roles, scope)
-            if not chain:
-                raise ValueError(f"models.roles.{scope} must be non-empty")
             for model_key in chain:
                 item = catalog_by_key.get(str(model_key or "").strip())
                 if item is None:
@@ -730,10 +750,19 @@ class Config(BaseSettings):
         normalized = normalize_role_scope(role)
         return list(getattr(self.models.roles, normalized))
 
-    def get_role_max_iterations(self, role: str) -> int:
+    def get_role_max_iterations(self, role: str) -> int | None:
         normalized = normalize_role_scope(role)
-        value = int(getattr(self.agents.role_iterations, normalized, DEFAULT_ROLE_MAX_ITERATIONS[normalized]) or 0)
-        return max(2, value)
+        value = getattr(self.agents.role_iterations, normalized, DEFAULT_ROLE_MAX_ITERATIONS[normalized])
+        if value is None:
+            return None
+        return max(0, int(value))
+
+    def get_role_max_concurrency(self, role: str) -> int | None:
+        normalized = normalize_role_scope(role)
+        value = getattr(self.agents.role_concurrency, normalized, DEFAULT_ROLE_MAX_CONCURRENCY[normalized])
+        if value is None:
+            return None
+        return max(0, int(value))
 
     def resolve_role_model_key(self, role: str) -> str:
         refs = self.get_role_model_keys(role)

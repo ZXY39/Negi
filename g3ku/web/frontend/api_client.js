@@ -7,6 +7,54 @@ class ApiClient {
     static _requestTokens = new Map();
     static _bootstrapUnlockRequestKey = "bootstrap:unlock";
 
+    static _normalizeErrorCode(value) {
+        if (typeof value !== "string") return "";
+        const normalized = value.trim();
+        if (!normalized) return "";
+        return /^[a-z0-9_]+$/i.test(normalized) ? normalized.toLowerCase() : "";
+    }
+
+    static getErrorCode(value) {
+        if (!value) return "";
+        if (typeof value === "string") return this._normalizeErrorCode(value);
+        if (typeof value !== "object") return "";
+        return this._normalizeErrorCode(value.code)
+            || this.getErrorCode(value.data)
+            || this.getErrorCode(value.detail)
+            || this.getErrorCode(value.payload)
+            || this.getErrorCode(value.message)
+            || "";
+    }
+
+    static _friendlyErrorMessageForCode(code) {
+        switch (String(code || "").trim().toLowerCase()) {
+            case "no_model_configured":
+                return "当前项目还没有配置可用模型。请先进入“模型配置”页面，新增并保存至少一个模型，并把它分配给主Agent（CEO）角色。";
+            case "project_locked":
+                return "项目当前已锁定，请先完成解锁后再继续。";
+            case "task_service_unavailable":
+                return "任务运行服务暂未就绪，请稍后再试。";
+            case "main_task_service_unavailable":
+                return "主任务服务暂未就绪，请稍后再试。";
+            default:
+                return "";
+        }
+    }
+
+    static friendlyErrorMessage(value, fallback = "") {
+        const code = this.getErrorCode(value);
+        const friendly = this._friendlyErrorMessageForCode(code);
+        if (friendly) return friendly;
+        if (value && typeof value === "object") {
+            const detailMessage = typeof value.detail?.message === "string" ? value.detail.message.trim() : "";
+            if (detailMessage) return detailMessage;
+            const directMessage = typeof value.message === "string" ? value.message.trim() : "";
+            if (directMessage) return directMessage;
+        }
+        if (typeof value === "string" && value.trim()) return value.trim();
+        return String(fallback || "").trim() || "未知错误";
+    }
+
     static getActiveSessionId() {
         return String(this._activeSessionId || FALLBACK_SESSION_ID).trim() || FALLBACK_SESSION_ID;
     }
@@ -91,13 +139,17 @@ class ApiClient {
             if (!response.ok) {
                 const payload = await response.json().catch(() => ({}));
                 const detail = payload.detail !== undefined ? payload.detail : payload.message;
-                const message = typeof detail === "string"
+                const fallbackMessage = typeof detail === "string"
                     ? detail
                     : (detail && typeof detail === "object" && typeof detail.message === "string" && detail.message.trim())
                         ? detail.message.trim()
                         : payload.message || `HTTP ${response.status}`;
+                const code = this.getErrorCode(detail) || this.getErrorCode(payload);
+                const message = this.friendlyErrorMessage({ code, detail, payload, message: fallbackMessage }, fallbackMessage);
                 const error = new Error(message);
+                error.code = code;
                 if (detail && typeof detail === "object") error.data = detail;
+                else if (code) error.data = { code, message };
                 error.status = response.status;
                 error.payload = payload;
                 throw error;
@@ -403,6 +455,7 @@ class ApiClient {
             items: Array.isArray(data.items) ? data.items.map((item) => item.key) : [],
             roles: data.roles || {},
             roleIterations: data.roleIterations || data.role_iterations || {},
+            roleConcurrency: data.roleConcurrency || data.role_concurrency || {},
             defaults: {},
         };
     }
@@ -467,20 +520,26 @@ class ApiClient {
 
     static async updateModelRoleChain(scope, payload) {
         const source = Array.isArray(payload) ? { modelKeys: payload } : (payload && typeof payload === "object" ? payload : {});
+        const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
         const modelKeys = Array.isArray(source.modelKeys)
             ? source.modelKeys
             : Array.isArray(source.model_keys)
                 ? source.model_keys
                 : undefined;
-        const maxIterations = source.maxIterations ?? source.max_iterations;
         const body = {};
         if (modelKeys !== undefined) {
             body.model_keys = modelKeys;
             body.modelKeys = modelKeys;
         }
-        if (maxIterations !== undefined) {
+        if (has("maxIterations") || has("max_iterations")) {
+            const maxIterations = has("maxIterations") ? source.maxIterations : source.max_iterations;
             body.max_iterations = maxIterations;
             body.maxIterations = maxIterations;
+        }
+        if (has("maxConcurrency") || has("max_concurrency")) {
+            const maxConcurrency = has("maxConcurrency") ? source.maxConcurrency : source.max_concurrency;
+            body.max_concurrency = maxConcurrency;
+            body.maxConcurrency = maxConcurrency;
         }
         return this._refreshModelsAfter(this.put(`/api/models/roles/${scope}`, body));
     }
@@ -535,6 +594,7 @@ class ApiClient {
             items: data.items || [],
             routes: data.routes || {},
             roleIterations: data.roleIterations || data.role_iterations || {},
+            roleConcurrency: data.roleConcurrency || data.role_concurrency || {},
         };
     }
 
@@ -567,30 +627,38 @@ class ApiClient {
         return {
             routes: data.routes || {},
             roleIterations: data.roleIterations || data.role_iterations || {},
+            roleConcurrency: data.roleConcurrency || data.role_concurrency || {},
         };
     }
 
     static async updateLlmRoute(scope, payload) {
         const source = Array.isArray(payload) ? { modelKeys: payload } : (payload && typeof payload === "object" ? payload : {});
+        const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
         const modelKeys = Array.isArray(source.modelKeys)
             ? source.modelKeys
             : Array.isArray(source.model_keys)
                 ? source.model_keys
                 : undefined;
-        const maxIterations = source.maxIterations ?? source.max_iterations;
         const body = {};
         if (modelKeys !== undefined) {
             body.model_keys = modelKeys;
             body.modelKeys = modelKeys;
         }
-        if (maxIterations !== undefined) {
+        if (has("maxIterations") || has("max_iterations")) {
+            const maxIterations = has("maxIterations") ? source.maxIterations : source.max_iterations;
             body.max_iterations = maxIterations;
             body.maxIterations = maxIterations;
+        }
+        if (has("maxConcurrency") || has("max_concurrency")) {
+            const maxConcurrency = has("maxConcurrency") ? source.maxConcurrency : source.max_concurrency;
+            body.max_concurrency = maxConcurrency;
+            body.maxConcurrency = maxConcurrency;
         }
         const data = await this.put(`/api/llm/routes/${encodeURIComponent(scope)}`, body);
         return {
             routes: data.routes || {},
             roleIterations: data.roleIterations || data.role_iterations || {},
+            roleConcurrency: data.roleConcurrency || data.role_concurrency || {},
         };
     }
 

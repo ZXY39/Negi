@@ -378,6 +378,56 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("Skipped persisted inflight turn sync for {}", session_key)
 
+    async def _persist_turn_transcript(
+        self,
+        *,
+        user_input: UserInputMessage,
+        user_text: str,
+        assistant_text: str,
+        interaction_flow: list[dict[str, Any]],
+        interaction_trace: dict[str, Any] | None,
+        internal_source: str | None,
+        route_kind: str,
+        assistant_metadata: dict[str, Any] | None = None,
+    ) -> Any | None:
+        persisted_session = None
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            if internal_source is None:
+                persisted_session.add_message(
+                    "user",
+                    user_text,
+                    attachments=list(user_input.attachments or []),
+                    metadata=dict(user_input.metadata or {}),
+                )
+            assistant_payload: dict[str, Any] = {}
+            if interaction_flow:
+                assistant_payload["tool_events"] = interaction_flow
+            if interaction_trace is not None:
+                assistant_payload["interaction_trace"] = interaction_trace
+            metadata_payload = dict(assistant_metadata or {})
+            if metadata_payload:
+                assistant_payload["metadata"] = metadata_payload
+            persisted_session.add_message("assistant", assistant_text, **assistant_payload)
+            if self._state.session_key.startswith("web:"):
+                from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
+
+                update_ceo_session_after_turn(
+                    persisted_session,
+                    user_text="" if internal_source is not None else user_text,
+                    assistant_text=assistant_text,
+                    route_kind=str(route_kind or ""),
+                )
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            await self._emit(
+                "message_delta",
+                channel="analysis",
+                kind="persistence_warning",
+                text="Session transcript persistence failed; response is still available in-memory.",
+            )
+        return persisted_session
+
     async def _emit_state_snapshot(self):
         self._sync_persisted_inflight_turn()
         await self._emit("state_snapshot", state=self.state_dict())
@@ -645,12 +695,37 @@ class RuntimeAgentSession:
             except Exception as exc:
                 self._state.is_running = False
                 self._state.status = "error"
-                self._state.last_error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)
+                error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)
+                self._state.last_error = error
+                error_reply = f"运行出错：{error.message}"
+                self._state.latest_message = error_reply
+                interaction_flow = self._interaction_flow_snapshot()
+                interaction_trace = self.interaction_trace_snapshot()
+                user_text = self._history_text(user_input.content)
+                if persist_transcript:
+                    assistant_metadata = {
+                        "source": "runtime_error",
+                        "error_code": error.code,
+                        "error_message": error.message,
+                        "recoverable": error.recoverable,
+                    }
+                    if cron_internal:
+                        assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
+                    await self._persist_turn_transcript(
+                        user_input=user_input,
+                        user_text=user_text,
+                        assistant_text=error_reply,
+                        interaction_flow=interaction_flow,
+                        interaction_trace=interaction_trace,
+                        internal_source=internal_source,
+                        route_kind=str(getattr(self, "_last_route_kind", "") or ""),
+                        assistant_metadata=assistant_metadata,
+                    )
                 await self._emit(
                     "error",
-                    code="legacy_session_error",
-                    message=str(exc),
-                    recoverable=True,
+                    code=error.code,
+                    message=error.message,
+                    recoverable=error.recoverable,
                     source="runtime",
                 )
                 await self._emit("agent_end", session_key=self._state.session_key, status="error")
@@ -670,43 +745,22 @@ class RuntimeAgentSession:
                     logger.info(render_output_trace(output))
                 persisted_session = None
                 if persist_transcript:
-                    try:
-                        persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-                        if internal_source is None:
-                            persisted_session.add_message(
-                                "user",
-                                user_text,
-                                attachments=list(user_input.attachments or []),
-                                metadata=dict(user_input.metadata or {}),
-                            )
-                        assistant_payload: dict[str, Any] = {}
-                        if interaction_flow:
-                            assistant_payload["tool_events"] = interaction_flow
-                        if interaction_trace is not None:
-                            assistant_payload["interaction_trace"] = interaction_trace
-                        if cron_internal:
-                            assistant_payload["metadata"] = {
-                                "source": "cron",
-                                "cron_job_id": str((user_input.metadata or {}).get("cron_job_id") or "").strip(),
-                            }
-                        persisted_session.add_message("assistant", output, **assistant_payload)
-                        if self._state.session_key.startswith("web:"):
-                            from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
-
-                            update_ceo_session_after_turn(
-                                persisted_session,
-                                user_text="" if internal_source is not None else user_text,
-                                assistant_text=output,
-                                route_kind=str(getattr(self, "_last_route_kind", "") or ""),
-                            )
-                        self._loop.sessions.save(persisted_session)
-                    except Exception:
-                        await self._emit(
-                            "message_delta",
-                            channel="analysis",
-                            kind="persistence_warning",
-                            text="Session transcript persistence failed; response is still available in-memory.",
-                        )
+                    assistant_metadata = None
+                    if cron_internal:
+                        assistant_metadata = {
+                            "source": "cron",
+                            "cron_job_id": str((user_input.metadata or {}).get("cron_job_id") or "").strip(),
+                        }
+                    persisted_session = await self._persist_turn_transcript(
+                        user_input=user_input,
+                        user_text=user_text,
+                        assistant_text=output,
+                        interaction_flow=interaction_flow,
+                        interaction_trace=interaction_trace,
+                        internal_source=internal_source,
+                        route_kind=str(getattr(self, "_last_route_kind", "") or ""),
+                        assistant_metadata=assistant_metadata,
+                    )
                     if internal_source is None and getattr(self._loop, "memory_manager", None) is not None:
                         try:
                             await self._loop.memory_manager.ingest_turn(

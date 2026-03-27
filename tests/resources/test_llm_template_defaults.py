@@ -61,3 +61,20 @@ def test_openai_template_keeps_standard_api_mode_choices():
         "openai-completions",
         "openai-responses",
     ]
+
+
+def test_normalize_draft_rejects_endpoint_style_base_url():
+    registry = TemplateRegistry()
+    draft = _draft_from_template("openai").model_copy(
+        update={"base_url": "https://api.openai.com/v1/chat/completions"}
+    )
+
+    normalized, errors = normalize_draft(draft, registry)
+
+    assert normalized is None
+    assert any(error.field == "base_url" for error in errors)
+    assert any(
+        error.code == "endpoint_path_not_base_url"
+        and "/chat/completions" in error.message
+        for error in errors
+    )

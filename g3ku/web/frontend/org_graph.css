@@ -5046,6 +5046,32 @@ textarea {
     white-space: nowrap;
 }
 
+.model-role-limit-field {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    min-width: min(100%, 320px);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.model-role-limit-options {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.model-role-limit-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+}
+
 .model-role-iterations-input {
     width: 92px;
     min-height: 34px;
@@ -5056,6 +5082,10 @@ textarea {
     color: var(--text-primary);
     font: inherit;
     text-align: right;
+}
+
+.model-role-limit-input {
+    width: 96px;
 }
 
 .model-role-iterations-input:disabled {

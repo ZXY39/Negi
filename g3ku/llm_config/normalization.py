@@ -22,6 +22,13 @@ DERIVED_HEADER_FIELDS = {
 }
 
 NON_PARAMETER_FIELDS = {"api_key", "base_url", "default_model", "extra_headers", "extra_options"}
+COMMON_ENDPOINT_SUFFIX_HINTS = {
+    "/chat/completions": "Base URL should point to the provider API root, not the /chat/completions endpoint.",
+    "/responses": "Base URL should point to the provider API root, not the /responses endpoint.",
+    "/models": "Base URL should point to the provider API root, not the /models endpoint.",
+    "/messages": "Base URL should point to the provider API root, not the /messages endpoint.",
+    "/api/tags": "Base URL should point to the provider API root, not the /api/tags endpoint.",
+}
 
 
 def normalize_provider_id(provider_id: str) -> str:
@@ -57,6 +64,23 @@ def _parse_boolean(value: Any) -> bool | None:
 def _validate_url(value: str) -> bool:
     parsed = urlparse(value)
     return bool(parsed.scheme and parsed.netloc)
+
+
+def _base_url_endpoint_hint(value: str) -> str | None:
+    parsed = urlparse(value)
+    path = parsed.path.rstrip("/").lower()
+    if not path:
+        return None
+    for suffix, hint in COMMON_ENDPOINT_SUFFIX_HINTS.items():
+        if path.endswith(suffix):
+            return hint
+    if ":generatecontent" in path:
+        return "Base URL should point to the Gemini API root, not a model-specific :generateContent endpoint."
+    if path.endswith("/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"):
+        return "Base URL should point to the DashScope API root, not the embedding task endpoint."
+    if path.endswith("/api/v1/services/rerank/text-rerank/text-rerank"):
+        return "Base URL should point to the DashScope API root, not the rerank task endpoint."
+    return None
 
 
 def _coerce_field_value(field_type: FieldInputType, raw_value: Any, default: Any) -> Any:
@@ -136,6 +160,16 @@ def normalize_draft(
         base_url = template.default_base_url.rstrip("/")
     if not _validate_url(base_url):
         errors.append(FieldError(field="base_url", code="invalid_url", message="Base URL is invalid."))
+    else:
+        endpoint_hint = _base_url_endpoint_hint(base_url)
+        if endpoint_hint:
+            errors.append(
+                FieldError(
+                    field="base_url",
+                    code="endpoint_path_not_base_url",
+                    message=endpoint_hint,
+                )
+            )
 
     default_model = draft.default_model.strip() or template.default_model
     if not default_model:

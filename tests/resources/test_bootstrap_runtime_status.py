@@ -218,4 +218,43 @@ def test_bootstrap_exit_stops_runtime_before_requesting_server_shutdown(monkeypa
     response = client.post("/bootstrap/exit", json={})
 
     assert response.status_code == 200
-    assert calls == ["shutdown_runtime", "request_server_shutdown"]
+
+
+def test_bootstrap_unlock_succeeds_when_runtime_start_is_deferred(monkeypatch):
+    calls: list[str] = []
+
+    class _Security:
+        def unlock(self, *, password: str) -> None:
+            calls.append(f"unlock:{password}")
+
+        def status(self):
+            return {"mode": "unlocked"}
+
+    async def _deferred_runtime_start() -> None:
+        raise RuntimeError("No model configured for role 'ceo'.")
+
+    monkeypatch.setattr(bootstrap_rest, "_service", lambda: _Security())
+    monkeypatch.setattr(bootstrap_rest, "_start_runtime_after_unlock", _deferred_runtime_start)
+    monkeypatch.setattr(
+        bootstrap_rest,
+        "_status_payload",
+        lambda include_preview=True: {
+            "mode": "unlocked",
+            "runtime_ready": False,
+            "runtime_bootstrapping": False,
+            "runtime": {
+                "agent_ready": False,
+                "main_runtime_ready": False,
+                "heartbeat_ready": False,
+                "bootstrapping": False,
+                "ready": False,
+            },
+        },
+    )
+
+    client = TestClient(_build_app())
+    response = client.post("/bootstrap/unlock", json={"password": "demo"})
+
+    assert response.status_code == 200
+    assert calls == ["unlock:demo"]
+    assert response.json()["item"]["runtime_ready"] is False

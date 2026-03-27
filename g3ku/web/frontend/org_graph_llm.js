@@ -11,6 +11,7 @@
       providerModel: "",
       templateProviderId: "",
       jsonText: "",
+      initialJsonText: "",
       validation: null,
       probe: null,
       error: "",
@@ -54,6 +55,7 @@
         bindingMap: {},
         routes: EMPTY_MODEL_ROLES(),
         roleIterations: DEFAULT_ROLE_ITERATIONS(),
+        roleConcurrency: DEFAULT_ROLE_CONCURRENCY(),
         editor: emptyEditorState(),
         eventsBound: false,
       };
@@ -113,13 +115,16 @@
     S.modelCatalog.items = chatBindings.map((item) => trim(item.key));
     S.modelCatalog.roles = normalizeAllModelRoles(state.routes || EMPTY_MODEL_ROLES());
     S.modelCatalog.roleIterations = normalizeRoleIterations(state.roleIterations || DEFAULT_ROLE_ITERATIONS());
+    S.modelCatalog.roleConcurrency = normalizeRoleConcurrency(state.roleConcurrency || DEFAULT_ROLE_CONCURRENCY());
     if (S.modelCatalog.roleEditing) {
       S.modelCatalog.roleDrafts = normalizeAllModelRoles(S.modelCatalog.roleDrafts || EMPTY_MODEL_ROLES());
       S.modelCatalog.roleIterationDrafts = normalizeRoleIterations(S.modelCatalog.roleIterationDrafts || DEFAULT_ROLE_ITERATIONS());
+      S.modelCatalog.roleConcurrencyDrafts = normalizeRoleConcurrency(S.modelCatalog.roleConcurrencyDrafts || DEFAULT_ROLE_CONCURRENCY());
       syncModelRoleDraftState();
     } else {
       S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
       S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
+      S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
       S.modelCatalog.rolesDirty = false;
     }
     S.modelCatalog.defaults = {
@@ -290,6 +295,7 @@
     section.providerModel = trim(meta?.providerModel);
     section.templateProviderId = "";
     section.jsonText = "";
+    section.initialJsonText = "";
     section.validation = null;
     section.probe = null;
     section.error = "";
@@ -305,6 +311,7 @@
       section.providerModel = trim(meta?.providerModel || providerModelFromDraft(draft));
       section.templateProviderId = defaultMemoryTemplateProviderId(section.capability, section.providerId);
       section.jsonText = JSON.stringify(draft, null, 2);
+      section.initialJsonText = section.jsonText;
       return;
     }
     if (!section.modelKey) {
@@ -325,6 +332,7 @@
     const draft = draftFromConfig(record);
     section.providerId = trim(draft.provider_id);
     section.jsonText = JSON.stringify(draft, null, 2);
+    section.initialJsonText = section.jsonText;
   }
 
   async function loadMemorySectionConfig(editor, sectionKey, meta) {
@@ -335,6 +343,7 @@
     section.providerModel = trim(meta?.providerModel);
     section.templateProviderId = "";
     section.jsonText = "";
+    section.initialJsonText = "";
     section.validation = null;
     section.probe = null;
     section.error = "";
@@ -349,6 +358,7 @@
       section.providerId = trim(draft.provider_id);
       section.providerModel = providerModelFromDraft(draft);
       section.jsonText = JSON.stringify(draft, null, 2);
+      section.initialJsonText = section.jsonText;
       return;
     }
     const record = await ApiClient.getLlmConfig(section.configId, { includeSecrets: true });
@@ -357,6 +367,7 @@
     section.providerModel = trim(meta?.providerModel || providerModelFromDraft(draft));
     section.templateProviderId = defaultMemoryTemplateProviderId(section.capability, section.providerId);
     section.jsonText = JSON.stringify(draft, null, 2);
+    section.initialJsonText = section.jsonText;
   }
 
   function syncMemorySectionText(sectionKey) {
@@ -365,6 +376,15 @@
     const textarea = document.getElementById(memoryTextareaId(sectionKey));
     if (textarea) section.jsonText = textarea.value || "";
     return section;
+  }
+
+  function memorySectionIsModified(section) {
+    if (!section) return false;
+    return trim(section.jsonText) !== trim(section.initialJsonText);
+  }
+
+  function modifiedMemorySectionKeys(memory = llmState().editor.memory) {
+    return ["embedding", "rerank"].filter((sectionKey) => memorySectionIsModified(memory?.[sectionKey]));
   }
 
   function setMemorySectionValidationError(section, message, field = "json") {
@@ -432,15 +452,11 @@
 
   function canSaveMemoryEditor() {
     const memory = llmState().editor.memory;
-    const hasEmbeddingDraft = !!trim(memory?.embedding?.jsonText);
-    const hasRerankDraft = !!trim(memory?.rerank?.jsonText);
     return Boolean(
       memory
       && !memory.loading
       && !trim(memory.error)
-      && !trim(memory.embedding.error)
-      && !trim(memory.rerank.error)
-      && (hasEmbeddingDraft || hasRerankDraft)
+      && modifiedMemorySectionKeys(memory).length
     );
   }
 
@@ -829,6 +845,38 @@
     }).join("");
   }
 
+  function renderRoutes() {
+    if (!U.modelRoleEditors) return;
+    const editing = !!S.modelCatalog.roleEditing;
+    U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
+      const chain = modelScopeChain(scope.key);
+      const maxIterations = modelScopeIterations(scope.key);
+      const maxConcurrency = modelScopeConcurrency(scope.key);
+      return `
+        <section class="model-chain-card">
+          <div class="panel-header">
+            <div>
+              <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
+              <p class="subtitle">${escv(chain[0] ? `默认：${chain[0]}` : "尚未配置")}</p>
+            </div>
+            <div class="model-chain-card-meta">
+              <span class="policy-chip neutral">${chain.length} 个模型</span>
+              ${renderRoleLimitControl({ scopeKey: scope.key, kind: "iterations", label: "最大轮数", value: maxIterations, editing })}
+              ${renderRoleLimitControl({ scopeKey: scope.key, kind: "concurrency", label: "最大并发数", value: maxConcurrency, editing })}
+            </div>
+          </div>
+          <div class="model-role-section">
+            <div class="model-role-section-title">ROLE CHAIN</div>
+            <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
+              const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
+              const key = trim(item?.key || ref);
+              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}">${editing ? '<button type="button" class="model-chain-handle" aria-label="拖拽排序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>' : ''}<button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(key)}</span><span class="resource-list-subtitle">${escv(item?.provider_model || ref)}</span><span class="model-inline-meta">${index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ''}</span></button>${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>` : ''}</article>`;
+            }).join("") : `<div class="empty-state compact">${editing ? '把左侧模型拖到这里，编排当前角色链。' : '点击“编辑模型链”后再调整角色链。'}</div>`}</div>
+          </div>
+        </section>`;
+    }).join("");
+  }
+
   function renderAll() {
     const state = llmState();
     refs();
@@ -859,6 +907,7 @@
       state.bindings = Array.isArray(bindingPayload?.items) ? bindingPayload.items : [];
       state.routes = normalizeAllModelRoles(bindingPayload?.routes || EMPTY_MODEL_ROLES());
       state.roleIterations = normalizeRoleIterations(bindingPayload?.roleIterations || bindingPayload?.role_iterations || DEFAULT_ROLE_ITERATIONS());
+      state.roleConcurrency = normalizeRoleConcurrency(bindingPayload?.roleConcurrency || bindingPayload?.role_concurrency || DEFAULT_ROLE_CONCURRENCY());
       mapify();
     } catch (error) {
       state.error = error.message || "加载失败";
@@ -1140,8 +1189,10 @@
   async function handleMemorySavePartial() {
     const state = llmState();
     if (!canSaveMemoryEditor()) {
+      const modifiedKeys = modifiedMemorySectionKeys(state.editor.memory);
       throw new Error(
-        state.editor.memory?.error
+        (!modifiedKeys.length ? "当前没有已修改的记忆模型配置。" : "")
+        || state.editor.memory?.error
         || state.editor.memory?.embedding?.error
         || state.editor.memory?.rerank?.error
         || "Memory model config is not ready."
@@ -1150,12 +1201,16 @@
     // Persist current textarea edits into state before any rerender happens.
     syncMemorySectionText("embedding");
     syncMemorySectionText("rerank");
+    const sectionKeys = modifiedMemorySectionKeys(state.editor.memory);
+    if (!sectionKeys.length) {
+      throw new Error("当前没有已修改的记忆模型配置。");
+    }
     state.saving = true;
     renderAll();
     try {
       const results = [];
       const bindingPayload = {};
-      for (const sectionKey of ["embedding", "rerank"]) {
+      for (const sectionKey of sectionKeys) {
         const prepared = prepareMemorySectionDraft(sectionKey);
         const section = prepared.section;
         const label = section?.label || capabilityLabel(sectionKey);
@@ -1182,6 +1237,7 @@
             persistent: true,
           });
           await persistMemorySectionDraft(section, prepared.draft);
+          section.initialJsonText = section.jsonText;
           if (trim(section.configId)) {
             bindingPayload[`${sectionKey}_config_id`] = section.configId;
           }
@@ -1376,10 +1432,12 @@
         routes = await ApiClient.updateLlmRoute(scope, {
           modelKeys: normalizeModelRoleChain(S.modelCatalog.roleDrafts[scope] || []),
           maxIterations: modelScopeIterations(scope, "draft"),
+          maxConcurrency: modelScopeConcurrency(scope, "draft"),
         });
       }
       llmState().routes = normalizeAllModelRoles(routes?.routes || EMPTY_MODEL_ROLES());
       llmState().roleIterations = normalizeRoleIterations(routes?.roleIterations || DEFAULT_ROLE_ITERATIONS());
+      llmState().roleConcurrency = normalizeRoleConcurrency(routes?.roleConcurrency || routes?.role_concurrency || DEFAULT_ROLE_CONCURRENCY());
       S.modelCatalog.roleEditing = false;
       S.modelCatalog.rolesDirty = false;
       showToast({ title: "保存成功", text: "模型链已更新", kind: "success" });

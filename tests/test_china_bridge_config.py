@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import g3ku_bootstrap
 import g3ku.china_bridge.supervisor as supervisor_module
 from g3ku.china_bridge.supervisor import ChinaBridgeSupervisor
 from g3ku.config.loader import _migrate_config, load_config
@@ -286,3 +287,106 @@ async def test_supervisor_clears_running_state_when_host_exits_before_client_con
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+def test_bootstrap_preflight_warns_when_node_and_package_manager_missing(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku").mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku" / "config.json").write_text(
+        json.dumps(
+            {
+                "chinaBridge": {
+                    "enabled": True,
+                    "autoStart": True,
+                    "nodeBin": "node",
+                    "npmClient": "pnpm",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(g3ku_bootstrap, "PROJECT_ROOT", workspace)
+    monkeypatch.setattr(g3ku_bootstrap, "_resolve_node_executable", lambda _config: None)
+    monkeypatch.setattr(g3ku_bootstrap, "_node_satisfies_min_version", lambda _path: False)
+    monkeypatch.setattr(g3ku_bootstrap, "_resolve_package_manager_executable", lambda _config, *, node_path=None: None)
+
+    messages = g3ku_bootstrap._china_bridge_preflight_messages()
+
+    assert len(messages) == 2
+    assert "Node.js is not available in PATH" in messages[0]
+    assert "no package manager was found" in messages[1]
+
+
+def test_bootstrap_preflight_skips_when_china_bridge_is_disabled(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku").mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku" / "config.json").write_text(
+        json.dumps({"chinaBridge": {"enabled": False, "autoStart": True}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(g3ku_bootstrap, "PROJECT_ROOT", workspace)
+
+    assert g3ku_bootstrap._china_bridge_preflight_messages() == []
+
+@pytest.mark.asyncio
+async def test_supervisor_skips_start_when_prerequisites_are_missing(tmp_path: Path, monkeypatch) -> None:
+    supervisor = _build_supervisor(tmp_path)
+
+    monkeypatch.setattr(supervisor_module.shutil, "which", lambda _name: None)
+
+    await supervisor.start()
+
+    assert supervisor._runner_task is None
+    assert supervisor.state.running is False
+    assert supervisor.state.connected is False
+    assert supervisor.state.built is True
+    assert supervisor.state.pid is None
+    assert supervisor.state.last_error == ""
+
+def test_bootstrap_attempts_windows_node_install_when_missing(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku").mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku" / "config.json").write_text(
+        json.dumps(
+            {
+                "chinaBridge": {
+                    "enabled": True,
+                    "autoStart": True,
+                    "nodeBin": "node",
+                    "npmClient": "pnpm",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    installed = {"done": False}
+    node_path = workspace / "nodejs" / "node.exe"
+    npm_path = workspace / "nodejs" / "npm.cmd"
+    added_paths: list[Path] = []
+
+    monkeypatch.setattr(g3ku_bootstrap, "PROJECT_ROOT", workspace)
+    monkeypatch.setattr(g3ku_bootstrap.os, "name", "nt", raising=False)
+
+    def _resolve_node(_config: dict):
+        return node_path if installed["done"] else None
+
+    def _install() -> bool:
+        installed["done"] = True
+        return True
+
+    monkeypatch.setattr(g3ku_bootstrap, "_resolve_node_executable", _resolve_node)
+    monkeypatch.setattr(g3ku_bootstrap, "_node_satisfies_min_version", lambda path: path == node_path)
+    monkeypatch.setattr(g3ku_bootstrap, "_install_windows_node_lts", _install)
+    monkeypatch.setattr(g3ku_bootstrap, "_resolve_package_manager_executable", lambda _config, *, node_path=None: npm_path if installed["done"] else None)
+    monkeypatch.setattr(g3ku_bootstrap, "_ensure_executable_dir_on_path", lambda executable: added_paths.append(Path(executable).parent))
+
+    g3ku_bootstrap._ensure_china_bridge_toolchain()
+
+    assert installed["done"] is True
+    assert added_paths == [node_path.parent, npm_path.parent]
+

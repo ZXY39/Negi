@@ -20,6 +20,7 @@ from g3ku.runtime.tool_watchdog import ToolExecutionManager
 
 class AgentRuntimeEngine:
     """Lightweight source runtime engine used by the converged session runtime."""
+    _UNSET = object()
 
     def __init__(
         self,
@@ -29,7 +30,7 @@ class AgentRuntimeEngine:
         workspace,
         model: str | None = None,
         provider_name: str | None = None,
-        max_iterations: int = 40,
+        max_iterations: int | None | object = _UNSET,
         temperature: float = 0.1,
         max_tokens: int = 4096,
         memory_window: int = 100,
@@ -51,7 +52,7 @@ class AgentRuntimeEngine:
         self.workspace = Path(workspace)
         self.model = str(model or '')
         self.provider_name = str(provider_name or '')
-        self.max_iterations = int(max_iterations or 40)
+        self.max_iterations = self._normalize_optional_limit(max_iterations, default=40)
         self.temperature = float(temperature or 0.1)
         self.max_tokens = int(max_tokens or 4096)
         self.memory_window = int(memory_window or 100)
@@ -131,6 +132,16 @@ class AgentRuntimeEngine:
         self._bootstrap = RuntimeBootstrapBridge(self)
         self._bootstrap.init_multi_agent_runtime()
         self._bootstrap.register_default_tools()
+
+    @classmethod
+    def _normalize_optional_limit(cls, value: int | None | object, *, default: int | None) -> int | None:
+        if value is cls._UNSET:
+            value = default
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return max(0, int(value))
 
     async def _maybe_await(self, value: Any) -> Any:
         if inspect.isawaitable(value):

@@ -51,9 +51,37 @@ class ChinaBridgeSupervisor:
     def state(self) -> ChinaBridgeState:
         return self._state
 
+    def _package_manager_candidates(self) -> list[str]:
+        preferred = str(self._app_config.china_bridge.npm_client or "pnpm").strip() or "pnpm"
+        candidates: list[str] = [preferred]
+        for fallback in ("pnpm", "npm"):
+            if fallback not in candidates:
+                candidates.append(fallback)
+        return candidates
+
+    def _startup_prerequisite_errors(self) -> list[str]:
+        errors: list[str] = []
+        node_bin = str(self._app_config.china_bridge.node_bin or "node").strip() or "node"
+        if not shutil.which(node_bin):
+            errors.append(f"missing node runtime: {node_bin}")
+        if (self._host_install_required() or self._host_build_required()) and not any(
+            shutil.which(candidate) for candidate in self._package_manager_candidates()
+        ):
+            errors.append("missing package manager: " + ", ".join(self._package_manager_candidates()))
+        return errors
+
     async def start(self) -> None:
         if not bool(self._app_config.china_bridge.enabled) or not bool(self._app_config.china_bridge.auto_start):
             self._write_state(running=False, connected=False)
+            return
+        if self._startup_prerequisite_errors():
+            self._write_state(
+                running=False,
+                connected=False,
+                built=self._dist_entry().exists(),
+                pid=None,
+                last_error="",
+            )
             return
         if self._runner_task is not None:
             return
@@ -192,11 +220,7 @@ class ChinaBridgeSupervisor:
         )
 
     def _resolve_package_manager(self) -> tuple[str, str]:
-        preferred = str(self._app_config.china_bridge.npm_client or "pnpm").strip() or "pnpm"
-        candidates: list[str] = [preferred]
-        for fallback in ("pnpm", "npm"):
-            if fallback not in candidates:
-                candidates.append(fallback)
+        candidates = self._package_manager_candidates()
         for candidate in candidates:
             resolved = shutil.which(candidate)
             if resolved:

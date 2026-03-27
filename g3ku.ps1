@@ -8,8 +8,8 @@ if (-not (Test-Path $bootstrap)) {
     Write-Error "[g3ku] Missing bootstrap script: $bootstrap"
 }
 
+$venvReady = $false
 if (Test-Path $venvPython) {
-    $venvReady = $false
     try {
         & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" *> $null
         $venvReady = ($LASTEXITCODE -eq 0)

@@ -9,6 +9,7 @@ from g3ku.llm_config.enums import AuthMode, Capability
 from g3ku.llm_config.facade import LLMConfigFacade
 
 VALID_SCOPES = ("ceo", "execution", "inspection")
+_UNSET = object()
 
 
 def _normalize_scope(value: str) -> str:
@@ -217,12 +218,16 @@ class ModelManager:
     def set_scope_max_iterations(self, scope: str, max_iterations: int) -> dict[str, Any]:
         return self.update_scope_route(scope, max_iterations=max_iterations)
 
+    def set_scope_max_concurrency(self, scope: str, max_concurrency: int | None) -> dict[str, Any]:
+        return self.update_scope_route(scope, max_concurrency=max_concurrency)
+
     def update_scope_route(
         self,
         scope: str,
         *,
         model_keys: list[str] | None = None,
-        max_iterations: int | None = None,
+        max_iterations: Any = _UNSET,
+        max_concurrency: Any = _UNSET,
     ) -> dict[str, Any]:
         normalized_scope = _normalize_scope(scope)
         updated = False
@@ -242,20 +247,23 @@ class ModelManager:
                 raise ValueError("model_keys must not be empty")
             setattr(self.config.models.roles, normalized_scope, cleaned)
             updated = True
-        if max_iterations is not None:
-            clean_iterations = int(max_iterations)
-            if clean_iterations < 2:
-                raise ValueError("max_iterations must be >= 2")
+        if max_iterations is not _UNSET:
+            clean_iterations = self._normalize_optional_limit(max_iterations, field_name="max_iterations")
             setattr(self.config.agents.role_iterations, normalized_scope, clean_iterations)
             updated = True
+        if max_concurrency is not _UNSET:
+            clean_concurrency = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
+            setattr(self.config.agents.role_concurrency, normalized_scope, clean_concurrency)
+            updated = True
         if not updated:
-            raise ValueError("model_keys or max_iterations must be provided")
+            raise ValueError("model_keys, max_iterations, or max_concurrency must be provided")
         self._revalidate()
         self.save()
         return {
             "scope": normalized_scope,
             "model_keys": list(getattr(self.config.models.roles, normalized_scope)),
             "max_iterations": self.config.get_role_max_iterations(normalized_scope),
+            "max_concurrency": self.config.get_role_max_concurrency(normalized_scope),
         }
 
     def add_model_to_scope(self, key: str, scope: str) -> None:
@@ -278,6 +286,17 @@ class ModelManager:
     def _scope_list(self, scope: str) -> list[str]:
         normalized_scope = _normalize_scope(scope)
         return getattr(self.config.models.roles, normalized_scope)
+
+    @staticmethod
+    def _normalize_optional_limit(value: Any, *, field_name: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        clean_value = int(value)
+        if clean_value < 0:
+            raise ValueError(f"{field_name} must be >= 0")
+        return clean_value
 
     def _remove_model_from_roles(self, key: str) -> None:
         for scope in VALID_SCOPES:

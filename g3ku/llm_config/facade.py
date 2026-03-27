@@ -31,6 +31,10 @@ def _store_root(workspace: Path | None = None) -> Path:
     return root / ".g3ku" / "llm-config"
 
 
+def _read_utf8_json_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
+
+
 def _resolve_legacy_master_key(storage_root: Path) -> str | None:
     import os
 
@@ -39,7 +43,7 @@ def _resolve_legacy_master_key(storage_root: Path) -> str | None:
         return env_key
     key_path = storage_root / "master.key"
     if key_path.exists():
-        raw = key_path.read_text(encoding="utf-8").strip()
+        raw = _read_utf8_json_text(key_path).strip()
         if not raw:
             return None
         try:
@@ -395,7 +399,7 @@ class LLMConfigFacade:
         if not path.exists():
             return {}, False
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = json.loads(_read_utf8_json_text(path))
         except Exception:
             return {}, True
         if not isinstance(raw, dict):

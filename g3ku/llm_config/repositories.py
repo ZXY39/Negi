@@ -18,10 +18,15 @@ class EncryptedConfigRepository:
         if not self.index_path.exists():
             self._write_index([])
 
+    @staticmethod
+    def _read_json_text(path: Path) -> str:
+        # Accept UTF-8 with or without BOM so user-edited JSON files do not break save flows.
+        return path.read_text(encoding="utf-8-sig")
+
     def _read_index(self) -> list[StoredConfigSummary]:
         if not self.index_path.exists():
             return []
-        payload = json.loads(self.index_path.read_text(encoding="utf-8"))
+        payload = json.loads(self._read_json_text(self.index_path))
         entries = payload.get("configs", []) if isinstance(payload, dict) else []
         return [StoredConfigSummary.model_validate(entry) for entry in entries]
 
@@ -67,7 +72,7 @@ class EncryptedConfigRepository:
     def get(self, config_id: str) -> NormalizedProviderConfig:
         record_path = self._record_path(config_id)
         if record_path.exists():
-            return NormalizedProviderConfig.model_validate_json(record_path.read_text(encoding="utf-8"))
+            return NormalizedProviderConfig.model_validate_json(self._read_json_text(record_path))
         legacy_path = self._legacy_record_path(config_id)
         if legacy_path.exists() and self.secret_store is not None:
             decrypted = self.secret_store.decrypt(legacy_path.read_bytes())

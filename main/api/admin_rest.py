@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import errno
 import os
@@ -22,7 +23,21 @@ from g3ku.china_bridge.registry import (
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.schema import Config
 from g3ku.config.model_manager import ModelManager, VALID_SCOPES
-from g3ku.shells.web import get_agent, refresh_web_agent_runtime
+from g3ku.resources import get_shared_resource_manager
+from g3ku.resources.models import ResourceKind
+from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
+from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
+from main.governance import (
+    GovernanceStore,
+    MainRuntimePolicyEngine,
+    MainRuntimeResourceRegistry,
+    PermissionSubject,
+    list_effective_skill_ids,
+    list_effective_tool_names,
+)
+from main.governance.roles import to_public_allowed_roles
+from main.protocol import now_iso
+from main.storage.sqlite_store import SQLiteTaskStore
 
 router = APIRouter()
 
@@ -45,6 +60,731 @@ def _service():
     if service is None:
         raise HTTPException(status_code=503, detail='main_task_service_unavailable')
     return service
+
+
+def _resolve_workspace_relative_path(workspace: Path, raw_path: str | Path | None, *, fallback: str) -> Path:
+    candidate = Path(str(raw_path or fallback))
+    if not candidate.is_absolute():
+        candidate = Path(workspace) / candidate
+    return candidate.resolve(strict=False)
+
+
+class _ResourceDeleteBlockedError(ValueError):
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        resource_kind: str,
+        resource_id: str,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.payload = {
+            'code': str(code or '').strip(),
+            'message': str(message or '').strip(),
+            'resource_kind': str(resource_kind or '').strip(),
+            'resource_id': str(resource_id or '').strip(),
+            'usage': dict(usage or {}),
+        }
+
+
+class _ResourceMutationBlockedError(ValueError):
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        resource_kind: str,
+        resource_id: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.payload = {
+            'code': str(code or '').strip(),
+            'message': str(message or '').strip(),
+            'resource_kind': str(resource_kind or '').strip(),
+            'resource_id': str(resource_id or '').strip(),
+            'details': dict(details or {}),
+        }
+
+
+class _StandaloneResourceService:
+    def __init__(self, cfg: Config):
+        self._cfg = cfg
+        self._workspace = Path(cfg.workspace_path).resolve(strict=False)
+        self._resource_manager = get_shared_resource_manager(self._workspace, app_config=cfg)
+        self._resource_manager.start()
+        self._resource_manager.reload_now(trigger='admin_resource_read')
+        runtime_store_path = _resolve_workspace_relative_path(
+            self._workspace,
+            getattr(cfg.main_runtime, 'store_path', None),
+            fallback='.g3ku/main-runtime/runtime.sqlite3',
+        )
+        governance_path = _resolve_workspace_relative_path(
+            self._workspace,
+            getattr(cfg.main_runtime, 'governance_store_path', None),
+            fallback='.g3ku/main-runtime/governance.sqlite3',
+        )
+        self._task_store = SQLiteTaskStore(runtime_store_path)
+        self._governance_store = GovernanceStore(governance_path)
+        self.resource_registry = MainRuntimeResourceRegistry(
+            workspace_root=self._workspace,
+            store=self._governance_store,
+            resource_manager=self._resource_manager,
+        )
+        self.resource_registry.refresh_from_current_resources()
+        self.policy_engine = MainRuntimePolicyEngine(
+            store=self._governance_store,
+            resource_registry=self.resource_registry,
+        )
+        self.policy_engine.sync_default_role_policies()
+
+    def close(self) -> None:
+        self._task_store.close()
+        self._governance_store.close()
+
+    def list_skill_resources(self) -> list[Any]:
+        return list(self.resource_registry.list_skill_resources())
+
+    def get_skill_resource(self, skill_id: str):
+        return self.resource_registry.get_skill_resource(str(skill_id or '').strip())
+
+    def list_skill_files(self, skill_id: str) -> dict[str, str]:
+        return {
+            file_key: str(path)
+            for file_key, path in self.resource_registry.skill_file_map(str(skill_id or '').strip()).items()
+        }
+
+    def read_skill_file(self, skill_id: str, file_key: str) -> str:
+        path = self.resource_registry.skill_file_map(str(skill_id or '').strip()).get(str(file_key or '').strip())
+        if path is None:
+            raise ValueError('editable_file_not_allowed')
+        return path.read_text(encoding='utf-8')
+
+    def _configured_core_tool_entries(self) -> list[str]:
+        return configured_core_tools(resource_manager=self._resource_manager)
+
+    def _core_tool_resolution(self):
+        return resolve_core_tool_targets(
+            self._configured_core_tool_entries(),
+            list(self.resource_registry.list_tool_families()),
+        )
+
+    def _raw_tool_family(self, tool_id: str):
+        return self.resource_registry.get_tool_family(str(tool_id or '').strip())
+
+    def _decorate_tool_family(self, family):
+        if family is None:
+            return None
+        resolution = self._core_tool_resolution()
+        metadata = dict(getattr(family, 'metadata', {}) or {})
+        metadata['repair_required'] = bool(getattr(family, 'callable', True)) and not bool(getattr(family, 'available', True))
+        return family.model_copy(update={'is_core': family.tool_id in resolution.family_ids, 'metadata': metadata})
+
+    def list_tool_resources(self) -> list[Any]:
+        return [self._decorate_tool_family(item) for item in self.resource_registry.list_tool_families()]
+
+    def get_tool_family(self, tool_id: str):
+        return self._decorate_tool_family(self._raw_tool_family(tool_id))
+
+    def _tool_family_executor_name(self, family) -> str:
+        primary = str(getattr(family, 'primary_executor_name', '') or '').strip()
+        if primary:
+            return primary
+        for action in list(getattr(family, 'actions', []) or []):
+            for executor_name in list(getattr(action, 'executor_names', []) or []):
+                name = str(executor_name or '').strip()
+                if name:
+                    return name
+        fallback = str(getattr(family, 'tool_id', '') or '').strip()
+        descriptor = self._resource_manager.get_tool_descriptor(fallback) if fallback else None
+        if descriptor is not None:
+            return fallback
+        return ''
+
+    def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
+        family = self._raw_tool_family(tool_id)
+        if family is None:
+            needle = str(tool_id or '').strip()
+            for item in self.resource_registry.list_tool_families():
+                action_names = {
+                    str(executor_name or '').strip()
+                    for action in list(getattr(item, 'actions', []) or [])
+                    for executor_name in list(getattr(action, 'executor_names', []) or [])
+                    if str(executor_name or '').strip()
+                }
+                if needle and needle in action_names:
+                    family = item
+                    break
+        if family is None:
+            return None
+        executor_name = self._tool_family_executor_name(family)
+        content = ''
+        path = ''
+        descriptor = None
+        if executor_name:
+            try:
+                content = self._resource_manager.load_toolskill_body(executor_name)
+            except FileNotFoundError:
+                content = ''
+            descriptor = self._resource_manager.get_tool_descriptor(executor_name)
+            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
+                path = str(descriptor.toolskills_main_path)
+        if descriptor is None:
+            descriptor = self._resource_manager.get_tool_descriptor(str(getattr(family, 'tool_id', '') or '').strip())
+            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
+                path = str(descriptor.toolskills_main_path)
+        tool_type = str(getattr(family, 'tool_type', getattr(descriptor, 'tool_type', 'internal')) or 'internal')
+        install_dir = str(
+            getattr(family, 'install_dir', None)
+            or getattr(descriptor, 'install_dir', '')
+            or ''
+        ).strip() or None
+        callable_flag = bool(getattr(family, 'callable', getattr(descriptor, 'callable', True)))
+        repair_required = callable_flag and not bool(getattr(family, 'available', getattr(descriptor, 'available', True)))
+        return {
+            'tool_id': family.tool_id,
+            'primary_executor_name': executor_name,
+            'content': content,
+            'path': path,
+            'description': family.description,
+            'tool_type': tool_type,
+            'install_dir': install_dir,
+            'callable': callable_flag,
+            'available': bool(getattr(family, 'available', getattr(descriptor, 'available', True))),
+            'repair_required': repair_required,
+            'warnings': list(getattr(family, 'metadata', {}).get('warnings') or []),
+            'errors': list(getattr(family, 'metadata', {}).get('errors') or []),
+        }
+
+    def _subject(self, *, actor_role: str, session_id: str, task_id: str | None = None, node_id: str | None = None) -> PermissionSubject:
+        return PermissionSubject(
+            user_key=session_id,
+            session_id=session_id,
+            task_id=task_id,
+            node_id=node_id,
+            actor_role=actor_role,
+        )
+
+    def list_effective_tool_names(self, *, actor_role: str, session_id: str) -> list[str]:
+        supported = sorted(self._resource_manager.tool_instances().keys())
+        return list_effective_tool_names(
+            subject=self._subject(actor_role=actor_role, session_id=session_id),
+            supported_tool_names=supported,
+            resource_registry=self.resource_registry,
+            policy_engine=self.policy_engine,
+            mutation_allowed=True,
+        )
+
+    def list_visible_skill_resources(self, *, actor_role: str, session_id: str):
+        visible_ids = set(
+            list_effective_skill_ids(
+                subject=self._subject(actor_role=actor_role, session_id=session_id),
+                available_skill_ids=[item.skill_id for item in self.resource_registry.list_skill_resources()],
+                policy_engine=self.policy_engine,
+            )
+        )
+        return [item for item in self.resource_registry.list_skill_resources() if item.skill_id in visible_ids]
+
+    def list_visible_tool_families(self, *, actor_role: str, session_id: str):
+        visible_names = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        subject = self._subject(actor_role=actor_role, session_id=session_id)
+        families = []
+        for family in self.resource_registry.list_tool_families():
+            actions = []
+            for action in family.actions:
+                decision = self.policy_engine.evaluate_tool_action(
+                    subject=subject,
+                    tool_id=family.tool_id,
+                    action_id=action.action_id,
+                )
+                executor_visible = bool(set(action.executor_names) & visible_names)
+                if decision.allowed and (not bool(getattr(family, 'callable', True)) or executor_visible):
+                    actions.append(action)
+            if actions:
+                families.append(family.model_copy(update={'actions': actions}))
+        return families
+
+    def capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
+        return self._resource_manager.capture_resource_tree_state()
+
+    def refresh_resource_paths(
+        self,
+        paths: list[str | Path],
+        *,
+        trigger: str = 'path-change',
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        self._resource_manager.refresh_paths(list(paths or []), trigger=trigger)
+        skills, tools = self.resource_registry.refresh_from_current_resources()
+        self.policy_engine.sync_default_role_policies()
+        return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
+
+    def refresh_changed_resources(
+        self,
+        before_state: dict[str, dict[str, str]] | None,
+        *,
+        trigger: str = 'path-change',
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        self._resource_manager.refresh_changed_tree_state(before_state, trigger=trigger)
+        skills, tools = self.resource_registry.refresh_from_current_resources()
+        self.policy_engine.sync_default_role_policies()
+        return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
+
+    def write_skill_file(self, skill_id: str, file_key: str, content: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        path = self.resource_registry.skill_file_map(str(skill_id or '').strip()).get(str(file_key or '').strip())
+        if path is None:
+            raise ValueError('editable_file_not_allowed')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(content or ''), encoding='utf-8')
+        self.refresh_resource_paths([path], trigger='skill-file-write', session_id=session_id)
+        return {'skill_id': str(skill_id or '').strip(), 'file_key': str(file_key or '').strip(), 'path': str(path)}
+
+    async def write_skill_file_async(
+        self,
+        skill_id: str,
+        file_key: str,
+        content: str,
+        *,
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        item = self.write_skill_file(skill_id, file_key, content, session_id=session_id)
+        item['catalog_synced'] = False
+        return item
+
+    def _workspace_root(self) -> Path:
+        return self._workspace
+
+    def _resource_base_dir(self, kind: ResourceKind) -> Path:
+        registry = getattr(self._resource_manager, '_registry', None)
+        if kind is ResourceKind.SKILL:
+            candidate = getattr(registry, 'skills_dir', None)
+            fallback = self._workspace_root() / 'skills'
+        else:
+            candidate = getattr(registry, 'tools_dir', None)
+            fallback = self._workspace_root() / 'tools'
+        return Path(candidate or fallback).resolve(strict=False)
+
+    @staticmethod
+    def _is_relative_to(path: Path, base: Path) -> bool:
+        try:
+            path.relative_to(base)
+        except ValueError:
+            return False
+        return True
+
+    def _resolve_workspace_path(self, raw_path: str | Path | None) -> Path:
+        path = Path(raw_path or '').expanduser()
+        if not path.is_absolute():
+            path = self._workspace_root() / path
+        return path.resolve(strict=False)
+
+    def _resolve_resource_root(self, raw_path: str | Path | None, *, kind: ResourceKind) -> Path:
+        resolved = self._resolve_workspace_path(raw_path)
+        base_dir = self._resource_base_dir(kind)
+        if not self._is_relative_to(resolved, base_dir):
+            raise ValueError(f'{kind.value}_path_outside_workspace')
+        if resolved == base_dir:
+            raise ValueError(f'{kind.value}_path_invalid')
+        return resolved
+
+    def _resource_is_busy(self, kind: ResourceKind, *names: str) -> bool:
+        for raw_name in names:
+            name = str(raw_name or '').strip()
+            if not name:
+                continue
+            try:
+                state = self._resource_manager.busy_state(kind, name)
+            except Exception:
+                continue
+            if bool(getattr(state, 'busy', False)):
+                return True
+        return False
+
+    @staticmethod
+    def _display_role_label(role: str) -> str:
+        return {
+            'ceo': '主Agent',
+            'execution': '执行',
+            'inspection': '检验',
+        }.get(str(role or '').strip().lower(), str(role or '').strip())
+
+    def _running_task_records(self) -> list[Any]:
+        try:
+            tasks = self._task_store.list_tasks()
+        except Exception:
+            return []
+        return [
+            task
+            for task in tasks
+            if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress' and not bool(getattr(task, 'is_paused', False))
+        ]
+
+    def _running_ceo_session_ids(self) -> list[str]:
+        return []
+
+    def _skill_visible_roles_for_task(self, task: Any, skill_id: str) -> list[str]:
+        roles: list[str] = []
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        for actor_role in ('execution', 'inspection'):
+            visible_ids = {
+                str(getattr(item, 'skill_id', '') or '').strip()
+                for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)
+            }
+            if skill_id in visible_ids:
+                roles.append(actor_role)
+        return roles
+
+    def _tool_visible_roles_for_task(self, task: Any, tool_id: str) -> list[str]:
+        roles: list[str] = []
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        for actor_role in ('execution', 'inspection'):
+            visible_ids = {
+                str(getattr(item, 'tool_id', '') or '').strip()
+                for item in self.list_visible_tool_families(actor_role=actor_role, session_id=session_id)
+            }
+            if tool_id in visible_ids:
+                roles.append(actor_role)
+        return roles
+
+    @classmethod
+    def _format_usage_message(
+        cls,
+        *,
+        resource_label: str,
+        display_name: str,
+        usage: dict[str, list[dict[str, Any]]],
+    ) -> str:
+        tasks = list(usage.get('tasks') or [])
+        blockers: list[str] = []
+        if tasks:
+            blockers.append(f'{len(tasks)} 个进行中的任务')
+        message = f'无法删除{resource_label}“{display_name}”，当前有{"、".join(blockers)}正在使用。'
+        previews: list[str] = []
+        if tasks:
+            task_text = '；'.join(
+                (
+                    f"{str(item.get('title') or item.get('task_id') or '未命名任务').strip()} ({str(item.get('task_id') or '').strip()})"
+                    + (
+                        f" / {'、'.join(cls._display_role_label(role) for role in list(item.get('actor_roles') or []))}"
+                        if list(item.get('actor_roles') or [])
+                        else ''
+                    )
+                )
+                for item in tasks[:3]
+            )
+            if len(tasks) > 3:
+                task_text += f'；等 {len(tasks)} 个'
+            previews.append(f'任务：{task_text}')
+        return f"{message} {' '.join(previews)}".strip()
+
+    def _skill_usage_summary(self, skill_id: str) -> dict[str, list[dict[str, Any]]]:
+        usage: dict[str, list[dict[str, Any]]] = {'tasks': [], 'ceo_sessions': []}
+        for task in self._running_task_records():
+            actor_roles = self._skill_visible_roles_for_task(task, skill_id)
+            if not actor_roles:
+                continue
+            usage['tasks'].append(
+                {
+                    'task_id': str(getattr(task, 'task_id', '') or '').strip(),
+                    'title': str(getattr(task, 'title', '') or '').strip(),
+                    'session_id': str(getattr(task, 'session_id', '') or '').strip(),
+                    'actor_roles': actor_roles,
+                }
+            )
+        return usage
+
+    def _tool_usage_summary(self, tool_id: str) -> dict[str, list[dict[str, Any]]]:
+        usage: dict[str, list[dict[str, Any]]] = {'tasks': [], 'ceo_sessions': []}
+        for task in self._running_task_records():
+            actor_roles = self._tool_visible_roles_for_task(task, tool_id)
+            if not actor_roles:
+                continue
+            usage['tasks'].append(
+                {
+                    'task_id': str(getattr(task, 'task_id', '') or '').strip(),
+                    'title': str(getattr(task, 'title', '') or '').strip(),
+                    'session_id': str(getattr(task, 'session_id', '') or '').strip(),
+                    'actor_roles': actor_roles,
+                }
+            )
+        return usage
+
+    def _raise_if_skill_in_use(self, skill) -> None:
+        target_skill_id = str(getattr(skill, 'skill_id', '') or '').strip()
+        display_name = str(getattr(skill, 'display_name', '') or target_skill_id).strip() or target_skill_id
+        usage = self._skill_usage_summary(target_skill_id)
+        if not usage['tasks']:
+            return
+        raise _ResourceDeleteBlockedError(
+            code='skill_in_use',
+            message=self._format_usage_message(resource_label='Skill', display_name=display_name, usage=usage),
+            resource_kind='skill',
+            resource_id=target_skill_id,
+            usage=usage,
+        )
+
+    def _raise_if_tool_in_use(self, family) -> None:
+        target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+        display_name = str(getattr(family, 'display_name', '') or target_tool_id).strip() or target_tool_id
+        usage = self._tool_usage_summary(target_tool_id)
+        if not usage['tasks']:
+            return
+        raise _ResourceDeleteBlockedError(
+            code='tool_in_use',
+            message=self._format_usage_message(resource_label='工具', display_name=display_name, usage=usage),
+            resource_kind='tool',
+            resource_id=target_tool_id,
+            usage=usage,
+        )
+
+    def _delete_path(self, path: Path, *, deleted_paths: list[str]) -> None:
+        if not path.exists():
+            return
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            raise ValueError(f'resource_delete_failed:{path}:{exc}') from exc
+        deleted_paths.append(str(path))
+
+    def _collect_workspace_delete_path(
+        self,
+        raw_path: str | Path | None,
+        *,
+        delete_paths: set[Path],
+        skipped_paths: list[str],
+    ) -> None:
+        text = str(raw_path or '').strip()
+        if not text:
+            return
+        resolved = self._resolve_workspace_path(text)
+        workspace_root = self._workspace_root()
+        if not self._is_relative_to(resolved, workspace_root):
+            skipped_paths.append(str(resolved))
+            return
+        if resolved == workspace_root:
+            skipped_paths.append(str(resolved))
+            return
+        delete_paths.add(resolved)
+
+    def delete_skill_resource(self, skill_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        skill = self.get_skill_resource(skill_id)
+        if skill is None:
+            raise ValueError('skill_not_found')
+        target_skill_id = str(skill.skill_id or '').strip()
+        self._raise_if_skill_in_use(skill)
+        if self._resource_is_busy(ResourceKind.SKILL, target_skill_id):
+            raise ValueError('skill_busy')
+        before_state = self.capture_resource_tree_state()
+        skill_root = self._resolve_resource_root(skill.source_path, kind=ResourceKind.SKILL)
+        deleted_paths: list[str] = []
+        self._delete_path(skill_root, deleted_paths=deleted_paths)
+        refresh_result = self.refresh_changed_resources(
+            before_state,
+            trigger='skill-delete',
+            session_id=session_id,
+        )
+        self._governance_store.delete_role_policies_for_resource(
+            resource_kind='skill',
+            resource_id=target_skill_id,
+        )
+        return {
+            'skill_id': target_skill_id,
+            'path': str(skill_root),
+            'deleted_paths': deleted_paths,
+            'resources': refresh_result,
+        }
+
+    async def delete_skill_resource_async(self, skill_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        item = self.delete_skill_resource(skill_id, session_id=session_id)
+        item['catalog_synced'] = False
+        return item
+
+    def update_skill_policy(self, skill_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles: list[str] | None = None):
+        _ = session_id
+        skill = self.get_skill_resource(skill_id)
+        if skill is None:
+            return None
+        updated = skill.model_copy(
+            update={
+                'enabled': skill.enabled if enabled is None else bool(enabled),
+                'allowed_roles': list(skill.allowed_roles if allowed_roles is None else allowed_roles),
+            }
+        )
+        self._governance_store.upsert_skill_resource(updated, updated_at=now_iso())
+        self.policy_engine.sync_default_role_policies()
+        return updated
+
+    def enable_skill(self, skill_id: str, *, session_id: str = 'web:shared'):
+        return self.update_skill_policy(skill_id, session_id=session_id, enabled=True)
+
+    def disable_skill(self, skill_id: str, *, session_id: str = 'web:shared'):
+        return self.update_skill_policy(skill_id, session_id=session_id, enabled=False)
+
+    def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        family = self._raw_tool_family(tool_id)
+        if family is None:
+            raise ValueError('tool_not_found')
+        target_tool_id = str(family.tool_id or '').strip()
+        if target_tool_id in self._core_tool_resolution().family_ids:
+            raise _ResourceMutationBlockedError(
+                code='core_tool_delete_forbidden',
+                message='Core tool families cannot be deleted.',
+                resource_kind='tool_family',
+                resource_id=target_tool_id,
+            )
+        self._raise_if_tool_in_use(family)
+        descriptor_names: set[str] = {
+            str(getattr(family, 'primary_executor_name', '') or '').strip(),
+            target_tool_id,
+        }
+        for action in list(getattr(family, 'actions', []) or []):
+            descriptor_names.update(
+                str(name or '').strip()
+                for name in list(getattr(action, 'executor_names', []) or [])
+                if str(name or '').strip()
+            )
+        descriptor_names.discard('')
+        if self._resource_is_busy(ResourceKind.TOOL, *sorted(descriptor_names)):
+            raise ValueError('tool_busy')
+        before_state = self.capture_resource_tree_state()
+        delete_paths: set[Path] = set()
+        skipped_paths: list[str] = []
+        delete_paths.add(self._resolve_resource_root(family.source_path, kind=ResourceKind.TOOL))
+        for descriptor_name in sorted(descriptor_names):
+            descriptor = self._resource_manager.get_tool_descriptor(descriptor_name)
+            if descriptor is None:
+                continue
+            delete_paths.add(self._resolve_resource_root(descriptor.root, kind=ResourceKind.TOOL))
+            self._collect_workspace_delete_path(
+                getattr(descriptor, 'install_dir', None),
+                delete_paths=delete_paths,
+                skipped_paths=skipped_paths,
+            )
+        self._collect_workspace_delete_path(
+            getattr(family, 'install_dir', None),
+            delete_paths=delete_paths,
+            skipped_paths=skipped_paths,
+        )
+        deleted_paths: list[str] = []
+        for path in sorted(delete_paths, key=lambda item: (len(str(item)), str(item)), reverse=True):
+            self._delete_path(path, deleted_paths=deleted_paths)
+        refresh_result = self.refresh_changed_resources(
+            before_state,
+            trigger='tool-delete',
+            session_id=session_id,
+        )
+        self._governance_store.delete_role_policies_for_resource(
+            resource_kind='tool_family',
+            resource_id=target_tool_id,
+        )
+        return {
+            'tool_id': target_tool_id,
+            'path': str(self._resolve_resource_root(family.source_path, kind=ResourceKind.TOOL)),
+            'deleted_paths': deleted_paths,
+            'skipped_paths': skipped_paths,
+            'resources': refresh_result,
+        }
+
+    async def delete_tool_resource_async(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        item = self.delete_tool_resource(tool_id, session_id=session_id)
+        item['catalog_synced'] = False
+        return item
+
+    def update_tool_policy(
+        self,
+        tool_id: str,
+        *,
+        session_id: str = 'web:shared',
+        enabled: bool | None = None,
+        allowed_roles_by_action: dict[str, list[str]] | None = None,
+    ):
+        _ = session_id
+        family = self._raw_tool_family(tool_id)
+        if family is None:
+            return None
+        target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+        is_core = target_tool_id in self._core_tool_resolution().family_ids
+        if is_core and enabled is not None and not bool(enabled):
+            raise _ResourceMutationBlockedError(
+                code='core_tool_disable_forbidden',
+                message='Core tool families cannot be disabled.',
+                resource_kind='tool_family',
+                resource_id=target_tool_id,
+            )
+        allowed_roles_by_action = dict(allowed_roles_by_action or {})
+        actions = []
+        for action in family.actions:
+            roles = allowed_roles_by_action.get(action.action_id)
+            if str(getattr(action, 'admin_mode', 'editable') or 'editable') == 'readonly_system' and roles is not None:
+                normalized_roles = to_public_allowed_roles([str(role) for role in (roles or [])])
+                current_roles = to_public_allowed_roles(list(getattr(action, 'allowed_roles', []) or []))
+                if normalized_roles != current_roles:
+                    raise _ResourceMutationBlockedError(
+                        code='tool_action_readonly',
+                        message='Readonly system actions cannot be edited.',
+                        resource_kind='tool_family',
+                        resource_id=target_tool_id,
+                        details={'action_id': action.action_id},
+                    )
+            next_roles = to_public_allowed_roles([str(role) for role in (action.allowed_roles if roles is None else roles)])
+            if is_core and bool(getattr(action, 'agent_visible', True)) and 'ceo' not in next_roles:
+                raise _ResourceMutationBlockedError(
+                    code='core_tool_ceo_visibility_required',
+                    message='Core tool families must remain visible to the CEO for agent-visible actions.',
+                    resource_kind='tool_family',
+                    resource_id=target_tool_id,
+                    details={'action_id': action.action_id},
+                )
+            actions.append(action.model_copy(update={'allowed_roles': next_roles}))
+        updated = family.model_copy(
+            update={
+                'enabled': family.enabled if enabled is None else bool(enabled),
+                'actions': actions,
+            }
+        )
+        self._governance_store.upsert_tool_family(updated, updated_at=now_iso())
+        self.policy_engine.sync_default_role_policies()
+        return self.get_tool_family(target_tool_id)
+
+    def enable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
+        return self.update_tool_policy(tool_id, session_id=session_id, enabled=True)
+
+    def disable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
+        return self.update_tool_policy(tool_id, session_id=session_id, enabled=False)
+
+    def reload_resources(self, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        self._resource_manager.reload_now(trigger='manual')
+        skills, tools = self.resource_registry.refresh_from_current_resources()
+        self.policy_engine.sync_default_role_policies()
+        return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
+
+    async def reload_resources_async(self, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        result = self.reload_resources(session_id=session_id)
+        result['catalog'] = {'created': 0, 'updated': 0, 'removed': 0}
+        return result
+
+
+@contextmanager
+def _resource_service():
+    try:
+        yield _service()
+        return
+    except Exception as exc:
+        if not is_no_ceo_model_configured_error(exc):
+            raise
+    service = _StandaloneResourceService(load_config())
+    try:
+        yield service
+    finally:
+        service.close()
 
 
 def _resource_delete_http_error(exc: ValueError) -> HTTPException:
@@ -86,6 +826,10 @@ def _model_roles(manager: ModelManager) -> dict[str, list[str]]:
 
 def _model_role_iterations(manager: ModelManager) -> dict[str, int]:
     return {scope: manager.config.get_role_max_iterations(scope) for scope in VALID_SCOPES}
+
+
+def _model_role_concurrency(manager: ModelManager) -> dict[str, int | None]:
+    return {scope: manager.config.get_role_max_concurrency(scope) for scope in VALID_SCOPES}
 
 
 def _main_runtime_settings_payload(cfg: Config) -> dict[str, Any]:
@@ -169,6 +913,19 @@ def _process_exists(pid: int | None) -> bool:
     return True
 
 
+def _china_bridge_runtime_deferred_payload(cfg: Config) -> dict[str, str] | None:
+    try:
+        has_ceo_model = bool(cfg.get_role_model_keys('ceo'))
+    except Exception:
+        has_ceo_model = True
+    if has_ceo_model:
+        return None
+    return {
+        'reason': 'no_model_configured',
+        'message': '???? CEO ??????????????',
+    }
+
+
 def _china_bridge_runtime_summary(cfg: Config) -> dict[str, Any]:
     status = _china_bridge_status_payload() or {}
     dist_entry = cfg.workspace_path / 'subsystems' / 'china_channels_host' / 'dist' / 'index.js'
@@ -179,9 +936,12 @@ def _china_bridge_runtime_summary(cfg: Config) -> dict[str, Any]:
     running = raw_running if pid is None else (raw_running and pid_alive)
     connected = bool(status.get('connected')) and running
     stale_state = raw_running and pid is not None and not pid_alive
+    deferred = _china_bridge_runtime_deferred_payload(cfg)
     last_error = str(status.get('last_error') or '').strip()
     if stale_state and not last_error:
         last_error = 'china bridge host process is not running'
+    if deferred is not None and not running and not connected:
+        last_error = ''
     return {
         'enabled': bool(cfg.china_bridge.enabled),
         'public_port': int(cfg.china_bridge.public_port),
@@ -198,6 +958,9 @@ def _china_bridge_runtime_summary(cfg: Config) -> dict[str, Any]:
         'state_stale': stale_state,
         'status_path': str(_china_bridge_status_path()),
         'status_exists': bool(status),
+        'startup_deferred': deferred is not None,
+        'startup_deferred_reason': deferred['reason'] if deferred is not None else None,
+        'startup_deferred_message': deferred['message'] if deferred is not None else None,
         'last_error': last_error or None,
     }
 
@@ -758,6 +1521,7 @@ async def list_models():
         'items': manager.list_models(),
         'roles': _model_roles(manager),
         'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
     }
 
 
@@ -851,17 +1615,27 @@ async def delete_model(model_key: str):
 @router.put('/models/roles/{scope}')
 async def update_model_roles(scope: str, payload: dict = Body(...)):
     manager = ModelManager.load()
+    body = payload if isinstance(payload, dict) else {}
     raw_model_keys = payload.get('model_keys')
     if raw_model_keys is None and 'modelKeys' in payload:
         raw_model_keys = payload.get('modelKeys')
     raw_max_iterations = payload.get('max_iterations')
     if raw_max_iterations is None and 'maxIterations' in payload:
         raw_max_iterations = payload.get('maxIterations')
+    raw_max_concurrency = payload.get('max_concurrency')
+    if raw_max_concurrency is None and 'maxConcurrency' in payload and 'max_concurrency' not in payload:
+        raw_max_concurrency = payload.get('maxConcurrency')
     try:
+        update_kwargs: dict[str, Any] = {}
+        if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
+            update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
+        if 'max_iterations' in body or 'maxIterations' in body:
+            update_kwargs['max_iterations'] = raw_max_iterations
+        if 'max_concurrency' in body or 'maxConcurrency' in body:
+            update_kwargs['max_concurrency'] = raw_max_concurrency
         roles = manager.update_scope_route(
             scope,
-            model_keys=[str(item) for item in raw_model_keys] if raw_model_keys is not None else None,
-            max_iterations=raw_max_iterations,
+            **update_kwargs,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -872,6 +1646,7 @@ async def update_model_roles(scope: str, payload: dict = Body(...)):
         'roles': roles,
         'all_roles': _model_roles(manager),
         'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
     }
 
 
@@ -966,6 +1741,7 @@ async def list_llm_bindings():
         'items': manager.list_models(),
         'routes': manager.facade.get_routes(manager.config),
         'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
     }
 
 
@@ -1035,23 +1811,34 @@ async def get_llm_routes():
         'ok': True,
         'routes': manager.facade.get_routes(manager.config),
         'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
     }
 
 
 @router.put('/llm/routes/{scope}')
 async def update_llm_route(scope: str, payload: dict = Body(...)):
     manager = ModelManager.load()
+    body = payload if isinstance(payload, dict) else {}
     raw_model_keys = payload.get('model_keys')
     if raw_model_keys is None and 'modelKeys' in payload:
         raw_model_keys = payload.get('modelKeys')
     raw_max_iterations = payload.get('max_iterations')
     if raw_max_iterations is None and 'maxIterations' in payload:
         raw_max_iterations = payload.get('maxIterations')
+    raw_max_concurrency = payload.get('max_concurrency')
+    if raw_max_concurrency is None and 'maxConcurrency' in payload and 'max_concurrency' not in payload:
+        raw_max_concurrency = payload.get('maxConcurrency')
     try:
+        update_kwargs: dict[str, Any] = {}
+        if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
+            update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
+        if 'max_iterations' in body or 'maxIterations' in body:
+            update_kwargs['max_iterations'] = raw_max_iterations
+        if 'max_concurrency' in body or 'maxConcurrency' in body:
+            update_kwargs['max_concurrency'] = raw_max_concurrency
         route = manager.update_scope_route(
             scope,
-            model_keys=[str(item) for item in raw_model_keys] if raw_model_keys is not None else None,
-            max_iterations=raw_max_iterations,
+            **update_kwargs,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1061,6 +1848,7 @@ async def update_llm_route(scope: str, payload: dict = Body(...)):
         'route': route,
         'routes': manager.facade.get_routes(manager.config),
         'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
     }
 
 
@@ -1120,125 +1908,125 @@ async def run_llm_migration():
 
 @router.get('/resources/skills')
 async def list_skills():
-    service = _service()
-    return {'ok': True, 'items': [item.model_dump(mode='json') for item in service.list_skill_resources()]}
+    with _resource_service() as service:
+        return {'ok': True, 'items': [item.model_dump(mode='json') for item in service.list_skill_resources()]}
 
 
 @router.get('/resources/skills/{skill_id}')
 async def get_skill(skill_id: str):
-    service = _service()
-    item = service.get_skill_resource(skill_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail='skill_not_found')
-    return {
-        'ok': True,
-        'item': item.model_dump(mode='json'),
-        'files': [{'file_key': file_key, 'path': path} for file_key, path in service.list_skill_files(skill_id).items()],
-    }
+    with _resource_service() as service:
+        item = service.get_skill_resource(skill_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail='skill_not_found')
+        return {
+            'ok': True,
+            'item': item.model_dump(mode='json'),
+            'files': [{'file_key': file_key, 'path': path} for file_key, path in service.list_skill_files(skill_id).items()],
+        }
 
 
 @router.get('/resources/skills/{skill_id}/files')
 async def list_skill_files(skill_id: str):
-    service = _service()
-    item = service.get_skill_resource(skill_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail='skill_not_found')
-    return {'ok': True, 'items': [{'file_key': file_key, 'path': path} for file_key, path in service.list_skill_files(skill_id).items()]}
+    with _resource_service() as service:
+        item = service.get_skill_resource(skill_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail='skill_not_found')
+        return {'ok': True, 'items': [{'file_key': file_key, 'path': path} for file_key, path in service.list_skill_files(skill_id).items()]}
 
 
 @router.get('/resources/skills/{skill_id}/files/{file_key}')
 async def get_skill_file(skill_id: str, file_key: str):
-    service = _service()
-    if service.get_skill_resource(skill_id) is None:
-        raise HTTPException(status_code=404, detail='skill_not_found')
-    try:
-        content = service.read_skill_file(skill_id, file_key)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {
-        'ok': True,
-        'file_key': file_key,
-        'path': service.list_skill_files(skill_id).get(file_key, ''),
-        'content': content,
-    }
+    with _resource_service() as service:
+        if service.get_skill_resource(skill_id) is None:
+            raise HTTPException(status_code=404, detail='skill_not_found')
+        try:
+            content = service.read_skill_file(skill_id, file_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {
+            'ok': True,
+            'file_key': file_key,
+            'path': service.list_skill_files(skill_id).get(file_key, ''),
+            'content': content,
+        }
 
 
 @router.put('/resources/skills/{skill_id}/files/{file_key}')
 async def update_skill_file(skill_id: str, file_key: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
-    service = _service()
-    if service.get_skill_resource(skill_id) is None:
-        raise HTTPException(status_code=404, detail='skill_not_found')
-    try:
-        item = await service.write_skill_file_async(skill_id, file_key, str(payload.get('content') or ''), session_id=session_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'ok': True, 'item': item}
+    with _resource_service() as service:
+        if service.get_skill_resource(skill_id) is None:
+            raise HTTPException(status_code=404, detail='skill_not_found')
+        try:
+            item = await service.write_skill_file_async(skill_id, file_key, str(payload.get('content') or ''), session_id=session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {'ok': True, 'item': item}
 
 
 @router.put('/resources/skills/{skill_id}/policy')
 async def update_skill_policy(skill_id: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
-    service = _service()
-    item = service.update_skill_policy(
-        skill_id,
-        session_id=session_id,
-        enabled=payload.get('enabled'),
-        allowed_roles=[str(item) for item in (payload.get('allowed_roles') or [])] if payload.get('allowed_roles') is not None else None,
-    )
-    if item is None:
-        raise HTTPException(status_code=404, detail='skill_not_found')
-    return {'ok': True, 'item': item.model_dump(mode='json')}
+    with _resource_service() as service:
+        item = service.update_skill_policy(
+            skill_id,
+            session_id=session_id,
+            enabled=payload.get('enabled'),
+            allowed_roles=[str(item) for item in (payload.get('allowed_roles') or [])] if payload.get('allowed_roles') is not None else None,
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail='skill_not_found')
+        return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.post('/resources/skills/{skill_id}/enable')
 async def enable_skill(skill_id: str, session_id: str = Query('web:shared')):
-    service = _service()
-    item = service.enable_skill(skill_id, session_id=session_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail='skill_not_found')
-    return {'ok': True, 'item': item.model_dump(mode='json')}
+    with _resource_service() as service:
+        item = service.enable_skill(skill_id, session_id=session_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail='skill_not_found')
+        return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.post('/resources/skills/{skill_id}/disable')
 async def disable_skill(skill_id: str, session_id: str = Query('web:shared')):
-    service = _service()
-    item = service.disable_skill(skill_id, session_id=session_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail='skill_not_found')
-    return {'ok': True, 'item': item.model_dump(mode='json')}
+    with _resource_service() as service:
+        item = service.disable_skill(skill_id, session_id=session_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail='skill_not_found')
+        return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.delete('/resources/skills/{skill_id}')
 async def delete_skill(skill_id: str, session_id: str = Query('web:shared')):
-    service = _service()
-    try:
-        item = await service.delete_skill_resource_async(skill_id, session_id=session_id)
-    except ValueError as exc:
-        raise _resource_delete_http_error(exc) from exc
-    return {'ok': True, 'item': item}
+    with _resource_service() as service:
+        try:
+            item = await service.delete_skill_resource_async(skill_id, session_id=session_id)
+        except ValueError as exc:
+            raise _resource_delete_http_error(exc) from exc
+        return {'ok': True, 'item': item}
 
 
 @router.get('/resources/tools')
 async def list_tools():
-    service = _service()
-    return {'ok': True, 'items': [item.model_dump(mode='json') for item in service.list_tool_resources()]}
+    with _resource_service() as service:
+        return {'ok': True, 'items': [item.model_dump(mode='json') for item in service.list_tool_resources()]}
 
 
 @router.get('/resources/tools/{tool_id}')
 async def get_tool(tool_id: str):
-    service = _service()
-    item = service.get_tool_family(tool_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail='tool_not_found')
-    return {'ok': True, 'item': item.model_dump(mode='json')}
+    with _resource_service() as service:
+        item = service.get_tool_family(tool_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail='tool_not_found')
+        return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.get('/resources/tools/{tool_id}/toolskill')
 async def get_tool_toolskill(tool_id: str):
-    service = _service()
-    payload = service.get_tool_toolskill(tool_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail='tool_not_found')
-    return {'ok': True, **payload}
+    with _resource_service() as service:
+        payload = service.get_tool_toolskill(tool_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail='tool_not_found')
+        return {'ok': True, **payload}
 
 
 def _china_bridge_status_path() -> Path:
@@ -1365,64 +2153,66 @@ async def restart_china_bridge():
 
 @router.put('/resources/tools/{tool_id}/policy')
 async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
-    service = _service()
-    actions_payload = payload.get('actions') if isinstance(payload.get('actions'), dict) else None
-    normalized_actions: dict[str, list[str]] | None = None
-    if actions_payload is not None:
-        normalized_actions = {
-            str(action_id): [str(role) for role in (roles or [])]
-            for action_id, roles in actions_payload.items()
-        }
-    try:
-        item = service.update_tool_policy(tool_id, session_id=session_id, enabled=payload.get('enabled'), allowed_roles_by_action=normalized_actions)
-    except ValueError as exc:
-        raise _resource_delete_http_error(exc) from exc
-    if item is None:
-        raise HTTPException(status_code=404, detail='tool_not_found')
-    return {'ok': True, 'item': item.model_dump(mode='json')}
+    with _resource_service() as service:
+        actions_payload = payload.get('actions') if isinstance(payload.get('actions'), dict) else None
+        normalized_actions: dict[str, list[str]] | None = None
+        if actions_payload is not None:
+            normalized_actions = {
+                str(action_id): [str(role) for role in (roles or [])]
+                for action_id, roles in actions_payload.items()
+            }
+        try:
+            item = service.update_tool_policy(tool_id, session_id=session_id, enabled=payload.get('enabled'), allowed_roles_by_action=normalized_actions)
+        except ValueError as exc:
+            raise _resource_delete_http_error(exc) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail='tool_not_found')
+        return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.post('/resources/tools/{tool_id}/enable')
 async def enable_tool(tool_id: str, session_id: str = Query('web:shared')):
-    service = _service()
-    try:
-        item = service.enable_tool(tool_id, session_id=session_id)
-    except ValueError as exc:
-        raise _resource_delete_http_error(exc) from exc
-    if item is None:
-        raise HTTPException(status_code=404, detail='tool_not_found')
-    return {'ok': True, 'item': item.model_dump(mode='json')}
+    with _resource_service() as service:
+        try:
+            item = service.enable_tool(tool_id, session_id=session_id)
+        except ValueError as exc:
+            raise _resource_delete_http_error(exc) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail='tool_not_found')
+        return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.post('/resources/tools/{tool_id}/disable')
 async def disable_tool(tool_id: str, session_id: str = Query('web:shared')):
-    service = _service()
-    try:
-        item = service.disable_tool(tool_id, session_id=session_id)
-    except ValueError as exc:
-        raise _resource_delete_http_error(exc) from exc
-    if item is None:
-        raise HTTPException(status_code=404, detail='tool_not_found')
-    return {'ok': True, 'item': item.model_dump(mode='json')}
+    with _resource_service() as service:
+        try:
+            item = service.disable_tool(tool_id, session_id=session_id)
+        except ValueError as exc:
+            raise _resource_delete_http_error(exc) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail='tool_not_found')
+        return {'ok': True, 'item': item.model_dump(mode='json')}
 
 
 @router.delete('/resources/tools/{tool_id}')
 async def delete_tool(tool_id: str, session_id: str = Query('web:shared')):
-    service = _service()
-    try:
-        item = await service.delete_tool_resource_async(tool_id, session_id=session_id)
-    except ValueError as exc:
-        raise _resource_delete_http_error(exc) from exc
-    return {'ok': True, 'item': item}
+    with _resource_service() as service:
+        try:
+            item = await service.delete_tool_resource_async(tool_id, session_id=session_id)
+        except ValueError as exc:
+            raise _resource_delete_http_error(exc) from exc
+        return {'ok': True, 'item': item}
 
 
 @router.post('/resources/reload')
 async def reload_resources(payload: dict[str, Any] | None = Body(default=None), session_id: str = Query('web:shared')):
-    service = _service()
-    await service.startup()
-    effective_session_id = str((payload or {}).get('session_id') or session_id or 'web:shared')
-    result = await service.reload_resources_async(session_id=effective_session_id)
-    return {'ok': True, **result}
+    with _resource_service() as service:
+        startup = getattr(service, 'startup', None)
+        if callable(startup):
+            await startup()
+        effective_session_id = str((payload or {}).get('session_id') or session_id or 'web:shared')
+        result = await service.reload_resources_async(session_id=effective_session_id)
+        return {'ok': True, **result}
 
 
 @router.get('/memory/retrieval-traces')

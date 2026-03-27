@@ -72,6 +72,7 @@ from main.service.task_stall_notifier import (
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
+_UNSET = object()
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
 _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
 _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
@@ -134,9 +135,9 @@ class MainRuntimeService:
         acceptance_model_refs: list[str] | None = None,
         default_max_depth: int = 1,
         hard_max_depth: int = 4,
-        max_iterations: int = 16,
-        execution_max_iterations: int | None = None,
-        acceptance_max_iterations: int | None = None,
+        max_iterations: int | None | object = _UNSET,
+        execution_max_iterations: int | None | object = _UNSET,
+        acceptance_max_iterations: int | None | object = _UNSET,
         execution_mode: str = 'embedded',
         worker_id: str | None = None,
     ) -> None:
@@ -180,6 +181,8 @@ class MainRuntimeService:
         self.tool_execution_manager = ToolExecutionManager()
         self._builtin_tool_cache: dict[str, Tool] | None = None
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
+        execution_max_concurrency = app_config.get_role_max_concurrency('execution') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
+        acceptance_max_concurrency = app_config.get_role_max_concurrency('inspection') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
         react_loop = ReActToolLoop(
             chat_backend=chat_backend,
             log_service=self.log_service,
@@ -196,9 +199,15 @@ class MainRuntimeService:
             tool_provider=self._tool_provider,
             execution_model_refs=list(execution_model_refs or ['execution']),
             acceptance_model_refs=list(acceptance_model_refs or execution_model_refs or ['inspection']),
-            execution_max_iterations=execution_max_iterations if execution_max_iterations is not None else max_iterations,
-            acceptance_max_iterations=acceptance_max_iterations if acceptance_max_iterations is not None else (execution_max_iterations if execution_max_iterations is not None else max_iterations),
+            execution_max_iterations=execution_max_iterations if execution_max_iterations is not _UNSET else max_iterations,
+            acceptance_max_iterations=(
+                acceptance_max_iterations
+                if acceptance_max_iterations is not _UNSET
+                else (execution_max_iterations if execution_max_iterations is not _UNSET else max_iterations)
+            ),
             max_parallel_child_pipelines=max_parallel_child_pipelines,
+            execution_max_concurrency=execution_max_concurrency,
+            acceptance_max_concurrency=acceptance_max_concurrency,
             context_enricher=self._enrich_node_messages,
         )
         self.task_runner = TaskRunner(
@@ -1106,15 +1115,27 @@ class MainRuntimeService:
             )
 
     @staticmethod
-    def _node_parallelism_settings(config: Any | None) -> tuple[bool, int, int]:
+    def _node_parallelism_settings(config: Any | None) -> tuple[bool, int | None, int | None]:
         agents = getattr(config, 'agents', None) if config is not None else None
         parallelism = getattr(agents, 'node_parallelism', None) if agents is not None else None
         enabled = bool(getattr(parallelism, 'enabled', True)) if parallelism is not None else True
-        max_parallel_tool_calls = max(1, int(getattr(parallelism, 'max_parallel_tool_calls_per_node', 10) or 1))
-        max_parallel_child_pipelines = max(1, int(getattr(parallelism, 'max_parallel_child_pipelines_per_node', 10) or 1))
+        max_parallel_tool_calls = MainRuntimeService._normalize_optional_parallel_limit(
+            getattr(parallelism, 'max_parallel_tool_calls_per_node', None) if parallelism is not None else None
+        )
+        max_parallel_child_pipelines = MainRuntimeService._normalize_optional_parallel_limit(
+            getattr(parallelism, 'max_parallel_child_pipelines_per_node', None) if parallelism is not None else None
+        )
         if not enabled:
             return False, 1, 1
         return True, max_parallel_tool_calls, max_parallel_child_pipelines
+
+    @staticmethod
+    def _normalize_optional_parallel_limit(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return max(0, int(value))
 
     def ensure_runtime_config_current(self, force: bool = False, reason: str = 'runtime') -> bool:
         config, revision, changed = get_runtime_config(force=force)
@@ -1129,10 +1150,13 @@ class MainRuntimeService:
         self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
         self.node_runner._execution_max_iterations = config.get_role_max_iterations('execution')
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
+        self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
+        self.node_runner._acceptance_max_concurrency = config.get_role_max_concurrency('inspection')
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(config)
         self._react_loop._parallel_tool_calls_enabled = parallel_enabled
         self._react_loop._max_parallel_tool_calls = max_parallel_tool_calls
         self.node_runner._max_parallel_child_pipelines = max_parallel_child_pipelines
+        self.node_runner._parallel_child_pipelines_enabled = parallel_enabled
         # Resource manager config binding and reload are handled by refresh_loop_runtime_config().
         # Rebinding here clears dynamic tool instances before CEO exposure is assembled.
         self.resource_registry.refresh_from_current_resources()

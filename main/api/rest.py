@@ -4,13 +4,18 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 
-from g3ku.shells.web import get_agent
+from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error
 
 router = APIRouter()
 
 
 def _service():
-    agent = get_agent()
+    try:
+        agent = get_agent()
+    except Exception as exc:
+        if not is_no_ceo_model_configured_error(exc):
+            raise
+        raise HTTPException(status_code=503, detail='no_model_configured') from exc
     service = getattr(agent, 'main_task_service', None)
     if service is None:
         raise HTTPException(status_code=503, detail='main_task_service_unavailable')

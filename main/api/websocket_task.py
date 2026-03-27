@@ -4,7 +4,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from g3ku.security import get_bootstrap_security_service
-from g3ku.shells.web import get_agent
+from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, no_ceo_model_configured_payload
 from main.api.websocket_utils import (
     WebSocketChannelClosed,
     websocket_close,
@@ -54,7 +54,23 @@ async def tasks_websocket(websocket: WebSocket):
         )
         await websocket_close(websocket, code=4423)
         return
-    service = _service()
+    try:
+        service = _service()
+    except Exception as exc:
+        if not is_no_ceo_model_configured_error(exc):
+            raise
+        await websocket_send_json(
+            websocket,
+            build_envelope(
+                channel='task',
+                session_id=requested_session_id,
+                seq=after_seq,
+                type='error',
+                data=no_ceo_model_configured_payload(),
+            ),
+        )
+        await websocket_close(websocket, code=4503)
+        return
     try:
         if service is None:
             await websocket_send_json(
@@ -163,7 +179,24 @@ async def task_websocket(websocket: WebSocket, task_id: str):
         )
         await websocket_close(websocket, code=4423)
         return
-    service = _service()
+    try:
+        service = _service()
+    except Exception as exc:
+        if not is_no_ceo_model_configured_error(exc):
+            raise
+        await websocket_send_json(
+            websocket,
+            build_envelope(
+                channel='task',
+                session_id=requested_session_id or 'web:shared',
+                task_id=task_id,
+                seq=after_seq,
+                type='error',
+                data=no_ceo_model_configured_payload(),
+            ),
+        )
+        await websocket_close(websocket, code=4503)
+        return
     try:
         if service is None:
             await websocket_send_json(

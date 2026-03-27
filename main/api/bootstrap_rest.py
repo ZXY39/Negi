@@ -4,7 +4,9 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException
+from loguru import logger
 
+from g3ku.config.loader import load_config
 from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import (
     describe_web_runtime_services,
@@ -49,6 +51,14 @@ def _assert_unlocked() -> None:
 
 
 async def _start_runtime_after_unlock() -> None:
+    try:
+        config = load_config()
+    except Exception as exc:
+        logger.warning("bootstrap runtime preflight skipped while reading config: {}", exc)
+        config = None
+    if config is not None and not config.get_role_model_keys("ceo"):
+        logger.info("Skipping runtime startup after unlock because no CEO model is configured yet.")
+        return
     agent = get_agent()
     await ensure_web_runtime_services(agent)
 
@@ -163,10 +173,13 @@ async def bootstrap_setup(payload: dict = Body(...)):
             password=password,
             confirm_legacy_reset=confirm_legacy_reset,
         )
-        await _start_runtime_after_unlock()
     except Exception as exc:
         service.lock()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        await _start_runtime_after_unlock()
+    except Exception as exc:
+        logger.warning("bootstrap setup completed but runtime startup is deferred: {}", exc)
     return {"ok": True, "item": _status_payload(include_preview=False)}
 
 
@@ -176,10 +189,12 @@ async def bootstrap_unlock(payload: dict = Body(...)):
     service = _service()
     try:
         service.unlock(password=password)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
         await _start_runtime_after_unlock()
     except Exception as exc:
-        service.lock()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("bootstrap unlock succeeded but runtime startup is deferred: {}", exc)
     return {"ok": True, "item": _status_payload(include_preview=False)}
 
 

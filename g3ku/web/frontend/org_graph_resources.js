@@ -180,7 +180,7 @@ function communicationRuntimeLabel(item) {
     if (runtime.connected) return "已连接";
     if (communicationBridgeError(runtime)) return "桥接异常";
     if (runtime.running) return "桥接运行中";
-    if (runtime.status_exists) return "桥接待连接";
+    if (runtime.status_exists) return "桥接连接中";
     return "待测试";
 }
 
@@ -502,7 +502,7 @@ function renderCommunicationBridgeSummary() {
     }
     const bridgeError = communicationBridgeError(bridge);
     const statusKey = bridge.connected ? "success" : bridgeError ? "failed" : bridge.running ? "running" : bridge.enabled ? "pending" : "blocked";
-    const statusLabel = bridge.connected ? "已连接" : bridgeError ? "异常" : bridge.running ? "运行中" : bridge.enabled ? "待连接" : "未启用";
+    const statusLabel = bridge.connected ? "已连接" : bridgeError ? "异常" : bridge.running ? "运行中" : bridge.enabled ? "连接中" : "未启用";
     const statusText = bridgeError ? `${statusLabel} · ${bridgeError}` : statusLabel;
     U.communicationBridgeSummary.innerHTML = `
         <div class="resource-list-item communication-summary-card">

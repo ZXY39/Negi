@@ -49,6 +49,7 @@ _RESULT_REQUIRED_KEYS = (
     'blocking_reason',
 )
 _STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
+_UNSET = object()
 
 
 class RepeatedActionCircuitBreaker:
@@ -73,15 +74,15 @@ class ReActToolLoop:
         *,
         chat_backend,
         log_service,
-        max_iterations: int = 16,
+        max_iterations: int | None | object = _UNSET,
         parallel_tool_calls_enabled: bool = True,
-        max_parallel_tool_calls: int = 10,
+        max_parallel_tool_calls: int | None | object = _UNSET,
     ) -> None:
         self._chat_backend = chat_backend
         self._log_service = log_service
-        self._max_iterations = max(2, int(max_iterations or 16))
+        self._max_iterations = self._normalize_optional_limit(max_iterations, default=16)
         self._parallel_tool_calls_enabled = bool(parallel_tool_calls_enabled)
-        self._max_parallel_tool_calls = max(1, int(max_parallel_tool_calls or 1))
+        self._max_parallel_tool_calls = self._normalize_optional_limit(max_parallel_tool_calls, default=10)
 
     async def run(
         self,
@@ -92,16 +93,17 @@ class ReActToolLoop:
         tools: dict[str, Tool],
         model_refs: list[str],
         runtime_context: dict[str, Any],
-        max_iterations: int | None = None,
+        max_iterations: int | None | object = _UNSET,
+        max_parallel_tool_calls: int | None | object = _UNSET,
     ) -> NodeFinalResult:
         breaker = RepeatedActionCircuitBreaker()
-        limit = max(2, int(max_iterations or self._max_iterations))
+        limit = self._normalize_optional_limit(max_iterations, default=self._max_iterations)
         attempts = 0
         last_contract_violations: list[str] = []
         message_history = list(messages or [])
         orphan_tool_result_strikes = 0
         repair_overlay_text: str | None = None
-        while attempts < limit:
+        while limit is None or attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
             resumed_history = await self._resume_pending_tool_turn_if_needed(
@@ -259,6 +261,7 @@ class ReActToolLoop:
                         ),
                     },
                     prior_overflow_signatures=self._overflowed_search_signatures(message_history),
+                    max_parallel_tool_calls=max_parallel_tool_calls,
                 )
                 assistant_message = {
                     'role': 'assistant',
@@ -651,6 +654,7 @@ class ReActToolLoop:
         allowed_content_refs: list[str],
         runtime_context: dict[str, Any],
         prior_overflow_signatures: set[str] | None = None,
+        max_parallel_tool_calls: int | None | object = _UNSET,
     ) -> list[dict[str, Any]]:
         if any(str(getattr(call, 'name', '') or '').strip() == STAGE_TOOL_NAME for call in list(response_tool_calls or [])) and len(list(response_tool_calls or [])) != 1:
             return [
@@ -676,7 +680,17 @@ class ReActToolLoop:
                 }
                 for index, call in enumerate(list(response_tool_calls or []))
             ]
-        semaphore = asyncio.Semaphore(self._max_parallel_tool_calls if self._parallel_tool_calls_enabled else 1)
+        configured_parallel_limit = self._normalize_optional_limit(
+            max_parallel_tool_calls,
+            default=self._max_parallel_tool_calls,
+        )
+        semaphore = asyncio.Semaphore(
+            self._parallel_slot_count(
+                configured_parallel_limit,
+                len(list(response_tool_calls or [])),
+                enabled=self._parallel_tool_calls_enabled,
+            )
+        )
 
         async def _run_call(index: int, call: Any) -> dict[str, Any]:
             async with semaphore:
@@ -747,6 +761,24 @@ class ReActToolLoop:
 
         gathered = await asyncio.gather(*[_run_call(index, call) for index, call in enumerate(response_tool_calls)])
         return [item for item in sorted(gathered, key=lambda value: int(value['index']))]
+
+    @staticmethod
+    def _normalize_optional_limit(value: int | None | object, *, default: int | None) -> int | None:
+        if value is _UNSET:
+            value = default
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return max(0, int(value))
+
+    @staticmethod
+    def _parallel_slot_count(limit: int | None, item_count: int, *, enabled: bool) -> int:
+        if not enabled or item_count <= 1:
+            return 1
+        if limit is None:
+            return max(1, item_count)
+        return max(1, int(limit) if int(limit) > 0 else 1)
 
     def _update_tool_live_state(
         self,

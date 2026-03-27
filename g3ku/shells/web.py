@@ -41,6 +41,19 @@ _global_china_outbound_task: Optional[asyncio.Task] = None
 _global_china_start_task: Optional[asyncio.Task] = None
 _global_runtime_services_lock: Optional[asyncio.Lock] = None
 
+_NO_CEO_MODEL_CONFIGURED_MESSAGE = "No model configured for role 'ceo'."
+
+
+def is_no_ceo_model_configured_error(exc: BaseException | None) -> bool:
+    return str(exc or '').strip() == _NO_CEO_MODEL_CONFIGURED_MESSAGE
+
+
+def no_ceo_model_configured_payload() -> dict[str, str]:
+    return {
+        'code': 'no_model_configured',
+        'message': '当前项目还没有配置可用模型。请先进入“模型配置”页面，新增并保存至少一个模型，并把它分配给主Agent（CEO）角色。',
+    }
+
 
 def _get_runtime_services_lock() -> asyncio.Lock:
     global _global_runtime_services_lock
@@ -538,8 +551,10 @@ __all__ = [
     'debug_trace_enabled',
     'ensure_web_runtime_services',
     'get_agent',
+    'is_no_ceo_model_configured_error',
     'get_runtime_manager',
     'get_web_heartbeat_service',
+    'no_ceo_model_configured_payload',
     'refresh_web_agent_runtime',
     'run_web_shell',
     'shutdown_web_runtime',

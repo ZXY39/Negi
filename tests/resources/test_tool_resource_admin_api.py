@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from g3ku.config.loader import ensure_startup_config_ready
 from g3ku.resources import ResourceManager
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.security import get_bootstrap_security_service
@@ -75,6 +76,10 @@ def _build_app(service) -> FastAPI:
     app.include_router(admin_rest.router, prefix='/api')
     admin_rest.get_agent = lambda: SimpleNamespace(main_task_service=service)
     return app
+
+
+def _raise_no_model_configured():
+    raise ValueError("No model configured for role 'ceo'.")
 
 
 def _write_external_tool(workspace: Path, *, name: str = 'external_browser') -> None:
@@ -1191,7 +1196,7 @@ def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
     )
     (workspace / '.g3ku' / 'config.json').write_text(
         json.dumps({
-            'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'roleIterations': {'ceo': 40, 'execution': 16, 'inspection': 16}, 'multiAgent': {'orchestratorModelKey': None}},
+            'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'roleIterations': {'ceo': 40, 'execution': 16, 'inspection': 16}, 'roleConcurrency': {'ceo': None, 'execution': None, 'inspection': None}, 'multiAgent': {'orchestratorModelKey': None}},
             'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': '', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
             'providers': {},
             'web': {'host': '127.0.0.1', 'port': 1},
@@ -1285,6 +1290,7 @@ def test_models_endpoint_returns_role_iterations(tmp_path: Path, monkeypatch):
     payload = response.json()
     assert payload['ok'] is True
     assert payload['role_iterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16}
+    assert payload['role_concurrency'] == {'ceo': None, 'execution': None, 'inspection': None}
 
 
 def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path, monkeypatch):
@@ -1511,12 +1517,16 @@ def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypat
 
     cfg = load_config()
 
-    assert cfg.get_role_max_iterations('ceo') == 40
-    assert cfg.get_role_max_iterations('execution') == 16
-    assert cfg.get_role_max_iterations('inspection') == 16
+    assert cfg.get_role_max_iterations('ceo') is None
+    assert cfg.get_role_max_iterations('execution') is None
+    assert cfg.get_role_max_iterations('inspection') is None
+    assert cfg.get_role_max_concurrency('ceo') is None
+    assert cfg.get_role_max_concurrency('execution') is None
+    assert cfg.get_role_max_concurrency('inspection') is None
 
     saved = json.loads(config_path.read_text(encoding='utf-8'))
-    assert saved['agents']['roleIterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16}
+    assert saved['agents']['roleIterations'] == {'ceo': None, 'execution': None, 'inspection': None}
+    assert saved['agents']['roleConcurrency'] == {'ceo': None, 'execution': None, 'inspection': None}
 
 
 def test_llm_routes_endpoint_updates_role_iterations(tmp_path: Path, monkeypatch):
@@ -1541,6 +1551,30 @@ def test_llm_routes_endpoint_updates_role_iterations(tmp_path: Path, monkeypatch
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['agents']['roleIterations']['execution'] == 22
+
+
+def test_llm_routes_endpoint_updates_role_concurrency(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/llm/routes/execution',
+        json={'model_keys': ['m'], 'max_concurrency': 3},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['routes']['execution'] == ['m']
+    assert payload['role_concurrency']['execution'] == 3
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['agents']['roleConcurrency']['execution'] == 3
 
 
 def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path, monkeypatch):
@@ -2184,6 +2218,98 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
         manager.close()
 
 
+def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workspace)
+    ensure_startup_config_ready()
+    _write_skill(workspace, name='demo_skill')
+    _write_external_tool(workspace, name='external_browser')
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    monkeypatch.setattr(admin_rest, 'get_agent', _raise_no_model_configured)
+
+    client = TestClient(app)
+
+    skills_response = client.get('/api/resources/skills')
+    assert skills_response.status_code == 200
+    assert any(item['skill_id'] == 'demo_skill' for item in skills_response.json()['items'])
+
+    skill_response = client.get('/api/resources/skills/demo_skill')
+    assert skill_response.status_code == 200
+    assert skill_response.json()['item']['skill_id'] == 'demo_skill'
+    assert any(item['file_key'] == 'skill_doc' for item in skill_response.json()['files'])
+
+    tools_response = client.get('/api/resources/tools')
+    assert tools_response.status_code == 200
+    assert any(item['tool_id'] == 'external_browser' for item in tools_response.json()['items'])
+
+    tool_response = client.get('/api/resources/tools/external_browser')
+    assert tool_response.status_code == 200
+    assert tool_response.json()['item']['tool_id'] == 'external_browser'
+
+    toolskill_response = client.get('/api/resources/tools/external_browser/toolskill')
+    assert toolskill_response.status_code == 200
+    assert '# External Browser' in str(toolskill_response.json().get('content') or '')
+
+
+def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workspace)
+    ensure_startup_config_ready()
+    _write_skill(workspace, name='demo_skill')
+    _write_external_tool(workspace, name='external_browser')
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    monkeypatch.setattr(admin_rest, 'get_agent', _raise_no_model_configured)
+
+    client = TestClient(app)
+
+    skill_policy = client.put(
+        '/api/resources/skills/demo_skill/policy',
+        params={'session_id': 'web:shared'},
+        json={'enabled': False, 'allowed_roles': ['ceo']},
+    )
+    assert skill_policy.status_code == 200
+    assert skill_policy.json()['item']['enabled'] is False
+    assert skill_policy.json()['item']['allowed_roles'] == ['ceo']
+
+    skill_enable = client.post('/api/resources/skills/demo_skill/enable', params={'session_id': 'web:shared'})
+    assert skill_enable.status_code == 200
+    assert skill_enable.json()['item']['enabled'] is True
+
+    skill_file = client.put(
+        '/api/resources/skills/demo_skill/files/skill_doc',
+        params={'session_id': 'web:shared'},
+        json={'content': '# Demo Skill\n\nUpdated content.\n'},
+    )
+    assert skill_file.status_code == 200
+    assert skill_file.json()['item']['catalog_synced'] is False
+
+    tool_policy = client.put(
+        '/api/resources/tools/external_browser/policy',
+        params={'session_id': 'web:shared'},
+        json={'actions': {'use': ['execution']}},
+    )
+    assert tool_policy.status_code == 200
+    assert tool_policy.json()['item']['actions'][0]['allowed_roles'] == ['execution']
+
+    tool_disable = client.post('/api/resources/tools/external_browser/disable', params={'session_id': 'web:shared'})
+    assert tool_disable.status_code == 200
+    assert tool_disable.json()['item']['enabled'] is False
+
+    tool_enable = client.post('/api/resources/tools/external_browser/enable', params={'session_id': 'web:shared'})
+    assert tool_enable.status_code == 200
+    assert tool_enable.json()['item']['enabled'] is True
+
+    reload_response = client.post('/api/resources/reload', params={'session_id': 'web:shared'}, json={})
+    assert reload_response.status_code == 200
+    assert reload_response.json()['ok'] is True
+
+
 @pytest.mark.asyncio
 async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -2420,3 +2546,46 @@ async def test_core_tool_admin_endpoints_block_disable_delete_and_ceo_removal(tm
     finally:
         await service.close()
         manager.close()
+
+def test_china_bridge_channels_endpoint_ignores_stale_error_when_ceo_model_missing(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    config_path = workspace / '.g3ku' / 'config.json'
+    payload = json.loads(config_path.read_text(encoding='utf-8'))
+    payload['models']['catalog'] = []
+    payload['models']['roles'] = {'ceo': [], 'execution': [], 'inspection': []}
+    config_path.write_text(json.dumps(payload), encoding='utf-8')
+
+    state_dir = workspace / '.g3ku' / 'china-bridge'
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / 'status.json').write_text(
+        json.dumps(
+            {
+                'enabled': True,
+                'running': False,
+                'connected': False,
+                'pid': None,
+                'last_error': 'china bridge build requires a package manager, but none of these were found: pnpm, npm',
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.get('/api/china-bridge/channels')
+
+    assert response.status_code == 200
+    data = response.json()['bridge']
+    assert data['running'] is False
+    assert data['connected'] is False
+    assert data['startup_deferred'] is True
+    assert data['startup_deferred_reason'] == 'no_model_configured'
+    assert 'CEO ??' in data['startup_deferred_message']
+    assert data['last_error'] is None
+

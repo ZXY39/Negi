@@ -29,7 +29,13 @@ from g3ku.runtime.web_ceo_sessions import (
     upload_dir_for_session,
     workspace_path,
 )
-from g3ku.shells.web import ensure_web_runtime_services, get_agent, get_runtime_manager
+from g3ku.shells.web import (
+    ensure_web_runtime_services,
+    get_agent,
+    get_runtime_manager,
+    is_no_ceo_model_configured_error,
+    no_ceo_model_configured_payload,
+)
 from g3ku.utils.helpers import safe_filename
 from main.api.websocket_utils import (
     WebSocketChannelClosed,
@@ -507,7 +513,22 @@ async def ceo_websocket(websocket: WebSocket):
         )
         await websocket_close(websocket, code=4423)
         return
-    agent = get_agent()
+    try:
+        agent = get_agent()
+    except Exception as exc:
+        if not is_no_ceo_model_configured_error(exc):
+            raise
+        await websocket_send_json(
+            websocket,
+            build_envelope(
+                channel='ceo',
+                session_id='web:shared',
+                type='error',
+                data=no_ceo_model_configured_payload(),
+            ),
+        )
+        await websocket_close(websocket, code=4503)
+        return
     runtime_manager = get_runtime_manager(agent)
     transcript_store = getattr(agent, 'sessions', None)
     if transcript_store is None:
@@ -631,7 +652,16 @@ async def ceo_websocket(websocket: WebSocket):
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            await _push_stream_event('ceo.error', {'code': 'turn_failed', 'message': str(exc)})
+            snapshot = _build_inflight_turn_snapshot(session, session_id)
+            await _push_stream_event(
+                'ceo.error',
+                {
+                    'code': 'turn_failed',
+                    'message': str(exc),
+                    'interaction_trace': _serialize_interaction_trace((snapshot or {}).get('interaction_trace')),
+                    'source': str((snapshot or {}).get('source') or 'user').strip().lower() or 'user',
+                },
+            )
             return
 
     async def sender(source_queue: asyncio.Queue[dict[str, Any]]) -> None:

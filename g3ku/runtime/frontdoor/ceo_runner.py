@@ -231,11 +231,17 @@ class CeoFrontDoorRunner:
             raise RuntimeError("CEO frontdoor requires an initialized provider or app_config.")
         return _DirectProviderChatBackend(provider)
 
-    def _parallel_tool_settings(self) -> tuple[bool, int]:
+    def _parallel_tool_settings(self) -> tuple[bool, int | None]:
         service = getattr(self._loop, "main_task_service", None)
         react_loop = getattr(service, "_react_loop", None) if service is not None else None
         enabled = bool(getattr(react_loop, "_parallel_tool_calls_enabled", True)) if react_loop is not None else True
-        max_parallel = max(1, int(getattr(react_loop, "_max_parallel_tool_calls", 10) or 10)) if react_loop is not None else 10
+        app_config = getattr(self._loop, "app_config", None)
+        role_limit = (
+            app_config.get_role_max_concurrency("ceo")
+            if app_config is not None and hasattr(app_config, "get_role_max_concurrency")
+            else None
+        )
+        max_parallel = role_limit if role_limit is not None else (getattr(react_loop, "_max_parallel_tool_calls", 10) if react_loop is not None else 10)
         return enabled, max_parallel
 
     def _registered_tools(self, tool_names: list[str]) -> dict[str, Tool]:
@@ -583,7 +589,7 @@ class CeoFrontDoorRunner:
         runtime_context: dict[str, Any],
         prompt_cache_key: str,
     ) -> CeoTurnResult:
-        limit = max(2, int(getattr(self._loop, "max_iterations", 12) or 12))
+        configured_limit = getattr(self._loop, "max_iterations", 12)
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         message_history = list(messages or [])
         interaction_trace = new_interaction_trace()
@@ -609,7 +615,9 @@ class CeoFrontDoorRunner:
             all_tools[STAGE_TOOL_NAME] = CeoSubmitNextStageTool(_submit_stage)
         chat_backend = self._resolve_chat_backend()
 
-        for _attempt in range(limit):
+        attempt_index = 0
+        while configured_limit is None or attempt_index < max(0, int(configured_limit)):
+            attempt_index += 1
             if stage_tool_enabled:
                 stage_gate = self._stage_gate(interaction_trace)
                 visible_tools = visible_tools_for_stage_iteration(
@@ -686,7 +694,9 @@ class CeoFrontDoorRunner:
                     )
                     self._sync_session_trace(session, interaction_trace)
 
-                semaphore = asyncio.Semaphore(max_parallel_tool_calls if parallel_enabled else 1)
+                semaphore = asyncio.Semaphore(
+                    self._parallel_slot_count(max_parallel_tool_calls, len(tool_call_payloads), enabled=parallel_enabled)
+                )
 
                 async def _run_single(index: int):
                     nonlocal interaction_trace
@@ -823,6 +833,14 @@ class CeoFrontDoorRunner:
         interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
         self._sync_session_trace(session, interaction_trace)
         raise RuntimeError("CEO frontdoor exceeded maximum iterations")
+
+    @staticmethod
+    def _parallel_slot_count(limit: int | None, item_count: int, *, enabled: bool) -> int:
+        if not enabled or item_count <= 1:
+            return 1
+        if limit is None:
+            return max(1, item_count)
+        return max(1, int(limit) if int(limit) > 0 else 1)
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._loop._ensure_checkpointer_ready()

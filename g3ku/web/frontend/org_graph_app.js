@@ -6,7 +6,8 @@ const MODEL_SCOPES = [
 
 const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
 const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
-const DEFAULT_ROLE_ITERATIONS = () => ({ ceo: 40, execution: 16, inspection: 16 });
+const DEFAULT_ROLE_ITERATIONS = () => ({ ceo: null, execution: null, inspection: null });
+const DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection: null });
 const TREE_SCALE_MIN = 0.12;
 const TREE_SCALE_MAX = 3.5;
 const TREE_SCALE_FACTOR = 1.12;
@@ -38,8 +39,27 @@ const cloneRoleIterations = (iterations = DEFAULT_ROLE_ITERATIONS()) => {
     const defaults = DEFAULT_ROLE_ITERATIONS();
     const next = DEFAULT_ROLE_ITERATIONS();
     MODEL_SCOPES.forEach(({ key }) => {
-        const value = Number(iterations?.[key]);
-        next[key] = Number.isInteger(value) && value >= 2 ? value : defaults[key];
+        const raw = iterations?.[key];
+        if (raw == null || String(raw).trim() === "") {
+            next[key] = defaults[key];
+            return;
+        }
+        const value = Number(raw);
+        next[key] = Number.isInteger(value) && value >= 0 ? value : defaults[key];
+    });
+    return next;
+};
+const cloneRoleConcurrency = (concurrency = DEFAULT_ROLE_CONCURRENCY()) => {
+    const defaults = DEFAULT_ROLE_CONCURRENCY();
+    const next = DEFAULT_ROLE_CONCURRENCY();
+    MODEL_SCOPES.forEach(({ key }) => {
+        const raw = concurrency?.[key];
+        if (raw == null || String(raw).trim() === "") {
+            next[key] = defaults[key];
+            return;
+        }
+        const value = Number(raw);
+        next[key] = Number.isInteger(value) && value >= 0 ? value : defaults[key];
     });
     return next;
 };
@@ -48,6 +68,7 @@ const S = {
     view: "ceo",
     ceoWs: null,
     ceoWsToken: 0,
+    ceoWsLastErrorCode: "",
     ceoPendingTurns: [],
     ceoTurnActive: false,
     ceoPauseBusy: false,
@@ -125,6 +146,8 @@ const S = {
         roleDrafts: EMPTY_MODEL_ROLES(),
         roleIterations: DEFAULT_ROLE_ITERATIONS(),
         roleIterationDrafts: DEFAULT_ROLE_ITERATIONS(),
+        roleConcurrency: DEFAULT_ROLE_CONCURRENCY(),
+        roleConcurrencyDrafts: DEFAULT_ROLE_CONCURRENCY(),
         defaults: DEFAULT_MODEL_DEFAULTS(),
         loading: false,
         saving: false,
@@ -2196,7 +2219,7 @@ function handleCeoError(payload = {}) {
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
-    finalizeCeoTurn(`运行出错：${String(payload?.message || "unknown error")}`);
+    finalizeCeoTurn(`运行出错：${String(payload?.message || "unknown error")}`, payload || {});
 }
 
 function requestCeoPause() {
@@ -3899,6 +3922,10 @@ function activeRoleIterations() {
     return S.modelCatalog.roleEditing ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
 }
 
+function activeRoleConcurrency() {
+    return S.modelCatalog.roleEditing ? S.modelCatalog.roleConcurrencyDrafts : S.modelCatalog.roleConcurrency;
+}
+
 function modelScopeChain(scope, source = "active") {
     const roles = source === "draft"
         ? S.modelCatalog.roleDrafts
@@ -3914,9 +3941,22 @@ function modelScopeIterations(scope, source = "active") {
         : source === "committed"
             ? S.modelCatalog.roleIterations
             : activeRoleIterations();
-    const defaults = DEFAULT_ROLE_ITERATIONS();
-    const value = Number(iterations?.[scope]);
-    return Number.isInteger(value) && value >= 2 ? value : defaults[scope];
+    const raw = iterations?.[scope];
+    if (raw == null || String(raw).trim() === "") return null;
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function modelScopeConcurrency(scope, source = "active") {
+    const concurrency = source === "draft"
+        ? S.modelCatalog.roleConcurrencyDrafts
+        : source === "committed"
+            ? S.modelCatalog.roleConcurrency
+            : activeRoleConcurrency();
+    const raw = concurrency?.[scope];
+    if (raw == null || String(raw).trim() === "") return null;
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function modelScopeContains(scope, ref, source = "active") {
@@ -3948,6 +3988,10 @@ function normalizeRoleIterations(iterations = DEFAULT_ROLE_ITERATIONS()) {
     return cloneRoleIterations(iterations);
 }
 
+function normalizeRoleConcurrency(concurrency = DEFAULT_ROLE_CONCURRENCY()) {
+    return cloneRoleConcurrency(concurrency);
+}
+
 function modelRolesEqual(left, right) {
     return MODEL_SCOPES.every(({ key }) => {
         const leftChain = normalizeModelRoleChain(left?.[key] || []);
@@ -3963,10 +4007,17 @@ function modelRoleIterationsEqual(left, right) {
     return MODEL_SCOPES.every(({ key }) => leftNormalized[key] === rightNormalized[key]);
 }
 
+function modelRoleConcurrencyEqual(left, right) {
+    const leftNormalized = normalizeRoleConcurrency(left);
+    const rightNormalized = normalizeRoleConcurrency(right);
+    return MODEL_SCOPES.every(({ key }) => leftNormalized[key] === rightNormalized[key]);
+}
+
 function syncModelRoleDraftState() {
     const rolesChanged = !modelRolesEqual(S.modelCatalog.roleDrafts, S.modelCatalog.roles);
     const iterationsChanged = !modelRoleIterationsEqual(S.modelCatalog.roleIterationDrafts, S.modelCatalog.roleIterations);
-    S.modelCatalog.rolesDirty = !!S.modelCatalog.roleEditing && (rolesChanged || iterationsChanged);
+    const concurrencyChanged = !modelRoleConcurrencyEqual(S.modelCatalog.roleConcurrencyDrafts, S.modelCatalog.roleConcurrency);
+    S.modelCatalog.rolesDirty = !!S.modelCatalog.roleEditing && (rolesChanged || iterationsChanged || concurrencyChanged);
 }
 
 function modelCatalogHeadersKey(headers) {
@@ -4036,6 +4087,11 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
         : payload.role_iterations && typeof payload.role_iterations === "object"
             ? payload.role_iterations
             : {};
+    const roleConcurrencyPayload = payload.roleConcurrency && typeof payload.roleConcurrency === "object"
+        ? payload.roleConcurrency
+        : payload.role_concurrency && typeof payload.role_concurrency === "object"
+            ? payload.role_concurrency
+            : {};
     const nextRoles = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
         nextRoles[key] = remapModelRefs(
@@ -4051,13 +4107,16 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
     S.modelCatalog.catalog = catalog;
     S.modelCatalog.roles = normalizeAllModelRoles(nextRoles);
     S.modelCatalog.roleIterations = normalizeRoleIterations(roleIterationsPayload);
+    S.modelCatalog.roleConcurrency = normalizeRoleConcurrency(roleConcurrencyPayload);
     if (preserveRoleDrafts && S.modelCatalog.roleEditing) {
         S.modelCatalog.roleDrafts = normalizeAllModelRoles(S.modelCatalog.roleDrafts);
         S.modelCatalog.roleIterationDrafts = normalizeRoleIterations(S.modelCatalog.roleIterationDrafts);
+        S.modelCatalog.roleConcurrencyDrafts = normalizeRoleConcurrency(S.modelCatalog.roleConcurrencyDrafts);
         syncModelRoleDraftState();
     } else {
         S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
         S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
+        S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
         S.modelCatalog.roleEditing = false;
         S.modelCatalog.rolesDirty = false;
     }
@@ -4564,9 +4623,14 @@ function updateRoleChainDraft(scope, nextChain) {
 function updateRoleIterationDraft(scope, value, { render = true } = {}) {
     if (!S.modelCatalog.roleEditing) return false;
     const normalizedScope = String(scope || "").trim();
-    const cleanValue = Number.parseInt(String(value || "").trim(), 10);
-    if (!normalizedScope || !Number.isInteger(cleanValue) || cleanValue < 2) return false;
-    S.modelCatalog.roleIterationDrafts[normalizedScope] = cleanValue;
+    if (!normalizedScope) return false;
+    if (value == null || String(value).trim() === "") {
+        S.modelCatalog.roleIterationDrafts[normalizedScope] = null;
+    } else {
+        const cleanValue = Number.parseInt(String(value || "").trim(), 10);
+        if (!Number.isInteger(cleanValue) || cleanValue < 0) return false;
+        S.modelCatalog.roleIterationDrafts[normalizedScope] = cleanValue;
+    }
     syncModelRoleDraftState();
     if (render) renderModelCatalog();
     return true;
@@ -4635,6 +4699,128 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
             payload = await ApiClient.updateModelRoleChain(scope, {
                 modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
                 maxIterations: iterationSource[scope],
+            });
+        }
+        if (payload) applyModelCatalog(payload);
+        hint(successText);
+    } catch (e) {
+        S.modelCatalog.error = e.message || "save failed";
+        hint(`模型配置错误：${S.modelCatalog.error}`, true);
+        throw e;
+    } finally {
+        S.modelCatalog.saving = false;
+        renderModelCatalog();
+    }
+}
+
+function renderRoleLimitControl({ scopeKey, kind, label, value, editing }) {
+    const modeName = `model-role-${kind}-mode-${scopeKey}`;
+    const inputValue = value == null ? "" : String(value);
+    return `
+        <div class="model-role-limit-field" data-model-role-limit-kind="${esc(kind)}" data-model-role-limit-scope="${esc(scopeKey)}">
+            <span class="model-role-iterations-label">${esc(label)}</span>
+            <div class="model-role-limit-options">
+                <label class="model-role-limit-option">
+                    <input type="radio" name="${esc(modeName)}" value="unlimited" ${value == null ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}">
+                    <span>无限制</span>
+                </label>
+                <label class="model-role-limit-option">
+                    <input type="radio" name="${esc(modeName)}" value="custom" ${value != null ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}">
+                    <span>自定义</span>
+                </label>
+                <input class="model-role-iterations-input model-role-limit-input spinless-number-input" type="number" min="0" step="1" inputmode="numeric" value="${esc(inputValue)}" placeholder="0" ${editing && value != null ? "" : "disabled"} data-model-role-limit-input="${esc(kind)}">
+            </div>
+        </div>`;
+}
+
+function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
+    if (!U.modelRoleEditors) return false;
+    let changed = false;
+    const groups = [...U.modelRoleEditors.querySelectorAll("[data-model-role-limit-kind][data-model-role-limit-scope]")];
+    if (!groups.length) return false;
+    groups.forEach((group) => {
+        if (!(group instanceof HTMLElement)) return;
+        const scope = String(group.dataset.modelRoleLimitScope || "").trim();
+        const kind = String(group.dataset.modelRoleLimitKind || "").trim();
+        if (!scope || !kind) return;
+        const input = group.querySelector("[data-model-role-limit-input]");
+        if (!(input instanceof HTMLInputElement)) return;
+        const scopeLabel = MODEL_SCOPES.find((item) => item.key === scope)?.label || scope;
+        const selectedMode = group.querySelector("[data-model-role-limit-mode]:checked");
+        const mode = selectedMode instanceof HTMLInputElement ? String(selectedMode.value || "unlimited") : "unlimited";
+        input.disabled = mode !== "custom" || !S.modelCatalog.roleEditing;
+        if (mode !== "custom") {
+            input.classList.remove("is-invalid");
+            input.setCustomValidity("");
+            const currentValue = kind === "iterations" ? modelScopeIterations(scope, "draft") : modelScopeConcurrency(scope, "draft");
+            if (currentValue !== null) {
+                if (kind === "iterations") S.modelCatalog.roleIterationDrafts[scope] = null;
+                if (kind === "concurrency") S.modelCatalog.roleConcurrencyDrafts[scope] = null;
+                changed = true;
+            }
+            return;
+        }
+        const rawValue = String(input.value || "").trim();
+        const cleanValue = Number.parseInt(rawValue, 10);
+        const invalid = !rawValue || !Number.isInteger(cleanValue) || cleanValue < 0;
+        const label = kind === "iterations" ? "最大轮数" : "最大并发数";
+        if (invalid) {
+            input.classList.add("is-invalid");
+            input.setCustomValidity("请输入不为负数的整数");
+            if (requireValid) {
+                input.reportValidity();
+                throw new Error(`${scopeLabel} ${label}必须是不为负数的整数`);
+            }
+            return;
+        }
+        input.classList.remove("is-invalid");
+        input.setCustomValidity("");
+        const currentValue = kind === "iterations" ? modelScopeIterations(scope, "draft") : modelScopeConcurrency(scope, "draft");
+        if (currentValue !== cleanValue) {
+            if (kind === "iterations") S.modelCatalog.roleIterationDrafts[scope] = cleanValue;
+            if (kind === "concurrency") S.modelCatalog.roleConcurrencyDrafts[scope] = cleanValue;
+            changed = true;
+        }
+    });
+    if (changed) syncModelRoleDraftState();
+    return changed;
+}
+
+function startModelRoleEditing() {
+    S.modelCatalog.roleEditing = true;
+    S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+    S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
+    S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
+    syncModelRoleDraftState();
+    renderModelCatalog();
+}
+
+function cancelModelRoleEditing() {
+    S.modelCatalog.roleEditing = false;
+    S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
+    S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
+    S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
+    S.modelCatalog.rolesDirty = false;
+    finishModelDrag();
+    renderModelCatalog();
+    hint("已取消模型链修改。", false);
+}
+
+async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
+    const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!targets.length) return;
+    const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
+    const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
+    const concurrencySource = useDrafts ? S.modelCatalog.roleConcurrencyDrafts : S.modelCatalog.roleConcurrency;
+    S.modelCatalog.saving = true;
+    renderModelCatalog();
+    try {
+        let payload = null;
+        for (const scope of targets) {
+            payload = await ApiClient.updateModelRoleChain(scope, {
+                modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
+                maxIterations: iterationSource[scope],
+                maxConcurrency: concurrencySource[scope],
             });
         }
         if (payload) applyModelCatalog(payload);
@@ -5392,11 +5578,26 @@ function initCeoWs() {
         if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
         const payload = JSON.parse(ev.data);
         if (payload.type === "snapshot.ceo") {
+            S.ceoWsLastErrorCode = "";
             renderCeoSnapshot(payload.data?.messages || [], payload.data?.inflight_turn || null);
             S.ceoSessionBusy = false;
             renderCeoSessions();
             syncCeoSessionActions();
             syncCeoPrimaryButton();
+        }
+        if (payload.type === "error") {
+            const code = ApiClient.getErrorCode(payload.data || {});
+            const message = ApiClient.friendlyErrorMessage(payload.data || {}, payload.data?.message || "连接失败");
+            if (code && code !== S.ceoWsLastErrorCode) {
+                S.ceoWsLastErrorCode = code;
+                showToast({
+                    title: code === "no_model_configured" ? "未配置模型" : "连接失败",
+                    text: message,
+                    kind: code === "no_model_configured" ? "warn" : "error",
+                    durationMs: 5200,
+                });
+            }
+            return;
         }
         if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {}, payload.data || {});
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
@@ -5947,14 +6148,19 @@ function bind() {
     });
     U.modelRoleEditors?.addEventListener("input", (e) => {
         if (!S.modelCatalog.roleEditing) return;
-        const field = e.target.closest("[data-model-role-iterations]");
-        if (!(field instanceof HTMLInputElement)) return;
+        const field = e.target.closest("[data-model-role-iterations], [data-model-role-limit-input]");
+        if (!(field instanceof HTMLElement)) return;
         syncRoleIterationDraftsFromInputs({ requireValid: false });
     });
     U.modelRoleEditors?.addEventListener("change", (e) => {
         if (!S.modelCatalog.roleEditing) return;
-        const field = e.target.closest("[data-model-role-iterations]");
-        if (!(field instanceof HTMLInputElement)) return;
+        const field = e.target.closest("[data-model-role-iterations], [data-model-role-limit-input], [data-model-role-limit-mode]");
+        if (!(field instanceof HTMLElement)) return;
+        if (field.matches("[data-model-role-limit-mode]")) {
+            syncRoleIterationDraftsFromInputs({ requireValid: false });
+            renderModelCatalog();
+            return;
+        }
         try {
             syncRoleIterationDraftsFromInputs({ requireValid: true });
             renderModelCatalog();

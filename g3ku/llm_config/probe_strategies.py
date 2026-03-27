@@ -14,6 +14,56 @@ def _join_url(base_url: str, suffix: str) -> str:
     return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
 
 
+def _response_content_type(response: httpx.Response) -> str:
+    raw_value = str(response.headers.get("content-type", "") or "").strip()
+    if not raw_value:
+        return ""
+    return raw_value.split(";", 1)[0].strip()
+
+
+def _response_body_preview(response: httpx.Response, *, limit: int = 160) -> str:
+    body = str(response.text or "")
+    normalized = " ".join(body.split())
+    if not normalized:
+        return ""
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit].rstrip()}..."
+
+
+def _non_json_failure(
+    config: NormalizedProviderConfig,
+    *,
+    response: httpx.Response,
+    latency_ms: int,
+    label: str,
+) -> ProbeResult:
+    content_type = _response_content_type(response)
+    details: list[str] = []
+    if response.status_code:
+        details.append(f"HTTP {response.status_code}")
+    if content_type:
+        details.append(content_type)
+    detail_suffix = f" ({', '.join(details)})" if details else ""
+    diagnostics: dict[str, Any] = {}
+    if content_type:
+        diagnostics["content_type"] = content_type
+    preview = _response_body_preview(response)
+    if preview:
+        diagnostics["body_preview"] = preview
+    return _failure_result(
+        config,
+        status=ProbeStatus.INVALID_RESPONSE,
+        http_status=response.status_code,
+        latency_ms=latency_ms,
+        message=(
+            f"{label}{detail_suffix}. "
+            "This usually means the Base URL points to a web page, auth portal, or full endpoint path instead of the provider API root."
+        ),
+        diagnostics=diagnostics,
+    )
+
+
 def _success_result(
     config: NormalizedProviderConfig,
     *,
@@ -122,12 +172,11 @@ def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderCon
         try:
             fallback_payload = fallback.json()
         except json.JSONDecodeError:
-            return _failure_result(
+            return _non_json_failure(
                 config,
-                status=ProbeStatus.INVALID_RESPONSE,
-                http_status=fallback.status_code,
+                response=fallback,
                 latency_ms=latency_ms,
-                message="Fallback endpoint returned a non-JSON response.",
+                label="Fallback endpoint returned a non-JSON response",
             )
         if 200 <= fallback.status_code < 300:
             return _success_result(
@@ -148,12 +197,11 @@ def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderCon
     try:
         payload = response.json()
     except json.JSONDecodeError:
-        return _failure_result(
+        return _non_json_failure(
             config,
-            status=ProbeStatus.INVALID_RESPONSE,
-            http_status=response.status_code,
+            response=response,
             latency_ms=latency_ms,
-            message="Model catalog returned a non-JSON response.",
+            label="Model catalog returned a non-JSON response",
         )
     if 200 <= response.status_code < 300:
         model_count = None
@@ -200,12 +248,11 @@ def _probe_anthropic_compatible(client: httpx.Client, config: NormalizedProvider
     try:
         payload = response.json()
     except json.JSONDecodeError:
-        return _failure_result(
+        return _non_json_failure(
             config,
-            status=ProbeStatus.INVALID_RESPONSE,
-            http_status=response.status_code,
+            response=response,
             latency_ms=latency_ms,
-            message="Anthropic-compatible endpoint returned a non-JSON response.",
+            label="Anthropic-compatible endpoint returned a non-JSON response",
         )
     if 200 <= response.status_code < 300:
         return _success_result(
@@ -249,12 +296,11 @@ def _probe_gemini(client: httpx.Client, config: NormalizedProviderConfig) -> Pro
     try:
         payload = response.json()
     except json.JSONDecodeError:
-        return _failure_result(
+        return _non_json_failure(
             config,
-            status=ProbeStatus.INVALID_RESPONSE,
-            http_status=response.status_code,
+            response=response,
             latency_ms=latency_ms,
-            message="Gemini endpoint returned a non-JSON response.",
+            label="Gemini endpoint returned a non-JSON response",
         )
     if 200 <= response.status_code < 300:
         return _success_result(
@@ -292,7 +338,12 @@ def _probe_dashscope_embedding(client: httpx.Client, config: NormalizedProviderC
     try:
         payload = response.json()
     except json.JSONDecodeError:
-        return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, http_status=response.status_code, latency_ms=latency_ms, message="DashScope embedding returned a non-JSON response.")
+        return _non_json_failure(
+            config,
+            response=response,
+            latency_ms=latency_ms,
+            label="DashScope embedding returned a non-JSON response",
+        )
     if 200 <= response.status_code < 300:
         return _success_result(config, latency_ms=latency_ms, http_status=response.status_code, message="DashScope embedding probe succeeded.", diagnostics={"response_keys": sorted(payload.keys()) if isinstance(payload, dict) else []})
     return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, http_status=response.status_code, latency_ms=latency_ms, message="DashScope embedding probe failed.")
@@ -314,7 +365,12 @@ def _probe_dashscope_rerank(client: httpx.Client, config: NormalizedProviderConf
     try:
         payload = response.json()
     except json.JSONDecodeError:
-        return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, http_status=response.status_code, latency_ms=latency_ms, message="DashScope rerank returned a non-JSON response.")
+        return _non_json_failure(
+            config,
+            response=response,
+            latency_ms=latency_ms,
+            label="DashScope rerank returned a non-JSON response",
+        )
     if 200 <= response.status_code < 300:
         return _success_result(config, latency_ms=latency_ms, http_status=response.status_code, message="DashScope rerank probe succeeded.", diagnostics={"response_keys": sorted(payload.keys()) if isinstance(payload, dict) else []})
     return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, http_status=response.status_code, latency_ms=latency_ms, message="DashScope rerank probe failed.")
@@ -335,12 +391,11 @@ def _probe_ollama(client: httpx.Client, config: NormalizedProviderConfig) -> Pro
     try:
         payload = response.json()
     except json.JSONDecodeError:
-        return _failure_result(
+        return _non_json_failure(
             config,
-            status=ProbeStatus.INVALID_RESPONSE,
-            http_status=response.status_code,
+            response=response,
             latency_ms=latency_ms,
-            message="Ollama returned a non-JSON response.",
+            label="Ollama returned a non-JSON response",
         )
     models = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(models, list):

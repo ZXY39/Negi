@@ -121,3 +121,29 @@ def test_probe_config_omits_empty_bearer_for_dashscope(protocol_adapter, default
 
     assert result.status == ProbeStatus.AUTH_ERROR
 
+
+def test_probe_config_reports_content_type_for_non_json_model_catalog() -> None:
+    config = _config(
+        provider_id="openai",
+        protocol_adapter=ProtocolAdapter.OPENAI_RESPONSES,
+        base_url="https://example.com/v1",
+        default_model="gpt-5.4",
+        api_key="test-key",
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            text="<html><title>Sign in</title><body>login required</body></html>",
+        )
+
+    result = probe_config(config, transport=httpx.MockTransport(_handler))
+
+    assert result.status == ProbeStatus.INVALID_RESPONSE
+    assert "HTTP 200" in result.message
+    assert "text/html" in result.message
+    assert result.diagnostics["content_type"] == "text/html"
+    assert "login required" in result.diagnostics["body_preview"]
+

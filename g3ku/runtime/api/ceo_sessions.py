@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Body, HTTPException
 
@@ -18,19 +19,36 @@ from g3ku.runtime.web_ceo_sessions import (
     resolve_active_ceo_session_id,
     workspace_path,
 )
-from g3ku.shells.web import get_agent, get_runtime_manager, get_web_heartbeat_service
+from g3ku.session.manager import SessionManager
+from g3ku.shells.web import (
+    get_agent,
+    get_runtime_manager,
+    get_web_heartbeat_service,
+    is_no_ceo_model_configured_error,
+)
 from main.protocol import build_envelope
 
 router = APIRouter()
 
 
+_STANDALONE_RUNTIME_MANAGER = SimpleNamespace(
+    get=lambda _session_id: None,
+    remove=lambda _session_id: None,
+)
+
+
 def _sessions():
-    agent = get_agent()
+    state_store = WebCeoStateStore(workspace_path())
+    try:
+        agent = get_agent()
+    except Exception as exc:
+        if not is_no_ceo_model_configured_error(exc):
+            raise
+        return None, SessionManager(workspace_path()), _STANDALONE_RUNTIME_MANAGER, state_store
     session_manager = getattr(agent, "sessions", None)
     if session_manager is None:
         raise HTTPException(status_code=503, detail="session_manager_unavailable")
     runtime_manager = get_runtime_manager(agent)
-    state_store = WebCeoStateStore(workspace_path())
     return agent, session_manager, runtime_manager, state_store
 
 
@@ -121,6 +139,8 @@ def _publish_ceo_sessions_snapshot(
 
 
 async def _task_service(agent):
+    if agent is None:
+        raise HTTPException(status_code=503, detail='no_model_configured')
     service = getattr(agent, 'main_task_service', None)
     if service is None:
         raise HTTPException(status_code=503, detail='main_task_service_unavailable')
