@@ -192,7 +192,6 @@ class FallbackProvider(LLMProvider):
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
     ) -> LLMResponse:
-        del prompt_cache_key
         from g3ku.providers.provider_factory import build_provider_from_model_key
 
         requested = str(model or "").strip()
@@ -241,6 +240,7 @@ class FallbackProvider(LLMProvider):
                         reasoning_effort=effective_reasoning,
                         tool_choice=tool_choice,
                         parallel_tool_calls=parallel_tool_calls,
+                        prompt_cache_key=prompt_cache_key,
                     )
                 except Exception as exc:
                     last_error = exc

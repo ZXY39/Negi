@@ -23,9 +23,16 @@ class ResponsesProvider(LLMProvider):
 
     RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
-    def __init__(self, api_key: str, api_base: str, default_model: str = "gpt-5.3-codex"):
+    def __init__(
+        self,
+        api_key: str,
+        api_base: str,
+        default_model: str = "gpt-5.3-codex",
+        extra_headers: dict[str, str] | None = None,
+    ):
         super().__init__(api_key=api_key, api_base=api_base)
         self.default_model = default_model
+        self.extra_headers = dict(extra_headers or {})
 
     async def chat(
         self,
@@ -55,6 +62,8 @@ class ResponsesProvider(LLMProvider):
             "accept": "text/event-stream",
             "content-type": "application/json",
         }
+        if self.extra_headers:
+            headers.update(self.extra_headers)
 
         if system_prompt:
             # Prepend system prompt as a user message to ensure visibility

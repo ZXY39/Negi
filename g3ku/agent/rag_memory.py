@@ -3339,6 +3339,7 @@ class MemoryManager:
         self._trace_lock = asyncio.Lock()
         self._backend_lock = asyncio.Lock()
         self._backend: _RagMemoryBackend | None = None
+        self._bootstrap_replay_task: asyncio.Task[None] | None = None
         self._backend_state = "disabled"
         self._last_backend_error = ""
         self._last_rag_attempt_at = 0.0
@@ -3362,8 +3363,30 @@ class MemoryManager:
             return
         self._backend = backend
         self.store = backend.store
-        self._backend_state = "rag_healthy"
+        self._backend_state = "rag_recovering"
         self._last_backend_error = ""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            self._bootstrap_replay_task = loop.create_task(self._finish_bootstrap_replay(backend))
+        else:
+            asyncio.run(self._finish_bootstrap_replay(backend))
+
+    async def _finish_bootstrap_replay(self, backend: _RagMemoryBackend) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await self._replay_journal_to_rag(backend)
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+        else:
+            if self._backend is backend:
+                self._backend_state = "rag_healthy"
+                self._last_backend_error = ""
+        finally:
+            if self._bootstrap_replay_task is current_task:
+                self._bootstrap_replay_task = None
 
     def _bootstrap_sync_state(self) -> dict[str, Any]:
         state = self._load_json_dict(self.sync_state_file)
@@ -3646,6 +3669,9 @@ class MemoryManager:
         if not self._rag_mode_enabled():
             return None
         if self._backend is not None:
+            task = self._bootstrap_replay_task
+            if task is not None:
+                await asyncio.shield(task)
             return self._backend
         now = time.monotonic()
         if not force_retry and now - self._last_rag_attempt_at < self._RAG_RETRY_BACKOFF_S:
@@ -4634,6 +4660,10 @@ class MemoryManager:
         return base
 
     def close(self) -> None:
+        task = self._bootstrap_replay_task
+        self._bootstrap_replay_task = None
+        if task is not None and not task.done():
+            task.cancel()
         backend = self._backend
         self._backend = None
         self.store = None

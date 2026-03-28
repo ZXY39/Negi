@@ -166,6 +166,11 @@ class ReActToolLoop:
                 },
                 publish_snapshot=True,
             )
+            turn_prompt_cache_key = self._execution_prompt_cache_key(
+                model_messages=model_messages,
+                tool_schemas=tool_schemas,
+                model_refs=model_refs,
+            )
             response = await self._chat_with_optional_extensions(
                 messages=request_messages,
                 tools=tool_schemas or None,
@@ -173,11 +178,7 @@ class ReActToolLoop:
                 max_tokens=1200,
                 temperature=0.2,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
-                prompt_cache_key=self._execution_prompt_cache_key(
-                    model_messages=model_messages,
-                    tool_schemas=tool_schemas,
-                    model_refs=model_refs,
-                ),
+                prompt_cache_key=turn_prompt_cache_key,
             )
             response_tool_calls = list(response.tool_calls or [])
             tool_calls = [
@@ -191,6 +192,8 @@ class ReActToolLoop:
                 tool_calls=tool_calls,
                 usage_attempts=list(response.attempts or []),
                 model_messages=model_messages,
+                request_messages=request_messages,
+                prompt_cache_key=turn_prompt_cache_key,
                 request_message_count=getattr(response, 'request_message_count', None),
                 request_message_chars=getattr(response, 'request_message_chars', None),
             )
@@ -1630,7 +1633,18 @@ class ReActToolLoop:
         text = str(overlay_text or '').strip()
         if not text:
             return base_messages
-        return [{'role': 'system', 'content': text}, *base_messages]
+        overlay_block = f'System note for this turn only:\n{text}'
+        if base_messages and str(base_messages[-1].get('role') or '').strip().lower() == 'user':
+            last_message = dict(base_messages[-1])
+            last_content = last_message.get('content')
+            if isinstance(last_content, str):
+                last_message['content'] = (
+                    f"{last_content.rstrip()}\n\n{overlay_block}"
+                    if last_content.strip()
+                    else overlay_block
+                )
+                return [*base_messages[:-1], last_message]
+        return [*base_messages, {'role': 'user', 'content': overlay_block}]
 
     def _externalize_message_content(
         self,

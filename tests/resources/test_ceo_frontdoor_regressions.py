@@ -682,6 +682,79 @@ async def test_ceo_frontdoor_runner_binds_session_stable_prompt_cache_key(monkey
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_stage_overlay_moves_to_tail_without_changing_prefix(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'load skill guidance', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(content='done', finish_reason='stop'),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[{'role': 'user', 'content': 'recent user'}],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    await runner.run_turn(user_input=SimpleNamespace(content='current question'), session=session)
+
+    assert len(backend.calls) == 2
+    first_prefix = str((backend.calls[0]['messages'][0] or {}).get('content') or '')
+    second_prefix = str((backend.calls[1]['messages'][0] or {}).get('content') or '')
+    assert first_prefix == second_prefix == 'SYSTEM PROMPT'
+    first_tail = str((backend.calls[0]['messages'][-1] or {}).get('content') or '')
+    second_tail = str((backend.calls[1]['messages'][-1] or {}).get('content') or '')
+    assert first_tail != second_tail
+    assert 'System note for this turn only:' in first_tail
+    assert 'System note for this turn only:' in second_tail
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_uses_cron_internal_system_message_and_cron_only_tools(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None

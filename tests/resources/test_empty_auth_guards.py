@@ -9,6 +9,9 @@ import pytest
 from g3ku.llm_config.enums import AuthMode, Capability, ProbeStatus, ProtocolAdapter
 from g3ku.llm_config.models import NormalizedProviderConfig
 from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config
+from g3ku.providers.custom_provider import CustomProvider
+from g3ku.providers.fallback import FallbackProvider
+from g3ku.providers.base import LLMResponse
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.responses_provider import ResponsesProvider
 
@@ -91,6 +94,93 @@ def test_build_provider_from_model_key_selects_requested_api_key_index(monkeypat
     assert first.api_key_count == 2
     assert first.provider.api_key == "key-1"
     assert second.provider.api_key == "key-2"
+
+
+def test_build_provider_from_model_key_routes_openai_responses_protocol_to_direct_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "g3ku.providers.provider_factory.resolve_chat_target",
+        lambda config, ref: SimpleNamespace(
+            provider_id="openai",
+            protocol_adapter=ProtocolAdapter.OPENAI_RESPONSES,
+            resolved_model="gpt-5.4",
+            secret_payload={"api_key": "test-key"},
+            base_url="https://example.com/v1",
+            max_tokens_limit=None,
+            default_temperature=None,
+            default_reasoning_effort=None,
+            config_id="cfg-123",
+            headers={"x-trace": "enabled"},
+        ),
+    )
+    config = SimpleNamespace(get_model_runtime_profile=lambda ref: None)
+
+    target = build_provider_from_model_key(config, "primary")
+
+    assert isinstance(target.provider, ResponsesProvider)
+    assert target.provider.api_base == "https://example.com/v1"
+    assert target.provider.extra_headers == {"x-trace": "enabled"}
+
+
+def test_build_provider_from_model_key_routes_openai_completions_protocol_to_custom_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "g3ku.providers.provider_factory.resolve_chat_target",
+        lambda config, ref: SimpleNamespace(
+            provider_id="openrouter",
+            protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
+            resolved_model="openai/gpt-4.1",
+            secret_payload={"api_key": "test-key"},
+            base_url="https://example.com/v1",
+            max_tokens_limit=None,
+            default_temperature=None,
+            default_reasoning_effort=None,
+            config_id="cfg-123",
+            headers={"HTTP-Referer": "https://app.example"},
+        ),
+    )
+    config = SimpleNamespace(get_model_runtime_profile=lambda ref: None)
+
+    target = build_provider_from_model_key(config, "primary")
+
+    assert isinstance(target.provider, CustomProvider)
+    assert target.provider.api_base == "https://example.com/v1"
+    assert target.provider.extra_headers == {"HTTP-Referer": "https://app.example"}
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_forwards_prompt_cache_key(monkeypatch) -> None:
+    captured: list[str | None] = []
+
+    class _RecorderProvider:
+        async def chat(self, **kwargs):
+            captured.append(kwargs.get("prompt_cache_key"))
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    monkeypatch.setattr(
+        "g3ku.providers.provider_factory.build_provider_from_model_key",
+        lambda config, model_key, api_key_index=None: SimpleNamespace(
+            provider=_RecorderProvider(),
+            model_id="gpt-5.4",
+            max_tokens_limit=None,
+            default_temperature=None,
+            default_reasoning_effort=None,
+            retry_on=[],
+            retry_count=0,
+            api_key_count=0,
+        ),
+    )
+
+    provider = FallbackProvider(
+        config=SimpleNamespace(),
+        model_chain=["primary"],
+        default_model_ref="primary",
+    )
+
+    await provider.chat(
+        messages=[{"role": "user", "content": "hello"}],
+        prompt_cache_key="stable-key",
+    )
+
+    assert captured == ["stable-key"]
 
 
 @pytest.mark.asyncio

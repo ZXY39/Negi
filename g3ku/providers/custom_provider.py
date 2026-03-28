@@ -12,10 +12,21 @@ from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, norma
 
 class CustomProvider(LLMProvider):
 
-    def __init__(self, api_key: str = "no-key", api_base: str = "http://localhost:8000/v1", default_model: str = "default"):
+    def __init__(
+        self,
+        api_key: str = "no-key",
+        api_base: str = "http://localhost:8000/v1",
+        default_model: str = "default",
+        extra_headers: dict[str, str] | None = None,
+    ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
-        self._client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+        self.extra_headers = dict(extra_headers or {})
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=api_base,
+            default_headers=self.extra_headers or None,
+        )
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                    model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7,
@@ -30,6 +41,8 @@ class CustomProvider(LLMProvider):
             "max_tokens": max(1, max_tokens),
             "temperature": temperature,
         }
+        if self.extra_headers:
+            kwargs["extra_headers"] = dict(self.extra_headers)
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         if tools:

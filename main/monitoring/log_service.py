@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import threading
 from datetime import datetime
@@ -242,6 +243,8 @@ class TaskLogService:
         tool_calls: list[dict[str, Any]] | None = None,
         usage_attempts: list[Any] | None = None,
         model_messages: list[dict[str, Any]] | None = None,
+        request_messages: list[dict[str, Any]] | None = None,
+        prompt_cache_key: str | None = None,
         request_message_count: int | None = None,
         request_message_chars: int | None = None,
     ) -> NodeRecord | None:
@@ -301,6 +304,8 @@ class TaskLogService:
                             node_id=node_id,
                             call_index=call_index,
                             model_messages=model_messages,
+                            request_messages=request_messages,
+                            prompt_cache_key=prompt_cache_key,
                             tool_calls=tool_calls,
                             delta_usage=delta_usage,
                             delta_usage_by_model=delta_usage_by_model,
@@ -594,6 +599,8 @@ class TaskLogService:
         node_id: str,
         call_index: int,
         model_messages: list[dict[str, Any]] | None,
+        request_messages: list[dict[str, Any]] | None,
+        prompt_cache_key: str | None,
         tool_calls: list[dict[str, Any]] | None,
         delta_usage,
         delta_usage_by_model: list[Any],
@@ -601,26 +608,56 @@ class TaskLogService:
         request_message_chars: int | None,
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
+        request_list = list(request_messages or message_list)
+        try:
+            prepared_payload = json.dumps(request_list, ensure_ascii=False, default=str)
+        except Exception:
+            prepared_payload = str(request_list)
         if request_message_count is None or request_message_chars is None:
-            try:
-                prepared_payload = json.dumps(message_list, ensure_ascii=False, default=str)
-            except Exception:
-                prepared_payload = str(message_list)
-            prepared_message_count = len(message_list)
+            prepared_message_count = len(request_list)
             prepared_message_chars = len(prepared_payload)
         else:
             prepared_message_count = max(0, int(request_message_count or 0))
             prepared_message_chars = max(0, int(request_message_chars or 0))
+        try:
+            model_payload = json.dumps(message_list, ensure_ascii=False, default=str)
+        except Exception:
+            model_payload = str(message_list)
         return {
             'task_id': task_id,
             'node_id': node_id,
             'call_index': int(call_index or 0),
+            'model_message_count': len(message_list),
+            'model_message_chars': len(model_payload),
             'prepared_message_count': prepared_message_count,
             'prepared_message_chars': prepared_message_chars,
             'response_tool_call_count': len(list(tool_calls or [])),
+            'prompt_cache_key_present': bool(str(prompt_cache_key or '').strip()),
+            'prompt_cache_key_hash': TaskLogService._short_hash(prompt_cache_key),
+            'request_overlay_applied': request_list != message_list,
+            'model_message_hash': TaskLogService._short_hash(model_payload),
+            'prepared_message_hash': TaskLogService._short_hash(prepared_payload),
+            'model_prefix_hash': TaskLogService._message_prefix_hash(message_list),
+            'prepared_prefix_hash': TaskLogService._message_prefix_hash(request_list),
             'delta_usage': delta_usage.model_dump(mode='json'),
             'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
         }
+
+    @staticmethod
+    def _short_hash(value: Any) -> str:
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+
+    @classmethod
+    def _message_prefix_hash(cls, messages: list[dict[str, Any]] | None, *, prefix_count: int = 2) -> str:
+        prefix = list(messages or [])[: max(0, int(prefix_count or 0))]
+        try:
+            payload = json.dumps(prefix, ensure_ascii=False, default=str)
+        except Exception:
+            payload = str(prefix)
+        return cls._short_hash(payload)
 
     def _next_output_seq(self, node_id: str) -> int:
         record = self._store.get_node(node_id)
