@@ -9,6 +9,7 @@ import pytest
 
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
+from g3ku.content import ContentNavigationService
 from g3ku.runtime.tool_bridge import ToolExecutionBridge
 
 
@@ -134,3 +135,48 @@ async def test_tool_execution_bridge_uses_watchdog_for_ceo_roles(tmp_path: Path,
     assert calls == [{"tool_name": "immediate_tool", "actor_role": "ceo"}]
     assert result.content == "done"
     assert result.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_bridge_uses_original_structured_status_before_externalization(tmp_path: Path) -> None:
+    class _JsonErrorTool(Tool):
+        @property
+        def name(self) -> str:
+            return "json_error_tool"
+
+        @property
+        def description(self) -> str:
+            return "Return a structured error payload."
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def execute(self, **kwargs: Any) -> str:
+            _ = kwargs
+            return '{"status":"error","exit_code":1,"error":"simulated exec failure","details":"' + ('x' * 1800) + '"}'
+
+    loop = _LoopStub(tmp_path)
+    loop.tools.register(_JsonErrorTool())
+    loop.main_task_service = SimpleNamespace(content_store=ContentNavigationService(workspace=tmp_path))
+    bridge = ToolExecutionBridge(loop)
+    runtime_context = SimpleNamespace(
+        actor_role="execution",
+        session_key="web:test-execution",
+        channel="web",
+        chat_id="test-execution",
+        message_id=None,
+        iteration=1,
+        on_progress=None,
+        cancel_token=None,
+    )
+
+    result = await bridge.execute_named_tool(
+        name="json_error_tool",
+        arguments={},
+        tool_call_id="call-json-error",
+        runtime_context=runtime_context,
+        emit_progress=False,
+    )
+
+    assert result.status == "error"

@@ -21,7 +21,7 @@ _PREVIEW_CHAR_LIMIT = 220
 
 
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _stringify(value: Any) -> str:

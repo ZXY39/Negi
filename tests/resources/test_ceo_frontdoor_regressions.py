@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage
 
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.base import Tool
+from g3ku.content import ContentNavigationService
 from g3ku.integrations.langchain_runtime import ProviderChatModelAdapter
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
@@ -161,6 +162,24 @@ class _CronTool(Tool):
 
 def _cron_tool() -> _CronTool:
     return _CronTool()
+
+
+class _JsonErrorTool(Tool):
+    @property
+    def name(self) -> str:
+        return 'json_error_tool'
+
+    @property
+    def description(self) -> str:
+        return 'Return a structured error payload.'
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {'type': 'object', 'properties': {}, 'required': []}
+
+    async def execute(self, **kwargs) -> str:
+        _ = kwargs
+        return '{"status":"error","exit_code":1,"error":"simulated exec failure","details":"' + ('x' * 1800) + '"}'
 
 
 def test_frontdoor_context_resolution_falls_back_then_uses_metadata() -> None:
@@ -1219,6 +1238,247 @@ async def test_ceo_frontdoor_runner_emits_tool_error_after_trace_sync(monkeypatc
     assert tool["tool_name"] == "error_tool"
     assert tool["status"] == "error"
     assert tool["output_text"] == "Error: simulated tool failure"
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_keeps_running_when_tool_result_contains_method(monkeypatch, tmp_path) -> None:
+    class _WeirdPayloadTool(Tool):
+        @property
+        def name(self) -> str:
+            return 'weird_payload'
+
+        @property
+        def description(self) -> str:
+            return 'Return a payload with a bound method.'
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {'type': 'object', 'properties': {}, 'required': []}
+
+        def helper(self) -> str:
+            return 'ok'
+
+        async def execute(self, **kwargs) -> dict[str, object]:
+            _ = kwargs
+            return {'ok': True, 'callback': self.helper}
+
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'capture weird payload', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='tool-1',
+                        name='weird_payload',
+                        arguments={},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-2',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'wrap up after weird payload', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(content='done', finish_reason='stop'),
+        ]
+    )
+    tool_registry = _FakeToolRegistry([_WeirdPayloadTool()])
+    content_store = ContentNavigationService(workspace=tmp_path)
+
+    class _MainTaskService:
+        def __init__(self) -> None:
+            self.log_service = SimpleNamespace(_content_store=content_store)
+
+        async def startup(self) -> None:
+            return None
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=_MainTaskService(),
+        tools=tool_registry,
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["weird_payload"]}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt="SYSTEM PROMPT",
+            recent_history=[],
+            tool_names=["weird_payload"],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        _interaction_trace=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='store the weird payload'), session=session)
+
+    assert output == 'done'
+    tool_messages = [
+        item
+        for item in list(backend.calls[2].get('messages') or [])
+        if str(item.get('role') or '') == 'tool' and str(item.get('name') or '') == 'weird_payload'
+    ]
+    assert tool_messages
+    assert '"callback"' in str(tool_messages[-1].get('content') or '')
+    assert 'helper' in str(tool_messages[-1].get('content') or '')
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_marks_externalized_structured_tool_error_as_error(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'capture externalized tool error', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='tool-1',
+                        name='json_error_tool',
+                        arguments={},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-2',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'wrap up after structured tool error', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(content='done', finish_reason='stop'),
+        ]
+    )
+    tool_registry = _FakeToolRegistry([_JsonErrorTool()])
+    content_store = ContentNavigationService(workspace=tmp_path)
+
+    class _MainTaskService:
+        def __init__(self) -> None:
+            self.log_service = SimpleNamespace(_content_store=content_store)
+
+        async def startup(self) -> None:
+            return None
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=_MainTaskService(),
+        tools=tool_registry,
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["json_error_tool"]}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt="SYSTEM PROMPT",
+            recent_history=[],
+            tool_names=["json_error_tool"],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    class _Session:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(session_key="web:shared")
+            self._memory_channel = "web"
+            self._memory_chat_id = "shared"
+            self._channel = "web"
+            self._chat_id = "shared"
+            self._active_cancel_token = None
+            self._interaction_trace = None
+
+        def inflight_turn_snapshot(self):
+            return None
+
+        def set_interaction_trace(self, trace, *, stage=None) -> None:
+            _ = stage
+            self._interaction_trace = copy.deepcopy(trace)
+
+    session = _Session()
+    output = await runner.run_turn(user_input=SimpleNamespace(content='run the structured error tool'), session=session)
+
+    assert output == 'done'
+    trace = getattr(session, '_interaction_trace', None)
+    assert trace is not None
+    stage = list(trace.get('stages') or [])[0]
+    tool = list(stage.get('rounds') or [])[0]['tools'][0]
+    assert tool['tool_name'] == 'json_error_tool'
+    assert tool['status'] == 'error'
 
 
 @pytest.mark.asyncio

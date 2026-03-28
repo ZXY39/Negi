@@ -138,4 +138,4 @@ class MemoryWriteTool(Tool):
             chat_id=str(chat_id or "unknown"),
             items=list(items or []),
         )
-        return json.dumps(result, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False, default=str)

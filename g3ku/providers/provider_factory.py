@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from g3ku.config.schema import Config
+from g3ku.llm_config.enums import ProtocolAdapter
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.providers.base import LLMProvider
 from g3ku.providers.custom_provider import CustomProvider
@@ -64,6 +65,26 @@ def _require_non_empty_api_key(
     )
 
 
+def _protocol_adapter_value(target) -> str:
+    raw = getattr(target, 'protocol_adapter', None)
+    if hasattr(raw, 'value'):
+        raw = raw.value
+    return str(raw or '').strip().lower()
+
+
+def _uses_openai_responses_protocol(target) -> bool:
+    adapter = _protocol_adapter_value(target)
+    return adapter == ProtocolAdapter.OPENAI_RESPONSES.value
+
+
+def _uses_openai_completions_protocol(target) -> bool:
+    adapter = _protocol_adapter_value(target)
+    return adapter in {
+        ProtocolAdapter.OPENAI_COMPLETIONS.value,
+        ProtocolAdapter.CUSTOM_DIRECT.value,
+    }
+
+
 def build_provider_from_model_key(
     config: Config,
     model_key: str,
@@ -90,12 +111,18 @@ def build_provider_from_model_key(
     retry_on = list(managed.retry_on or []) if managed is not None else ['network', '429', '5xx']
     retry_count = int(getattr(managed, 'retry_count', 0) or 0) if managed is not None else 0
     api_key_count = len(api_keys)
+    extra_headers = dict(getattr(target, 'headers', {}) or {})
 
     if provider_id == 'custom':
-        provider = CustomProvider(api_key=api_key or 'no-key', api_base=api_base or 'http://localhost:8000/v1', default_model=model_id)
+        provider = CustomProvider(
+            api_key=api_key or 'no-key',
+            api_base=api_base or 'http://localhost:8000/v1',
+            default_model=model_id,
+            extra_headers=extra_headers,
+        )
         return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
 
-    if provider_id == 'responses':
+    if provider_id == 'responses' or _uses_openai_responses_protocol(target):
         provider = ResponsesProvider(
             api_key=_require_non_empty_api_key(
                 provider_id=provider_id,
@@ -105,12 +132,33 @@ def build_provider_from_model_key(
             ),
             api_base=api_base or '',
             default_model=model_id,
+            extra_headers=extra_headers,
         )
         return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
 
     if provider_id == 'openai_codex':
         provider = OpenAICodexProvider(default_model=f'openai_codex/{model_id}')
         return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
+
+    if _uses_openai_completions_protocol(target):
+        provider = CustomProvider(
+            api_key=api_key or 'no-key',
+            api_base=api_base or 'http://localhost:8000/v1',
+            default_model=model_id,
+            extra_headers=extra_headers,
+        )
+        return ProviderTarget(
+            provider_ref=provider_ref,
+            provider_id=provider_id,
+            model_id=model_id,
+            provider=provider,
+            max_tokens_limit=max_tokens_limit,
+            default_temperature=default_temperature,
+            default_reasoning_effort=default_reasoning_effort,
+            retry_on=retry_on,
+            retry_count=retry_count,
+            api_key_count=api_key_count,
+        )
 
     resolved_model = _resolve_litellm_model(provider_id, model_id)
     provider = LiteLLMProvider(

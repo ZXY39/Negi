@@ -2003,6 +2003,10 @@ class MainRuntimeService:
         return {
             'ok': True,
             'tool_id': resolved_tool_id,
+            'family_tool_id': toolskill.get('family_tool_id'),
+            'requested_tool_id': toolskill.get('requested_tool_id'),
+            'primary_executor_name': toolskill.get('primary_executor_name'),
+            'resolved_executor_name': toolskill.get('resolved_executor_name'),
             'content': content,
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
@@ -2049,6 +2053,10 @@ class MainRuntimeService:
         return {
             'ok': True,
             'tool_id': resolved_tool_id,
+            'family_tool_id': toolskill.get('family_tool_id'),
+            'requested_tool_id': toolskill.get('requested_tool_id'),
+            'primary_executor_name': toolskill.get('primary_executor_name'),
+            'resolved_executor_name': toolskill.get('resolved_executor_name'),
             'uri': f'g3ku://resource/tool/{resolved_tool_id}',
             'level': payload['level'],
             'content': payload['content'],
@@ -2603,23 +2611,39 @@ class MainRuntimeService:
                 return fallback
         return ''
 
-    def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
-        family = self._raw_tool_family(tool_id)
-        if family is None:
-            needle = str(tool_id or '').strip()
+    @staticmethod
+    def _tool_family_executor_names(family) -> list[str]:
+        names: list[str] = []
+        for action in list(getattr(family, 'actions', []) or []):
+            for executor_name in list(getattr(action, 'executor_names', []) or []):
+                name = str(executor_name or '').strip()
+                if name and name not in names:
+                    names.append(name)
+        return names
+
+    def _resolve_tool_toolskill_target(self, tool_id: str):
+        requested = str(tool_id or '').strip()
+        family = self._raw_tool_family(requested)
+        if family is not None:
+            return family, requested, self._tool_family_executor_name(family)
+        if requested:
             for item in self.resource_registry.list_tool_families():
-                action_names = {
-                    str(executor_name or '').strip()
-                    for action in list(getattr(item, 'actions', []) or [])
-                    for executor_name in list(getattr(action, 'executor_names', []) or [])
-                    if str(executor_name or '').strip()
-                }
-                if needle and needle in action_names:
-                    family = item
-                    break
+                for executor_name in self._tool_family_executor_names(item):
+                    if requested == executor_name:
+                        return item, requested, executor_name
+        return None, requested, ''
+
+    def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
+        family, requested_tool_id, executor_name = self._resolve_tool_toolskill_target(tool_id)
         if family is None:
             return None
-        executor_name = self._tool_family_executor_name(family)
+        family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+        family_primary_executor = self._tool_family_executor_name(family)
+        resolved_tool_id = (
+            executor_name
+            if requested_tool_id and executor_name and requested_tool_id == executor_name and executor_name != family_tool_id
+            else family_tool_id
+        )
         content = ''
         path = ''
         descriptor = None
@@ -2644,8 +2668,11 @@ class MainRuntimeService:
         callable_flag = bool(getattr(family, 'callable', getattr(descriptor, 'callable', True)))
         repair_required = callable_flag and not bool(getattr(family, 'available', getattr(descriptor, 'available', True)))
         return {
-            'tool_id': family.tool_id,
-            'primary_executor_name': executor_name,
+            'tool_id': resolved_tool_id or family_tool_id,
+            'family_tool_id': family_tool_id,
+            'requested_tool_id': requested_tool_id or family_tool_id,
+            'primary_executor_name': family_primary_executor,
+            'resolved_executor_name': executor_name or family_primary_executor,
             'content': content,
             'path': path,
             'description': family.description,

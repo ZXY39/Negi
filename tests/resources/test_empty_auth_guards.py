@@ -9,6 +9,7 @@ import pytest
 from g3ku.llm_config.enums import AuthMode, Capability, ProbeStatus, ProtocolAdapter
 from g3ku.llm_config.models import NormalizedProviderConfig
 from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config
+from g3ku.providers.custom_provider import CustomProvider
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.responses_provider import ResponsesProvider
 
@@ -91,6 +92,56 @@ def test_build_provider_from_model_key_selects_requested_api_key_index(monkeypat
     assert first.api_key_count == 2
     assert first.provider.api_key == "key-1"
     assert second.provider.api_key == "key-2"
+
+
+def test_build_provider_from_model_key_routes_openai_responses_protocol_to_direct_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "g3ku.providers.provider_factory.resolve_chat_target",
+        lambda config, ref: SimpleNamespace(
+            provider_id="openai",
+            protocol_adapter=ProtocolAdapter.OPENAI_RESPONSES,
+            resolved_model="gpt-5.4",
+            secret_payload={"api_key": "test-key"},
+            base_url="https://example.com/v1",
+            max_tokens_limit=None,
+            default_temperature=None,
+            default_reasoning_effort=None,
+            config_id="cfg-123",
+            headers={"x-trace": "enabled"},
+        ),
+    )
+    config = SimpleNamespace(get_model_runtime_profile=lambda ref: None)
+
+    target = build_provider_from_model_key(config, "primary")
+
+    assert isinstance(target.provider, ResponsesProvider)
+    assert target.provider.api_base == "https://example.com/v1"
+    assert target.provider.extra_headers == {"x-trace": "enabled"}
+
+
+def test_build_provider_from_model_key_routes_openai_completions_protocol_to_custom_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "g3ku.providers.provider_factory.resolve_chat_target",
+        lambda config, ref: SimpleNamespace(
+            provider_id="openrouter",
+            protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
+            resolved_model="openai/gpt-4.1",
+            secret_payload={"api_key": "test-key"},
+            base_url="https://example.com/v1",
+            max_tokens_limit=None,
+            default_temperature=None,
+            default_reasoning_effort=None,
+            config_id="cfg-123",
+            headers={"HTTP-Referer": "https://app.example"},
+        ),
+    )
+    config = SimpleNamespace(get_model_runtime_profile=lambda ref: None)
+
+    target = build_provider_from_model_key(config, "primary")
+
+    assert isinstance(target.provider, CustomProvider)
+    assert target.provider.api_base == "https://example.com/v1"
+    assert target.provider.extra_headers == {"HTTP-Referer": "https://app.example"}
 
 
 @pytest.mark.asyncio

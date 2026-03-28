@@ -2670,6 +2670,47 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
         manager.close()
 
 
+@pytest.mark.asyncio
+async def test_load_tool_context_v2_returns_executor_specific_toolskill_for_executor_name(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'memory_search', 'memory_write', 'memory_runtime')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-memory-write-tool-context')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+
+        payload = service.load_tool_context_v2(
+            actor_role='ceo',
+            session_id='web:shared',
+            tool_id='memory_write',
+        )
+
+        assert payload['ok'] is True
+        assert payload['tool_id'] == 'memory_write'
+        assert payload['family_tool_id'] == 'memory'
+        assert payload['requested_tool_id'] == 'memory_write'
+        assert payload['primary_executor_name'] == 'memory_search'
+        assert payload['resolved_executor_name'] == 'memory_write'
+        assert payload['content'].startswith('# memory_write')
+        assert 'Write explicit long-term memory immediately.' in payload['content']
+    finally:
+        await service.close()
+        manager.close()
+
+
 def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

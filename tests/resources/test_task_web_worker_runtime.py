@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import g3ku.shells.web as web_shell
-from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.providers.base import LLMModelAttempt, LLMResponse, ToolCallRequest
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
@@ -873,6 +873,57 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
 
         event = _receive_until_type(ws, "task.snapshot")
         assert event["data"]["progress"]["model_calls"][-1]["call_index"] == 4
+
+
+def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    model_messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "user prompt"},
+    ]
+    request_messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "user prompt\n\nSystem note for this turn only:\nstage overlay"},
+    ]
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="sub gpt-5.4",
+                provider_id="openai",
+                provider_model="gpt-5.4",
+                usage={"input_tokens": 10, "output_tokens": 5, "cache_hit_tokens": 2},
+            )
+        ],
+        model_messages=model_messages,
+        request_messages=request_messages,
+        prompt_cache_key="stable-cache-key",
+        request_message_count=len(request_messages),
+        request_message_chars=321,
+    )
+
+    events = service.store.list_task_events(task_id=record.task_id, limit=20)
+    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+
+    assert model_call["prompt_cache_key_present"] is True
+    assert str(model_call["prompt_cache_key_hash"]).strip()
+    assert model_call["request_overlay_applied"] is True
+    assert model_call["model_message_count"] == 2
+    assert model_call["prepared_message_count"] == 2
+    assert str(model_call["model_prefix_hash"]).strip()
+    assert str(model_call["prepared_prefix_hash"]).strip()
 
 
 def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path: Path):

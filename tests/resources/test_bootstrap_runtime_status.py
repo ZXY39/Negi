@@ -115,6 +115,7 @@ async def test_ensure_web_runtime_services_limits_worker_wait(monkeypatch):
     service = _Service()
     heartbeat = _Heartbeat()
     waits: list[float] = []
+    sync_reasons: list[str] = []
 
     async def _ensure_worker(_service, *, wait_timeout_s: float = 5.0):
         _ = _service
@@ -132,6 +133,7 @@ async def test_ensure_web_runtime_services_limits_worker_wait(monkeypatch):
     monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
     monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
     monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _noop)
+    monkeypatch.setattr(web_shell, "_force_web_runtime_sync", lambda _agent=None, *, reason='runtime': sync_reasons.append(reason) or True)
 
     class _Agent:
         main_task_service = service
@@ -139,6 +141,7 @@ async def test_ensure_web_runtime_services_limits_worker_wait(monkeypatch):
     await web_shell.ensure_web_runtime_services(_Agent())
 
     assert waits == [1.0]
+    assert sync_reasons == ['web_runtime_services_startup']
     assert service._started is True
     assert heartbeat._started is True
 
@@ -185,6 +188,22 @@ async def test_refresh_web_agent_runtime_restarts_china_bridge_when_config_chang
     assert changed is True
     assert stop_calls == ['stopped']
     assert started_with == ['next']
+
+
+@pytest.mark.asyncio
+async def test_refresh_web_agent_runtime_force_still_syncs_when_config_revision_is_unchanged(monkeypatch):
+    loop = SimpleNamespace(app_config=SimpleNamespace(china_bridge=SimpleNamespace(enabled=False, auto_start=False)))
+    forced_reasons: list[str] = []
+
+    monkeypatch.setattr(web_shell, 'get_agent', lambda: loop)
+    monkeypatch.setattr(web_shell, 'refresh_loop_runtime_config', lambda _loop, **_kwargs: False)
+    monkeypatch.setattr(web_shell, '_force_web_runtime_sync', lambda _agent=None, *, reason='runtime': forced_reasons.append(reason) or True)
+    monkeypatch.setattr(web_shell, '_sync_china_bridge_services_after_runtime_refresh', _noop)
+
+    changed = await web_shell.refresh_web_agent_runtime(force=True, reason='test-force')
+
+    assert changed is True
+    assert forced_reasons == ['test-force']
 
 
 def test_bootstrap_exit_stops_runtime_before_requesting_server_shutdown(monkeypatch):

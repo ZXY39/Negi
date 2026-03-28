@@ -301,8 +301,11 @@ async def _sync_china_bridge_services_after_runtime_refresh(runtime_agent: Agent
 async def refresh_web_agent_runtime(force: bool = False, reason: str = 'runtime') -> bool:
     runtime_agent = get_agent()
     changed = refresh_loop_runtime_config(runtime_agent, force=force, reason=reason)
+    forced_sync = False
+    if force:
+        forced_sync = _force_web_runtime_sync(runtime_agent, reason=reason)
     await _sync_china_bridge_services_after_runtime_refresh(runtime_agent, runtime_agent.app_config)
-    return changed
+    return bool(changed or forced_sync)
 
 
 def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager:
@@ -414,6 +417,41 @@ def describe_web_runtime_services(agent: AgentLoop | None = None) -> dict[str, b
     }
 
 
+def _force_web_runtime_sync(agent: AgentLoop | None = None, *, reason: str = 'runtime') -> bool:
+    runtime_agent = agent or get_agent()
+    synced = False
+    resource_manager = getattr(runtime_agent, 'resource_manager', None)
+    if resource_manager is not None and hasattr(resource_manager, 'reload_now'):
+        resource_manager.reload_now(trigger=reason)
+        synced = True
+
+    bootstrap = getattr(runtime_agent, '_bootstrap', None)
+    if bootstrap is not None and hasattr(bootstrap, 'sync_internal_tool_runtimes'):
+        synced = bool(bootstrap.sync_internal_tool_runtimes(force=True, reason=reason)) or synced
+
+    service = getattr(runtime_agent, 'main_task_service', None)
+    if service is not None:
+        if resource_manager is not None and hasattr(service, 'bind_resource_manager'):
+            service.bind_resource_manager(resource_manager)
+        registry = getattr(service, 'resource_registry', None)
+        if registry is not None and hasattr(registry, 'refresh_from_current_resources'):
+            registry.refresh_from_current_resources()
+            synced = True
+        reconcile = getattr(service, 'reconcile_core_tool_families', None)
+        if callable(reconcile):
+            synced = bool(reconcile()) or synced
+        policy_engine = getattr(service, 'policy_engine', None)
+        if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
+            policy_engine.sync_default_role_policies()
+            synced = True
+
+    if hasattr(runtime_agent, '_ceo_model_chain_cache_key'):
+        runtime_agent._ceo_model_chain_cache_key = None
+    if hasattr(runtime_agent, '_ceo_model_client_cache'):
+        runtime_agent._ceo_model_client_cache = None
+    return synced
+
+
 async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
     global _global_web_heartbeat
     if describe_web_runtime_services(agent).get('ready') and _cron_runtime_ready(agent):
@@ -423,6 +461,8 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
         runtime_agent = agent or get_agent()
         if describe_web_runtime_services(runtime_agent).get('ready') and _cron_runtime_ready(runtime_agent):
             return
+
+        _force_web_runtime_sync(runtime_agent, reason='web_runtime_services_startup')
 
         main_task_service = getattr(runtime_agent, 'main_task_service', None)
         if main_task_service is not None:

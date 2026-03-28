@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 from g3ku.content import parse_content_envelope
+from g3ku.runtime.tool_result_status import infer_tool_result_status
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
     resolve_snapshot_supplier,
@@ -498,14 +499,15 @@ class ToolExecutionBridge:
         finally:
             self._loop.tools.pop_runtime_context(token)
 
-        result = self._externalize_tool_result(
+        status = infer_tool_result_status(result)
+        externalized = self._externalize_tool_result(
             result,
             runtime_context=runtime_context,
             tool_name=tool_name,
         )
-        rendered = self._stringify_tool_result(result)
+        rendered = self._stringify_tool_result(externalized)
         if on_progress and emit_progress:
-            event_kind = "tool_error" if rendered.startswith("Error") else "tool_result"
+            event_kind = "tool_error" if status == "error" else "tool_result"
             progress_text = f"{tool_name} failed: {rendered}" if event_kind == "tool_error" else self.tool_result_hint(tool_name, rendered)
             await self._loop._emit_progress_event(
                 on_progress,
@@ -513,7 +515,6 @@ class ToolExecutionBridge:
                 event_kind=event_kind,
                 event_data=self._event_data(runtime_context, tool_name=tool_name or "tool"),
             )
-        status = "error" if rendered.startswith("Error") else "success"
         return ToolMessage(
             content=rendered,
             tool_call_id=tool_call_id,
@@ -526,7 +527,7 @@ class ToolExecutionBridge:
         if isinstance(value, str):
             return value
         try:
-            return json.dumps(value, ensure_ascii=False)
+            return json.dumps(value, ensure_ascii=False, default=str)
         except Exception:
             return str(value)
 

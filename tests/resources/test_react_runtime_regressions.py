@@ -362,6 +362,12 @@ def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
     assert request_messages[1:] == base_messages
 
 
+def test_tool_message_status_uses_structured_payload_status() -> None:
+    assert ReActToolLoop._tool_message_status('{"status":"error","exit_code":1}') == 'error'
+    assert ReActToolLoop._tool_message_status('{"status":"background_running","execution_id":"tool-exec:1"}') == 'running'
+    assert ReActToolLoop._tool_message_status('{"ok":true}') == 'success'
+
+
 def test_execution_result_protocol_message_avoids_partial_guidance() -> None:
     message = ReActToolLoop._result_protocol_message(node_kind='execution')
 

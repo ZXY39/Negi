@@ -14,6 +14,7 @@ import json_repair
 
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
+from g3ku.runtime.tool_result_status import infer_tool_result_status
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.errors import TaskPausedError
@@ -166,6 +167,11 @@ class ReActToolLoop:
                 },
                 publish_snapshot=True,
             )
+            turn_prompt_cache_key = self._execution_prompt_cache_key(
+                model_messages=model_messages,
+                tool_schemas=tool_schemas,
+                model_refs=model_refs,
+            )
             response = await self._chat_with_optional_extensions(
                 messages=request_messages,
                 tools=tool_schemas or None,
@@ -173,11 +179,7 @@ class ReActToolLoop:
                 max_tokens=1200,
                 temperature=0.2,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
-                prompt_cache_key=self._execution_prompt_cache_key(
-                    model_messages=model_messages,
-                    tool_schemas=tool_schemas,
-                    model_refs=model_refs,
-                ),
+                prompt_cache_key=turn_prompt_cache_key,
             )
             response_tool_calls = list(response.tool_calls or [])
             tool_calls = [
@@ -191,6 +193,8 @@ class ReActToolLoop:
                 tool_calls=tool_calls,
                 usage_attempts=list(response.attempts or []),
                 model_messages=model_messages,
+                request_messages=request_messages,
+                prompt_cache_key=turn_prompt_cache_key,
                 request_message_count=getattr(response, 'request_message_count', None),
                 request_message_chars=getattr(response, 'request_message_chars', None),
             )
@@ -841,8 +845,7 @@ class ReActToolLoop:
 
     @staticmethod
     def _tool_message_status(tool_content: str) -> str:
-        text = str(tool_content or '').strip()
-        return 'error' if text.startswith('Error') else 'success'
+        return infer_tool_result_status(tool_content)
 
     async def _execute_tool(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> str:
         stage_gate_error = self._execution_tool_gate_error(tool_name=tool_name, runtime_context=runtime_context)
@@ -1273,7 +1276,7 @@ class ReActToolLoop:
     @staticmethod
     def _render_tool_result(result: Any) -> str:
         try:
-            return json.dumps(result, ensure_ascii=False)
+            return json.dumps(result, ensure_ascii=False, default=str)
         except TypeError:
             return str(result)
 
@@ -1630,7 +1633,15 @@ class ReActToolLoop:
         text = str(overlay_text or '').strip()
         if not text:
             return base_messages
-        return [{'role': 'system', 'content': text}, *base_messages]
+        overlay_block = f'System note for this turn only:\n{text}'
+        if base_messages and str(base_messages[-1].get('role') or '').strip().lower() == 'user':
+            last_message = dict(base_messages[-1])
+            last_content = last_message.get('content')
+            if isinstance(last_content, str):
+                combined = f"{last_content.rstrip()}\n\n{overlay_block}" if last_content.strip() else overlay_block
+                last_message['content'] = combined
+                return [*base_messages[:-1], last_message]
+        return [*base_messages, {'role': 'user', 'content': overlay_block}]
 
     def _externalize_message_content(
         self,

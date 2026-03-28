@@ -517,9 +517,13 @@ async def test_react_loop_uses_stable_prompt_cache_key_despite_dynamic_stage_ove
         assert len(calls) == 3
         assert str(calls[0]['prompt_cache_key'] or '').strip()
         assert calls[1]['prompt_cache_key'] == calls[2]['prompt_cache_key']
-        overlay_1 = str((calls[0]['messages'][0] or {}).get('content') or '')
-        overlay_2 = str((calls[1]['messages'][0] or {}).get('content') or '')
-        overlay_3 = str((calls[2]['messages'][0] or {}).get('content') or '')
+        first_prefix = str((calls[0]['messages'][0] or {}).get('content') or '')
+        second_prefix = str((calls[1]['messages'][0] or {}).get('content') or '')
+        third_prefix = str((calls[2]['messages'][0] or {}).get('content') or '')
+        assert first_prefix == second_prefix == third_prefix
+        overlay_1 = str((calls[0]['messages'][-1] or {}).get('content') or '')
+        overlay_2 = str((calls[1]['messages'][-1] or {}).get('content') or '')
+        overlay_3 = str((calls[2]['messages'][-1] or {}).get('content') or '')
         assert overlay_1 != overlay_2
         assert overlay_2 != overlay_3
     finally:

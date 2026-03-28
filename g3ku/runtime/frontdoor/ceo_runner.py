@@ -4,7 +4,9 @@ import asyncio
 import inspect
 import json
 import time
+import traceback
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -27,6 +29,7 @@ from g3ku.runtime.frontdoor.interaction_trace import (
 )
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.project_environment import current_project_environment
+from g3ku.runtime.tool_result_status import infer_tool_result_status
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, build_session_prompt_cache_key
@@ -513,7 +516,16 @@ class CeoFrontDoorRunner:
         text = str(overlay_text or "").strip()
         if not text:
             return list(messages or [])
-        return [{"role": "system", "content": text}, *list(messages or [])]
+        base_messages = list(messages or [])
+        overlay_block = f"System note for this turn only:\n{text}"
+        if base_messages and str(base_messages[-1].get("role") or "").strip().lower() == "user":
+            last_message = dict(base_messages[-1])
+            last_content = last_message.get("content")
+            if isinstance(last_content, str):
+                combined = f"{last_content.rstrip()}\n\n{overlay_block}" if last_content.strip() else overlay_block
+                last_message["content"] = combined
+                return [*base_messages[:-1], last_message]
+        return [*base_messages, {"role": "user", "content": overlay_block}]
 
     @staticmethod
     def _externalize_message_content(value: Any, *, runtime_context: dict[str, Any]) -> Any:
@@ -534,29 +546,52 @@ class CeoFrontDoorRunner:
         store = getattr(getattr(service, "log_service", None), "_content_store", None)
         if store is None:
             return value
-        return store.externalize_for_message(
-            value,
-            runtime=runtime_context,
-            display_name=f"tool:{tool_name}",
-            source_kind=f"tool_result:{tool_name}",
-            compact=True,
-        )
+        try:
+            return store.externalize_for_message(
+                value,
+                runtime=runtime_context,
+                display_name=f"tool:{tool_name}",
+                source_kind=f"tool_result:{tool_name}",
+                compact=True,
+            )
+        except Exception:
+            logger.exception("Failed to externalize CEO tool result for {}", tool_name)
+            return value
 
     @staticmethod
     def _render_tool_result(result: Any) -> str:
         if isinstance(result, str):
             return result
         try:
-            return json.dumps(result, ensure_ascii=False)
+            return json.dumps(result, ensure_ascii=False, default=str)
         except Exception:
             return str(result)
 
     @staticmethod
-    def _tool_status(result_text: str) -> str:
-        text = str(result_text or "").strip()
-        if text.startswith("Error"):
-            return "error"
-        return "success"
+    def _format_tool_exception(tool_name: str, exc: Exception) -> tuple[str, dict[str, Any]]:
+        frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ is not None else []
+        location = ""
+        if frames:
+            last = frames[-1]
+            location = f"{Path(last.filename).name}:{last.lineno} in {last.name}"
+        error_text = f"Error executing {tool_name}: {exc}"
+        if location:
+            error_text = f"{error_text} [{location}]"
+        event_data: dict[str, Any] = {
+            "tool_name": tool_name,
+            "exception_type": type(exc).__name__,
+        }
+        if location:
+            event_data["location"] = location
+        try:
+            event_data["traceback"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        except Exception:
+            pass
+        return error_text, event_data
+
+    @staticmethod
+    def _tool_status(result: Any) -> str:
+        return infer_tool_result_status(result)
 
     async def _emit_watchdog_progress(self, *, on_progress, tool_name: str, poll: dict[str, Any]) -> None:
         snapshot = poll.get("snapshot") if isinstance(poll, dict) else None
@@ -677,22 +712,23 @@ class CeoFrontDoorRunner:
         except Exception as exc:
             finished_at = now_iso()
             elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-            error_text = f"Error executing {tool_name}: {exc}"
+            logger.exception("CEO tool {} failed", tool_name)
+            error_text, event_data = self._format_tool_exception(tool_name, exc)
             await self._emit_progress(
                 on_progress,
                 error_text,
                 event_kind="tool_error",
-                event_data={"tool_name": tool_name},
+                event_data=event_data,
             )
             return error_text, "error", started_at, finished_at, elapsed_seconds
         finally:
             self._loop.tools.pop_runtime_context(token)
 
+        status = self._tool_status(result)
         externalized = self._externalize_tool_result(result, runtime_context=runtime_context, tool_name=tool_name)
         rendered = self._render_tool_result(externalized)
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-        status = self._tool_status(rendered)
         return rendered, status, started_at, finished_at, elapsed_seconds
 
     async def _run_react_turn(

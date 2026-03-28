@@ -96,5 +96,5 @@ class MemorySearchTool(Tool):
             context_type=context_type if context_type in {"memory", "resource", "skill"} else None,
             include_l2=bool(include_l2),
         )
-        return json.dumps(result, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False, default=str)
 
