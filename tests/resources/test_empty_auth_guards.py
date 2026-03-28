@@ -68,6 +68,31 @@ def test_build_provider_from_model_key_rejects_empty_responses_api_key(monkeypat
     assert "LLM config id: cfg-123" in message
 
 
+def test_build_provider_from_model_key_selects_requested_api_key_index(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "g3ku.providers.provider_factory.resolve_chat_target",
+        lambda config, ref: SimpleNamespace(
+            provider_id="custom",
+            resolved_model="gpt-4.1",
+            secret_payload={"api_key": "key-1,key-2"},
+            base_url="https://example.com/v1",
+            max_tokens_limit=None,
+            default_temperature=None,
+            default_reasoning_effort=None,
+            config_id="cfg-123",
+            headers={},
+        ),
+    )
+    config = SimpleNamespace(get_model_runtime_profile=lambda ref: None)
+
+    first = build_provider_from_model_key(config, "primary")
+    second = build_provider_from_model_key(config, "primary", api_key_index=1)
+
+    assert first.api_key_count == 2
+    assert first.provider.api_key == "key-1"
+    assert second.provider.api_key == "key-2"
+
+
 @pytest.mark.asyncio
 async def test_responses_provider_refuses_empty_bearer_header(monkeypatch) -> None:
     class _UnexpectedAsyncClient:
@@ -146,4 +171,112 @@ def test_probe_config_reports_content_type_for_non_json_model_catalog() -> None:
     assert "text/html" in result.message
     assert result.diagnostics["content_type"] == "text/html"
     assert "login required" in result.diagnostics["body_preview"]
+
+
+def test_probe_config_falls_back_when_model_catalog_returns_500() -> None:
+    config = _config(
+        provider_id="custom",
+        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        base_url="https://example.com/v1",
+        default_model="custom-model",
+        api_key="test-key",
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(500, json={"error": "broken catalog"})
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    result = probe_config(config, transport=httpx.MockTransport(_handler))
+
+    assert result.success is True
+    assert result.message == "Fallback request succeeded."
+    assert result.diagnostics["fallback_used"] is True
+    assert result.diagnostics["api_key_count"] == 1
+    assert result.diagnostics["api_key_attempts"] == 1
+
+
+def test_probe_config_rotates_api_keys_after_auth_failure() -> None:
+    config = _config(
+        provider_id="custom",
+        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        base_url="https://example.com/v1",
+        default_model="custom-model",
+        api_key="bad-key,good-key",
+    )
+    seen_tokens: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        token = request.headers.get("Authorization", "")
+        seen_tokens.append(token)
+        if token.endswith("bad-key"):
+            return httpx.Response(401, json={"error": "bad key"})
+        return httpx.Response(200, json={"data": [{"id": "custom-model"}]})
+
+    result = probe_config(config, transport=httpx.MockTransport(_handler))
+
+    assert result.success is True
+    assert result.diagnostics["api_key_count"] == 2
+    assert result.diagnostics["api_key_attempts"] == 2
+    assert seen_tokens == ["Bearer bad-key", "Bearer good-key"]
+
+
+def test_probe_config_does_not_rotate_api_keys_after_bad_request() -> None:
+    config = _config(
+        provider_id="custom",
+        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        base_url="https://example.com/v1",
+        default_model="custom-model",
+        api_key="bad-key,good-key",
+    )
+    seen_tokens: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen_tokens.append(request.headers.get("Authorization", ""))
+        if request.url.path == "/v1/models":
+            return httpx.Response(400, json={"error": "unsupported"})
+        return httpx.Response(400, json={"error": "bad payload"})
+
+    result = probe_config(config, transport=httpx.MockTransport(_handler))
+
+    assert result.success is False
+    assert result.http_status == 400
+    assert result.message == "Fallback request failed."
+    assert result.diagnostics["api_key_count"] == 2
+    assert result.diagnostics["api_key_attempts"] == 1
+    assert seen_tokens == ["Bearer bad-key", "Bearer bad-key"]
+
+
+@pytest.mark.parametrize(
+    ("protocol_adapter", "default_model", "first_status"),
+    [
+        (ProtocolAdapter.DASHSCOPE_EMBEDDING, "qwen3-vl-embedding", 429),
+        (ProtocolAdapter.DASHSCOPE_RERANK, "qwen3-vl-rerank", 401),
+    ],
+)
+def test_probe_config_rotates_api_keys_for_dashscope_capabilities(protocol_adapter, default_model, first_status) -> None:
+    config = _config(
+        provider_id="dashscope",
+        protocol_adapter=protocol_adapter,
+        base_url="https://example.com",
+        default_model=default_model,
+        api_key="key-1,key-2",
+    )
+    seen_tokens: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen_tokens.append(request.headers.get("Authorization", ""))
+        if len(seen_tokens) == 1:
+            return httpx.Response(first_status, json={"error": "retry next key"})
+        if protocol_adapter == ProtocolAdapter.DASHSCOPE_EMBEDDING:
+            return httpx.Response(200, json={"output": {"embeddings": [{"embedding": [0.1], "text_index": 0}]}})
+        return httpx.Response(200, json={"output": {"results": [{"index": 0, "score": 0.9}]}})
+
+    result = probe_config(config, transport=httpx.MockTransport(_handler))
+
+    assert result.success is True
+    assert result.diagnostics["api_key_count"] == 2
+    assert result.diagnostics["api_key_attempts"] == 2
+    assert seen_tokens == ["Bearer key-1", "Bearer key-2"]
 

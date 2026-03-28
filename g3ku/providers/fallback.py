@@ -8,6 +8,7 @@ from loguru import logger
 
 from g3ku.config.schema import Config
 from g3ku.providers.base import LLMProvider, LLMResponse
+from g3ku.utils.api_keys import iter_api_key_retry_slots
 
 PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting the configured fallback chain."
 _INTERNAL_RUNTIME_ERROR_TOKENS = (
@@ -19,6 +20,17 @@ _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "programmingerror",
     "no active connection",
     "cannot operate on a closed database",
+)
+_AUTH_ERROR_TOKENS = (
+    "401",
+    "403",
+    "unauthorized",
+    "forbidden",
+    "authentication failed",
+    "auth failed",
+    "invalid api key",
+    "incorrect api key",
+    "bad api key",
 )
 
 
@@ -102,6 +114,17 @@ def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None 
     return False
 
 
+def is_auth_model_error(error: Exception | str) -> bool:
+    text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "").lower()
+    if is_internal_runtime_model_error(text):
+        return False
+    return any(token in text for token in _AUTH_ERROR_TOKENS)
+
+
+def should_rotate_api_key_error(error: Exception | str, retry_on: list[str] | None = None) -> bool:
+    return is_auth_model_error(error) or is_retryable_model_error(error, retry_on=retry_on)
+
+
 def should_fallback_model_error(error: Exception | str) -> bool:
     return not is_internal_runtime_model_error(error)
 
@@ -111,6 +134,13 @@ def response_requires_retry(response: LLMResponse, retry_on: list[str] | None = 
         return False
     error_source = str(response.error_text or response.content or "")
     return is_retryable_model_error(error_source, retry_on=retry_on)
+
+
+def response_requires_api_key_rotation(response: LLMResponse, retry_on: list[str] | None = None) -> bool:
+    if str(response.finish_reason or "").lower() != "error":
+        return False
+    error_source = str(response.error_text or response.content or "")
+    return should_rotate_api_key_error(error_source, retry_on=retry_on)
 
 
 def response_requires_fallback(response: LLMResponse) -> bool:
@@ -175,7 +205,7 @@ class FallbackProvider(LLMProvider):
         last_response: LLMResponse | None = None
         for model_key in chain:
             try:
-                target = build_provider_from_model_key(self._config, model_key)
+                base_target = build_provider_from_model_key(self._config, model_key)
             except Exception as exc:
                 last_error = exc
                 if len(chain) > 1:
@@ -186,16 +216,22 @@ class FallbackProvider(LLMProvider):
                 raise
 
             effective_max_tokens = int(max_tokens)
-            if target.max_tokens_limit is not None:
-                effective_max_tokens = max(1, min(effective_max_tokens, int(target.max_tokens_limit)))
+            if base_target.max_tokens_limit is not None:
+                effective_max_tokens = max(1, min(effective_max_tokens, int(base_target.max_tokens_limit)))
 
-            effective_temperature = float(target.default_temperature if target.default_temperature is not None else temperature)
-            effective_reasoning = str(target.default_reasoning_effort) if target.default_reasoning_effort is not None else reasoning_effort
-            retry_count = normalized_retry_count(getattr(target, "retry_count", 0))
+            effective_temperature = float(base_target.default_temperature if base_target.default_temperature is not None else temperature)
+            effective_reasoning = str(base_target.default_reasoning_effort) if base_target.default_reasoning_effort is not None else reasoning_effort
+            retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
             move_to_next_model = False
 
-            for retry_index in range(retry_count + 1):
+            for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count):
+                target = base_target
                 try:
+                    target = base_target if slot.attempt_number == 1 else build_provider_from_model_key(
+                        self._config,
+                        model_key,
+                        api_key_index=slot.key_index,
+                    )
                     response = await target.provider.chat(
                         messages=messages,
                         tools=tools,
@@ -208,19 +244,32 @@ class FallbackProvider(LLMProvider):
                     )
                 except Exception as exc:
                     last_error = exc
-                    retryable = is_retryable_model_error(exc, retry_on=target.retry_on)
-                    if retryable and retry_index < retry_count:
+                    rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
+                    if rotate_key and not slot.is_last_key:
                         logger.warning(
-                            "Model retry triggered for {} ({}/{}): {}",
+                            "Model key rotation triggered for {} (round {}/{}, key {}/{}): {}",
                             model_key,
-                            retry_index + 1,
-                            retry_count,
+                            slot.round_index + 1,
+                            slot.round_count,
+                            slot.key_index + 1,
+                            slot.key_count,
+                            exc,
+                        )
+                        continue
+                    if rotate_key and not slot.is_last_round:
+                        logger.warning(
+                            "Model retry triggered for {} (round {}/{}, key {}/{}): {}",
+                            model_key,
+                            slot.round_index + 1,
+                            slot.round_count,
+                            slot.key_index + 1,
+                            slot.key_count,
                             exc,
                         )
                         continue
                     if should_fallback_model_error(exc) and model_key != chain[-1]:
                         logger.warning(
-                            "Model fallback triggered for {} after {} retries: {}",
+                            "Model fallback triggered for {} after {} retry rounds: {}",
                             model_key,
                             retry_count,
                             exc,
@@ -231,22 +280,35 @@ class FallbackProvider(LLMProvider):
                         raise exhausted_model_chain_error(exc) from exc
                     raise
 
-                retryable_response = response_requires_retry(response, retry_on=target.retry_on)
+                rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
                 fallback_response = response_requires_fallback(response)
-                if retryable_response:
+                if rotate_key_response:
                     last_response = response
-                    if retry_index < retry_count:
+                    if not slot.is_last_key:
                         logger.warning(
-                            "Model retry triggered for {} ({}/{}): {}",
+                            "Model key rotation triggered for {} (round {}/{}, key {}/{}): {}",
                             model_key,
-                            retry_index + 1,
-                            retry_count,
+                            slot.round_index + 1,
+                            slot.round_count,
+                            slot.key_index + 1,
+                            slot.key_count,
+                            response.content or response.finish_reason,
+                        )
+                        continue
+                    if not slot.is_last_round:
+                        logger.warning(
+                            "Model retry triggered for {} (round {}/{}, key {}/{}): {}",
+                            model_key,
+                            slot.round_index + 1,
+                            slot.round_count,
+                            slot.key_index + 1,
+                            slot.key_count,
                             response.content or response.finish_reason,
                         )
                         continue
                 if fallback_response and model_key != chain[-1]:
                     logger.warning(
-                        "Model fallback triggered for {} after {} retries: {}",
+                        "Model fallback triggered for {} after {} retry rounds: {}",
                         model_key,
                         retry_count,
                         response.content or response.finish_reason,

@@ -9,6 +9,7 @@ from g3ku.providers.custom_provider import CustomProvider
 from g3ku.providers.litellm_provider import LiteLLMProvider
 from g3ku.providers.openai_codex_provider import OpenAICodexProvider
 from g3ku.providers.responses_provider import ResponsesProvider
+from g3ku.utils.api_keys import parse_api_keys
 
 
 @dataclass(slots=True)
@@ -22,6 +23,7 @@ class ProviderTarget:
     default_reasoning_effort: str | None = None
     retry_on: list[str] = field(default_factory=lambda: ['network', '429', '5xx'])
     retry_count: int = 0
+    api_key_count: int = 0
 
 
 def _resolve_litellm_model(provider_id: str, model_id: str) -> str:
@@ -62,12 +64,22 @@ def _require_non_empty_api_key(
     )
 
 
-def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTarget:
+def build_provider_from_model_key(
+    config: Config,
+    model_key: str,
+    *,
+    api_key_index: int | None = None,
+) -> ProviderTarget:
     provider_ref = str(model_key or '').strip()
     target = resolve_chat_target(config, provider_ref)
     provider_id = target.provider_id
     model_id = target.resolved_model
-    api_key = str(target.secret_payload.get('api_key', '') or '')
+    raw_api_key = str(target.secret_payload.get('api_key', '') or '')
+    api_keys = parse_api_keys(raw_api_key)
+    selected_index = 0
+    if api_keys and api_key_index is not None:
+        selected_index = max(0, min(int(api_key_index), len(api_keys) - 1))
+    api_key = api_keys[selected_index] if api_keys else raw_api_key.strip()
     api_base = target.base_url
     managed = config.get_model_runtime_profile(provider_ref)
     if managed is not None and not managed.enabled:
@@ -77,10 +89,11 @@ def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTar
     default_reasoning_effort = target.default_reasoning_effort
     retry_on = list(managed.retry_on or []) if managed is not None else ['network', '429', '5xx']
     retry_count = int(getattr(managed, 'retry_count', 0) or 0) if managed is not None else 0
+    api_key_count = len(api_keys)
 
     if provider_id == 'custom':
         provider = CustomProvider(api_key=api_key or 'no-key', api_base=api_base or 'http://localhost:8000/v1', default_model=model_id)
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count)
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
 
     if provider_id == 'responses':
         provider = ResponsesProvider(
@@ -93,11 +106,11 @@ def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTar
             api_base=api_base or '',
             default_model=model_id,
         )
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count)
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
 
     if provider_id == 'openai_codex':
         provider = OpenAICodexProvider(default_model=f'openai_codex/{model_id}')
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count)
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
 
     resolved_model = _resolve_litellm_model(provider_id, model_id)
     provider = LiteLLMProvider(
@@ -107,4 +120,4 @@ def build_provider_from_model_key(config: Config, model_key: str) -> ProviderTar
         extra_headers=target.headers,
         provider_name=provider_id,
     )
-    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count)
+    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)

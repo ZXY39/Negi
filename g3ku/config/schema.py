@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
+from g3ku.utils.api_keys import has_api_keys
+
 ROLE_SCOPE_ALIASES = {
     "ceo": "ceo",
     "execution": "execution",
@@ -334,7 +336,7 @@ class ManagedModelConfig(Base):
             return self
         if not provider_model:
             raise ValueError("models.catalog[].provider_model or llm_config_id is required")
-        if not api_key:
+        if not has_api_keys(api_key):
             raise ValueError("models.catalog[].api_key is required before migration")
         return self
 

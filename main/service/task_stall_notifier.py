@@ -158,13 +158,21 @@ class TaskStallNotifier:
         task = self._service.get_task(key)
         if task is None or not self._is_web_task(self._service, task):
             return
-        if str(getattr(task, "status", "") or "").strip().lower() != "in_progress":
-            return
-        if bool(getattr(task, "is_paused", False)) or bool(getattr(task, "pause_requested", False)):
-            return
-        if bool(getattr(task, "cancel_requested", False)):
-            return
         runtime_state = self._service.log_service.read_runtime_state(key) or {}
+        is_actionable = getattr(self._service, "is_task_stall_actionable", None)
+        if callable(is_actionable):
+            try:
+                if not bool(is_actionable(key, runtime_state=runtime_state)):
+                    return
+            except Exception:
+                return
+        elif (
+            str(getattr(task, "status", "") or "").strip().lower() != "in_progress"
+            or bool(getattr(task, "is_paused", False))
+            or bool(getattr(task, "pause_requested", False))
+            or bool(getattr(task, "cancel_requested", False))
+        ):
+            return
         last_visible_output_at = str(runtime_state.get("last_visible_output_at") or task.created_at or "").strip()
         if not last_visible_output_at:
             return
@@ -200,13 +208,21 @@ class TaskStallNotifier:
         task = self._service.get_task(task_id)
         if task is None or not self._is_web_task(self._service, task):
             return
-        if str(getattr(task, "status", "") or "").strip().lower() != "in_progress":
-            return
-        if bool(getattr(task, "is_paused", False)) or bool(getattr(task, "pause_requested", False)):
-            return
-        if bool(getattr(task, "cancel_requested", False)):
-            return
         runtime_state = self._service.log_service.read_runtime_state(task_id) or {}
+        is_actionable = getattr(self._service, "is_task_stall_actionable", None)
+        if callable(is_actionable):
+            try:
+                if not bool(is_actionable(task_id, runtime_state=runtime_state)):
+                    return
+            except Exception:
+                return
+        elif (
+            str(getattr(task, "status", "") or "").strip().lower() != "in_progress"
+            or bool(getattr(task, "is_paused", False))
+            or bool(getattr(task, "pause_requested", False))
+            or bool(getattr(task, "cancel_requested", False))
+        ):
+            return
         last_visible_output_at = str(runtime_state.get("last_visible_output_at") or task.created_at or "").strip()
         last_bucket_minutes = max(0, int(runtime_state.get("last_stall_notice_bucket_minutes") or 0))
         current_bucket_minutes = stall_bucket_minutes(

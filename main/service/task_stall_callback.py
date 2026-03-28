@@ -13,6 +13,20 @@ from main.service.task_terminal_callback import (
 
 
 TASK_STALL_CALLBACK_PATH = "/api/internal/task-stall"
+TASK_STALL_REASON_SUSPECTED_STALL = "suspected_stall"
+TASK_STALL_REASON_USER_PAUSED = "user_paused"
+TASK_STALL_REASON_WORKER_UNAVAILABLE = "worker_unavailable"
+TASK_STALL_REASON_CANCEL_REQUESTED = "cancel_requested"
+TASK_STALL_REASON_NOT_IN_PROGRESS = "not_in_progress"
+TASK_STALL_REASON_MISSING_TASK = "missing_task"
+_TASK_STALL_REASONS = {
+    TASK_STALL_REASON_SUSPECTED_STALL,
+    TASK_STALL_REASON_USER_PAUSED,
+    TASK_STALL_REASON_WORKER_UNAVAILABLE,
+    TASK_STALL_REASON_CANCEL_REQUESTED,
+    TASK_STALL_REASON_NOT_IN_PROGRESS,
+    TASK_STALL_REASON_MISSING_TASK,
+}
 
 
 def _replace_callback_path(url: str, *, expected_path: str, target_path: str) -> str:
@@ -77,6 +91,11 @@ def _normalize_iso(value: Any) -> str:
     return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def normalize_task_stall_reason(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in _TASK_STALL_REASONS else TASK_STALL_REASON_SUSPECTED_STALL
+
+
 def normalize_task_stall_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = payload if isinstance(payload, dict) else {}
     task_id = _normalize_task_id(source.get("task_id") or source.get("taskId"))
@@ -110,6 +129,7 @@ def normalize_task_stall_payload(payload: dict[str, Any] | None) -> dict[str, An
         "stalled_minutes": stalled_minutes,
         "bucket_minutes": bucket_minutes,
         "last_visible_output_at": last_visible_output_at,
+        "reason": normalize_task_stall_reason(source.get("reason")),
         "brief_text": str(source.get("brief_text") or source.get("briefText") or "").strip(),
         "latest_node_summary": str(
             source.get("latest_node_summary") or source.get("latestNodeSummary") or ""

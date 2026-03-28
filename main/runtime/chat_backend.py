@@ -9,13 +9,14 @@ from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
     exhausted_model_chain_error,
-    is_retryable_model_error,
     normalized_retry_count,
+    response_requires_api_key_rotation,
     response_requires_fallback,
-    response_requires_retry,
     sanitize_terminal_model_error,
+    should_rotate_api_key_error,
     should_fallback_model_error,
 )
+from g3ku.utils.api_keys import iter_api_key_retry_slots
 
 _COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
 
@@ -142,7 +143,7 @@ class ConfigChatBackend:
         attempts: list[LLMModelAttempt] = []
         for index, ref in enumerate(refs):
             try:
-                target = build_provider_from_model_key(self._config, ref)
+                base_target = build_provider_from_model_key(self._config, ref)
             except Exception as exc:
                 last_error = exc
                 if should_fallback_model_error(exc) and index < len(refs) - 1:
@@ -150,15 +151,19 @@ class ConfigChatBackend:
                 if should_fallback_model_error(exc):
                     raise exhausted_model_chain_error(exc) from exc
                 raise
-            retry_count = normalized_retry_count(getattr(target, "retry_count", 0))
+            retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
             move_to_next_model = False
-            stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, target.model_id))
-            retry_index = 0
-            retry_budget = retry_count + 1
-            while retry_index < retry_budget:
+            stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, base_target.model_id))
+            for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count):
+                target = base_target
                 request_messages = list(messages or [])
                 request_message_count, request_message_chars = _message_stats(request_messages)
                 try:
+                    target = base_target if slot.attempt_number == 1 else build_provider_from_model_key(
+                        self._config,
+                        ref,
+                        api_key_index=slot.key_index,
+                    )
                     response = await target.provider.chat(
                         messages=request_messages,
                         tools=tools,
@@ -172,9 +177,10 @@ class ConfigChatBackend:
                     )
                 except Exception as exc:
                     last_error = exc
-                    retryable = is_retryable_model_error(exc, retry_on=target.retry_on)
-                    if retryable and retry_index < retry_count:
-                        retry_index += 1
+                    rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
+                    if rotate_key and not slot.is_last_key:
+                        continue
+                    if rotate_key and not slot.is_last_round:
                         continue
                     if should_fallback_model_error(exc) and index < len(refs) - 1:
                         move_to_next_model = True
@@ -199,11 +205,12 @@ class ConfigChatBackend:
                 attempts.extend(response_attempts)
                 response.attempts = list(attempts)
                 last_response = response
-                retryable_response = response_requires_retry(response, retry_on=target.retry_on)
+                rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
                 fallback_response = response_requires_fallback(response)
-                if retryable_response:
-                    if retry_index < retry_count:
-                        retry_index += 1
+                if rotate_key_response:
+                    if not slot.is_last_key:
+                        continue
+                    if not slot.is_last_round:
                         continue
                 if fallback_response and index < len(refs) - 1:
                     move_to_next_model = True

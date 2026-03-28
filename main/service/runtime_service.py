@@ -67,6 +67,12 @@ from main.service.task_terminal_callback import (
     resolve_task_terminal_callback_url,
 )
 from main.service.task_stall_callback import (
+    TASK_STALL_REASON_CANCEL_REQUESTED,
+    TASK_STALL_REASON_MISSING_TASK,
+    TASK_STALL_REASON_NOT_IN_PROGRESS,
+    TASK_STALL_REASON_SUSPECTED_STALL,
+    TASK_STALL_REASON_USER_PAUSED,
+    TASK_STALL_REASON_WORKER_UNAVAILABLE,
     normalize_task_stall_payload,
     resolve_task_stall_callback_token,
     resolve_task_stall_callback_url,
@@ -1131,20 +1137,38 @@ class MainRuntimeService:
 
     def get_session_task_counts(self, session_id: str) -> dict[str, int]:
         tasks = self.list_tasks_for_session(session_id)
-        unfinished = sum(1 for task in tasks if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress')
+        in_progress = 0
+        paused = 0
+        terminal = 0
+        for task in tasks:
+            status = str(getattr(task, 'status', '') or '').strip().lower()
+            if status != 'in_progress':
+                terminal += 1
+            elif bool(getattr(task, 'is_paused', False)):
+                paused += 1
+            else:
+                in_progress += 1
         return {
             'total': len(tasks),
-            'unfinished': unfinished,
-            'terminal': max(0, len(tasks) - unfinished),
+            'unfinished': in_progress,
+            'in_progress': in_progress,
+            'paused': paused,
+            'terminal': terminal,
+            'deletable': terminal + paused,
         }
 
     async def delete_task_records_for_session(self, session_id: str) -> int:
-        unfinished = self.list_unfinished_tasks_for_session(session_id)
-        if unfinished:
-            raise ValueError('session_has_unfinished_tasks')
         deleted = 0
         for task in list(self.list_tasks_for_session(session_id)):
-            await self.delete_task(task.task_id)
+            status = str(getattr(task, 'status', '') or '').strip().lower()
+            if status == 'in_progress' and not bool(getattr(task, 'is_paused', False)):
+                continue
+            try:
+                await self.delete_task(task.task_id)
+            except ValueError as exc:
+                if str(exc) in {'task_not_paused', 'task_still_stopping'}:
+                    continue
+                raise
             deleted += 1
         return deleted
 
@@ -1221,6 +1245,42 @@ class MainRuntimeService:
             return False
         return bool(heartbeat.enqueue_task_stall_payload(normalized))
 
+    def classify_task_stall_reason(
+        self,
+        task_id: str,
+        *,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> str:
+        task = self.get_task(task_id)
+        if task is None:
+            return TASK_STALL_REASON_MISSING_TASK
+        if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
+            return TASK_STALL_REASON_NOT_IN_PROGRESS
+        current_runtime_state = runtime_state if isinstance(runtime_state, dict) else (self.log_service.read_runtime_state(task.task_id) or {})
+        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
+            return TASK_STALL_REASON_USER_PAUSED
+        if bool(current_runtime_state.get('paused')) or bool(current_runtime_state.get('pause_requested')):
+            return TASK_STALL_REASON_USER_PAUSED
+        if bool(getattr(task, 'cancel_requested', False)):
+            return TASK_STALL_REASON_CANCEL_REQUESTED
+        if bool(current_runtime_state.get('cancel_requested')):
+            return TASK_STALL_REASON_CANCEL_REQUESTED
+        if self.execution_mode == 'web':
+            if not self.is_worker_online():
+                return TASK_STALL_REASON_WORKER_UNAVAILABLE
+        return TASK_STALL_REASON_SUSPECTED_STALL
+
+    def is_task_stall_actionable(
+        self,
+        task_id: str,
+        *,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> bool:
+        return self.classify_task_stall_reason(
+            task_id,
+            runtime_state=runtime_state,
+        ) == TASK_STALL_REASON_SUSPECTED_STALL
+
     def build_task_stall_payload(
         self,
         task_id: str,
@@ -1234,13 +1294,10 @@ class MainRuntimeService:
         origin_session_id = self._task_origin_session_id(task)
         if not origin_session_id.startswith('web:'):
             return {}
-        if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
-            return {}
-        if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
-            return {}
-        if bool(getattr(task, 'cancel_requested', False)):
-            return {}
         runtime_state = self.log_service.read_runtime_state(task.task_id) or {}
+        stall_reason = self.classify_task_stall_reason(task.task_id, runtime_state=runtime_state)
+        if stall_reason != TASK_STALL_REASON_SUSPECTED_STALL:
+            return {}
         visible_at = str(last_visible_output_at or runtime_state.get('last_visible_output_at') or task.created_at or '').strip()
         minute_seconds = float(getattr(self.task_stall_notifier, 'minute_seconds', 60.0) or 60.0)
         current_bucket = stall_bucket_minutes(visible_at, minute_seconds=minute_seconds)
@@ -1257,6 +1314,7 @@ class MainRuntimeService:
                 'task_id': task.task_id,
                 'session_id': origin_session_id,
                 'title': str(getattr(task, 'title', '') or task.task_id).strip() or task.task_id,
+                'reason': stall_reason,
                 'stalled_minutes': stalled_minutes,
                 'bucket_minutes': active_bucket,
                 'last_visible_output_at': visible_at,

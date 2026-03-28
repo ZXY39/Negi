@@ -4359,6 +4359,19 @@ textarea {
     line-height: 1.5;
 }
 
+.confirm-checkbox-details {
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--bg-surface-2) 84%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
 .confirm-actions {
     display: flex;
     justify-content: flex-end;

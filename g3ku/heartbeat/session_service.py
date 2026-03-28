@@ -20,7 +20,13 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
-from main.service.task_stall_callback import normalize_task_stall_payload
+from main.service.task_stall_callback import (
+    TASK_STALL_REASON_SUSPECTED_STALL,
+    TASK_STALL_REASON_USER_PAUSED,
+    TASK_STALL_REASON_WORKER_UNAVAILABLE,
+    normalize_task_stall_payload,
+    normalize_task_stall_reason,
+)
 from main.service.task_stall_notifier import stalled_minutes_since, stall_bucket_minutes
 from main.service.task_terminal_callback import build_task_terminal_payload, enrich_task_terminal_payload, normalize_task_terminal_payload
 
@@ -129,18 +135,31 @@ class WebSessionHeartbeatService:
         session_id = str(normalized_payload.get("session_id") or "").strip()
         task_id = str(normalized_payload.get("task_id") or "").strip()
         bucket_minutes = int(normalized_payload.get("bucket_minutes") or 0)
+        dedupe_key = str(
+            normalized_payload.get("dedupe_key")
+            or f"task-stall:{task_id}:{bucket_minutes}:{normalized_payload.get('last_visible_output_at') or ''}"
+        ).strip()
         if not session_id or not task_id or bucket_minutes <= 0:
             return False
         if self._session_manual_pause_waiting_reason(session_id):
+            self._ack_task_stall_dedupe_key(dedupe_key)
             return False
+        service = self._main_task_service
+        classify_reason = getattr(service, "classify_task_stall_reason", None) if service is not None else None
+        if callable(classify_reason):
+            try:
+                current_reason = str(classify_reason(task_id) or "").strip().lower() or TASK_STALL_REASON_SUSPECTED_STALL
+                normalized_payload["reason"] = current_reason
+                if current_reason != TASK_STALL_REASON_SUSPECTED_STALL:
+                    self._ack_task_stall_dedupe_key(dedupe_key)
+                    return False
+            except Exception:
+                logger.debug("task stall actionability check skipped for {}", task_id)
         event = self._events.enqueue(
             session_id=session_id,
             source="main_runtime",
             reason="task_stall",
-            dedupe_key=str(
-                normalized_payload.get("dedupe_key")
-                or f"task-stall:{task_id}:{bucket_minutes}:{normalized_payload.get('last_visible_output_at') or ''}"
-            ).strip(),
+            dedupe_key=dedupe_key,
             payload=dict(normalized_payload),
             delay_seconds=0.0,
         )
@@ -320,16 +339,34 @@ class WebSessionHeartbeatService:
             if task is None:
                 discarded_event_ids.add(latest.event_id)
                 continue
-            if str(getattr(task, "status", "") or "").strip().lower() != "in_progress":
-                discarded_event_ids.add(latest.event_id)
-                continue
-            if bool(getattr(task, "is_paused", False)) or bool(getattr(task, "pause_requested", False)):
-                discarded_event_ids.add(latest.event_id)
-                continue
-            if bool(getattr(task, "cancel_requested", False)):
-                discarded_event_ids.add(latest.event_id)
-                continue
             runtime_state = getattr(getattr(service, "log_service", None), "read_runtime_state", lambda _task_id: None)(task_id) or {}
+            current_reason = TASK_STALL_REASON_SUSPECTED_STALL
+            classify_reason = getattr(service, "classify_task_stall_reason", None)
+            if callable(classify_reason):
+                try:
+                    current_reason = str(classify_reason(task_id, runtime_state=runtime_state) or "").strip().lower()
+                    if current_reason != TASK_STALL_REASON_SUSPECTED_STALL:
+                        discarded_event_ids.add(latest.event_id)
+                        continue
+                except Exception:
+                    discarded_event_ids.add(latest.event_id)
+                    continue
+            else:
+                if str(getattr(task, "status", "") or "").strip().lower() != "in_progress":
+                    discarded_event_ids.add(latest.event_id)
+                    continue
+                if bool(getattr(task, "is_paused", False)) or bool(getattr(task, "pause_requested", False)):
+                    discarded_event_ids.add(latest.event_id)
+                    continue
+                if bool(getattr(task, "cancel_requested", False)):
+                    discarded_event_ids.add(latest.event_id)
+                    continue
+                if bool(runtime_state.get("paused")) or bool(runtime_state.get("pause_requested")):
+                    discarded_event_ids.add(latest.event_id)
+                    continue
+                if bool(runtime_state.get("cancel_requested")):
+                    discarded_event_ids.add(latest.event_id)
+                    continue
             last_visible_output_at = str(
                 runtime_state.get("last_visible_output_at")
                 or (latest.payload or {}).get("last_visible_output_at")
@@ -353,6 +390,7 @@ class WebSessionHeartbeatService:
                     "task_id": task_id,
                     "session_id": str((latest.payload or {}).get("session_id") or origin_session_id).strip() or "web:shared",
                     "title": str((latest.payload or {}).get("title") or getattr(task, "title", "") or task_id).strip() or task_id,
+                    "reason": current_reason,
                     "stalled_minutes": stalled_minutes_since(last_visible_output_at),
                     "bucket_minutes": current_bucket,
                     "last_visible_output_at": last_visible_output_at,
@@ -501,13 +539,25 @@ class WebSessionHeartbeatService:
             if reason == "task_stall":
                 task_id = str(payload.get("task_id") or "").strip()
                 title = str(payload.get("title") or task_id or "task").strip() or "task"
+                stall_reason = normalize_task_stall_reason(payload.get("reason"))
                 stalled_minutes = self._int_value(payload.get("stalled_minutes"))
                 bucket_minutes = self._int_value(payload.get("bucket_minutes"))
                 brief_text = str(payload.get("brief_text") or "").strip() or "No task summary."
                 latest_node_summary = str(payload.get("latest_node_summary") or "").strip() or "No latest node summary."
                 runtime_excerpt = str(payload.get("runtime_summary_excerpt") or "").strip() or "No runtime summary."
                 last_visible_output_at = str(payload.get("last_visible_output_at") or "").strip() or "unknown"
+                if stall_reason == TASK_STALL_REASON_USER_PAUSED:
+                    lines.append(f"- Task {title} ({task_id}) was paused by the user")
+                    lines.append("  Reason: user_paused")
+                    lines.append("  Do not investigate the task yet. Wait for the user to resume or redirect it.")
+                    continue
+                if stall_reason == TASK_STALL_REASON_WORKER_UNAVAILABLE:
+                    lines.append(f"- Task {title} ({task_id}) is waiting for the worker to come back")
+                    lines.append("  Reason: worker_unavailable")
+                    lines.append("  Do not treat this as a task logic stall yet. Wait for worker recovery or restart.")
+                    continue
                 lines.append(f"- Task {title} ({task_id}) may be stalled")
+                lines.append(f"  Reason: {stall_reason or TASK_STALL_REASON_SUSPECTED_STALL}")
                 lines.append(f"  Silent for: {stalled_minutes} min")
                 lines.append(f"  Trigger bucket: {bucket_minutes} min")
                 lines.append(f"  Last visible output at: {last_visible_output_at}")
@@ -651,6 +701,18 @@ class WebSessionHeartbeatService:
                 store(dedupe_key, delivered_at=delivered_at)
             except Exception:
                 logger.debug("task stall outbox ack skipped for {}", dedupe_key)
+
+    def _ack_task_stall_dedupe_key(self, dedupe_key: str) -> None:
+        key = str(dedupe_key or "").strip()
+        if not key:
+            return
+        store = getattr(getattr(self._main_task_service, "store", None), "mark_task_stall_outbox_delivered", None)
+        if not callable(store):
+            return
+        try:
+            store(key, delivered_at=now_iso())
+        except Exception:
+            logger.debug("task stall outbox ack skipped for {}", key)
 
     def _serialize_tool_event(self, event: AgentEvent) -> dict[str, Any] | None:
         payload = event.payload if isinstance(event.payload, dict) else {}

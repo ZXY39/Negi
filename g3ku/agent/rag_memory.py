@@ -40,6 +40,7 @@ from g3ku.llm_config.runtime_resolver import (
     resolve_memory_rerank_target,
 )
 from g3ku.security import apply_config_secret_entries, get_bootstrap_security_service
+from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_status
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
 
 try:
@@ -340,6 +341,50 @@ def _load_workspace_dashscope_settings(workspace: Path) -> tuple[str, str | None
     return cfg_key or env_key, cfg_base or env_base
 
 
+def _dashscope_post_with_api_key_pool(
+    *,
+    endpoint: str,
+    api_key_value: str,
+    payload: dict[str, Any],
+    timeout_s: float,
+    label: str,
+) -> requests.Response:
+    api_keys = parse_api_keys(api_key_value)
+    if not api_keys:
+        raise RuntimeError(f"{label} API key is not configured")
+
+    last_exc: Exception | None = None
+    for key_index, api_key in enumerate(api_keys):
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=timeout_s)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if key_index < len(api_keys) - 1:
+                continue
+            raise RuntimeError(f"{label} API call failed at {endpoint}") from exc
+
+        if 200 <= response.status_code < 300:
+            return response
+
+        if should_switch_api_key_for_http_status(response.status_code) and key_index < len(api_keys) - 1:
+            last_exc = RuntimeError(f"{label} API call failed ({response.status_code}) at {endpoint}")
+            continue
+
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError(f"{label} API call failed ({response.status_code}) at {endpoint}") from exc
+        raise RuntimeError(f"{label} API call failed ({response.status_code}) at {endpoint}")
+
+    if last_exc is not None:
+        raise RuntimeError(f"{label} API call failed at {endpoint}") from last_exc
+    raise RuntimeError(f"{label} API call failed at {endpoint}")
+
+
 class DashScopeMultimodalEmbeddings(Embeddings):
     """DashScope multimodal embedding adapter for qwen3-vl-embedding."""
 
@@ -352,7 +397,7 @@ class DashScopeMultimodalEmbeddings(Embeddings):
         batch_size: int = 32,
         timeout_s: float = 30.0,
     ):
-        self.api_key = api_key.strip()
+        self.api_key = str(api_key or "").strip()
         self.model = model
         self.api_base = _dashscope_root_url(api_base)
         self.batch_size = max(1, int(batch_size or 1))
@@ -367,17 +412,13 @@ class DashScopeMultimodalEmbeddings(Embeddings):
             "input": {"contents": [{"text": text} for text in texts]},
             "parameters": {"output_type": "dense"},
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = requests.post(self.endpoint, headers=headers, json=payload, timeout=self.timeout_s)
-        try:
-            response.raise_for_status()
-        except Exception as exc:
-            raise RuntimeError(
-                f"DashScope embedding API call failed ({response.status_code}) at {self.endpoint}"
-            ) from exc
+        response = _dashscope_post_with_api_key_pool(
+            endpoint=self.endpoint,
+            api_key_value=self.api_key,
+            payload=payload,
+            timeout_s=self.timeout_s,
+            label="DashScope embedding",
+        )
         data = response.json()
         return _extract_embedding_vectors(data, expected_count=len(texts))
 
@@ -407,7 +448,7 @@ class DashScopeTextReranker:
         api_base: str | None = None,
         timeout_s: float = 20.0,
     ):
-        self.api_key = api_key.strip()
+        self.api_key = str(api_key or "").strip()
         self.model = model
         self.api_base = _dashscope_root_url(api_base)
         self.timeout_s = float(timeout_s)
@@ -435,17 +476,13 @@ class DashScopeTextReranker:
         if top_n is not None:
             payload["parameters"]["top_n"] = max(1, int(top_n))
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = requests.post(self.endpoint, headers=headers, json=payload, timeout=self.timeout_s)
-        try:
-            response.raise_for_status()
-        except Exception as exc:
-            raise RuntimeError(
-                f"DashScope rerank API call failed ({response.status_code}) at {self.endpoint}"
-            ) from exc
+        response = _dashscope_post_with_api_key_pool(
+            endpoint=self.endpoint,
+            api_key_value=self.api_key,
+            payload=payload,
+            timeout_s=self.timeout_s,
+            label="DashScope rerank",
+        )
 
         data = response.json()
         scored = _extract_rerank_scores(data)

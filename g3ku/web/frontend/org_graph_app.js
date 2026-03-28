@@ -348,6 +348,7 @@ const U = {
     confirmCheckbox: document.getElementById("confirm-checkbox"),
     confirmCheckboxLabel: document.getElementById("confirm-checkbox-label"),
     confirmCheckboxHint: document.getElementById("confirm-checkbox-hint"),
+    confirmCheckboxDetails: document.getElementById("confirm-checkbox-details"),
     confirmCancel: document.getElementById("confirm-cancel"),
     confirmAccept: document.getElementById("confirm-accept"),
     projectExit: document.getElementById("project-exit-btn"),
@@ -3548,11 +3549,20 @@ function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "dang
             U.confirmCheckbox.disabled = false;
             U.confirmCheckboxLabel.textContent = checkbox.label || "同时删除此对话创建的所有任务记录";
             U.confirmCheckboxHint.textContent = checkbox.hint || "";
+            if (U.confirmCheckboxDetails) {
+                const detailText = String(checkbox.details || "").trim();
+                U.confirmCheckboxDetails.hidden = !detailText;
+                U.confirmCheckboxDetails.textContent = detailText;
+            }
         } else {
             U.confirmCheckbox.checked = false;
             U.confirmCheckbox.disabled = false;
             U.confirmCheckboxLabel.textContent = "同时删除此对话创建的所有任务记录";
             U.confirmCheckboxHint.textContent = "";
+            if (U.confirmCheckboxDetails) {
+                U.confirmCheckboxDetails.hidden = true;
+                U.confirmCheckboxDetails.textContent = "";
+            }
         }
     }
     U.confirmAccept.textContent = confirmLabel;
@@ -4373,13 +4383,14 @@ function renderModelDetail() {
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">API Key *</span>
-                                <input class="resource-search" name="apiKey" value="${esc(current?.api_key || "")}" placeholder="sk-...">
+                                <input class="resource-search" name="apiKey" value="${esc(current?.api_key || "")}" placeholder="sk-... or sk-1,sk-2">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Base URL ${isCreate ? "*" : ""}</span>
                                 <input class="resource-search" name="apiBase" value="${esc(current?.api_base || "")}" placeholder="https://api.example.com/v1">
                             </label>
                         </div>
+                        <p class="subtitle">API Key 支持用逗号或换行填写多把 key，例如 key1,key2。多个 key 会按顺序轮换。</p>
                         <div class="model-form-status-area" style="margin-top: var(--space-4);">
                             ${enabled
             ? `<button type="button" class="toolbar-btn danger" data-model-control="disable" data-key="${esc(current?.key || "")}">禁用模型</button>`
@@ -4413,6 +4424,7 @@ function renderModelDetail() {
                                 <input class="resource-search spinless-number-input" type="number" min="0" step="1" name="retryCount" value="${esc(String(current?.retry_count ?? 0))}" placeholder="0">
                             </label>
                         </div>
+                        <p class="subtitle">配置多个 API Key 时，重试次数按完整轮过所有 key 计算。</p>
                     </section>
                     <section class="resource-section">
                         <h3>额外请求头</h3>
@@ -4966,9 +4978,11 @@ function collectModelFormData(form, current) {
     const description = String(formData.get("description") || "").trim();
     const enabled = formData.get("enabled") === "on";
     const selectedScopes = new Set(MODEL_SCOPES.filter((scope) => formData.get(`scope_${scope.key}`) === "on").map((scope) => scope.key));
+    const hasApiKeyEntries = String(apiKey || "").split(/[\n,]/).some((item) => String(item || "").trim());
 
     if (!key) throw new Error("模型 Key 不能为空");
     if (!providerModel) throw new Error("Provider / Model 不能为空");
+    if (!hasApiKeyEntries) throw new Error("API Key 不能为空");
     if (!apiKey) throw new Error("API Key 不能为空");
     if (isCreate && !apiBase) throw new Error("Base URL 不能为空");
 
@@ -5533,26 +5547,45 @@ function handleRenameCancel() {
 function formatSessionDeleteHint(payload = {}) {
     const related = payload?.related_tasks && typeof payload.related_tasks === "object" ? payload.related_tasks : {};
     const total = normalizeInt(related.total, 0);
-    const terminal = normalizeInt(related.terminal, 0);
+    const deletable = normalizeInt(related.deletable, normalizeInt(related.terminal, 0));
+    const inProgress = normalizeInt(related.in_progress, normalizeInt(related.unfinished, 0));
     if (total <= 0) return "当前会话没有关联任务记录。";
-    return `共 ${total} 条任务记录，其中 ${terminal} 条已完成，可一并清理。`;
+    if (deletable <= 0) return `共 ${total} 条任务记录，当前均为进行中，本次不会一并清理。`;
+    if (inProgress <= 0) return `共 ${total} 条任务记录，可一并清理。`;
+    return `共 ${total} 条任务记录，其中 ${deletable} 条可立即清理，${inProgress} 条进行中。进行中任务会保留。`;
 }
 
-function formatSessionDeleteBlockedText(payload = {}) {
-    const message = String(payload?.message || "").trim();
-    const tasks = Array.isArray(payload?.usage?.tasks) ? payload.usage.tasks : [];
-    if (!tasks.length) return message || "会话仍有未完成任务，无法删除。";
-    const names = tasks
-        .slice(0, 3)
-        .map((item) => {
-            const title = String(item?.title || item?.task_id || "").trim();
-            const taskId = String(item?.task_id || "").trim();
-            return taskId && taskId !== title ? `${title} (${taskId})` : title;
-        })
-        .filter(Boolean);
-    const suffix = tasks.length > 3 ? ` 等 ${tasks.length} 个任务` : "";
-    if (!names.length) return message || "会话仍有未完成任务，无法删除。";
-    return `${message || "会话仍有未完成任务，无法删除。"} ${names.join("、")}${suffix}`;
+function normalizeSessionDeleteTaskIds(items = []) {
+    const seen = new Set();
+    return (Array.isArray(items) ? items : [])
+        .map((item) => String(item?.task_id || item || "").trim())
+        .filter((taskId) => {
+            if (!taskId || seen.has(taskId)) return false;
+            seen.add(taskId);
+            return true;
+        });
+}
+
+function formatSessionDeleteTaskDetails(payload = {}) {
+    const usage = payload?.usage && typeof payload.usage === "object" ? payload.usage : {};
+    const completedIds = normalizeSessionDeleteTaskIds(usage.completed_tasks);
+    const pausedIds = normalizeSessionDeleteTaskIds(usage.paused_tasks);
+    const inProgressIds = normalizeSessionDeleteTaskIds(
+        Array.isArray(usage.in_progress_tasks) ? usage.in_progress_tasks : usage.tasks
+    );
+    const lines = [];
+    if (completedIds.length) {
+        lines.push("已完成任务 ID：", ...completedIds);
+    }
+    if (pausedIds.length) {
+        if (lines.length) lines.push("");
+        lines.push("已暂停任务 ID：", ...pausedIds);
+    }
+    if (inProgressIds.length) {
+        if (lines.length) lines.push("");
+        lines.push("进行中任务 ID：", ...inProgressIds);
+    }
+    return lines.join("\n");
 }
 
 function shortSessionIdLabel(sessionId) {
@@ -5585,15 +5618,6 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } 
         clearCeoComposerDraft(targetId);
         if (S.view === "tasks") await loadTasks();
     } catch (e) {
-        const blockedDelete = e?.status === 409 && e?.data && typeof e.data === "object" && e.data.code === "session_has_unfinished_tasks";
-        if (blockedDelete) {
-            showToast({
-                title: "无法删除当前会话",
-                text: formatSessionDeleteBlockedText(e.data),
-                kind: "warn",
-            });
-            return;
-        }
         showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
     } finally {
         S.ceoSessionCatalogBusy = false;
@@ -5625,23 +5649,16 @@ async function requestDeleteCeoSession(sessionId) {
     S.ceoSessionCatalogBusy = false;
     renderCeoSessions();
     syncCeoPrimaryButton();
-    if (deleteCheck?.can_delete === false) {
-        showToast({
-            title: "无法删除当前会话",
-            text: formatSessionDeleteBlockedText(deleteCheck),
-            kind: "warn",
-        });
-        return;
-    }
     openConfirm({
         title: "删除会话",
-        text: `将删除会话“${current.title || current.session_id}”（${shortSessionIdLabel(current.session_id)}）的聊天记录与附件。${formatSessionDeleteHint(deleteCheck)}`,
+        text: `将删除会话“${current.title || current.session_id}”（${shortSessionIdLabel(current.session_id)}）的聊天记录与附件。`,
         confirmLabel: "删除",
         confirmKind: "danger",
         returnFocus: U.ceoNewSession,
         checkbox: {
             label: "同时删除此对话创建的所有任务记录",
             hint: formatSessionDeleteHint(deleteCheck),
+            details: formatSessionDeleteTaskDetails(deleteCheck),
             checked: false,
         },
         onConfirm: ({ checked } = {}) => performDeleteCeoSession(current.session_id, { deleteTaskRecords: !!checked }),

@@ -120,6 +120,7 @@ class CeoFrontDoorRunner:
     _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
     _CEO_NON_BUDGET_TOOLS = {"create_async_task", "memory_write"}
     _EMPTY_RESPONSE_RETRY_LIMIT = 1
+    _STAGE_SETUP_ONLY_RETRY_LIMIT = 1
     _EXECUTION_POLICY_FOCUS = "focus"
     _EXECUTION_POLICY_COVERAGE = "coverage"
     _COVERAGE_INTENT_MARKERS = (
@@ -366,6 +367,80 @@ class CeoFrontDoorRunner:
         else:
             parts.append('本轮尚未创建异步任务。')
         parts.append('系统已自动停止本轮，避免把空结果误显示为成功回复。')
+        return ''.join(parts)
+
+    @staticmethod
+    def _looks_like_stage_setup_only_text(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        markers = (
+            "已切换到新阶段",
+            "切换到新阶段",
+            "现在进入新阶段",
+            "继续执行",
+            "继续直接",
+            "继续打开",
+            "接下来",
+            "下一步",
+            "准备执行",
+            "准备据此",
+            "我会继续",
+            "我将",
+            "will continue",
+            "continue working",
+            "continue to",
+            "next step",
+            "ready to",
+            "about to",
+            "switched to the new stage",
+        )
+        return any(marker in normalized for marker in markers)
+
+    @classmethod
+    def _should_retry_stage_setup_only_text(
+        cls,
+        *,
+        text: str,
+        stage_gate: dict[str, Any],
+        stage_created: bool,
+    ) -> bool:
+        if not stage_created:
+            return False
+        active = stage_gate.get("active_stage") if isinstance(stage_gate, dict) else None
+        if not isinstance(active, dict):
+            return False
+        if int(active.get("tool_rounds_used") or 0) != 0:
+            return False
+        if int(active.get("tool_round_budget") or 0) <= 0:
+            return False
+        return cls._looks_like_stage_setup_only_text(text)
+
+    @staticmethod
+    def _stage_setup_retry_message(*, active_stage: dict[str, Any] | None, visible_tool_names: list[str]) -> str:
+        active = dict(active_stage or {}) if isinstance(active_stage, dict) else {}
+        visible = ', '.join(f'`{name}`' for name in list(visible_tool_names or [])[:8]) or '(none)'
+        goal = str(active.get("stage_goal") or "").strip() or "(empty)"
+        budget = int(active.get("tool_round_budget") or 0)
+        return (
+            'System note: your previous reply only described continuing the current CEO stage, '
+            f'but this stage has not advanced yet (0/{budget} ordinary tool rounds used). '
+            f'Active stage goal: {goal}. '
+            'Do not stop at stage setup. Either call one visible tool for this stage now or provide the actual final answer with the completed outcome. '
+            f'Visible tools this turn: {visible}.'
+        )
+
+    @staticmethod
+    def _stage_setup_only_explanation(*, active_stage: dict[str, Any] | None) -> str:
+        active = dict(active_stage or {}) if isinstance(active_stage, dict) else {}
+        goal = str(active.get("stage_goal") or "").strip()
+        parts = [
+            '本轮内部执行在新阶段初始化后被过早收尾：当前 CEO 阶段已创建，但尚未推进任何工具轮次，'
+            '模型只返回了“继续执行/准备执行”之类的过渡说明，没有真正继续工作或交付最终结果。'
+        ]
+        if goal:
+            parts.append(f'阶段目标：{goal}。')
+        parts.append('系统已自动停止本轮，避免把阶段切换说明误显示为完成回复。')
         return ''.join(parts)
 
     @staticmethod
@@ -638,6 +713,7 @@ class CeoFrontDoorRunner:
         used_tools: list[str] = []
         stage_created = False
         empty_response_retries = 0
+        stage_setup_only_retries = 0
         breaker = RepeatedActionCircuitBreaker()
         stage_tool_enabled = not bool(runtime_context.get("disable_stage_tool"))
 
@@ -828,6 +904,36 @@ class CeoFrontDoorRunner:
                 if stage_block_message:
                     message_history.append({"role": "user", "content": stage_block_message})
                     continue
+                if self._should_retry_stage_setup_only_text(
+                    text=text,
+                    stage_gate=stage_gate,
+                    stage_created=stage_created,
+                ):
+                    if stage_setup_only_retries < self._STAGE_SETUP_ONLY_RETRY_LIMIT:
+                        stage_setup_only_retries += 1
+                        message_history.append(
+                            {
+                                "role": "user",
+                                "content": self._stage_setup_retry_message(
+                                    active_stage=stage_gate.get("active_stage"),
+                                    visible_tool_names=list(visible_tools.keys()),
+                                ),
+                            }
+                        )
+                        continue
+                    if interaction_trace.get("stages"):
+                        interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
+                        self._sync_session_trace(session, interaction_trace)
+                    route_kind = self._route_kind_for_turn(
+                        used_tools=used_tools,
+                        stage_created=stage_created,
+                        default=route_kind,
+                    )
+                    return CeoTurnResult(
+                        output=self._stage_setup_only_explanation(active_stage=stage_gate.get("active_stage")),
+                        route_kind=route_kind,
+                        interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
+                    )
                 interaction_trace["final_output"] = text.strip()
                 interaction_trace = finalize_active_stage(
                     interaction_trace,

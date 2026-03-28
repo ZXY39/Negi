@@ -6,7 +6,9 @@ from typing import Any
 
 import httpx
 
-from .enums import ProbeStatus, ProtocolAdapter
+from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_status
+
+from .enums import AuthMode, ProbeStatus, ProtocolAdapter
 from .models import NormalizedProviderConfig, ProbeResult
 
 
@@ -137,6 +139,41 @@ def _build_anthropic_url(base_url: str) -> str:
     return f"{trimmed}/v1/messages"
 
 
+def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[str, dict[str, Any]]:
+    endpoint = "/responses" if config.protocol_adapter == ProtocolAdapter.OPENAI_RESPONSES else "/chat/completions"
+    if endpoint == "/responses":
+        return endpoint, {"model": config.default_model, "input": "ping", "max_output_tokens": 1}
+    return endpoint, {
+        "model": config.default_model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+    }
+
+
+def _config_with_api_key(config: NormalizedProviderConfig, api_key: str) -> NormalizedProviderConfig:
+    auth = dict(config.auth)
+    auth["api_key"] = str(api_key or "").strip()
+    return config.model_copy(update={"auth": auth})
+
+
+def _with_probe_attempt_diagnostics(
+    result: ProbeResult,
+    *,
+    api_key_count: int,
+    api_key_attempts: int,
+) -> ProbeResult:
+    diagnostics = dict(result.diagnostics)
+    diagnostics["api_key_count"] = max(0, int(api_key_count or 0))
+    diagnostics["api_key_attempts"] = max(0, int(api_key_attempts or 0))
+    return result.model_copy(update={"diagnostics": diagnostics})
+
+
+def _should_switch_api_key_for_probe_result(result: ProbeResult) -> bool:
+    if result.status in {ProbeStatus.AUTH_ERROR, ProbeStatus.CONNECTION_ERROR, ProbeStatus.TIMEOUT}:
+        return True
+    return should_switch_api_key_for_http_status(result.http_status)
+
+
 def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
     headers = _build_openai_headers(config)
     start = time.perf_counter()
@@ -150,60 +187,16 @@ def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderCon
             latency_ms=latency_ms,
             message="Authentication failed while requesting model catalog.",
         )
-    if response.status_code in {400, 404, 405}:
-        endpoint = "/responses" if config.protocol_adapter == ProtocolAdapter.OPENAI_RESPONSES else "/chat/completions"
-        if endpoint == "/responses":
-            payload = {"model": config.default_model, "input": "ping", "max_output_tokens": 1}
-        else:
-            payload = {
-                "model": config.default_model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 1,
-            }
-        fallback = client.post(_join_url(config.base_url, endpoint), headers=headers, json=payload)
-        if fallback.status_code in {401, 403}:
-            return _failure_result(
-                config,
-                status=ProbeStatus.AUTH_ERROR,
-                http_status=fallback.status_code,
-                latency_ms=latency_ms,
-                message="Authentication failed during fallback request.",
-            )
+    if 200 <= response.status_code < 300:
         try:
-            fallback_payload = fallback.json()
+            payload = response.json()
         except json.JSONDecodeError:
             return _non_json_failure(
                 config,
-                response=fallback,
+                response=response,
                 latency_ms=latency_ms,
-                label="Fallback endpoint returned a non-JSON response",
+                label="Model catalog returned a non-JSON response",
             )
-        if 200 <= fallback.status_code < 300:
-            return _success_result(
-                config,
-                latency_ms=latency_ms,
-                http_status=fallback.status_code,
-                message="Fallback request succeeded.",
-                diagnostics={"fallback_used": True, "response_keys": sorted(fallback_payload.keys())},
-            )
-        return _failure_result(
-            config,
-            status=ProbeStatus.INVALID_RESPONSE,
-            http_status=fallback.status_code,
-            latency_ms=latency_ms,
-            message="Fallback request failed.",
-            diagnostics={"fallback_used": True},
-        )
-    try:
-        payload = response.json()
-    except json.JSONDecodeError:
-        return _non_json_failure(
-            config,
-            response=response,
-            latency_ms=latency_ms,
-            label="Model catalog returned a non-JSON response",
-        )
-    if 200 <= response.status_code < 300:
         model_count = None
         if isinstance(payload, dict) and isinstance(payload.get("data"), list):
             model_count = len(payload["data"])
@@ -216,12 +209,40 @@ def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderCon
             message="Model catalog request succeeded.",
             diagnostics={"model_count": model_count},
         )
+    endpoint, payload = _build_openai_fallback_payload(config)
+    fallback = client.post(_join_url(config.base_url, endpoint), headers=headers, json=payload)
+    if fallback.status_code in {401, 403}:
+        return _failure_result(
+            config,
+            status=ProbeStatus.AUTH_ERROR,
+            http_status=fallback.status_code,
+            latency_ms=latency_ms,
+            message="Authentication failed during fallback request.",
+        )
+    try:
+        fallback_payload = fallback.json()
+    except json.JSONDecodeError:
+        return _non_json_failure(
+            config,
+            response=fallback,
+            latency_ms=latency_ms,
+            label="Fallback endpoint returned a non-JSON response",
+        )
+    if 200 <= fallback.status_code < 300:
+        return _success_result(
+            config,
+            latency_ms=latency_ms,
+            http_status=fallback.status_code,
+            message="Fallback request succeeded.",
+            diagnostics={"fallback_used": True, "response_keys": sorted(fallback_payload.keys())},
+        )
     return _failure_result(
         config,
         status=ProbeStatus.INVALID_RESPONSE,
-        http_status=response.status_code,
+        http_status=fallback.status_code,
         latency_ms=latency_ms,
-        message="Model catalog request failed.",
+        message="Fallback request failed.",
+        diagnostics={"fallback_used": True},
     )
 
 
@@ -425,7 +446,7 @@ def _probe_ollama(client: httpx.Client, config: NormalizedProviderConfig) -> Pro
     )
 
 
-def probe_config(
+def _probe_single_config(
     config: NormalizedProviderConfig,
     *,
     transport: httpx.BaseTransport | None = None,
@@ -458,3 +479,38 @@ def probe_config(
             status=ProbeStatus.CONNECTION_ERROR,
             message="Could not connect to the provider endpoint.",
         )
+
+
+def probe_config(
+    config: NormalizedProviderConfig,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> ProbeResult:
+    if config.auth_mode != AuthMode.API_KEY:
+        return _probe_single_config(config, transport=transport)
+
+    api_keys = parse_api_keys(str(config.auth.get("api_key", "") or ""))
+    if not api_keys:
+        return _with_probe_attempt_diagnostics(
+            _probe_single_config(config, transport=transport),
+            api_key_count=0,
+            api_key_attempts=0,
+        )
+
+    last_result: ProbeResult | None = None
+    for attempt_index, api_key in enumerate(api_keys, start=1):
+        result = _probe_single_config(_config_with_api_key(config, api_key), transport=transport)
+        result = _with_probe_attempt_diagnostics(
+            result,
+            api_key_count=len(api_keys),
+            api_key_attempts=attempt_index,
+        )
+        if result.success:
+            return result
+        last_result = result
+        if not _should_switch_api_key_for_probe_result(result):
+            return result
+
+    if last_result is not None:
+        return last_result
+    return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, message="Probe failed.")

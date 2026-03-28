@@ -12,6 +12,11 @@ from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatServ
 from g3ku.session.manager import SessionManager
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
+from main.service.task_stall_callback import (
+    TASK_STALL_REASON_SUSPECTED_STALL,
+    TASK_STALL_REASON_USER_PAUSED,
+    TASK_STALL_REASON_WORKER_UNAVAILABLE,
+)
 
 
 class _DummyChatBackend:
@@ -170,6 +175,7 @@ async def test_task_stall_heartbeat_prompt_includes_diagnostics_and_actions(tmp_
     assert next_delay is None
     assert len(live_session.prompts) == 1
     prompt = str(live_session.prompts[0].content)
+    assert "Reason: suspected_stall" in prompt
     assert "task_progress(task_id)" in prompt
     assert "stop_tool_execution(task_id)" in prompt
     assert task.task_id in prompt
@@ -220,3 +226,132 @@ async def test_task_stall_heartbeat_discards_stale_event_after_new_output(tmp_pa
     assert live_session.prompts == []
     assert heartbeat._events.peek(session_id) == []
     await service.close()
+
+
+@pytest.mark.asyncio
+async def test_web_mode_build_task_stall_payload_skips_when_worker_offline(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    service._assert_worker_available = lambda: None
+
+    try:
+        task = await service.create_task("worker offline should not look stalled", session_id="web:stall-worker-offline")
+        stale_at = "2000-01-01T00:00:00+00:00"
+        service.log_service.update_runtime_state(
+            task.task_id,
+            last_visible_output_at=stale_at,
+            last_stall_notice_bucket_minutes=0,
+        )
+
+        payload = service.build_task_stall_payload(
+            task.task_id,
+            bucket_minutes=10,
+            last_visible_output_at=stale_at,
+        )
+
+        assert payload == {}
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_task_stall_reason_classification_distinguishes_pause_worker_and_real_stall(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    service._assert_worker_available = lambda: None
+
+    try:
+        paused_task = await service.create_task("paused task", session_id="web:stall-reason-paused")
+        service.log_service.set_pause_state(paused_task.task_id, pause_requested=True, is_paused=True)
+        assert service.classify_task_stall_reason(paused_task.task_id) == TASK_STALL_REASON_USER_PAUSED
+
+        offline_task = await service.create_task("offline task", session_id="web:stall-reason-offline")
+        assert service.classify_task_stall_reason(offline_task.task_id) == TASK_STALL_REASON_WORKER_UNAVAILABLE
+
+        service.store.upsert_worker_status(
+            worker_id="worker:test",
+            role="task_worker",
+            status="running",
+            updated_at=now_iso(),
+            payload={"active_task_count": 1, "execution_mode": "worker"},
+        )
+        stalled_task = await service.create_task("real stall task", session_id="web:stall-reason-stalled")
+        assert service.classify_task_stall_reason(stalled_task.task_id) == TASK_STALL_REASON_SUSPECTED_STALL
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_drops_task_stall_outbox_when_worker_offline(tmp_path: Path) -> None:
+    session_id = "web:ceo-stall-worker-offline"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession()
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    service._assert_worker_available = lambda: None
+
+    try:
+        task = await service.create_task("offline replay should be ignored", session_id=session_id)
+        stale_at = "2000-01-01T00:00:00+00:00"
+        payload = {
+            "task_id": task.task_id,
+            "session_id": session_id,
+            "title": task.title,
+            "bucket_minutes": 10,
+            "stalled_minutes": 14,
+            "last_visible_output_at": stale_at,
+            "brief_text": "stalled while worker was restarting",
+            "latest_node_summary": "root node",
+            "runtime_summary_excerpt": "root phase=before_model",
+        }
+        normalized = service.build_task_stall_payload(
+            task.task_id,
+            bucket_minutes=10,
+            last_visible_output_at=stale_at,
+        )
+        assert normalized == {}
+        dedupe_key = "task-stall-offline-replay"
+        service.store.put_task_stall_outbox(
+            dedupe_key=dedupe_key,
+            task_id=task.task_id,
+            session_id=session_id,
+            created_at=stale_at,
+            payload={**payload, "dedupe_key": dedupe_key},
+        )
+        heartbeat = WebSessionHeartbeatService(
+            workspace=tmp_path,
+            agent=SimpleNamespace(tool_execution_manager=None),
+            runtime_manager=_RuntimeManager(live_session),
+            main_task_service=service,
+            session_manager=session_manager,
+        )
+
+        accepted = heartbeat.enqueue_task_stall_payload({**payload, "dedupe_key": dedupe_key})
+
+        assert accepted is False
+        assert heartbeat._events.peek(session_id) == []
+        entry = service.store.get_task_stall_outbox(dedupe_key)
+        assert entry is not None
+        assert entry["delivery_state"] == "delivered"
+    finally:
+        await service.close()

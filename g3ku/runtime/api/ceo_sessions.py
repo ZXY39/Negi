@@ -150,40 +150,38 @@ async def _task_service(agent):
 
 def _session_task_delete_payload(service, session_id: str) -> dict:
     tasks = service.list_tasks_for_session(session_id)
-    unfinished = [
-        {
+    completed: list[dict] = []
+    paused: list[dict] = []
+    in_progress: list[dict] = []
+    for task in tasks:
+        item = {
             'task_id': str(getattr(task, 'task_id', '') or '').strip(),
             'title': str(getattr(task, 'title', '') or '').strip(),
             'status': str(getattr(task, 'status', '') or '').strip(),
             'is_paused': bool(getattr(task, 'is_paused', False)),
         }
-        for task in tasks
-        if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
-    ]
+        status = str(item.get('status') or '').strip().lower()
+        if status == 'in_progress':
+            if item['is_paused']:
+                paused.append(item)
+            else:
+                in_progress.append(item)
+        else:
+            completed.append(item)
     counts = service.get_session_task_counts(session_id)
-    can_delete = not unfinished
-    message = '' if can_delete else '会话仍有未完成任务，无法删除。'
     return {
         'ok': True,
         'session_id': session_id,
-        'can_delete': can_delete,
+        'can_delete': True,
         'related_tasks': counts,
-        'usage': {'tasks': unfinished},
-        'message': message,
-    }
-
-
-def _raise_session_delete_blocked(*, session_id: str, payload: dict) -> None:
-    raise HTTPException(
-        status_code=409,
-        detail={
-            'code': 'session_has_unfinished_tasks',
-            'message': str(payload.get('message') or '会话仍有未完成任务，无法删除。'),
-            'session_id': session_id,
-            'usage': dict(payload.get('usage') or {'tasks': []}),
-            'related_tasks': dict(payload.get('related_tasks') or {}),
+        'usage': {
+            'tasks': in_progress,
+            'completed_tasks': completed,
+            'paused_tasks': paused,
+            'in_progress_tasks': in_progress,
         },
-    )
+        'message': '',
+    }
 
 
 def _task_defaults_response(session) -> dict:
@@ -360,9 +358,6 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     agent, session_manager, runtime_manager, state_store = _sessions()
     service = await _task_service(agent)
     session = _assert_known_session(session_manager, session_id)
-    delete_check = _session_task_delete_payload(service, session.key)
-    if not bool(delete_check.get('can_delete')):
-        _raise_session_delete_blocked(session_id=session.key, payload=delete_check)
     stopped_background_tool_count = 0
     tool_execution_manager = getattr(agent, 'tool_execution_manager', None)
     if tool_execution_manager is not None and hasattr(tool_execution_manager, 'stop_session_executions'):
@@ -380,9 +375,6 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
         try:
             deleted_task_count = await service.delete_task_records_for_session(session.key)
         except ValueError as exc:
-            if str(exc) == 'session_has_unfinished_tasks':
-                latest = _session_task_delete_payload(service, session.key)
-                _raise_session_delete_blocked(session_id=session.key, payload=latest)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     delete_web_ceo_session_artifacts(session_manager=session_manager, session_id=session.key)
     remover = getattr(runtime_manager, "remove", None)

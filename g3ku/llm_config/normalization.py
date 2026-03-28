@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
+from g3ku.utils.api_keys import has_api_keys
+
 from .enums import AuthMode, FieldInputType, ProtocolAdapter
 from .models import FieldError, NormalizedProviderConfig, ProviderConfigDraft, ProviderTemplate
 from .template_registry import TemplateRegistry
@@ -152,7 +154,7 @@ def normalize_draft(
         ]
 
     api_key = draft.api_key.strip()
-    if draft.auth_mode == AuthMode.API_KEY and not api_key:
+    if draft.auth_mode == AuthMode.API_KEY and not has_api_keys(api_key):
         errors.append(FieldError(field="api_key", code="required", message="API key is required."))
 
     base_url = draft.base_url.strip().rstrip("/")

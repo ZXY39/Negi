@@ -8,7 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.agent.rag_memory import G3kuHybridStore, _load_workspace_dashscope_settings
+from g3ku.agent.rag_memory import (
+    DashScopeMultimodalEmbeddings,
+    DashScopeTextReranker,
+    G3kuHybridStore,
+    _load_workspace_dashscope_settings,
+)
 from g3ku.llm_config.enums import Capability
 from g3ku.llm_config.facade import LLMConfigFacade, MEMORY_EMBEDDING_CONFIG_ID
 from g3ku.llm_config.migration import _build_record
@@ -17,6 +22,19 @@ from g3ku.providers.openai_codex_provider import _convert_messages
 from g3ku.resources import ResourceManager
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 from g3ku.security import get_bootstrap_security_service
+
+
+class _FakeRequestsResponse:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self) -> dict:
+        return self._payload
 
 
 class _CloseSpy:
@@ -407,6 +425,50 @@ def test_resolve_memory_target_hydrates_secret_overlay(tmp_path: Path) -> None:
 
     assert target.config_id == MEMORY_EMBEDDING_CONFIG_ID
     assert target.secret_payload["api_key"] == "memory-overlay-key"
+
+
+def test_dashscope_embeddings_rotate_api_keys_on_retryable_status(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def _post(url, *, headers, json, timeout):
+        _ = url, json, timeout
+        calls.append(str(headers.get("Authorization", "")))
+        if len(calls) == 1:
+            return _FakeRequestsResponse(429, {"error": "rate limited"})
+        return _FakeRequestsResponse(
+            200,
+            {"output": {"embeddings": [{"embedding": [0.1, 0.2], "text_index": 0}]}},
+        )
+
+    monkeypatch.setattr("g3ku.agent.rag_memory.requests.post", _post)
+
+    embeddings = DashScopeMultimodalEmbeddings(api_key="key-1,key-2")
+    vectors = embeddings.embed_documents(["hello"])
+
+    assert vectors == [[0.1, 0.2]]
+    assert calls == ["Bearer key-1", "Bearer key-2"]
+
+
+def test_dashscope_reranker_rotates_api_keys_on_auth_failure(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def _post(url, *, headers, json, timeout):
+        _ = url, json, timeout
+        calls.append(str(headers.get("Authorization", "")))
+        if len(calls) == 1:
+            return _FakeRequestsResponse(401, {"error": "unauthorized"})
+        return _FakeRequestsResponse(
+            200,
+            {"output": {"results": [{"index": 0, "score": 0.9}]}},
+        )
+
+    monkeypatch.setattr("g3ku.agent.rag_memory.requests.post", _post)
+
+    reranker = DashScopeTextReranker(api_key="key-1,key-2")
+    ranked = reranker.rerank(query="hello", documents=["hello"])
+
+    assert ranked == [(0, 0.9)]
+    assert calls == ["Bearer key-1", "Bearer key-2"]
 
 
 

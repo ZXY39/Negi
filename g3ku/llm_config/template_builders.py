@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from g3ku.utils.api_keys import MULTI_API_KEY_HELP_TEXT, MULTI_API_KEY_PLACEHOLDER
+
 from .enums import AuthMode, Capability, FieldInputType, ProtocolAdapter
 from .models import ProviderTemplate, TemplateFieldOption, TemplateFieldSpec
 
@@ -50,7 +52,8 @@ def _base_fields(default_base_url: str, default_model: str, api_key_default: str
             required=True,
             secret=True,
             default=api_key_default,
-            placeholder="sk-...",
+            placeholder=MULTI_API_KEY_PLACEHOLDER,
+            help_text=MULTI_API_KEY_HELP_TEXT,
         ),
         field(
             key="base_url",

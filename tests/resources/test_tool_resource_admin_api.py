@@ -197,6 +197,54 @@ def _running_task_record(
     )
 
 
+def test_main_runtime_session_task_counts_distinguish_running_paused_and_deletable_records():
+    tasks = [
+        SimpleNamespace(task_id='task:done', status='success', is_paused=False),
+        SimpleNamespace(task_id='task:paused', status='in_progress', is_paused=True),
+        SimpleNamespace(task_id='task:busy', status='in_progress', is_paused=False),
+    ]
+
+    class _Service:
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return tasks
+
+    counts = MainRuntimeService.get_session_task_counts(_Service(), 'web:ceo-demo')
+
+    assert counts == {
+        'total': 3,
+        'unfinished': 1,
+        'in_progress': 1,
+        'paused': 1,
+        'terminal': 1,
+        'deletable': 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_main_runtime_delete_task_records_for_session_skips_in_progress_records():
+    deleted_ids: list[str] = []
+    tasks = [
+        SimpleNamespace(task_id='task:done', status='success', is_paused=False),
+        SimpleNamespace(task_id='task:paused', status='in_progress', is_paused=True),
+        SimpleNamespace(task_id='task:busy', status='in_progress', is_paused=False),
+    ]
+
+    class _Service:
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return tasks
+
+        async def delete_task(self, task_id: str):
+            deleted_ids.append(task_id)
+            return None
+
+    deleted = await MainRuntimeService.delete_task_records_for_session(_Service(), 'web:ceo-demo')
+
+    assert deleted == 2
+    assert deleted_ids == ['task:done', 'task:paused']
+
+
 @pytest.mark.asyncio
 async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -1174,6 +1222,180 @@ def test_ceo_session_create_endpoint_allows_new_session_while_current_session_is
     assert payload['item']['session_id'] == 'web:ceo-new'
     assert payload['item']['title'] == 'Parallel Session'
     assert ceo_sessions.WebCeoStateStore(tmp_path).get_active_session_id() == 'web:ceo-new'
+
+
+def test_ceo_session_delete_check_reports_grouped_task_ids(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    class _TaskService:
+        async def startup(self) -> None:
+            return None
+
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return [
+                SimpleNamespace(task_id='task:done-1', title='Done 1', status='success', is_paused=False),
+                SimpleNamespace(task_id='task:paused-1', title='Paused 1', status='in_progress', is_paused=True),
+                SimpleNamespace(task_id='task:busy-1', title='Busy 1', status='in_progress', is_paused=False),
+            ]
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            _ = session_id
+            return {
+                'total': 3,
+                'unfinished': 1,
+                'in_progress': 1,
+                'paused': 1,
+                'terminal': 1,
+                'deletable': 2,
+            }
+
+    current = Session(key='web:ceo-delete-check', metadata={'title': 'Delete Check'})
+    current_path = tmp_path / 'sessions' / 'web_ceo_delete_check.jsonl'
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    manager = _SessionManager([current], {current.key: current_path})
+
+    from g3ku.runtime.api import ceo_sessions
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    ceo_sessions.get_agent = lambda: SimpleNamespace(sessions=manager, main_task_service=_TaskService())
+    ceo_sessions.get_runtime_manager = lambda _agent: SimpleNamespace(get=lambda _session_id: None)
+    ceo_sessions.workspace_path = lambda: tmp_path
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    response = client.get(f'/api/ceo/sessions/{current.key}/delete-check')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['can_delete'] is True
+    assert payload['related_tasks']['deletable'] == 2
+    assert [item['task_id'] for item in payload['usage']['completed_tasks']] == ['task:done-1']
+    assert [item['task_id'] for item in payload['usage']['paused_tasks']] == ['task:paused-1']
+    assert [item['task_id'] for item in payload['usage']['in_progress_tasks']] == ['task:busy-1']
+    assert [item['task_id'] for item in payload['usage']['tasks']] == ['task:busy-1']
+
+
+def test_ceo_session_delete_allows_unfinished_related_tasks(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def invalidate(self, key: str) -> None:
+            self._sessions.pop(key, None)
+            self._paths.pop(key, None)
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    class _TaskService:
+        async def startup(self) -> None:
+            return None
+
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return [
+                SimpleNamespace(task_id='task:busy-delete', title='Busy Delete', status='in_progress', is_paused=False),
+            ]
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            _ = session_id
+            return {
+                'total': 1,
+                'unfinished': 1,
+                'in_progress': 1,
+                'paused': 0,
+                'terminal': 0,
+                'deletable': 0,
+            }
+
+    current = Session(key='web:ceo-delete-unfinished', metadata={'title': 'Delete Unfinished'})
+    other = Session(key='web:ceo-keep-after-delete', metadata={'title': 'Keep After Delete'})
+    current_path = tmp_path / 'sessions' / 'web_ceo_delete_unfinished.jsonl'
+    other_path = tmp_path / 'sessions' / 'web_ceo_keep_after_delete.jsonl'
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    other_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    manager = _SessionManager(
+        [current, other],
+        {
+            current.key: current_path,
+            other.key: other_path,
+        },
+    )
+    captured: dict[str, object] = {}
+
+    class _RuntimeManager:
+        def get(self, session_id: str):
+            _ = session_id
+            return None
+
+        def remove(self, session_id: str):
+            captured['removed_session'] = session_id
+            return None
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        captured['cancelled_session'] = session_key
+        return 0
+
+    from g3ku.runtime.api import ceo_sessions
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    ceo_sessions.get_agent = lambda: SimpleNamespace(
+        sessions=manager,
+        main_task_service=_TaskService(),
+        cancel_session_tasks=_cancel_session_tasks,
+    )
+    ceo_sessions.get_runtime_manager = lambda _agent: _RuntimeManager()
+    ceo_sessions.get_web_heartbeat_service = lambda _agent: None
+    ceo_sessions.workspace_path = lambda: tmp_path
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    response = client.delete(f'/api/ceo/sessions/{current.key}')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['deleted'] is True
+    assert payload['session_id'] == current.key
+    assert captured == {
+        'removed_session': current.key,
+        'cancelled_session': current.key,
+    }
 
 
 def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: Path, monkeypatch):

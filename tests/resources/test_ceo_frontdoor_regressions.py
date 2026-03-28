@@ -1008,6 +1008,100 @@ async def test_ceo_frontdoor_runner_blocks_final_text_when_stage_budget_is_exhau
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_blocks_stage_setup_only_text_before_any_work(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'open bilibili homepage', 'tool_round_budget': 2},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='现在已切换到新阶段，继续直接打开哔哩哔哩首页。',
+                finish_reason='stop',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='tool-1',
+                        name='filesystem',
+                        arguments={'path': 'README.md'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(content='done after real work', finish_reason='stop'),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='open bilibili'), session=session)
+
+    assert output == 'done after real work'
+    assert len(backend.calls) == 4
+    retry_messages = list(backend.calls[2].get('messages') or [])
+    assert any(
+        str(item.get('role') or '') == 'user'
+        and 'Do not stop at stage setup.' in str(item.get('content') or '')
+        and 'open bilibili homepage' in str(item.get('content') or '')
+        for item in retry_messages
+    )
+    trace = getattr(session, '_interaction_trace', None)
+    assert trace is not None
+    stages = list(trace.get('stages') or [])
+    assert len(stages) == 1
+    assert stages[0]['tool_rounds_used'] == 1
+    assert stages[0]['status'] == 'completed'
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_emits_tool_error_after_trace_sync(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None

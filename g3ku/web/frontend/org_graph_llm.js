@@ -600,6 +600,7 @@
           <span class="resource-field-label">JSON 配置</span>
           <textarea id="${escv(memoryTextareaId(sectionKey))}" class="llm-json-editor" rows="18" spellcheck="false"${section?.error ? " disabled" : ""}>${escv(section?.jsonText || "")}</textarea>
         </label>
+        <p class="llm-muted">"api_key" 支持用逗号或换行填写多把 key，例如 key1,key2。多个 key 会按顺序轮换。</p>
         ${renderStatus(section)}
       </section>`;
   }
@@ -659,10 +660,15 @@
           <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
         </label>
       </div>
+      <p class="llm-muted">多个 API Key 时，"retry_count" 表示完整轮过所有 key 的次数，不是单次请求重试次数。</p>
       <label class="resource-field">
         <span class="resource-field-label">说明</span>
         <textarea id="llm-binding-description" class="resource-editor model-textarea" rows="4" placeholder="用于备注当前模型的用途、成本或降级策略。">${escv(editor.description || "")}</textarea>
       </label>`;
+  }
+
+  function renderApiKeyJsonHint() {
+    return '<p class="llm-muted">"api_key" 支持用逗号或换行填写多把 key，例如 key1,key2。多个 key 会按顺序轮换；设置多个 key 时，"retry_count" 以完整轮过所有 key 为一次。</p>';
   }
 
   function renderEditor() {
@@ -704,6 +710,7 @@
                 <span class="resource-field-label">JSON 配置</span>
                 <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
               </label>
+              ${renderApiKeyJsonHint()}
               ${renderStatus()}
               <div class="llm-inline-actions">
                 <button type="button" class="toolbar-btn ghost" data-llm-action="test-create">测试连接</button>
@@ -754,6 +761,7 @@
                 <span class="resource-field-label">JSON 配置</span>
                 <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
               </label>
+              ${renderApiKeyJsonHint()}
               ${renderStatus()}
               <div class="llm-inline-actions">
                 <button type="button" class="toolbar-btn ghost" data-llm-action="test-detail">测试连接</button>
