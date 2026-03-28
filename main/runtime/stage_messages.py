@@ -21,7 +21,9 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
         return (
             f'Current CEO stage budget is exhausted: {used}/{budget}. '
             f'Stage goal: {goal}. '
-            'Before using more tools, summarize progress and call `submit_next_stage` to create the next stage.'
+            'Do not continue this stage with plain prose. '
+            'If the current stage is already complete, call `deliver_final_answer` to finish it explicitly; '
+            'otherwise call `submit_next_stage` to create the next CEO stage before doing more ordinary work.'
         )
     return (
         f'Active CEO stage goal: {goal}. '
@@ -43,9 +45,9 @@ def build_ceo_stage_result_block_message(stage_gate: dict[str, Any] | None) -> s
     return (
         f'Current CEO stage budget is exhausted: {used}/{budget}. '
         f'Stage goal: {goal}. '
-        'Do not finish yet. First summarize the completed progress for this stage and call '
-        '`submit_next_stage` to create the next CEO stage; after that, continue working or deliver '
-        'the final answer from the new stage.'
+        'Do not finish this stage with plain prose. '
+        'If the current stage is already complete, call `deliver_final_answer`; '
+        'otherwise call `submit_next_stage` to create the next CEO stage before continuing ordinary work.'
     )
 
 

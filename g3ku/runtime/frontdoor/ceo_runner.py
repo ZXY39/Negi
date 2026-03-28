@@ -112,6 +112,54 @@ class CeoSubmitNextStageTool(Tool):
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 
+class CeoDeliverFinalAnswerTool(Tool):
+    def __init__(self, deliver_callback) -> None:
+        self._deliver_callback = deliver_callback
+
+    @property
+    def name(self) -> str:
+        return "deliver_final_answer"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Finish the active CEO stage and deliver the final visible answer. "
+            "Use disposition='completed' when the stage goal is fully achieved, or disposition='blocked' "
+            "when progress is blocked and you must explain why."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string",
+                    "description": "The final visible answer to send to the user.",
+                    "minLength": 1,
+                },
+                "disposition": {
+                    "type": "string",
+                    "enum": ["completed", "blocked"],
+                    "description": "Whether the active CEO stage is complete or blocked.",
+                },
+                "blocking_reason": {
+                    "type": "string",
+                    "description": "Required when disposition='blocked'. Explain what prevents completion.",
+                },
+            },
+            "required": ["answer", "disposition"],
+        }
+
+    async def execute(self, answer: str, disposition: str, blocking_reason: str | None = None, **kwargs: Any) -> str:
+        result = await self._deliver_callback(
+            str(answer or "").strip(),
+            str(disposition or "").strip(),
+            str(blocking_reason or "").strip(),
+        )
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
 @dataclass(slots=True)
 class CeoTurnResult:
     output: str
@@ -120,10 +168,11 @@ class CeoTurnResult:
 
 
 class CeoFrontDoorRunner:
-    _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
-    _CEO_NON_BUDGET_TOOLS = {"create_async_task", "memory_write"}
+    _DELIVER_FINAL_ANSWER_TOOL_NAME = "deliver_final_answer"
+    _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution", _DELIVER_FINAL_ANSWER_TOOL_NAME}
+    _CEO_NON_BUDGET_TOOLS = {"create_async_task", "memory_write", _DELIVER_FINAL_ANSWER_TOOL_NAME}
     _EMPTY_RESPONSE_RETRY_LIMIT = 1
-    _STAGE_SETUP_ONLY_RETRY_LIMIT = 1
+    _ACTIVE_STAGE_DELIVERY_RETRY_LIMIT = 1
     _EXECUTION_POLICY_FOCUS = "focus"
     _EXECUTION_POLICY_COVERAGE = "coverage"
     _COVERAGE_INTENT_MARKERS = (
@@ -345,7 +394,8 @@ class CeoFrontDoorRunner:
             return (
                 'System note: your previous model turn was empty: no visible text and no tool calls. '
                 'Continue the active CEO stage now. Do not return an empty reply. '
-                'Either call one visible tool for this stage or provide the final visible answer. '
+                f'Either call one visible tool for this stage or call `{CeoFrontDoorRunner._DELIVER_FINAL_ANSWER_TOOL_NAME}` '
+                'to finish the stage explicitly. '
                 f'Visible tools this turn: {visible}.'
             )
         return (
@@ -373,78 +423,73 @@ class CeoFrontDoorRunner:
         return ''.join(parts)
 
     @staticmethod
-    def _looks_like_stage_setup_only_text(text: str) -> bool:
-        normalized = " ".join(str(text or "").strip().lower().split())
-        if not normalized:
-            return False
-        markers = (
-            "已切换到新阶段",
-            "切换到新阶段",
-            "现在进入新阶段",
-            "继续执行",
-            "继续直接",
-            "继续打开",
-            "接下来",
-            "下一步",
-            "准备执行",
-            "准备据此",
-            "我会继续",
-            "我将",
-            "will continue",
-            "continue working",
-            "continue to",
-            "next step",
-            "ready to",
-            "about to",
-            "switched to the new stage",
-        )
-        return any(marker in normalized for marker in markers)
+    def _latest_counted_stage_round(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
+        active = dict(active_stage or {}) if isinstance(active_stage, dict) else {}
+        rounds = [dict(item) for item in list(active.get("rounds") or []) if isinstance(item, dict)]
+        for round_item in reversed(rounds):
+            if bool(round_item.get("budget_counted")):
+                return round_item
+        return None
 
     @classmethod
-    def _should_retry_stage_setup_only_text(
+    def _latest_counted_stage_round_error_tools(cls, active_stage: dict[str, Any] | None) -> list[str]:
+        round_item = cls._latest_counted_stage_round(active_stage)
+        if not isinstance(round_item, dict):
+            return []
+        names: list[str] = []
+        for tool in list(round_item.get("tools") or []):
+            if not isinstance(tool, dict):
+                continue
+            status = str(tool.get("status") or "").strip().lower()
+            if status == "success":
+                continue
+            name = str(tool.get("tool_name") or "tool").strip() or "tool"
+            if name not in names:
+                names.append(name)
+        return names
+
+    @classmethod
+    def _active_stage_delivery_protocol_message(
         cls,
         *,
-        text: str,
-        stage_gate: dict[str, Any],
-        stage_created: bool,
-    ) -> bool:
-        if not stage_created:
-            return False
-        active = stage_gate.get("active_stage") if isinstance(stage_gate, dict) else None
-        if not isinstance(active, dict):
-            return False
-        if int(active.get("tool_rounds_used") or 0) != 0:
-            return False
-        if int(active.get("tool_round_budget") or 0) <= 0:
-            return False
-        return cls._looks_like_stage_setup_only_text(text)
-
-    @staticmethod
-    def _stage_setup_retry_message(*, active_stage: dict[str, Any] | None, visible_tool_names: list[str]) -> str:
+        active_stage: dict[str, Any] | None,
+        visible_tool_names: list[str],
+    ) -> str:
         active = dict(active_stage or {}) if isinstance(active_stage, dict) else {}
         visible = ', '.join(f'`{name}`' for name in list(visible_tool_names or [])[:8]) or '(none)'
         goal = str(active.get("stage_goal") or "").strip() or "(empty)"
-        budget = int(active.get("tool_round_budget") or 0)
+        unresolved_tools = cls._latest_counted_stage_round_error_tools(active)
+        unresolved_text = ""
+        if unresolved_tools:
+            unresolved_text = (
+                " The latest counted stage round still has unresolved tool errors: "
+                + ", ".join(f"`{name}`" for name in unresolved_tools)
+                + "."
+            )
         return (
-            'System note: your previous reply only described continuing the current CEO stage, '
-            f'but this stage has not advanced yet (0/{budget} ordinary tool rounds used). '
-            f'Active stage goal: {goal}. '
-            'Do not stop at stage setup. Either call one visible tool for this stage now or provide the actual final answer with the completed outcome. '
+            'System note: there is still an active CEO stage, and plain prose cannot finish it. '
+            f'Active stage goal: {goal}.{unresolved_text} '
+            f'Either call one visible tool for this stage, or call `{cls._DELIVER_FINAL_ANSWER_TOOL_NAME}` '
+            "with `answer`, `disposition`, and `blocking_reason` when needed. "
             f'Visible tools this turn: {visible}.'
         )
 
     @staticmethod
-    def _stage_setup_only_explanation(*, active_stage: dict[str, Any] | None) -> str:
+    def _active_stage_delivery_protocol_violation_explanation(*, active_stage: dict[str, Any] | None) -> str:
         active = dict(active_stage or {}) if isinstance(active_stage, dict) else {}
         goal = str(active.get("stage_goal") or "").strip()
         parts = [
-            '本轮内部执行在新阶段初始化后被过早收尾：当前 CEO 阶段已创建，但尚未推进任何工具轮次，'
-            '模型只返回了“继续执行/准备执行”之类的过渡说明，没有真正继续工作或交付最终结果。'
+            '本轮内部执行违反了 CEO 阶段完成协议：当前仍有活动阶段时，不能用普通文本直接收尾，'
+            '必须继续调用阶段相关工具，或显式调用 `deliver_final_answer` 完成交付。'
         ]
         if goal:
             parts.append(f'阶段目标：{goal}。')
-        parts.append('系统已自动停止本轮，避免把阶段切换说明误显示为完成回复。')
+        parts.append('系统已自动停止本轮，避免把阶段内说明误显示为最终完成回复。')
         return ''.join(parts)
+
+    @classmethod
+    def _active_stage_has_unresolved_errors(cls, active_stage: dict[str, Any] | None) -> bool:
+        return bool(cls._latest_counted_stage_round_error_tools(active_stage))
 
     @staticmethod
     def _tool_invocation_hint(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -510,6 +555,24 @@ class CeoFrontDoorRunner:
             return
         setattr(session, "_interaction_trace", normalized if normalized.get("stages") else None)
         setattr(session, "_current_stage", summary)
+
+    @classmethod
+    def _should_record_stage_round(
+        cls,
+        *,
+        stage_gate: dict[str, Any],
+        tool_call_payloads: list[dict[str, Any]],
+    ) -> bool:
+        if not bool(stage_gate.get("has_active_stage")):
+            return False
+        if not bool(stage_gate.get("transition_required")):
+            return True
+        names = [
+            str(payload.get("name") or "").strip()
+            for payload in list(tool_call_payloads or [])
+            if str(payload.get("name") or "").strip()
+        ]
+        return names == [cls._DELIVER_FINAL_ANSWER_TOOL_NAME]
 
     @staticmethod
     def _apply_stage_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:
@@ -655,6 +718,7 @@ class CeoFrontDoorRunner:
                 tool_name,
                 has_active_stage=bool(stage_gate.get("has_active_stage")),
                 transition_required=bool(stage_gate.get("transition_required")),
+                extra_allowed_tools=self._CONTROL_TOOL_NAMES,
                 stage_tool_name=STAGE_TOOL_NAME,
             )
             if stage_gate_error:
@@ -749,7 +813,8 @@ class CeoFrontDoorRunner:
         used_tools: list[str] = []
         stage_created = False
         empty_response_retries = 0
-        stage_setup_only_retries = 0
+        active_stage_delivery_retries = 0
+        pending_delivery: dict[str, str] | None = None
         breaker = RepeatedActionCircuitBreaker()
         stage_tool_enabled = not bool(runtime_context.get("disable_stage_tool"))
 
@@ -763,9 +828,63 @@ class CeoFrontDoorRunner:
             self._sync_session_trace(session, interaction_trace)
             return dict(stage)
 
+        async def _deliver_final_answer(answer: str, disposition: str, blocking_reason: str) -> dict[str, Any]:
+            nonlocal interaction_trace, pending_delivery
+            active_stage = self._stage_gate(interaction_trace).get("active_stage")
+            if not isinstance(active_stage, dict):
+                return {
+                    "status": "error",
+                    "error": "no active CEO stage; create or continue a stage before delivering the final answer",
+                }
+            normalized_answer = str(answer or "").strip()
+            if not normalized_answer:
+                return {
+                    "status": "error",
+                    "error": "answer must not be empty",
+                }
+            normalized_disposition = str(disposition or "").strip().lower()
+            if normalized_disposition not in {"completed", "blocked"}:
+                return {
+                    "status": "error",
+                    "error": "disposition must be one of completed|blocked",
+                }
+            normalized_blocking_reason = str(blocking_reason or "").strip()
+            unresolved_tools = self._latest_counted_stage_round_error_tools(active_stage)
+            if normalized_disposition == "completed" and unresolved_tools:
+                return {
+                    "status": "error",
+                    "error": (
+                        "cannot deliver a completed CEO stage while the latest counted round still has unresolved tool errors: "
+                        + ", ".join(unresolved_tools)
+                    ),
+                }
+            if normalized_disposition == "blocked" and not normalized_blocking_reason:
+                return {
+                    "status": "error",
+                    "error": "blocking_reason is required when disposition=blocked",
+                }
+            interaction_trace["final_output"] = normalized_answer
+            interaction_trace = finalize_active_stage(
+                interaction_trace,
+                status=CEO_STAGE_STATUS_COMPLETED if normalized_disposition == "completed" else CEO_STAGE_STATUS_FAILED,
+            )
+            self._sync_session_trace(session, interaction_trace)
+            pending_delivery = {
+                "answer": normalized_answer,
+                "disposition": normalized_disposition,
+                "blocking_reason": normalized_blocking_reason,
+            }
+            return {
+                "status": "success",
+                "accepted": True,
+                "disposition": normalized_disposition,
+                "stage_id": str(active_stage.get("stage_id") or ""),
+            }
+
         all_tools = dict(tools or {})
         if stage_tool_enabled:
             all_tools[STAGE_TOOL_NAME] = CeoSubmitNextStageTool(_submit_stage)
+            all_tools[self._DELIVER_FINAL_ANSWER_TOOL_NAME] = CeoDeliverFinalAnswerTool(_deliver_final_answer)
         chat_backend = self._resolve_chat_backend()
 
         attempt_index = 0
@@ -813,7 +932,8 @@ class CeoFrontDoorRunner:
                         signature = f"{payload['name']}:{json.dumps(payload['arguments'], ensure_ascii=False, sort_keys=True)}"
                         if payload["name"] != STAGE_TOOL_NAME and payload["name"] not in self._CONTROL_TOOL_NAMES:
                             breaker.register(signature)
-                if any(payload["name"] == STAGE_TOOL_NAME for payload in tool_call_payloads) and len(tool_call_payloads) != 1:
+                exclusive_tool_names = {STAGE_TOOL_NAME, self._DELIVER_FINAL_ANSWER_TOOL_NAME}
+                if any(payload["name"] in exclusive_tool_names for payload in tool_call_payloads) and len(tool_call_payloads) != 1:
                     assistant_message = {
                         "role": "assistant",
                         "content": self._externalize_message_content(response.content, runtime_context=runtime_context),
@@ -821,11 +941,17 @@ class CeoFrontDoorRunner:
                     }
                     message_history.append(assistant_message)
                     for payload in tool_call_payloads:
+                        exclusive_name = str(payload.get("name") or "tool")
+                        error_text = (
+                            f"Error: {exclusive_name} must be the only tool call in its turn"
+                            if exclusive_name in exclusive_tool_names
+                            else "Error: tool call must be the only tool call in its turn"
+                        )
                         message_history.append(
                             self._tool_result_message(
                                 tool_call_id=str(payload.get("id") or ""),
                                 tool_name=str(payload.get("name") or "tool"),
-                                content="Error: submit_next_stage must be the only tool call in its turn",
+                                content=error_text,
                                 started_at="",
                                 finished_at="",
                                 elapsed_seconds=None,
@@ -837,8 +963,10 @@ class CeoFrontDoorRunner:
                 active_stage_id = str((stage_gate.get("active_stage") or {}).get("stage_id") or "")
                 if (
                     stage_tool_enabled
-                    and bool(stage_gate.get("has_active_stage"))
-                    and not bool(stage_gate.get("transition_required"))
+                    and self._should_record_stage_round(
+                        stage_gate=stage_gate,
+                        tool_call_payloads=tool_call_payloads,
+                    )
                 ):
                     interaction_trace, round_payload = record_stage_round(
                         interaction_trace,
@@ -932,6 +1060,13 @@ class CeoFrontDoorRunner:
                     stage_created=stage_created,
                     default=route_kind,
                 )
+                active_stage_delivery_retries = 0
+                if pending_delivery is not None:
+                    return CeoTurnResult(
+                        output=str(pending_delivery.get("answer") or "").strip(),
+                        route_kind=route_kind,
+                        interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
+                    )
                 continue
 
             text = self._content_text(getattr(response, "content", ""))
@@ -940,17 +1075,13 @@ class CeoFrontDoorRunner:
                 if stage_block_message:
                     message_history.append({"role": "user", "content": stage_block_message})
                     continue
-                if self._should_retry_stage_setup_only_text(
-                    text=text,
-                    stage_gate=stage_gate,
-                    stage_created=stage_created,
-                ):
-                    if stage_setup_only_retries < self._STAGE_SETUP_ONLY_RETRY_LIMIT:
-                        stage_setup_only_retries += 1
+                if stage_tool_enabled and bool(stage_gate.get("has_active_stage")):
+                    if active_stage_delivery_retries < self._ACTIVE_STAGE_DELIVERY_RETRY_LIMIT:
+                        active_stage_delivery_retries += 1
                         message_history.append(
                             {
                                 "role": "user",
-                                "content": self._stage_setup_retry_message(
+                                "content": self._active_stage_delivery_protocol_message(
                                     active_stage=stage_gate.get("active_stage"),
                                     visible_tool_names=list(visible_tools.keys()),
                                 ),
@@ -966,7 +1097,9 @@ class CeoFrontDoorRunner:
                         default=route_kind,
                     )
                     return CeoTurnResult(
-                        output=self._stage_setup_only_explanation(active_stage=stage_gate.get("active_stage")),
+                        output=self._active_stage_delivery_protocol_violation_explanation(
+                            active_stage=stage_gate.get("active_stage")
+                        ),
                         route_kind=route_kind,
                         interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
                     )

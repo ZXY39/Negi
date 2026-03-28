@@ -24,6 +24,11 @@
 - `stage_goal` 为了提高效率，简要说明是否创建异步任务的原因，同时详细说明当前阶段的完成目标。
 - 阶段创建后，该阶段内的所有工具调用都必须服务于当前 `stage_goal`。
 - 如果当前阶段的工具轮次预算耗尽，不能再调用普通工具。立即先总结进度，然后调用 `submit_next_stage` 创建新阶段。
+- 一旦存在活动 CEO 阶段，普通文本不能直接结束该阶段；必须继续调用阶段相关工具，或显式调用 `deliver_final_answer` 完成交付。
+- `deliver_final_answer` 只能使用两种 `disposition`：
+  - `completed`：当前阶段目标已经完成，可以向用户交付最终答案。
+  - `blocked`：当前阶段无法继续推进，必须同时提供明确的 `blocking_reason`。
+- 如果最近一次计预算的阶段轮次仍有未消化的工具错误，不允许使用 `deliver_final_answer(disposition="completed")`。
 
 ## 4. 创建异步任务规则
 

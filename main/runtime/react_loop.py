@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections import deque
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -40,6 +41,7 @@ _COMPACT_HISTORY_MAX_STEPS = 12
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
+_TOOL_LIVE_STATE_STATUS_SOURCE = 'raw_result_v2'
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -65,6 +67,12 @@ class RepeatedActionCircuitBreaker:
         tail = list(self._recent)[-self._threshold :]
         if len(set(tail)) == 1:
             raise RuntimeError(f'repeated tool call detected: {tail[-1]}')
+
+
+@dataclass(slots=True)
+class _ToolExecutionOutcome:
+    content: str
+    status: str
 
 
 class ReActToolLoop:
@@ -370,6 +378,14 @@ class ReActToolLoop:
         ]
         if not pending_tool_calls:
             return None
+        for item in list(frame.get('tool_calls') or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('status_source') or '').strip() == _TOOL_LIVE_STATE_STATUS_SOURCE:
+                continue
+            raise RuntimeError(
+                'legacy in-flight tool state is not recoverable after the tool-status pipeline upgrade; rerun the task'
+            )
 
         live_tool_map = {
             str(item.get('tool_call_id') or '').strip(): dict(item)
@@ -557,6 +573,7 @@ class ReActToolLoop:
         payload['tool_call_id'] = str(call_id or '')
         payload['tool_name'] = str(payload.get('tool_name') or tool_name or 'tool')
         payload['status'] = str(status or payload.get('status') or 'error')
+        payload['status_source'] = str(payload.get('status_source') or _TOOL_LIVE_STATE_STATUS_SOURCE)
         payload.setdefault('started_at', '')
         payload.setdefault('finished_at', '')
         payload.setdefault('elapsed_seconds', None)
@@ -711,7 +728,7 @@ class ReActToolLoop:
                     elapsed_seconds=None,
                 )
                 try:
-                    tool_content = await self._execute_tool(
+                    tool_outcome = await self._execute_tool(
                         tools=tools,
                         tool_name=call.name,
                         arguments=dict(call.arguments or {}),
@@ -728,10 +745,14 @@ class ReActToolLoop:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # pragma: no cover - defensive fallback
-                    tool_content = f'Error executing {call.name}: {exc}'
+                    tool_outcome = _ToolExecutionOutcome(
+                        content=f'Error executing {call.name}: {exc}',
+                        status='error',
+                    )
                 finished_at = now_iso()
                 elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-                status = self._tool_message_status(tool_content)
+                tool_content = str(tool_outcome.content or '')
+                status = str(tool_outcome.status or 'error').strip() or 'error'
                 self._update_tool_live_state(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -806,6 +827,7 @@ class ReActToolLoop:
                     payload.update(
                         {
                             'status': status,
+                            'status_source': _TOOL_LIVE_STATE_STATUS_SOURCE,
                             'started_at': started_at or str(payload.get('started_at') or ''),
                             'finished_at': finished_at,
                             'elapsed_seconds': elapsed_seconds,
@@ -816,13 +838,14 @@ class ReActToolLoop:
                 next_calls.append(payload)
             if not matched:
                 payload = {
-                    'tool_call_id': str(tool_call_id or ''),
-                    'tool_name': 'tool',
-                    'status': status,
-                    'started_at': started_at,
-                    'finished_at': finished_at,
-                    'elapsed_seconds': elapsed_seconds,
-                }
+                        'tool_call_id': str(tool_call_id or ''),
+                        'tool_name': 'tool',
+                        'status': status,
+                        'status_source': _TOOL_LIVE_STATE_STATUS_SOURCE,
+                        'started_at': started_at,
+                        'finished_at': finished_at,
+                        'elapsed_seconds': elapsed_seconds,
+                    }
                 if result_content is not None:
                     payload['result_content'] = result_content
                 next_calls.append(payload)
@@ -838,22 +861,26 @@ class ReActToolLoop:
             'tool_call_id': str(call.id or ''),
             'tool_name': str(call.name or 'tool'),
             'status': 'queued',
+            'status_source': _TOOL_LIVE_STATE_STATUS_SOURCE,
             'started_at': '',
             'finished_at': '',
             'elapsed_seconds': None,
         }
 
-    @staticmethod
-    def _tool_message_status(tool_content: str) -> str:
-        return infer_tool_result_status(tool_content)
-
-    async def _execute_tool(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> str:
+    async def _execute_tool(
+        self,
+        *,
+        tools: dict[str, Tool],
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> _ToolExecutionOutcome:
         stage_gate_error = self._execution_tool_gate_error(tool_name=tool_name, runtime_context=runtime_context)
         if stage_gate_error:
-            return f'Error: {stage_gate_error}'
+            return _ToolExecutionOutcome(content=f'Error: {stage_gate_error}', status='error')
         tool = tools.get(tool_name)
         if tool is None:
-            return f'Error: tool not available: {tool_name}'
+            return _ToolExecutionOutcome(content=f'Error: tool not available: {tool_name}', status='error')
         search_signature = self._search_overflow_signature_for_call(tool_name=tool_name, arguments=arguments)
         prior_overflow_signatures = {
             str(item or '').strip()
@@ -861,33 +888,39 @@ class ReActToolLoop:
             if str(item or '').strip()
         }
         if search_signature and search_signature in prior_overflow_signatures:
-            return 'Error: previous search overflowed; refine query before retrying'
+            return _ToolExecutionOutcome(
+                content='Error: previous search overflowed; refine query before retrying',
+                status='error',
+            )
         errors = tool.validate_params(arguments)
         if errors:
-            return 'Error: ' + '; '.join(errors)
+            return _ToolExecutionOutcome(content='Error: ' + '; '.join(errors), status='error')
         execute_kwargs = dict(arguments)
         runtime_param_name = self._runtime_context_parameter_name(tool)
         if runtime_param_name is not None:
             execute_kwargs[runtime_param_name] = runtime_context
         if not actor_role_allows_watchdog(runtime_context):
-            return await tool.execute(**execute_kwargs)
-        outcome = await run_tool_with_watchdog(
-            tool.execute(**execute_kwargs),
-            tool_name=tool_name,
-            arguments=arguments,
-            runtime_context=runtime_context,
-            snapshot_supplier=self._snapshot_supplier(runtime_context),
-            manager=getattr(self, '_tool_execution_manager', None),
-            on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
-        )
-        result = outcome.value
+            result = await tool.execute(**execute_kwargs)
+        else:
+            outcome = await run_tool_with_watchdog(
+                tool.execute(**execute_kwargs),
+                tool_name=tool_name,
+                arguments=arguments,
+                runtime_context=runtime_context,
+                snapshot_supplier=self._snapshot_supplier(runtime_context),
+                manager=getattr(self, '_tool_execution_manager', None),
+                on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
+            )
+            result = outcome.value
+        status = infer_tool_result_status(result)
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
-        return self._externalize_message_content(
+        content = self._externalize_message_content(
             rendered,
             runtime_context=runtime_context,
             display_name=f'tool:{tool_name}',
             source_kind=f'tool_result:{tool_name}',
         )
+        return _ToolExecutionOutcome(content=str(content or ''), status=status)
 
     def _execution_tool_gate_error(self, *, tool_name: str, runtime_context: dict[str, Any]) -> str:
         node_kind = str(runtime_context.get('node_kind') or '').strip().lower()

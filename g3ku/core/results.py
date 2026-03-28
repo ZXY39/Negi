@@ -43,6 +43,10 @@ class ContentEnvelope:
     ref: str = ""
     handle: ContentHandle | None = None
     next_actions: list[str] = field(default_factory=lambda: ["content.search", "content.open"])
+    status: str = ""
+    exit_code: int | None = None
+    error: str = ""
+    execution_id: str = ""
 
     def to_dict(
         self,
@@ -56,6 +60,14 @@ class ContentEnvelope:
             "ref": self.ref,
             "next_actions": list(self.next_actions or []),
         }
+        if str(self.status or "").strip():
+            payload["status"] = str(self.status or "").strip()
+        if self.exit_code is not None:
+            payload["exit_code"] = int(self.exit_code)
+        if str(self.error or "").strip():
+            payload["error"] = str(self.error or "").strip()
+        if str(self.execution_id or "").strip():
+            payload["execution_id"] = str(self.execution_id or "").strip()
         if include_handle:
             payload["handle"] = self.handle.to_dict() if self.handle is not None else None
         return payload

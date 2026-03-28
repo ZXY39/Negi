@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
+from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager, _RagMemoryBackend
 from g3ku.agent.tools.base import Tool
+from g3ku.content import ContentNavigationService
 from g3ku.providers.base import LLMResponse
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
@@ -44,6 +45,10 @@ class _FakeLogService:
 
     def remove_frame(self, *args, **kwargs) -> None:
         _ = args, kwargs
+
+    def read_runtime_state(self, *args, **kwargs):
+        _ = args, kwargs
+        return {}
 
 
 def test_prepare_messages_passthrough_keeps_original_messages_even_with_content_store() -> None:
@@ -249,7 +254,7 @@ def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context()
         ContextRecordV2(record_id="skill:tmux", context_type="skill", uri="g3ku://skill/tmux"),
     ]
 
-    filtered = MemoryManager._filter_retrieved_records(
+    filtered = _RagMemoryBackend._filter_retrieved_records(
         records,
         allowed_context_types=["memory", "resource", "skill"],
         allowed_resource_record_ids=["tool:filesystem"],
@@ -297,7 +302,8 @@ async def test_execute_tool_blocks_repeated_overflowed_search() -> None:
         runtime_context={'prior_overflow_signatures': ['filesystem|/tmp/demo.py|needle']},
     )
 
-    assert result == 'Error: previous search overflowed; refine query before retrying'
+    assert result.status == 'error'
+    assert result.content == 'Error: previous search overflowed; refine query before retrying'
 
 
 @pytest.mark.asyncio
@@ -340,7 +346,8 @@ async def test_execute_tool_passes_runtime_context_to_name_mangled_class_tool() 
         runtime_context={'current_tool_call_id': 'call:test-runtime'},
     )
 
-    payload = json.loads(result)
+    assert result.status == 'success'
+    payload = json.loads(result.content)
     assert payload['value'] == 'demo'
     assert payload['current_tool_call_id'] == 'call:test-runtime'
     assert payload['kwargs_runtime'] is None
@@ -357,15 +364,53 @@ def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
     request_messages = loop._apply_temporary_system_overlay(base_messages, overlay_text=overlay)
 
     assert base_messages[0]['content'] == 'base system'
-    assert request_messages[0]['role'] == 'system'
-    assert request_messages[0]['content'] == overlay
-    assert request_messages[1:] == base_messages
+    assert request_messages[0] == base_messages[0]
+    assert request_messages[1]['role'] == 'user'
+    assert request_messages[1]['content'].startswith('base user')
+    assert 'System note for this turn only:' in request_messages[1]['content']
+    assert overlay in request_messages[1]['content']
 
 
-def test_tool_message_status_uses_structured_payload_status() -> None:
-    assert ReActToolLoop._tool_message_status('{"status":"error","exit_code":1}') == 'error'
-    assert ReActToolLoop._tool_message_status('{"status":"background_running","execution_id":"tool-exec:1"}') == 'running'
-    assert ReActToolLoop._tool_message_status('{"ok":true}') == 'success'
+def test_infer_tool_result_status_uses_structured_payload_status() -> None:
+    from g3ku.runtime.tool_result_status import infer_tool_result_status
+
+    assert infer_tool_result_status('{"status":"error","exit_code":1}') == 'error'
+    assert infer_tool_result_status('{"status":"background_running","execution_id":"tool-exec:1"}') == 'running'
+    assert infer_tool_result_status('{"ok":true}') == 'success'
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_preserves_structured_error_status_after_externalization(tmp_path) -> None:
+    class _JsonErrorTool(Tool):
+        @property
+        def name(self) -> str:
+            return 'json_error_tool'
+
+        @property
+        def description(self) -> str:
+            return 'Return a structured error payload.'
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {'type': 'object', 'properties': {}, 'required': []}
+
+        async def execute(self, **kwargs):
+            _ = kwargs
+            return '{"status":"error","exit_code":1,"error":"simulated exec failure","details":"' + ('x' * 1800) + '"}'
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    loop._log_service._content_store = ContentNavigationService(workspace=tmp_path)
+    result = await loop._execute_tool(
+        tools={'json_error_tool': _JsonErrorTool()},
+        tool_name='json_error_tool',
+        arguments={},
+        runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
+    )
+
+    assert result.status == 'error'
+    assert '"status": "error"' in result.content
+    assert '"exit_code": 1' in result.content
+    assert '"error": "simulated exec failure"' in result.content
 
 
 def test_execution_result_protocol_message_avoids_partial_guidance() -> None:
@@ -444,8 +489,5 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
     assert len(calls) == 2
     second_request = calls[1]
     assert second_request[0]['role'] == 'system'
-    assert 'If you are ending the node now' in str(second_request[0]['content'])
-    assert not any(
-        message.get('role') == 'user' and 'If you are ending the node now' in str(message.get('content') or '')
-        for message in second_request
-    )
+    assert second_request[1]['role'] == 'user'
+    assert 'If you are ending the node now' in str(second_request[1]['content'])

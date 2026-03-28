@@ -180,3 +180,6 @@ async def test_tool_execution_bridge_uses_original_structured_status_before_exte
     )
 
     assert result.status == "error"
+    assert '"status": "error"' in result.content
+    assert '"exit_code": 1' in result.content
+    assert '"error": "simulated exec failure"' in result.content

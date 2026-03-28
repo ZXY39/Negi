@@ -827,6 +827,7 @@ async def test_ceo_frontdoor_runner_exposes_ordinary_tools_before_first_stage(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason='updated for explicit CEO delivery protocol')
 async def test_ceo_frontdoor_runner_reuses_existing_continuation_task_when_user_rebuilds(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
@@ -861,6 +862,109 @@ async def test_ceo_frontdoor_runner_reuses_existing_continuation_task_when_user_
                 finish_reason='tool_calls',
             ),
             LLMResponse(content='已沿用进行中的续跑任务。', finish_reason='stop'),
+        ]
+    )
+    async_task_service = _AsyncTaskService()
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=async_task_service,
+        tools=_FakeToolRegistry([CreateAsyncTaskTool(async_task_service)]),
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['create_async_task']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[
+                {
+                    'role': 'assistant',
+                    'content': (
+                        f'{web_ceo_sessions.ACTIVE_TASKS_PREFIX}\n'
+                        '{"kind":"active_tasks","tasks":[{"task_id":"task:cont-1","continuation_of_task_id":"task:old-1","status":"in_progress","updated_at":"2026-03-28T10:00:00+08:00"}]}'
+                    ),
+                }
+            ],
+            tool_names=['create_async_task'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='重建任务，继续完成'), session=session)
+
+    assert output == '已沿用进行中的续跑任务。'
+    assert async_task_service.created == []
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_reuses_existing_continuation_task_with_explicit_delivery(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'reuse active continuation task', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='tool-1',
+                        name='create_async_task',
+                        arguments={
+                            'task': '继续完成失败任务，不要从零开始',
+                            'core_requirement': '继续完成打开网页的自动化流程',
+                            'execution_policy': {'mode': 'focus'},
+                            'continuation_of_task_id': 'task:old-1',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='deliver-1',
+                        name='deliver_final_answer',
+                        arguments={'answer': '已沿用进行中的续跑任务。', 'disposition': 'completed'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
         ]
     )
     async_task_service = _AsyncTaskService()
@@ -963,7 +1067,17 @@ async def test_ceo_frontdoor_runner_blocks_final_text_when_stage_budget_is_exhau
                 ],
                 finish_reason='tool_calls',
             ),
-            LLMResponse(content='done after next stage', finish_reason='stop'),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='deliver-1',
+                        name='deliver_final_answer',
+                        arguments={'answer': 'done after next stage', 'disposition': 'completed'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
         ]
     )
     loop = SimpleNamespace(
@@ -1012,7 +1126,8 @@ async def test_ceo_frontdoor_runner_blocks_final_text_when_stage_budget_is_exhau
     blocked_messages = list(backend.calls[3].get('messages') or [])
     assert any(
         str(item.get('role') or '') == 'user'
-        and 'Do not finish yet.' in str(item.get('content') or '')
+        and 'Do not finish this stage with plain prose.' in str(item.get('content') or '')
+        and 'deliver_final_answer' in str(item.get('content') or '')
         and 'submit_next_stage' in str(item.get('content') or '')
         for item in blocked_messages
     )
@@ -1027,6 +1142,7 @@ async def test_ceo_frontdoor_runner_blocks_final_text_when_stage_budget_is_exhau
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason='replaced by explicit CEO delivery protocol')
 async def test_ceo_frontdoor_runner_blocks_stage_setup_only_text_before_any_work(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
@@ -1121,6 +1237,115 @@ async def test_ceo_frontdoor_runner_blocks_stage_setup_only_text_before_any_work
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_blocks_active_stage_plain_text_completion(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'open bilibili homepage', 'tool_round_budget': 2},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='我先继续处理这个活动阶段，稍后再给你最终结果。',
+                finish_reason='stop',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='tool-1',
+                        name='filesystem',
+                        arguments={'path': 'README.md'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='deliver-1',
+                        name='deliver_final_answer',
+                        arguments={'answer': 'done after real work', 'disposition': 'completed'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='open bilibili'), session=session)
+
+    assert output == 'done after real work'
+    assert len(backend.calls) == 4
+    retry_messages = list(backend.calls[2].get('messages') or [])
+    assert any(
+        str(item.get('role') or '') == 'user'
+        and 'plain prose cannot finish it' in str(item.get('content') or '')
+        and 'open bilibili homepage' in str(item.get('content') or '')
+        and 'deliver_final_answer' in str(item.get('content') or '')
+        for item in retry_messages
+    )
+    trace = getattr(session, '_interaction_trace', None)
+    assert trace is not None
+    stages = list(trace.get('stages') or [])
+    assert len(stages) == 1
+    assert stages[0]['tool_rounds_used'] == 1
+    assert stages[0]['status'] == 'completed'
+    assert len(list(stages[0].get('rounds') or [])) == 2
+    assert list(stages[0].get('rounds') or [])[1]['budget_counted'] is False
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_emits_tool_error_after_trace_sync(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
@@ -1162,7 +1387,17 @@ async def test_ceo_frontdoor_runner_emits_tool_error_after_trace_sync(monkeypatc
                 ],
                 finish_reason="tool_calls",
             ),
-            LLMResponse(content="done", finish_reason="stop"),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="deliver-1",
+                        name="deliver_final_answer",
+                        arguments={"answer": "done", "disposition": "completed"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
         ]
     )
     loop = SimpleNamespace(
@@ -1300,7 +1535,17 @@ async def test_ceo_frontdoor_runner_keeps_running_when_tool_result_contains_meth
                 ],
                 finish_reason='tool_calls',
             ),
-            LLMResponse(content='done', finish_reason='stop'),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='deliver-1',
+                        name='deliver_final_answer',
+                        arguments={'answer': 'done', 'disposition': 'completed'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
         ]
     )
     tool_registry = _FakeToolRegistry([_WeirdPayloadTool()])
@@ -1408,7 +1653,17 @@ async def test_ceo_frontdoor_runner_marks_externalized_structured_tool_error_as_
                 ],
                 finish_reason='tool_calls',
             ),
-            LLMResponse(content='done', finish_reason='stop'),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='deliver-1',
+                        name='deliver_final_answer',
+                        arguments={'answer': 'done', 'disposition': 'completed'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
         ]
     )
     tool_registry = _FakeToolRegistry([_JsonErrorTool()])
@@ -1473,12 +1728,150 @@ async def test_ceo_frontdoor_runner_marks_externalized_structured_tool_error_as_
     output = await runner.run_turn(user_input=SimpleNamespace(content='run the structured error tool'), session=session)
 
     assert output == 'done'
+    tool_messages = [
+        item
+        for item in list(backend.calls[2].get('messages') or [])
+        if str(item.get('role') or '') == 'tool' and str(item.get('name') or '') == 'json_error_tool'
+    ]
+    assert tool_messages
+    assert '"status": "error"' in str(tool_messages[-1].get('content') or '')
+    assert '"exit_code": 1' in str(tool_messages[-1].get('content') or '')
+    assert '"error": "simulated exec failure"' in str(tool_messages[-1].get('content') or '')
     trace = getattr(session, '_interaction_trace', None)
     assert trace is not None
     stage = list(trace.get('stages') or [])[0]
     tool = list(stage.get('rounds') or [])[0]['tools'][0]
     assert tool['tool_name'] == 'json_error_tool'
     assert tool['status'] == 'error'
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_rejects_completed_delivery_with_unresolved_errors(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'run the risky tool and deliver the result', 'tool_round_budget': 1},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='tool-1',
+                        name='json_error_tool',
+                        arguments={},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='deliver-1',
+                        name='deliver_final_answer',
+                        arguments={'answer': 'done', 'disposition': 'completed'},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='deliver-2',
+                        name='deliver_final_answer',
+                        arguments={
+                            'answer': 'blocked by the structured tool failure',
+                            'disposition': 'blocked',
+                            'blocking_reason': 'latest counted round still has unresolved tool errors',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+        ]
+    )
+    tool_registry = _FakeToolRegistry([_JsonErrorTool()])
+    content_store = ContentNavigationService(workspace=tmp_path)
+
+    class _MainTaskService:
+        def __init__(self) -> None:
+            self.log_service = SimpleNamespace(_content_store=content_store)
+
+        async def startup(self) -> None:
+            return None
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=_MainTaskService(),
+        tools=tool_registry,
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["json_error_tool"]}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt="SYSTEM PROMPT",
+            recent_history=[],
+            tool_names=["json_error_tool"],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='run the structured error tool'), session=session)
+
+    assert output == 'blocked by the structured tool failure'
+    rejected_delivery_messages = [
+        item
+        for item in list(backend.calls[3].get('messages') or [])
+        if str(item.get('role') or '') == 'tool' and str(item.get('name') or '') == 'deliver_final_answer'
+    ]
+    assert rejected_delivery_messages
+    assert 'cannot deliver a completed CEO stage' in str(rejected_delivery_messages[-1].get('content') or '')
+    trace = getattr(session, '_interaction_trace', None)
+    assert trace is not None
+    stages = list(trace.get('stages') or [])
+    assert len(stages) == 1
+    assert stages[0]['status'] == 'failed'
+    assert stages[0]['tool_rounds_used'] == 1
+    assert len(list(stages[0].get('rounds') or [])) == 3
+    assert list(stages[0].get('rounds') or [])[1]['budget_counted'] is False
+    assert list(stages[0].get('rounds') or [])[2]['budget_counted'] is False
 
 
 @pytest.mark.asyncio
@@ -1566,19 +1959,17 @@ async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_co
                     ],
                     finish_reason='tool_calls',
                 ),
-                LLMResponse(content='done', finish_reason='stop'),
                 LLMResponse(
                     content='',
                     tool_calls=[
                         ToolCallRequest(
-                            id='stage-2',
-                            name='submit_next_stage',
-                            arguments={'stage_goal': 'finish runtime capture', 'tool_round_budget': 1},
+                            id='deliver-1',
+                            name='deliver_final_answer',
+                            arguments={'answer': 'done', 'disposition': 'completed'},
                         )
                     ],
                     finish_reason='tool_calls',
                 ),
-                LLMResponse(content='done', finish_reason='stop'),
             ]
         )
 
@@ -1889,19 +2280,17 @@ async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_co
                     ],
                     finish_reason='tool_calls',
                 ),
-                LLMResponse(content='done', finish_reason='stop'),
                 LLMResponse(
                     content='',
                     tool_calls=[
                         ToolCallRequest(
-                            id='stage-2',
-                            name='submit_next_stage',
-                            arguments={'stage_goal': 'finish runtime capture', 'tool_round_budget': 1},
+                            id='deliver-1',
+                            name='deliver_final_answer',
+                            arguments={'answer': 'done', 'disposition': 'completed'},
                         )
                     ],
                     finish_reason='tool_calls',
                 ),
-                LLMResponse(content='done', finish_reason='stop'),
             ]
         )
 

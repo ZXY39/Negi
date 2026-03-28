@@ -2135,8 +2135,34 @@ async def test_probe_http_json_surfaces_empty_httpx_errors():
         async def request(self, method, url, headers=None, json=None):
             raise httpx.ConnectError('', request=httpx.Request(method, url))
 
-    with pytest.raises(RuntimeError, match='请求失败：ConnectError'):
+    with pytest.raises(RuntimeError, match='请求失败（已重试 3 次）：ConnectError'):
         await admin_rest._probe_http_json(_FailingClient(), 'POST', admin_rest.QQBOT_ACCESS_TOKEN_URL)
+
+
+@pytest.mark.asyncio
+async def test_probe_http_json_retries_transient_transport_errors():
+    class _FlakyClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def request(self, method, url, headers=None, json=None):
+            self.calls += 1
+            request = httpx.Request(method, url, headers=headers, json=json)
+            if self.calls == 1:
+                raise httpx.ConnectError('', request=request)
+            return httpx.Response(200, json={'ok': True}, request=request)
+
+    client = _FlakyClient()
+
+    payload = await admin_rest._probe_http_json(
+        client,
+        'POST',
+        admin_rest.QQBOT_ACCESS_TOKEN_URL,
+        json_payload={'demo': True},
+    )
+
+    assert payload == {'ok': True}
+    assert client.calls == 2
 
 
 @pytest.mark.asyncio
