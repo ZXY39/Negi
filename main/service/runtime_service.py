@@ -35,6 +35,7 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
+from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.governance.roles import to_public_allowed_roles
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
@@ -2588,75 +2589,15 @@ class MainRuntimeService:
         return changed
 
     def _tool_family_executor_name(self, family) -> str:
-        primary = str(getattr(family, 'primary_executor_name', '') or '').strip()
-        if primary:
-            return primary
-        for action in list(getattr(family, 'actions', []) or []):
-            for executor_name in list(getattr(action, 'executor_names', []) or []):
-                name = str(executor_name or '').strip()
-                if name:
-                    return name
-        fallback = str(getattr(family, 'tool_id', '') or '').strip()
-        if self._resource_manager is not None and fallback:
-            descriptor = self._resource_manager.get_tool_descriptor(fallback)
-            if descriptor is not None:
-                return fallback
-        return ''
+        return resolve_primary_executor_name(family, resource_manager=self._resource_manager)
 
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
-        family = self._raw_tool_family(tool_id)
-        if family is None:
-            needle = str(tool_id or '').strip()
-            for item in self.resource_registry.list_tool_families():
-                action_names = {
-                    str(executor_name or '').strip()
-                    for action in list(getattr(item, 'actions', []) or [])
-                    for executor_name in list(getattr(action, 'executor_names', []) or [])
-                    if str(executor_name or '').strip()
-                }
-                if needle and needle in action_names:
-                    family = item
-                    break
-        if family is None:
-            return None
-        executor_name = self._tool_family_executor_name(family)
-        content = ''
-        path = ''
-        descriptor = None
-        if executor_name and self._resource_manager is not None:
-            try:
-                content = self._resource_manager.load_toolskill_body(executor_name)
-            except FileNotFoundError:
-                content = ''
-            descriptor = self._resource_manager.get_tool_descriptor(executor_name)
-            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
-                path = str(descriptor.toolskills_main_path)
-        if descriptor is None and self._resource_manager is not None:
-            descriptor = self._resource_manager.get_tool_descriptor(str(getattr(family, 'tool_id', '') or '').strip())
-            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
-                path = str(descriptor.toolskills_main_path)
-        tool_type = str(getattr(family, 'tool_type', getattr(descriptor, 'tool_type', 'internal')) or 'internal')
-        install_dir = str(
-            getattr(family, 'install_dir', None)
-            or getattr(descriptor, 'install_dir', '')
-            or ''
-        ).strip() or None
-        callable_flag = bool(getattr(family, 'callable', getattr(descriptor, 'callable', True)))
-        repair_required = callable_flag and not bool(getattr(family, 'available', getattr(descriptor, 'available', True)))
-        return {
-            'tool_id': family.tool_id,
-            'primary_executor_name': executor_name,
-            'content': content,
-            'path': path,
-            'description': family.description,
-            'tool_type': tool_type,
-            'install_dir': install_dir,
-            'callable': callable_flag,
-            'available': bool(getattr(family, 'available', getattr(descriptor, 'available', True))),
-            'repair_required': repair_required,
-            'warnings': list(getattr(family, 'metadata', {}).get('warnings') or []),
-            'errors': list(getattr(family, 'metadata', {}).get('errors') or []),
-        }
+        return build_tool_toolskill_payload(
+            tool_id,
+            raw_tool_family_getter=self._raw_tool_family,
+            resource_registry=self.resource_registry,
+            resource_manager=self._resource_manager,
+        )
 
     def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
         family = self._raw_tool_family(tool_id)

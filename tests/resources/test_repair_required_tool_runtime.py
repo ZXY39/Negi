@@ -170,3 +170,33 @@ async def test_resource_manager_registers_repair_required_stub_and_restores_real
         assert fixed_payload['value'] == 'done'
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_required_tool_ignores_runtime_context_in_argument_preview(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    (workspace / 'externaltools').mkdir(parents=True, exist_ok=True)
+    _write_repairable_tool(workspace)
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+
+    class _ProgressSink:
+        def emit(self, *_args, **_kwargs):
+            return None
+
+    try:
+        tool = manager.get_tool('demo_repair')
+        assert tool is not None
+        payload = json.loads(
+            await tool.execute(
+                value='demo',
+                __g3ku_runtime={'session_key': 'web:shared', 'on_progress': _ProgressSink().emit},
+            )
+        )
+
+        assert payload['repair_required'] is True
+        assert payload['argument_preview'] == {'value': 'demo'}
+    finally:
+        manager.close()

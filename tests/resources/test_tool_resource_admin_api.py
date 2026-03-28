@@ -280,6 +280,56 @@ async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_load_tool_context_prefers_requested_executor_toolskill_over_family_primary(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'memory_search', 'memory_write', 'memory_runtime')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-service-bind')
+    service.bind_resource_manager(manager)
+
+    try:
+        await service.startup()
+
+        toolskill = service.get_tool_toolskill('memory_write')
+        assert toolskill is not None
+        assert toolskill['tool_id'] == 'memory_write'
+        assert toolskill['family_tool_id'] == 'memory'
+        assert toolskill['toolskill_source_name'] == 'memory_write'
+        assert toolskill['available'] is False
+        assert toolskill['repair_required'] is True
+        assert 'tool_handler_unavailable' in toolskill['errors']
+        assert '# memory_write' in toolskill['content']
+        assert '# memory_search' not in toolskill['content']
+
+        payload = service.load_tool_context(
+            actor_role='ceo',
+            session_id='web:shared',
+            tool_id='memory_write',
+        )
+        assert payload['ok'] is True
+        assert payload['tool_id'] == 'memory_write'
+        assert payload['available'] is False
+        assert '# memory_write' in payload['content']
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_admin_endpoints_expose_external_tool_fields(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
@@ -2677,6 +2727,7 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     ensure_startup_config_ready()
     _write_skill(workspace, name='demo_skill')
     _write_external_tool(workspace, name='external_browser')
+    _copy_repo_tools(workspace, 'memory_search', 'memory_write', 'memory_runtime')
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -2704,6 +2755,16 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     toolskill_response = client.get('/api/resources/tools/external_browser/toolskill')
     assert toolskill_response.status_code == 200
     assert '# External Browser' in str(toolskill_response.json().get('content') or '')
+
+    memory_toolskill_response = client.get('/api/resources/tools/memory_write/toolskill')
+    assert memory_toolskill_response.status_code == 200
+    memory_payload = memory_toolskill_response.json()
+    assert memory_payload['tool_id'] == 'memory_write'
+    assert memory_payload['family_tool_id'] == 'memory'
+    assert memory_payload['toolskill_source_name'] == 'memory_write'
+    assert memory_payload['available'] is False
+    assert '# memory_write' in str(memory_payload.get('content') or '')
+    assert '# memory_search' not in str(memory_payload.get('content') or '')
 
 
 def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path, monkeypatch):

@@ -39,8 +39,32 @@ class RepairRequiredTool(Tool):
         _ = params
         return []
 
+    @staticmethod
+    def _preview_value(value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {
+                str(key): RepairRequiredTool._preview_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [RepairRequiredTool._preview_value(item) for item in value]
+        if callable(value):
+            name = getattr(value, '__name__', '') or getattr(value, '__qualname__', '') or type(value).__name__
+            return f'<callable:{name}>'
+        try:
+            json.dumps(value, ensure_ascii=False)
+            return value
+        except Exception:
+            return repr(value)
+
     async def execute(self, **kwargs: Any) -> str:
-        argument_preview = {k: v for k, v in dict(kwargs or {}).items() if k != '_g3ku_tool_state'}
+        argument_preview = {
+            key: self._preview_value(value)
+            for key, value in dict(kwargs or {}).items()
+            if key not in {'_g3ku_tool_state', '__g3ku_runtime'}
+        }
         return json.dumps(
             {
                 'ok': False,

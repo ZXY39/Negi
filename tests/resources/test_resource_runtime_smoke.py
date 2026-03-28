@@ -1558,6 +1558,32 @@ async def test_memory_write_builds_without_rag_store_and_writes_explicit_items(t
     assert manager.last_call['items'][0]['key'] == 'preferred_package_manager'
 
 
+def test_resource_manager_infers_memory_manager_from_main_task_service_for_memory_write(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    service = SimpleNamespace(memory_manager=None)
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-no-memory-manager')
+
+    try:
+        unavailable_tool = manager.get_tool('memory_write')
+        assert unavailable_tool is not None
+        assert type(unavailable_tool).__name__ == 'RepairRequiredTool'
+
+        service.memory_manager = object()
+        manager.reload_now(trigger='test-main-task-memory-manager')
+
+        restored_tool = manager.get_tool('memory_write')
+        assert restored_tool is not None
+        assert type(restored_tool).__name__ == 'EmbeddedMCPTool'
+    finally:
+        manager.close()
+
+
 def test_resource_loader_injects_tool_secrets(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
