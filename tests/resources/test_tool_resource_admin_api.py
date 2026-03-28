@@ -6,10 +6,12 @@ from pathlib import Path
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from g3ku.china_bridge.registry import china_channel_template
 from g3ku.config.loader import ensure_startup_config_ready
 from g3ku.resources import ResourceManager
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
@@ -1760,6 +1762,16 @@ def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path,
     assert [item['id'] for item in payload['items']] == ['qqbot', 'dingtalk', 'wecom', 'wecom-app', 'wecom-kf', 'wechat-mp', 'feishu-china']
 
 
+def test_china_bridge_qqbot_template_defaults_to_single_account():
+    template = china_channel_template('qqbot')
+
+    assert template['appId'] == 'your-qq-app-id'
+    assert template['clientSecret'] == 'your-qq-client-secret'
+    assert template['markdownSupport'] is True
+    assert 'defaultAccount' not in template
+    assert 'accounts' not in template
+
+
 def test_china_bridge_channel_save_updates_config_file(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)
@@ -1874,6 +1886,40 @@ def test_china_bridge_channel_test_reports_disabled_or_validated(tmp_path: Path,
 
     assert validated.status_code == 200
     assert validated.json()['result']['status'] in {'success', 'warning'}
+
+
+@pytest.mark.asyncio
+async def test_probe_http_json_surfaces_empty_httpx_errors():
+    class _FailingClient:
+        async def request(self, method, url, headers=None, json=None):
+            raise httpx.ConnectError('', request=httpx.Request(method, url))
+
+    with pytest.raises(RuntimeError, match='请求失败：ConnectError'):
+        await admin_rest._probe_http_json(_FailingClient(), 'POST', admin_rest.QQBOT_ACCESS_TOKEN_URL)
+
+
+@pytest.mark.asyncio
+async def test_probe_qqbot_connectivity_rejects_template_placeholder_account_values():
+    payload = {
+        'appId': '1903529517',
+        'clientSecret': 'real-secret',
+        'defaultAccount': 'default',
+        'accounts': {
+            'default': {
+                'appId': 'your-qq-app-id',
+                'clientSecret': 'your-qq-client-secret',
+            }
+        },
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await admin_rest._probe_qqbot_connectivity(payload)
+
+    message = str(excinfo.value)
+    assert 'QQ Bot 账号 default' in message
+    assert '模板占位值' in message
+    assert 'defaultAccount / accounts' in message
+    assert 'accounts.default.appId / clientSecret' in message
 
 
 def test_china_bridge_channels_endpoint_hides_stale_host_pid(tmp_path: Path, monkeypatch):

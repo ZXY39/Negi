@@ -1096,6 +1096,49 @@ def _string_value(value: Any) -> str:
     return str(value or '').strip()
 
 
+def _channel_template_placeholder_values(channel_id: str, *keys: str) -> set[str]:
+    template = china_channel_template(channel_id)
+    if not template:
+        return set()
+    candidates: list[dict[str, Any]] = [template]
+    accounts = template.get('accounts')
+    if isinstance(accounts, dict):
+        candidates.extend(account for account in accounts.values() if isinstance(account, dict))
+    values: set[str] = set()
+    for section in candidates:
+        for key in keys:
+            value = _string_value(section.get(key))
+            if value:
+                values.add(value)
+    return values
+
+
+def _describe_http_error(exc: httpx.HTTPError, url: str) -> str:
+    detail = str(exc).strip()
+    if detail:
+        return detail
+    cause = str(getattr(exc, '__cause__', '') or '').strip()
+    request = getattr(exc, 'request', None)
+    request_url = str(getattr(request, 'url', '') or '').strip() or str(url or '').strip()
+    parts = [exc.__class__.__name__ or 'HTTPError']
+    if cause:
+        parts.append(cause)
+    if request_url:
+        parts.append(request_url)
+    return '（'.join([parts[0], '；'.join(parts[1:])]) + ')' if len(parts) > 1 else parts[0]
+
+
+def _qqbot_placeholder_fields(section: dict[str, Any]) -> list[str]:
+    app_id = _string_value(_channel_section_value(section, 'appId', 'app_id'))
+    client_secret = _string_value(_channel_section_value(section, 'clientSecret', 'client_secret'))
+    placeholder_fields: list[str] = []
+    if app_id and app_id in _channel_template_placeholder_values('qqbot', 'appId', 'app_id'):
+        placeholder_fields.append('appId')
+    if client_secret and client_secret in _channel_template_placeholder_values('qqbot', 'clientSecret', 'client_secret'):
+        placeholder_fields.append('clientSecret')
+    return placeholder_fields
+
+
 def _trim_probe_response_text(text: str, limit: int = 240) -> str:
     body = str(text or '').strip()
     if not body:
@@ -1121,7 +1164,7 @@ async def _probe_http_json(
             json=json_payload,
         )
     except httpx.HTTPError as exc:
-        raise RuntimeError(f'请求失败：{exc}') from exc
+        raise RuntimeError(f'请求失败：{_describe_http_error(exc, url)}') from exc
     if response.status_code >= 400:
         body = _trim_probe_response_text(response.text)
         suffix = f'：{body}' if body else ''
@@ -1141,6 +1184,14 @@ async def _probe_qqbot_connectivity(payload: dict[str, Any]) -> dict[str, Any]:
     sections = _channel_effective_sections(payload)
     async with httpx.AsyncClient(timeout=CHINA_PROBE_TIMEOUT) as client:
         for account_id, section in sections:
+            placeholder_fields = _qqbot_placeholder_fields(section)
+            if placeholder_fields:
+                fields_text = ' / '.join(placeholder_fields)
+                raise RuntimeError(
+                    f'QQ Bot 账号 {account_id} 仍在使用模板占位值（{fields_text}）。'
+                    '如果只配置单账号，请删除 defaultAccount / accounts；'
+                    f'如果配置多账号，请将 accounts.{account_id}.{fields_text} 替换为真实值。'
+                )
             app_id = _string_value(_channel_section_value(section, 'appId', 'app_id'))
             client_secret = _string_value(_channel_section_value(section, 'clientSecret', 'client_secret'))
             token_payload = await _probe_http_json(

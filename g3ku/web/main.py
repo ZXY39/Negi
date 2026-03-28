@@ -4,7 +4,7 @@ import mimetypes
 import os
 import signal
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import uvicorn
@@ -16,6 +16,7 @@ from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import ensure_web_runtime_services, shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
 from g3ku.web.launcher import run_default_web_entrypoint
+from g3ku.web.frontend_assets import ensure_frontend_vendor_assets, frontend_assets_available
 from g3ku.web.server_control import request_server_shutdown, set_server_instance
 from g3ku.web.windows_asyncio import install_windows_connection_reset_filter
 from main.api import router as main_router
@@ -27,6 +28,13 @@ os.environ.setdefault('G3KU_TASK_RUNTIME_ROLE', 'web')
 _SHUTDOWN_HOOKS_LOCK = threading.RLock()
 _SHUTDOWN_HOOKS_INSTALLED = False
 _RUNTIME_SHUTDOWN_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+async def _refresh_frontend_assets_in_background() -> None:
+    try:
+        await asyncio.to_thread(ensure_frontend_vendor_assets)
+    except Exception as exc:
+        logger.warning("frontend asset sync skipped: {}", exc)
 
 
 def _set_runtime_shutdown_loop(loop: asyncio.AbstractEventLoop | None) -> None:
@@ -94,7 +102,16 @@ async def lifespan(_app: FastAPI):
     restore_asyncio_filter = install_windows_connection_reset_filter()
     _install_process_shutdown_hooks()
     _set_runtime_shutdown_loop(asyncio.get_running_loop())
+    asset_refresh_task: asyncio.Task | None = None
     try:
+        try:
+            if frontend_assets_available():
+                asset_refresh_task = asyncio.create_task(_refresh_frontend_assets_in_background())
+            else:
+                await asyncio.to_thread(ensure_frontend_vendor_assets)
+        except Exception as exc:
+            logger.warning("frontend asset sync skipped: {}", exc)
+
         security = get_bootstrap_security_service()
         if security.is_unlocked():
             try:
@@ -103,6 +120,10 @@ async def lifespan(_app: FastAPI):
                 logger.warning('web runtime init on startup skipped: {}', exc)
         yield
     finally:
+        if asset_refresh_task is not None and not asset_refresh_task.done():
+            asset_refresh_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asset_refresh_task
         await shutdown_web_runtime()
         _set_runtime_shutdown_loop(None)
         restore_asyncio_filter()

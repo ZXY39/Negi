@@ -649,6 +649,15 @@ def inflight_snapshot_path_for_session(session_id: str, *, create: bool = True) 
     return directory / f"{safe_session}.json"
 
 
+def is_restorable_inflight_turn_snapshot(snapshot: Any) -> bool:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
+    status = str(snapshot.get("status") or "").strip().lower()
+    if not status:
+        return True
+    return status in {"running", "paused"}
+
+
 def read_inflight_turn_snapshot(session_id: str) -> dict[str, Any] | None:
     path = inflight_snapshot_path_for_session(session_id, create=False)
     if not path.exists():
@@ -657,7 +666,7 @@ def read_inflight_turn_snapshot(session_id: str) -> dict[str, Any] | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    return payload if isinstance(payload, dict) else None
+    return payload if is_restorable_inflight_turn_snapshot(payload) else None
 
 
 def write_inflight_turn_snapshot(session_id: str, snapshot: dict[str, Any] | None) -> None:
@@ -700,7 +709,7 @@ def list_inflight_web_ceo_sessions() -> dict[str, dict[str, Any]]:
             snapshot = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if not isinstance(snapshot, dict):
+        if not is_restorable_inflight_turn_snapshot(snapshot):
             continue
         session_id = _decode_inflight_session_id(path, snapshot)
         if not session_id:

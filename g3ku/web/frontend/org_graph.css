@@ -872,6 +872,14 @@ textarea {
     --tree-line-running: color-mix(in srgb, var(--status-running-text) 84%, white 16%);
     --tree-line-success: color-mix(in srgb, var(--status-success-text) 82%, white 18%);
     --tree-line-failed: color-mix(in srgb, var(--status-failed-text) 84%, white 16%);
+    --tree-level-gap: clamp(2.25rem, 3.5vw, 3rem);
+    --tree-sibling-gap-x: var(--space-3);
+    --tree-node-min-width: 220px;
+    --tree-node-max-width: 320px;
+    --tree-node-padding-y: var(--space-3);
+    --tree-node-padding-x: var(--space-4);
+    --tree-node-accent-offset: 8px;
+    --tree-stack-gap: var(--space-2);
     display: flex;
     justify-content: center;
     align-items: flex-start;
@@ -883,13 +891,31 @@ textarea {
     will-change: transform;
 }
 
+.execution-tree.execution-tree--wide {
+    --tree-level-gap: clamp(2.75rem, 4.2vw, 3.5rem);
+    --tree-sibling-gap-x: 0.55rem;
+    --tree-node-min-width: 188px;
+    --tree-node-max-width: 272px;
+    --tree-node-padding-y: 0.6875rem;
+    --tree-node-padding-x: 0.875rem;
+}
+
+.execution-tree.execution-tree--dense {
+    --tree-level-gap: clamp(3rem, 5vw, 3.9rem);
+    --tree-sibling-gap-x: 0.35rem;
+    --tree-node-min-width: 164px;
+    --tree-node-max-width: 236px;
+    --tree-node-padding-y: 0.625rem;
+    --tree-node-padding-x: 0.75rem;
+}
+
 .execution-tree-list {
     --tree-branch-color: var(--tree-line);
     position: relative;
     display: flex;
     justify-content: center;
     align-items: flex-start;
-    padding-top: var(--space-8);
+    padding-top: var(--tree-level-gap);
 }
 
 .execution-tree > .execution-tree-list {
@@ -902,7 +928,7 @@ textarea {
     top: 0;
     left: 50%;
     width: 0;
-    height: var(--space-8);
+    height: var(--tree-level-gap);
     border-left: var(--tree-line-width) solid var(--tree-branch-color);
 }
 
@@ -917,7 +943,7 @@ textarea {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: var(--space-8) var(--space-3) 0;
+    padding: var(--tree-level-gap) var(--tree-sibling-gap-x) 0;
 }
 
 .execution-tree > .execution-tree-list > .execution-tree-item,
@@ -931,7 +957,7 @@ textarea {
     position: absolute;
     top: 0;
     width: 50%;
-    height: var(--space-8);
+    height: var(--tree-level-gap);
     border-top: var(--tree-line-width) solid var(--tree-branch-color);
 }
 
@@ -1006,10 +1032,10 @@ textarea {
 .execution-tree-node {
     position: relative;
     isolation: isolate;
-    min-width: 220px;
-    max-width: 320px;
+    min-width: var(--tree-node-min-width);
+    max-width: var(--tree-node-max-width);
     width: 100%;
-    padding: var(--space-3) var(--space-4) var(--space-3) calc(var(--space-4) + 8px);
+    padding: var(--tree-node-padding-y) var(--tree-node-padding-x) var(--tree-node-padding-y) calc(var(--tree-node-padding-x) + var(--tree-node-accent-offset));
     border-radius: 18px;
     border: 1px solid var(--tree-node-border);
     background: var(--tree-node-bg);
@@ -1096,7 +1122,7 @@ textarea {
 }
 
 .execution-tree-node[data-kind="manager"] {
-    min-width: 260px;
+    min-width: min(260px, calc(var(--tree-node-min-width) + 40px));
 }
 
 .execution-tree-node[data-kind="manager"]::before {
@@ -1138,10 +1164,10 @@ textarea {
 .execution-tree-node-stack {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
+    gap: var(--tree-stack-gap);
     width: fit-content;
-    min-width: 220px;
-    max-width: 320px;
+    min-width: var(--tree-node-min-width);
+    max-width: var(--tree-node-max-width);
     align-items: stretch;
     flex: 0 0 auto;
 }
@@ -1178,6 +1204,39 @@ textarea {
     gap: var(--space-2);
     width: 100%;
     padding: 0 var(--space-1);
+}
+
+.execution-tree.execution-tree--wide .execution-tree-node-title,
+.execution-tree.execution-tree--dense .execution-tree-node-title {
+    font-size: 0.92rem;
+}
+
+.execution-tree.execution-tree--wide .execution-tree-node-rounds,
+.execution-tree.execution-tree--dense .execution-tree-node-rounds {
+    gap: var(--space-1);
+}
+
+.execution-tree.execution-tree--dense .execution-tree-node-title {
+    font-size: 0.88rem;
+    line-height: 1.4;
+}
+
+.execution-tree.execution-tree--dense .execution-tree-round-label {
+    font-size: 0.68rem;
+}
+
+@media (max-width: 1440px) {
+    .execution-tree.execution-tree--wide {
+        --tree-node-min-width: 176px;
+        --tree-node-max-width: 248px;
+        --tree-sibling-gap-x: 0.4rem;
+    }
+
+    .execution-tree.execution-tree--dense {
+        --tree-node-min-width: 150px;
+        --tree-node-max-width: 214px;
+        --tree-sibling-gap-x: 0.25rem;
+    }
 }
 
 .execution-tree-round-label {

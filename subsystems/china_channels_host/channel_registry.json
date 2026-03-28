@@ -18,14 +18,7 @@
       "template_json": {
         "appId": "your-qq-app-id",
         "clientSecret": "your-qq-client-secret",
-        "markdownSupport": true,
-        "defaultAccount": "default",
-        "accounts": {
-          "default": {
-            "appId": "your-qq-app-id",
-            "clientSecret": "your-qq-client-secret"
-          }
-        }
+        "markdownSupport": true
       }
     },
     {

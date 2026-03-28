@@ -709,6 +709,22 @@ def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: P
     assert web_ceo_sessions.read_inflight_turn_snapshot("web:shared") is None
 
 
+def test_read_inflight_turn_snapshot_ignores_terminal_error_snapshot(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    web_ceo_sessions.write_inflight_turn_snapshot(
+        "web:ceo-stale-error",
+        {
+            "status": "error",
+            "assistant_text": "运行出错：CEO frontdoor exceeded maximum iterations",
+            "last_error": {"message": "CEO frontdoor exceeded maximum iterations"},
+        },
+    )
+
+    assert web_ceo_sessions.read_inflight_turn_snapshot("web:ceo-stale-error") is None
+    assert "web:ceo-stale-error" not in web_ceo_sessions.list_inflight_web_ceo_sessions()
+
+
 def test_inflight_snapshot_skips_watchdog_progress_updates() -> None:
     loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
@@ -1100,6 +1116,49 @@ def test_ceo_websocket_restores_paused_inflight_turn_after_runtime_session_reset
     assert inflight["user_message"]["content"] == "Pause and restore me"
     assert inflight["assistant_text"] == "Working on it..."
     assert [item["tool_name"] for item in inflight["tool_events"]].count("skill-installer") >= 1
+
+
+def test_ceo_websocket_does_not_restore_terminal_error_inflight_snapshot_from_disk(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+
+    session_id = "web:ceo-stale-error"
+    agent = SimpleNamespace(
+        sessions=SessionManager(tmp_path),
+        main_task_service=_TaskService(),
+    )
+    live_session = _FakeLiveSession()
+    runtime_manager = SimpleNamespace(
+        get=lambda key: live_session if str(key or "") == session_id else None,
+        get_or_create=lambda **kwargs: live_session,
+    )
+
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: runtime_manager)
+
+    web_ceo_sessions.write_inflight_turn_snapshot(
+        session_id,
+        {
+            "status": "error",
+            "assistant_text": "运行出错：CEO frontdoor exceeded maximum iterations",
+            "last_error": {"message": "CEO frontdoor exceeded maximum iterations"},
+        },
+    )
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        for _ in range(10):
+            snapshot = ws.receive_json()
+            if snapshot.get("type") == "snapshot.ceo":
+                break
+        else:
+            raise AssertionError("Did not receive snapshot.ceo payload")
+
+    assert snapshot["data"].get("inflight_turn") is None
 
 
 def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:

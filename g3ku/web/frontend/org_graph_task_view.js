@@ -158,6 +158,57 @@ function countVisibleTreeNodes(root, predicate = null) {
     return count;
 }
 
+function analyzeExecutionTreeLayout(root) {
+    const stats = {
+        totalItems: 0,
+        totalBoxes: 0,
+        maxBreadth: 0,
+        maxDepth: 0,
+        rootChildren: Array.isArray(root?.children) ? root.children.length : 0,
+    };
+    if (!root) return stats;
+    const breadthByDepth = new Map();
+    const queue = [{ node: root, depth: 1 }];
+    for (let index = 0; index < queue.length; index += 1) {
+        const current = queue[index];
+        const node = current?.node || null;
+        const depth = Number(current?.depth || 1);
+        if (!node) continue;
+        const inspectionCount = Array.isArray(node?.inspectionNodes) ? node.inspectionNodes.length : 0;
+        const children = Array.isArray(node?.children) ? node.children : [];
+        stats.totalItems += 1;
+        stats.totalBoxes += 1 + inspectionCount;
+        stats.maxDepth = Math.max(stats.maxDepth, depth);
+        breadthByDepth.set(depth, (breadthByDepth.get(depth) || 0) + 1);
+        children.forEach((child) => queue.push({ node: child, depth: depth + 1 }));
+    }
+    breadthByDepth.forEach((count) => {
+        if (count > stats.maxBreadth) stats.maxBreadth = count;
+    });
+    return stats;
+}
+
+function resolveExecutionTreeDensity(root) {
+    const stats = analyzeExecutionTreeLayout(root);
+    if (
+        stats.maxBreadth >= 8
+        || stats.totalItems >= 24
+        || (stats.maxBreadth >= 6 && stats.totalBoxes >= 18)
+        || (stats.rootChildren >= 7 && stats.totalItems >= 12)
+    ) {
+        return { mode: "dense", stats };
+    }
+    if (
+        stats.maxBreadth >= 5
+        || stats.totalItems >= 14
+        || stats.totalBoxes >= 16
+        || stats.rootChildren >= 5
+    ) {
+        return { mode: "wide", stats };
+    }
+    return { mode: "default", stats };
+}
+
 function hasManualTreeRoundSelections() {
     return Object.keys(normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId)).length > 0;
 }
@@ -1034,6 +1085,16 @@ function renderTree() {
     }
     const wrapper = document.createElement("div");
     wrapper.className = "execution-tree";
+    const layoutDensity = resolveExecutionTreeDensity(S.treeView);
+    wrapper.dataset.layout = layoutDensity.mode;
+    wrapper.dataset.totalItems = String(layoutDensity.stats.totalItems);
+    wrapper.dataset.maxBreadth = String(layoutDensity.stats.maxBreadth);
+    if (layoutDensity.mode === "wide" || layoutDensity.mode === "dense") {
+        wrapper.classList.add("execution-tree--wide");
+    }
+    if (layoutDensity.mode === "dense") {
+        wrapper.classList.add("execution-tree--dense");
+    }
     const rootList = document.createElement("ul");
     rootList.className = "execution-tree-list";
     const handleTreeNodeClick = (node, event) => {

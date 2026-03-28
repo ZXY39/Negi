@@ -373,9 +373,15 @@ class RuntimeAgentSession:
         if not session_key.startswith("web:"):
             return
         try:
-            from g3ku.runtime.web_ceo_sessions import write_inflight_turn_snapshot
+            from g3ku.runtime.web_ceo_sessions import (
+                is_restorable_inflight_turn_snapshot,
+                write_inflight_turn_snapshot,
+            )
 
-            write_inflight_turn_snapshot(session_key, self.inflight_turn_snapshot())
+            snapshot = self.inflight_turn_snapshot()
+            if not is_restorable_inflight_turn_snapshot(snapshot):
+                snapshot = None
+            write_inflight_turn_snapshot(session_key, snapshot)
         except Exception:
             logger.debug("Skipped persisted inflight turn sync for {}", session_key)
 
