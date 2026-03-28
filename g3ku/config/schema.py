@@ -561,6 +561,7 @@ class MemoryAssemblyConfig(Base):
             'task_list',
             'task_progress',
             'memory_search',
+            'memory_write',
             'message',
             'task_runtime',
             'skill_access',

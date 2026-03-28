@@ -35,10 +35,20 @@
 
 ### 4.2 `core_requirement` 要求
 
+- 调用 `create_async_task`（创建异步任务）时，必须显式提供 `execution_policy.mode`。
+- `execution_policy.mode` 只允许两种：
+  - `focus`：适用于各种任务类型，表示只做最高价值、最必要、与当前目标直接相关的动作。
+  - `coverage`：适用于各种任务类型，表示仍然先做最高价值动作，但在需要时允许扩展范围、补做边缘分支或系统性全量操作。
+- 默认使用 `focus`。只有当用户明确要求全面盘点、不要遗漏、尽可能完整、全量覆盖或系统梳理时，才使用 `coverage`。
+- `focus` 模式下，任务说明要收敛，强调关键结果、必要验证和直接完成目标，不要为了完整性主动扩圈。
+- `coverage` 模式下，任务说明仍要先抓关键结果，再按需要写出扩展范围、补漏或系统性覆盖的要求。
+
+### 4.3 `core_requirement` 要求
+
 - 必须先提炼一句高度概括核心需求的 `core_requirement`；该概括会沿任务树传播到所有下游子节点。
 - `core_requirement` 只能概括核心需求，不能等于 `task` 内容，不能复制 `task` 大段原文，也不能只是轻微改写后重复。
 
-### 4.3 最终验收要求
+### 4.4 最终验收要求
 
 - 创建异步任务后，必须判断最终结果是否需要最终验收。
 - 默认必须设置 `requires_final_acceptance=true`，并同时提供明确的 `final_acceptance_prompt`。
@@ -68,6 +78,7 @@
 - `exec` 在 Windows 上始终运行于 PowerShell。优先使用 PowerShell 兼容命令，例如 `Get-ChildItem`、`Get-Location`、`Get-Content`，或别名 `ls` / `pwd`；不要假设 `true`、`false`、bash heredoc 或 `rg` 这类类 Unix shell 内建一定可用。
 - `exec` 会继承当前 G3KU 进程使用的同一套 Python 环境。需要精确选择解释器时，优先使用 `{{project_python_hint}}` 或注入的 `G3KU_PROJECT_PYTHON` 环境变量，不要默认裸 `python` 一定指向正确解释器。
 - 不要假设自己拥有不可见的工具或 Skill。
+- 当用户要求系统长期记住某项身份、偏好、默认值、禁用项、流程约束或项目事实时，先调用 `memory_write` 保存，再给用户回复；禁止把猜测、临时任务状态、短期上下文或未经确认的推断写入永久记忆。
 - 凡是有关安装/更新/上网搜索/下载 skill 的这类请求，必须先 `load_skill_context(skill_id="clawhub-skill-manager")`，并把它作为唯一工作流入口。对于来自 ClawHub 的 skill，默认视为面向第三方项目的上游素材；安装前先判断是否需要按 G3KU 要求重写 `SKILL.md`、触发规则、资源描述与工具假设，安装后如仍不适配，再将 skill 按照符合 `skill-creator` 规范的方式改造。
 - 对于不会直接出现在函数工具列表里的工具资源，包括已注册的外置工具和当前不可用的工具，用 `load_tool_context` 读取安装、排障、更新和使用说明，再决定是否修复或继续调用。
 

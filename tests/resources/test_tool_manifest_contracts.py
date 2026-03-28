@@ -36,6 +36,9 @@ class _DummyMemoryManager:
     async def search_tool_view(self, **kwargs):
         return {}
 
+    async def write_explicit_memory_items(self, **kwargs):
+        return {"ok": True, "written": [], "deleted": [], "searchable": True}
+
 
 class _DummyBus:
     async def publish_outbound(self, message) -> None:
@@ -76,6 +79,7 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         'load_skill_context',
         'load_tool_context',
         'memory_search',
+        'memory_write',
         'message',
         'model_config',
         'task_fetch_cn',

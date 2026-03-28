@@ -565,6 +565,7 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
     title = str(payload.get("title") or "").strip() or DEFAULT_CEO_SESSION_TITLE
     preview_text = summarize_preview_text(payload.get("last_preview_text") or payload.get("preview_text") or "")
     frontdoor_context = normalize_frontdoor_context(payload.get("frontdoor_context"))
+    manual_pause_waiting_reason = bool(payload.get("manual_pause_waiting_reason"))
     depth_limits = main_runtime_depth_limits()
     if str(session_key or "").startswith("web:"):
         memory_scope = normalize_memory_scope(
@@ -587,6 +588,7 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
         "frontdoor_context": frontdoor_context,
         "memory_scope": memory_scope,
         "task_defaults": task_defaults,
+        "manual_pause_waiting_reason": manual_pause_waiting_reason,
         'last_task_memory': last_task_memory,
     }
 

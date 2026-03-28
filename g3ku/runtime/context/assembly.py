@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,23 @@ from g3ku.runtime.web_ceo_sessions import (
 class ContextAssemblyService:
     """Budget-aware CEO context assembly with visibility-preserving selection."""
 
+    MEMORY_WRITE_STRONG_TERMS: tuple[str, ...] = (
+        '记住',
+        '请记住',
+        '不要再',
+        '别再',
+        '默认',
+        '长期按这个来',
+        'please remember',
+        'from now on',
+        'going forward',
+        'default to',
+        "don't use",
+        'never use',
+    )
+    MEMORY_WRITE_FUTURE_RE = re.compile(r'(以后|今后).{0,24}(都|默认|不要|别再|按这个|用)')
+    MEMORY_WRITE_REMEMBER_RE = re.compile(r'\bremember\b')
+    MEMORY_WRITE_REMEMBER_EXCLUSION_RE = re.compile(r'\b(?:what|do)\s+you\s+remember\b')
     EXTENSION_TOOL_HINTS: dict[str, tuple[str, ...]] = {
         'cron': ('remind', 'schedule', 'cron', 'timer', 'recurring'),
         'load_skill_context': ('skill', 'workflow', 'procedure', 'steps', 'context', 'details'),
@@ -36,6 +54,50 @@ class ContextAssemblyService:
     def __init__(self, *, loop, prompt_builder) -> None:
         self._loop = loop
         self._prompt_builder = prompt_builder
+
+    @classmethod
+    def _detect_memory_write_intent(cls, query_text: str) -> list[str]:
+        text = str(query_text or '').strip()
+        if not text:
+            return []
+        lower = text.lower()
+        matched: list[str] = []
+        for term in cls.MEMORY_WRITE_STRONG_TERMS:
+            if term in {'please remember', 'remember'}:
+                continue
+            haystack = lower if term.isascii() else text
+            if term in haystack:
+                matched.append(term)
+        if 'please remember' in lower:
+            matched.append('please remember')
+        if (
+            cls.MEMORY_WRITE_REMEMBER_RE.search(lower)
+            and not cls.MEMORY_WRITE_REMEMBER_EXCLUSION_RE.search(lower)
+            and 'please remember' not in lower
+        ):
+            matched.append('remember')
+        if cls.MEMORY_WRITE_FUTURE_RE.search(text):
+            if '以后' in text:
+                matched.append('以后')
+            if '今后' in text:
+                matched.append('今后')
+        deduped: list[str] = []
+        for item in matched:
+            if item not in deduped:
+                deduped.append(item)
+        return deduped
+
+    @staticmethod
+    def _memory_write_hint_block(matched_terms: list[str]) -> str:
+        terms = ', '.join(matched_terms)
+        return '\n'.join(
+            [
+                '## Long-Term Memory Write Hint',
+                f'- The current user turn likely requests durable memory updates ({terms}).',
+                '- If this is a stable identity, preference, constraint, default, avoidance rule, workflow rule, or durable project fact, call `memory_write` before replying.',
+                '- Do not save temporary task state, guesses, or unconfirmed inferences as permanent memory.',
+            ]
+        )
 
     async def build_for_ceo(
         self,
@@ -129,6 +191,11 @@ class ContextAssemblyService:
             else:
                 system_prompt = f"{system_prompt}\n\n# Retrieved Context\n\n{retrieved_memory}"
 
+        memory_write_terms = self._detect_memory_write_intent(query_text)
+        memory_write_visible = 'memory_write' in {str(name or '').strip() for name in list(exposure.get('tool_names') or [])}
+        if memory_write_terms and memory_write_visible:
+            system_prompt = f"{system_prompt}\n\n{self._memory_write_hint_block(memory_write_terms)}"
+
         selected_tool_names, tool_trace = self._select_tools(
             query_text=query_text,
             visible_names=list(exposure.get('tool_names') or []),
@@ -198,6 +265,11 @@ class ContextAssemblyService:
             'active_tasks': {
                 'count': active_task_count,
                 'included': bool(active_task_message),
+            },
+            'memory_write_hint': {
+                'triggered': bool(memory_write_terms and memory_write_visible),
+                'matched_terms': list(memory_write_terms),
+                'visible': memory_write_visible,
             },
             'recent_history_count': len(recent_history),
             'tokens': {

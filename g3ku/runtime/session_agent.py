@@ -22,6 +22,10 @@ _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 class RuntimeAgentSession:
     """Primary AgentSession implementation backed by the runtime engine."""
 
+    _MANUAL_PAUSE_FOLLOW_UP_TEXT = (
+        "我先不继续自动分析或续跑任务。请告诉我为什么想暂停，我会根据你的原因再决定下一步。"
+    )
+
     def __init__(
         self,
         loop,
@@ -206,6 +210,7 @@ class RuntimeAgentSession:
 
     def _interaction_flow_snapshot(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
+        default_source = self._internal_prompt_source() or "user"
         for raw in self._event_log:
             if not isinstance(raw, dict):
                 continue
@@ -236,9 +241,33 @@ class RuntimeAgentSession:
                     "is_error": bool(event_payload.get("is_error")),
                     "is_update": is_update,
                     "kind": str(event_payload.get("kind") or "").strip(),
+                    "source": str(event_payload.get("source") or event_data.get("source") or default_source).strip()
+                    or default_source,
                 }
             )
         return items
+
+    def manual_pause_waiting_reason(self) -> bool:
+        return bool(getattr(self._state, "manual_pause_waiting_reason", False))
+
+    def _set_manual_pause_waiting_reason(self, enabled: bool) -> None:
+        flag = bool(enabled)
+        self._state.manual_pause_waiting_reason = flag
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return
+        try:
+            from g3ku.runtime.web_ceo_sessions import normalize_ceo_metadata
+
+            persisted_session = self._loop.sessions.get_or_create(session_key)
+            metadata = normalize_ceo_metadata(getattr(persisted_session, "metadata", None), session_key=session_key)
+            if bool(metadata.get("manual_pause_waiting_reason")) == flag:
+                return
+            metadata["manual_pause_waiting_reason"] = flag
+            persisted_session.metadata = metadata
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            logger.debug("manual pause metadata sync skipped for {}", session_key)
 
     def _resolve_progress_tool_target(self, data: dict[str, Any]) -> tuple[str, str]:
         tool_name = str(data.get("tool_name") or "").strip()
@@ -282,6 +311,8 @@ class RuntimeAgentSession:
         )
 
     def _current_inflight_turn_snapshot(self) -> dict[str, Any] | None:
+        if self.manual_pause_waiting_reason():
+            return None
         status = str(self._state.status or "").strip().lower()
         if not (self._state.is_running or status in {"paused", "error"}):
             return None
@@ -318,6 +349,8 @@ class RuntimeAgentSession:
         return snapshot
 
     def inflight_turn_snapshot(self) -> dict[str, Any] | None:
+        if self.manual_pause_waiting_reason():
+            return None
         snapshot = self._current_inflight_turn_snapshot()
         if snapshot is not None:
             source = str(snapshot.get("source") or "").strip().lower()
@@ -439,6 +472,37 @@ class RuntimeAgentSession:
         self._sync_persisted_inflight_turn()
         await self._emit("state_snapshot", state=self.state_dict())
 
+    async def _emit_manual_pause_follow_up(self, text: str | None = None) -> None:
+        follow_up_text = str(text or self._MANUAL_PAUSE_FOLLOW_UP_TEXT).strip() or self._MANUAL_PAUSE_FOLLOW_UP_TEXT
+        prompt = self._last_prompt
+        user_input = prompt if isinstance(prompt, UserInputMessage) else UserInputMessage(content=self._history_text(prompt))
+        internal_source = self._internal_prompt_source(user_input)
+        interaction_flow = self._interaction_flow_snapshot()
+        interaction_trace = self.interaction_trace_snapshot()
+        stage_snapshot = self.current_stage_snapshot()
+        user_text = self._history_text(user_input.content)
+        self._state.latest_message = follow_up_text
+        await self._persist_turn_transcript(
+            user_input=user_input,
+            user_text=user_text,
+            assistant_text=follow_up_text,
+            interaction_flow=interaction_flow,
+            interaction_trace=interaction_trace,
+            internal_source=internal_source,
+            route_kind="manual_pause_follow_up",
+            assistant_metadata={"source": "manual_pause_follow_up"},
+        )
+        await self._emit(
+            "message_end",
+            role="assistant",
+            text=follow_up_text,
+            heartbeat_internal=False,
+            source=internal_source or "user",
+            interaction_trace=interaction_trace,
+            stage=stage_snapshot,
+        )
+        self.clear_interaction_trace()
+
     async def _handle_progress(
         self,
         content: str,
@@ -451,6 +515,7 @@ class RuntimeAgentSession:
         kind = event_kind or ("tool_plan" if tool_hint else "deep_progress" if deep_progress else "progress")
         data = event_data if isinstance(event_data, dict) else {}
         tool_name = str(data.get("tool_name") or "").strip() or "tool"
+        source = self._internal_prompt_source() or "user"
 
         if kind == "tool_start":
             if tool_name in _CONTROL_TOOL_NAMES:
@@ -463,6 +528,7 @@ class RuntimeAgentSession:
                 tool_call_id=call_id,
                 text=str(content or ""),
                 kind=kind,
+                source=source,
                 data=data,
             )
             await self._emit_state_snapshot()
@@ -493,6 +559,7 @@ class RuntimeAgentSession:
                     tool_name=resolved_tool_name,
                     tool_call_id=call_id,
                     text=str(content or ""),
+                    source=source,
                     data=data,
                 )
                 await self._emit_state_snapshot()
@@ -513,6 +580,7 @@ class RuntimeAgentSession:
                     text=str(content or ""),
                     kind=kind,
                     is_error=payload_status in {"stopped", "failed", "error", "not_found", "unavailable"},
+                    source=source,
                     data=data,
                 )
                 await self._emit_state_snapshot()
@@ -526,6 +594,7 @@ class RuntimeAgentSession:
                 text=str(content or ""),
                 kind=kind,
                 is_error=False,
+                source=source,
                 data=data,
             )
             await self._emit_state_snapshot()
@@ -557,6 +626,7 @@ class RuntimeAgentSession:
                     text=error.message,
                     kind=kind,
                     is_error=True,
+                    source=source,
                     data=data,
                 )
                 await self._emit(
@@ -586,6 +656,7 @@ class RuntimeAgentSession:
                 text=error.message,
                 kind=kind,
                 is_error=True,
+                source=source,
                 data=data,
             )
             await self._emit(
@@ -607,6 +678,7 @@ class RuntimeAgentSession:
                 tool_name=resolved_tool_name,
                 tool_call_id=call_id,
                 text=str(content or ""),
+                source=source,
                 data=data,
             )
             return
@@ -661,6 +733,8 @@ class RuntimeAgentSession:
             internal_source = self._internal_prompt_source(user_input)
             heartbeat_internal = internal_source == "heartbeat"
             cron_internal = internal_source == "cron"
+            if internal_source is None and self.manual_pause_waiting_reason():
+                self._set_manual_pause_waiting_reason(False)
             if internal_source is not None:
                 current_snapshot = self._current_inflight_turn_snapshot()
                 current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
@@ -833,7 +907,8 @@ class RuntimeAgentSession:
         content = message.content if isinstance(message, UserInputMessage) else str(message)
         self._state.queued_follow_up_messages.append(UserInputMessage(content=content))
 
-    async def pause(self) -> None:
+    async def pause(self, *, manual: bool = False) -> None:
+        self._set_manual_pause_waiting_reason(manual)
         self._state.paused = True
         self._state.is_running = False
         self._state.status = "paused"
@@ -841,10 +916,29 @@ class RuntimeAgentSession:
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason="用户已请求暂停，正在安全停止...")
         await self._loop.cancel_session_tasks(self._state.session_key)
-        await self._emit("control_ack", action="pause", accepted=True)
+        self._state.pending_tool_calls.clear()
+        self._pending_tool_names.clear()
+        self._preserved_inflight_turn = None
+        if manual:
+            heartbeat = getattr(self._loop, "web_session_heartbeat", None)
+            if heartbeat is not None and hasattr(heartbeat, "clear_session"):
+                try:
+                    heartbeat.clear_session(self._state.session_key)
+                except Exception:
+                    logger.debug("manual pause heartbeat clear skipped for {}", self._state.session_key)
+        await self._emit(
+            "control_ack",
+            action="pause",
+            accepted=True,
+            source=self._internal_prompt_source() or "user",
+            manual_pause_waiting_reason=manual,
+        )
         await self._emit_state_snapshot()
+        if manual:
+            await self._emit_manual_pause_follow_up()
 
     async def resume(self, *, replan: bool = False, additional_context: str | None = None) -> RunResult:
+        self._set_manual_pause_waiting_reason(False)
         self._state.paused = False
         self._state.status = "running"
         await self._emit("control_ack", action="resume", accepted=True, replan=replan)
@@ -858,6 +952,7 @@ class RuntimeAgentSession:
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason=reason or "用户已请求停止，正在安全停止...")
         await self._loop.cancel_session_tasks(self._state.session_key)
+        self._set_manual_pause_waiting_reason(False)
         self._preserved_inflight_turn = None
         self.clear_interaction_trace()
         self._state.is_running = False

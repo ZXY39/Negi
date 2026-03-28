@@ -108,6 +108,8 @@ class WebSessionHeartbeatService:
         status = str(normalized_payload.get("status") or "").strip().lower()
         if not session_id or not task_id or status not in {"success", "failed"}:
             return False
+        if self._session_manual_pause_waiting_reason(session_id):
+            return False
         event = self._events.enqueue(
             session_id=session_id,
             source="main_runtime",
@@ -128,6 +130,8 @@ class WebSessionHeartbeatService:
         task_id = str(normalized_payload.get("task_id") or "").strip()
         bucket_minutes = int(normalized_payload.get("bucket_minutes") or 0)
         if not session_id or not task_id or bucket_minutes <= 0:
+            return False
+        if self._session_manual_pause_waiting_reason(session_id):
             return False
         event = self._events.enqueue(
             session_id=session_id,
@@ -151,6 +155,8 @@ class WebSessionHeartbeatService:
         raw_payload = dict(payload or {})
         execution_id = str(raw_payload.get("execution_id") or "").strip()
         if not key or not execution_id:
+            return
+        if self._session_manual_pause_waiting_reason(key):
             return
         tool_name = str(raw_payload.get("tool_name") or "tool").strip() or "tool"
         delay_s = self._tool_background_delay_seconds(raw_payload)
@@ -186,6 +192,8 @@ class WebSessionHeartbeatService:
         raw_payload = dict(payload or {})
         execution_id = str(raw_payload.get("execution_id") or "").strip()
         if not key or not execution_id:
+            return
+        if self._session_manual_pause_waiting_reason(key):
             return
         tool_name = str(raw_payload.get("tool_name") or "tool").strip() or "tool"
         status = str(raw_payload.get("status") or "completed").strip().lower() or "completed"
@@ -380,11 +388,49 @@ class WebSessionHeartbeatService:
         key = str(session_id or "").strip()
         if not key:
             return
+        queued_events = self._events.peek(key)
+        if queued_events:
+            removed = self._events.pop_many(key, event_ids={event.event_id for event in queued_events})
+            self._ack_task_terminal_events(removed)
+            self._ack_task_stall_events(removed)
         self._events.clear_session(key)
         self._wake.clear_session(key)
         task = self._prompt_tasks.pop(key, None)
         if task is not None:
             task.cancel()
+
+    def _session_manual_pause_waiting_reason(
+        self,
+        session_id: str,
+        *,
+        runtime_session: Any | None = None,
+        persisted_session: Any | None = None,
+    ) -> bool:
+        key = str(session_id or "").strip()
+        if not key or not self._session_exists(key):
+            return False
+        current_runtime_session = runtime_session
+        if current_runtime_session is None and self._runtime_manager is not None and hasattr(self._runtime_manager, "get"):
+            try:
+                current_runtime_session = self._runtime_manager.get(key)
+            except Exception:
+                current_runtime_session = None
+        if current_runtime_session is not None:
+            state = getattr(current_runtime_session, "state", None)
+            if bool(getattr(state, "manual_pause_waiting_reason", False)):
+                return True
+            getter = getattr(current_runtime_session, "manual_pause_waiting_reason", None)
+            if callable(getter):
+                try:
+                    if bool(getter()):
+                        return True
+                except Exception:
+                    logger.debug("manual pause runtime check skipped for {}", key)
+        current_persisted_session = persisted_session
+        if current_persisted_session is None:
+            current_persisted_session = self._session_manager.get_or_create(key)
+        metadata = normalize_ceo_metadata(getattr(current_persisted_session, "metadata", None), session_key=key)
+        return bool(metadata.get("manual_pause_waiting_reason"))
 
     def _session_exists(self, session_id: str) -> bool:
         get_path = getattr(self._session_manager, "get_path", None)
@@ -745,6 +791,9 @@ class WebSessionHeartbeatService:
             memory_channel=str(memory_scope.get("channel") or "web"),
             memory_chat_id=str(memory_scope.get("chat_id") or "shared"),
         )
+        if self._session_manual_pause_waiting_reason(key, runtime_session=session, persisted_session=persisted_session):
+            self.clear_session(key)
+            return None
         state = getattr(session, "state", None)
         status = str(getattr(state, "status", "") or "").strip().lower()
         next_delay = self._events.next_delay(key)

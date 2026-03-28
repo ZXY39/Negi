@@ -683,6 +683,7 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     result = await tool.execute(
         '整理需求',
         core_requirement='梳理用户需求的核心目标',
+        execution_policy={'mode': 'focus'},
         __g3ku_runtime={'session_key': 'web:ceo-demo', 'task_defaults': {'max_depth': 3}},
     )
 
@@ -691,6 +692,20 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     assert captured['session_id'] == 'web:ceo-demo'
     assert captured['max_depth'] == 3
     assert captured['kwargs']['metadata']['core_requirement'] == '梳理用户需求的核心目标'
+    assert captured['kwargs']['metadata']['execution_policy'] == {'mode': 'focus'}
+
+
+def test_create_async_task_tool_requires_execution_policy_param() -> None:
+    tool = CreateAsyncTaskTool(SimpleNamespace())
+
+    errors = tool.validate_params(
+        {
+            'task': '整理需求',
+            'core_requirement': '梳理用户需求的核心目标',
+        }
+    )
+
+    assert 'missing required execution_policy' in errors
 
 
 @pytest.mark.asyncio
@@ -710,6 +725,7 @@ async def test_create_async_task_tool_reuses_existing_continuation_task():
     result = await tool.execute(
         '继续完成失败任务',
         core_requirement='继续完成打开网页的自动化流程',
+        execution_policy={'mode': 'focus'},
         continuation_of_task_id='task:old-1',
         __g3ku_runtime={'session_key': 'web:ceo-demo'},
     )
@@ -738,6 +754,7 @@ async def test_create_async_task_tool_creates_continuation_task_with_metadata_wh
         result = await tool.execute(
             '继续完成失败任务',
             core_requirement='继续完成打开网页的自动化流程',
+            execution_policy={'mode': 'focus'},
             continuation_of_task_id='task:old-2',
             __g3ku_runtime={'session_key': 'web:ceo-demo', 'heartbeat_internal': True},
         )
@@ -748,6 +765,7 @@ async def test_create_async_task_tool_creates_continuation_task_with_metadata_wh
         assert record.metadata['continuation_of_task_id'] == 'task:old-2'
         assert record.metadata['created_by_source'] == 'heartbeat_auto_continue'
         assert record.metadata['core_requirement'] == '继续完成打开网页的自动化流程'
+        assert record.metadata['execution_policy'] == {'mode': 'focus'}
     finally:
         await service.close()
 
@@ -795,6 +813,7 @@ async def test_create_async_task_tool_keeps_session_task_count_when_reusing_exis
         result = await tool.execute(
             '重建任务，继续完成',
             core_requirement='继续完成打开目标网页',
+            execution_policy={'mode': 'focus'},
             continuation_of_task_id=original.task_id,
             __g3ku_runtime={'session_key': 'web:shared'},
         )
@@ -2530,6 +2549,7 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         workspace,
         'content',
         'memory_search',
+        'memory_write',
         'memory_runtime',
         'message',
         'load_skill_context',
@@ -2565,9 +2585,11 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         assert items['task_runtime'].is_core is True
 
         memory_actions = {action.action_id: action for action in items['memory'].actions}
-        assert set(memory_actions) == {'search', 'runtime'}
+        assert set(memory_actions) == {'search', 'write', 'runtime'}
         assert memory_actions['search'].agent_visible is True
         assert memory_actions['search'].admin_mode == 'editable'
+        assert memory_actions['write'].agent_visible is True
+        assert memory_actions['write'].admin_mode == 'editable'
         assert memory_actions['runtime'].agent_visible is False
         assert memory_actions['runtime'].admin_mode == 'readonly_system'
 
@@ -2578,19 +2600,51 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         class _PolicyEngine:
             @staticmethod
             def evaluate_tool_action(**kwargs):
-                _ = kwargs
-                return SimpleNamespace(allowed=True)
+                subject = kwargs.get('subject')
+                tool_id = str(kwargs.get('tool_id') or '')
+                action_id = str(kwargs.get('action_id') or '')
+                family = items.get(tool_id)
+                action = next(
+                    (
+                        current
+                        for current in list(getattr(family, 'actions', []) or [])
+                        if str(getattr(current, 'action_id', '') or '') == action_id
+                    ),
+                    None,
+                )
+                allowed_roles = set(getattr(action, 'allowed_roles', []) or [])
+                return SimpleNamespace(allowed=str(getattr(subject, 'actor_role', '') or '') in allowed_roles)
 
         visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='ceo'),
-                supported_tool_names=['memory_search', 'memory_runtime'],
+                supported_tool_names=['memory_search', 'memory_write', 'memory_runtime'],
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
                 mutation_allowed=True,
             )
         )
-        assert visible == {'memory_search'}
+        execution_visible = set(
+            list_effective_tool_names(
+                subject=SimpleNamespace(actor_role='execution'),
+                supported_tool_names=['memory_search', 'memory_write', 'memory_runtime'],
+                resource_registry=_Registry(),
+                policy_engine=_PolicyEngine(),
+                mutation_allowed=True,
+            )
+        )
+        inspection_visible = set(
+            list_effective_tool_names(
+                subject=SimpleNamespace(actor_role='inspection'),
+                supported_tool_names=['memory_search', 'memory_write', 'memory_runtime'],
+                resource_registry=_Registry(),
+                policy_engine=_PolicyEngine(),
+                mutation_allowed=True,
+            )
+        )
+        assert visible == {'memory_search', 'memory_write'}
+        assert execution_visible == {'memory_search'}
+        assert inspection_visible == {'memory_search'}
     finally:
         await service.close()
         manager.close()
@@ -2601,7 +2655,7 @@ async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'load_skill_context', 'load_tool_context', 'memory_runtime')
+    _copy_repo_tools(workspace, 'load_skill_context', 'load_tool_context', 'memory_runtime', 'memory_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -2652,6 +2706,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         workspace,
         'content',
         'memory_search',
+        'memory_write',
         'memory_runtime',
         'message',
         'load_skill_context',
@@ -2690,6 +2745,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         await service.startup()
         before = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in before
+        assert 'memory_write' in before
 
         changed = service.ensure_runtime_config_current(force=True, reason='test')
 
@@ -2697,6 +2753,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         assert 'create_async_task' in manager.tool_instances()
         after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in after
+        assert 'memory_write' in after
         assert {'task_list', 'task_failed_nodes', 'task_node_detail', 'task_progress', 'task_summary'}.issubset(set(after))
     finally:
         await service.close()

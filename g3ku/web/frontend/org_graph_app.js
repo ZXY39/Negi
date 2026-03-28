@@ -945,7 +945,7 @@ function cloneCeoSnapshotAttachments(items = []) {
 function normalizeCeoSnapshotToolEvent(event = {}) {
     if (!event || typeof event !== "object") return null;
     const next = {};
-    ["status", "tool_name", "text", "timestamp", "tool_call_id", "kind"].forEach((key) => {
+    ["status", "tool_name", "text", "timestamp", "tool_call_id", "kind", "source"].forEach((key) => {
         const value = String(event?.[key] || "").trim();
         if (value) next[key] = value;
     });
@@ -2147,9 +2147,11 @@ function syncCeoPrimaryButton() {
     icons();
 }
 
-function finalizePausedCeoTurn(text = "已暂停") {
-    const turn = pullActiveCeoTurn();
-    if (!turn?.textEl || !turn.flowEl) return;
+function finalizePausedCeoTurn(text = "已暂停", { source = null } = {}) {
+    const hasExplicitSource = source !== null && source !== undefined && String(source || "").trim();
+    const normalizedSource = hasExplicitSource ? normalizeCeoTurnSource(source) : null;
+    const turn = pullActiveCeoTurn(normalizedSource);
+    if (!turn?.textEl || !turn.flowEl) return false;
     mutateCeoFeed(() => {
         turn.finalized = true;
         turn.textEl.textContent = String(text || "已暂停");
@@ -2162,11 +2164,28 @@ function finalizePausedCeoTurn(text = "已暂停") {
             turn.flowEl.hidden = true;
         }
     }, { scrollMode: "preserve" });
+    patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
+        const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+        if (!inflightTurn) return entry || {};
+        const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
+        if (normalizedSource && inflightSource && normalizeCeoTurnSource(inflightSource) !== normalizedSource) {
+            return entry || {};
+        }
+        return {
+            ...(entry || {}),
+            inflight_turn: {
+                ...inflightTurn,
+                status: "paused",
+            },
+        };
+    });
+    return true;
 }
 
 function applyCeoState(state = {}, meta = {}) {
     const status = String(state?.status || "").trim().toLowerCase();
     const source = String(meta?.source || state?.source || "").trim().toLowerCase();
+    const manualPauseWaitingReason = !!(state?.manual_pause_waiting_reason || meta?.manual_pause_waiting_reason);
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
     const activeTurn = source ? getActiveCeoTurn(source) : getActiveCeoTurn();
@@ -2182,7 +2201,7 @@ function applyCeoState(state = {}, meta = {}) {
             ensureActiveCeoTurn({ source });
         }
     }
-    if (paused) finalizePausedCeoTurn();
+    if (paused && !manualPauseWaitingReason) finalizePausedCeoTurn("已暂停", { source });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
 }
@@ -2190,6 +2209,8 @@ function applyCeoState(state = {}, meta = {}) {
 function handleCeoControlAck(payload = {}) {
     const action = String(payload?.action || "").trim().toLowerCase();
     if (action !== "pause") return;
+    const source = String(payload?.source || "").trim().toLowerCase();
+    const manualPauseWaitingReason = !!payload?.manual_pause_waiting_reason;
     S.ceoPauseBusy = false;
     if (payload?.accepted === false) {
         syncCeoPrimaryButton();
@@ -2198,18 +2219,34 @@ function handleCeoControlAck(payload = {}) {
     }
     S.ceoTurnActive = false;
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
-    finalizePausedCeoTurn();
-    patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
-        const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
-        if (!inflightTurn) return entry || {};
-        return {
-            ...(entry || {}),
-            inflight_turn: {
-                ...inflightTurn,
-                status: "paused",
-            },
-        };
-    });
+    if (manualPauseWaitingReason) {
+        patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
+            const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+            let messages = trimCeoSessionSnapshotMessages(entry?.messages);
+            const normalizedSource = source ? normalizeCeoTurnSource(source) : "";
+            const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
+            const inflightMatchesSource = !normalizedSource
+                || !inflightTurn
+                || !inflightSource
+                || normalizeCeoTurnSource(inflightSource) === normalizedSource;
+            if (inflightTurn?.user_message && inflightMatchesSource) {
+                messages = appendCeoSessionSnapshotMessage(messages, {
+                    role: "user",
+                    content: String(inflightTurn.user_message?.content || ""),
+                    attachments: inflightTurn.user_message?.attachments || [],
+                });
+            }
+            return {
+                ...(entry || {}),
+                messages,
+                inflight_turn: inflightMatchesSource ? null : inflightTurn,
+            };
+        });
+        syncCeoSessionActions();
+        syncCeoPrimaryButton();
+        return;
+    }
+    finalizePausedCeoTurn("已暂停", { source });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
 }
@@ -2358,6 +2395,7 @@ function restoreCeoInflightTurn(snapshot = null) {
     if (!snapshot || typeof snapshot !== "object") return;
     const source = String(snapshot.source || "").trim().toLowerCase();
     const isHeartbeat = source === "heartbeat";
+    const interactionTrace = normalizeCeoInteractionTrace(snapshot.interaction_trace);
     const userMessage = snapshot.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
     if (userMessage && !isHeartbeat) {
         const attachments = normalizeUploadList(userMessage.attachments);
@@ -2365,26 +2403,31 @@ function restoreCeoInflightTurn(snapshot = null) {
         addMsg(text, "user", { attachments, scrollMode: "preserve" });
     }
     const status = String(snapshot.status || "").trim().toLowerCase();
-    if (normalizeCeoInteractionTrace(snapshot.interaction_trace)) {
+    if (interactionTrace) {
         patchCeoInflightTurn(snapshot);
     }
     const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
     const assistantText = String(snapshot.assistant_text || "").trim();
-    const needsAssistantTurn = !!normalizeCeoInteractionTrace(snapshot.interaction_trace) || toolEvents.length > 0 || status === "paused" || status === "error" || (!isHeartbeat && status === "running");
+    const needsAssistantTurn = !!interactionTrace || toolEvents.length > 0 || status === "paused" || status === "error" || (!isHeartbeat && status === "running");
     const turn = needsAssistantTurn ? ensureActiveCeoTurn({ source }) : null;
     if (turn?.textEl && assistantText) {
         turn.textEl.innerHTML = renderMarkdown(assistantText);
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
     }
-    toolEvents.forEach((event) => appendCeoToolEvent(event));
+    if (!interactionTrace) {
+        toolEvents.forEach((event) => appendCeoToolEvent({
+            ...(event && typeof event === "object" ? event : {}),
+            source: String(event?.source || source).trim().toLowerCase(),
+        }));
+    }
     if (status === "paused") {
-        finalizePausedCeoTurn(assistantText || "已暂停");
+        finalizePausedCeoTurn(assistantText || "已暂停", { source });
         return;
     }
     if (status === "error") {
         const errorMessage = String(snapshot?.last_error?.message || "").trim() || "unknown error";
-        finalizeCeoTurn(`运行出错：${errorMessage}`);
+        finalizeCeoTurn(`运行出错：${errorMessage}`, { source, interaction_trace: interactionTrace });
     }
 }
 
@@ -2754,7 +2797,8 @@ function pullActiveCeoTurn(source = null) {
 }
 
 function discardActiveCeoTurn({ source = "" } = {}) {
-    const turn = pullActiveCeoTurn(source);
+    const normalizedSource = String(source || "").trim() ? normalizeCeoTurnSource(source) : null;
+    const turn = pullActiveCeoTurn(normalizedSource);
     if (!turn) return false;
     const discarded = mutateCeoFeed(() => {
         turn.finalized = true;
@@ -2762,10 +2806,18 @@ function discardActiveCeoTurn({ source = "" } = {}) {
         return true;
     }, { scrollMode: "preserve" });
     if (discarded) {
-        patchCeoSessionSnapshotCache(activeSessionId(), (entry) => ({
-            ...(entry || {}),
-            inflight_turn: null,
-        }));
+        patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
+            const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+            if (!inflightTurn) return entry || {};
+            const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
+            if (normalizedSource && inflightSource && normalizeCeoTurnSource(inflightSource) !== normalizedSource) {
+                return entry || {};
+            }
+            return {
+                ...(entry || {}),
+                inflight_turn: null,
+            };
+        });
     }
     return discarded;
 }
@@ -2774,7 +2826,9 @@ function hasRunningCeoToolStep(turn) {
     return !!turn?.listEl?.querySelector?.(".interaction-step.running, .task-trace-step.running");
 }
 
-function discardPendingCeoTurns({ force = false } = {}) {
+function discardPendingCeoTurns({ force = false, source = null } = {}) {
+    const hasExpectedSource = source !== null && source !== undefined && String(source || "").trim();
+    const expectedSource = hasExpectedSource ? normalizeCeoTurnSource(source) : "";
     const removed = [];
     for (let index = S.ceoPendingTurns.length - 1; index >= 0; index -= 1) {
         const turn = S.ceoPendingTurns[index];
@@ -2782,6 +2836,7 @@ function discardPendingCeoTurns({ force = false } = {}) {
             S.ceoPendingTurns.splice(index, 1);
             continue;
         }
+        if (hasExpectedSource && normalizeCeoTurnSource(turn.source) !== expectedSource) continue;
         if (!force && hasRunningCeoToolStep(turn)) continue;
         const [removedTurn] = S.ceoPendingTurns.splice(index, 1);
         if (removedTurn) removed.push(removedTurn);
@@ -3227,7 +3282,17 @@ function stopLiveDurationTicker() {
 }
 
 function appendCeoToolEvent(event = {}) {
-    const source = normalizeCeoTurnSource(event?.source || "");
+    const explicitSource = String(event?.source || "").trim().toLowerCase();
+    let source = explicitSource ? normalizeCeoTurnSource(explicitSource) : "";
+    if (!source) {
+        const snapshotSource = String(getCeoSessionSnapshotCache(activeSessionId())?.inflight_turn?.source || "").trim().toLowerCase();
+        if (snapshotSource) source = normalizeCeoTurnSource(snapshotSource);
+    }
+    if (!source) {
+        const activeTurns = S.ceoPendingTurns.filter((turn) => turn && !turn.finalized);
+        if (activeTurns.length === 1) source = normalizeCeoTurnSource(activeTurns[0]?.source || "");
+    }
+    if (!source) return;
     const turn = ensureActiveCeoTurn({ source });
     if (!turn?.listEl || !turn.flowEl) return;
     mutateCeoFeed(() => {
@@ -3311,8 +3376,13 @@ function finalizeCeoTurn(text, meta = {}) {
     const turn = pullActiveCeoTurn(normalizedSource);
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
-        discardPendingCeoTurns({ force: normalizedSource === "heartbeat" });
+        discardPendingCeoTurns({ force: normalizedSource === "heartbeat", source: normalizedSource });
         patchCeoSessionSnapshotCache(sessionId, (entry) => {
+            const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+            const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
+            const inflightMatchesSource = !inflightTurn
+                || !inflightSource
+                || normalizeCeoTurnSource(inflightSource) === normalizedSource;
             const messages = appendCeoSessionSnapshotMessage(entry?.messages, {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
@@ -3321,7 +3391,7 @@ function finalizeCeoTurn(text, meta = {}) {
             return {
                 ...(entry || {}),
                 messages,
-                inflight_turn: null,
+                inflight_turn: inflightMatchesSource ? null : inflightTurn,
             };
         });
         return;
@@ -3348,12 +3418,15 @@ function finalizeCeoTurn(text, meta = {}) {
         }
         icons();
     }, { scrollMode: "preserve" });
-    discardPendingCeoTurns({ force: normalizedSource === "heartbeat" });
+    discardPendingCeoTurns({ force: normalizedSource === "heartbeat", source: normalizedSource });
     patchCeoSessionSnapshotCache(sessionId, (entry) => {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
         let messages = trimCeoSessionSnapshotMessages(entry?.messages);
         const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
-        if (inflightTurn?.user_message && inflightSource === normalizedSource) {
+        const inflightMatchesSource = !inflightTurn
+            || !String(inflightTurn?.source || "").trim()
+            || inflightSource === normalizedSource;
+        if (inflightTurn?.user_message && inflightMatchesSource) {
             messages = appendCeoSessionSnapshotMessage(messages, {
                 role: "user",
                 content: String(inflightTurn.user_message?.content || ""),
@@ -3369,7 +3442,7 @@ function finalizeCeoTurn(text, meta = {}) {
         return {
             ...(entry || {}),
             messages,
-            inflight_turn: null,
+            inflight_turn: inflightMatchesSource ? null : inflightTurn,
         };
     });
 }
@@ -5612,10 +5685,20 @@ function initCeoWs() {
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
         if (payload.type === "ceo.turn.patch") patchCeoInflightTurn(payload.data?.inflight_turn || null);
         if (payload.type === "ceo.agent.tool") {
-            const activeTurn = getActiveCeoTurn();
+            const rawSource = String(payload.data?.source || "").trim().toLowerCase();
+            let toolSource = rawSource ? normalizeCeoTurnSource(rawSource) : "";
+            if (!toolSource) {
+                const snapshotSource = String(getCeoSessionSnapshotCache(activeSessionId())?.inflight_turn?.source || "").trim().toLowerCase();
+                if (snapshotSource) toolSource = normalizeCeoTurnSource(snapshotSource);
+            }
+            if (!toolSource) {
+                const activeTurns = S.ceoPendingTurns.filter((turn) => turn && !turn.finalized);
+                if (activeTurns.length === 1) toolSource = normalizeCeoTurnSource(activeTurns[0]?.source || "");
+            }
+            const activeTurn = toolSource ? getActiveCeoTurn(toolSource) : null;
             const hasStructuredTrace = !!activeTurn?.listEl?.querySelector?.(".task-trace-step");
             if (!hasStructuredTrace) {
-                if (!activeTurn && !S.ceoTurnActive) return;
+                if (!activeTurn && !toolSource && !S.ceoTurnActive) return;
                 appendCeoToolEvent(payload.data || {});
             }
         }

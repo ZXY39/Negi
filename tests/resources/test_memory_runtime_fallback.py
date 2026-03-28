@@ -179,6 +179,133 @@ async def test_memory_search_fallback_returns_memory_only(monkeypatch, tmp_path:
     assert result["view"][0]["context_type"] == "memory"
 
 
+@pytest.mark.asyncio
+async def test_memory_manager_explicit_write_is_searchable_and_replaces_previous_value(tmp_path: Path) -> None:
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        first = await manager.write_explicit_memory_items(
+            session_key="web:shared",
+            channel="web",
+            chat_id="shared",
+            items=[
+                {
+                    "kind": "default",
+                    "key": "preferred_package_manager",
+                    "value": "poetry",
+                    "statement": "Default to poetry for package management.",
+                    "source_excerpt": "default to poetry",
+                }
+            ],
+        )
+        second = await manager.write_explicit_memory_items(
+            session_key="web:shared",
+            channel="web",
+            chat_id="shared",
+            items=[
+                {
+                    "kind": "default",
+                    "key": "preferred_package_manager",
+                    "value": "pnpm",
+                    "statement": "Default to pnpm for package management.",
+                    "source_excerpt": "default to pnpm from now on",
+                }
+            ],
+        )
+
+        stats = await manager.stats()
+        block = await manager.retrieve_block(
+            query="package manager default",
+            channel="web",
+            chat_id="shared",
+            session_key="web:shared",
+        )
+        new_result = await manager.search_tool_view(
+            query="pnpm",
+            channel="web",
+            chat_id="shared",
+            session_key="web:shared",
+            limit=5,
+            context_type="memory",
+            include_l2=True,
+        )
+        old_result = await manager.search_tool_view(
+            query="poetry",
+            channel="web",
+            chat_id="shared",
+            session_key="web:shared",
+            limit=5,
+            context_type="memory",
+            include_l2=True,
+        )
+        memory_text = (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8").lower()
+        history_text = (tmp_path / "memory" / "HISTORY.md").read_text(encoding="utf-8").lower()
+
+        assert first["ok"] is True
+        assert second["ok"] is True
+        assert len(first["written"]) == 1
+        assert len(second["written"]) == 1
+        assert second["deleted"] == [{"record_id": first["written"][0]["record_id"], "key": "preferred_package_manager"}]
+        assert stats["journal_seq"] == 3
+        assert "pnpm" in block.lower()
+        assert "poetry" not in block.lower()
+        assert any("pnpm" in str(item.get("l0") or "").lower() for item in new_result["view"])
+        assert not old_result["view"]
+        assert "pnpm" in memory_text
+        assert "poetry" not in memory_text
+        assert "delete: replaced key=preferred_package_manager" in history_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_manager_explicit_write_fallback_updates_legacy_projection_when_rag_is_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FailingBackend:
+        def __init__(self, workspace, cfg):
+            _ = workspace, cfg
+            raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(rag_memory, "_RagMemoryBackend", _FailingBackend)
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        payload = await manager.write_explicit_memory_items(
+            session_key="web:shared",
+            channel="web",
+            chat_id="shared",
+            items=[
+                {
+                    "kind": "preference",
+                    "key": "preferred_package_manager",
+                    "value": "pnpm",
+                    "statement": "Prefer pnpm for package management.",
+                    "source_excerpt": "please remember: prefer pnpm",
+                }
+            ],
+        )
+        stats = await manager.stats()
+        block = await manager.retrieve_block(
+            query="pnpm",
+            channel="web",
+            chat_id="shared",
+            session_key="web:shared",
+        )
+
+        assert payload["ok"] is True
+        assert payload["searchable"] is True
+        assert stats["backend_state"] == "legacy_degraded"
+        assert stats["journal_seq"] == 1
+        assert stats["legacy_applied_seq"] == 1
+        assert "pnpm" in block.lower()
+        assert "prefer pnpm" in (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8").lower()
+        assert "prefer pnpm" in (tmp_path / "memory" / "HISTORY.md").read_text(encoding="utf-8").lower()
+    finally:
+        manager.close()
+
+
 def test_memory_manager_first_boot_clears_legacy_memory_artifacts(monkeypatch, tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)

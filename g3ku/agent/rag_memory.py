@@ -63,7 +63,7 @@ except Exception:  # pragma: no cover - optional runtime dependency fallback
 _NS_SEP = "\x1f"
 CONTEXT_TYPE_ALL: tuple[str, ...] = ("memory", "resource", "skill")
 CONTEXT_LAYER_ALL: tuple[str, ...] = ("l0", "l1", "l2")
-MEMORY_RUNTIME_SCHEMA_VERSION = "global-journal-v1"
+MEMORY_RUNTIME_SCHEMA_VERSION = "global-journal-v2"
 DEFAULT_GLOBAL_MEMORY_NAMESPACE: tuple[str, ...] = ("memory", "global")
 _SENTENCE_SPLIT_RE = re.compile(
     r"[.!?\u3002\uFF01\uFF1F]+(?=\s|$|[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF])"
@@ -581,7 +581,8 @@ class MemorySyncEvent:
     session_key: str = ""
     channel: str = ""
     chat_id: str = ""
-    event_type: Literal["memory_write"] = "memory_write"
+    event_type: Literal["memory_write", "memory_delete"] = "memory_write"
+    metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now_iso)
     updated_at: str = field(default_factory=_now_iso)
 
@@ -1728,6 +1729,27 @@ class _RagMemoryBackend:
     async def apply_sync_event(self, event: MemorySyncEvent) -> dict[str, Any]:
         """Apply one journal event to the RAG-backed store idempotently."""
         namespace = self.namespace_for(channel=event.channel, chat_id=event.chat_id)
+        if event.event_type == "memory_delete":
+            if self.arch_version == "v2" and self._feature_enabled("unified_context"):
+                existing_record = await asyncio.to_thread(self.store._fetch_context_v2, namespace, event.record_id)
+                if existing_record is not None and existing_record.l2_ref:
+                    try:
+                        path = Path(existing_record.l2_ref)
+                        if path.exists():
+                            await asyncio.to_thread(path.unlink)
+                    except Exception:
+                        logger.debug("Delete L2 payload ignored for {}", event.record_id)
+                await asyncio.to_thread(self.store.delete_context_v2, namespace, event.record_id)
+                if str(getattr(self.config, "mode", "") or "").lower() == "dual":
+                    await asyncio.to_thread(self.store.put, namespace, event.record_id, None)
+            else:
+                await asyncio.to_thread(self.store.put, namespace, event.record_id, None)
+            return {
+                "record_id": event.record_id,
+                "event_type": event.event_type,
+                "deleted": True,
+                "metadata": dict(event.metadata or {}),
+            }
         if self.arch_version == "v2" and self._feature_enabled("unified_context"):
             l2_ref = None
             if self._feature_enabled("split_store"):
@@ -3426,6 +3448,27 @@ class MemoryManager:
         compat = getattr(self.config, "compat", None)
         return bool(getattr(compat, "dual_write_legacy_files", True))
 
+    def namespace_for(self, *, channel: str | None, chat_id: str | None) -> tuple[str, ...]:
+        isolation = getattr(self.config, "isolation", None)
+        mode = str(getattr(isolation, "mode", "session") or "session").strip().lower()
+        channel_val = str(channel or "unknown")
+        chat_val = str(chat_id or "unknown")
+        session_val = f"{channel_val}:{chat_val}"
+        if mode == "global":
+            template = list(getattr(isolation, "namespace_template", None) or list(DEFAULT_GLOBAL_MEMORY_NAMESPACE))
+        elif mode == "channel":
+            template = list(getattr(isolation, "namespace_template", None) or ["memory", "{channel}"])
+        else:
+            template = list(getattr(isolation, "namespace_template", None) or ["memory", "{channel}", "{chat_id}"])
+        out = []
+        for token in template:
+            out.append(
+                token.replace("{channel}", channel_val)
+                .replace("{chat_id}", chat_val)
+                .replace("{session_key}", session_val)
+            )
+        return tuple(out)
+
     def _safe_channel_chat(self, session_key: str, channel: str | None, chat_id: str | None) -> tuple[str, str]:
         ch = str(channel or "").strip()
         cid = str(chat_id or "").strip()
@@ -3505,6 +3548,33 @@ class MemoryManager:
             score -= 0.05
         return max(0.0, min(score, 0.98))
 
+    def _event_namespace(self, event: MemorySyncEvent) -> tuple[str, ...]:
+        return self.namespace_for(channel=event.channel, chat_id=event.chat_id)
+
+    @staticmethod
+    def _event_key_tag(event: MemorySyncEvent) -> str:
+        for tag in list(event.tags or []):
+            text = str(tag or "").strip()
+            if text.startswith("memory_key:"):
+                return text.split(":", 1)[1].strip()
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        return str(metadata.get("key") or "").strip()
+
+    def _active_memory_events(
+        self,
+        *,
+        namespace: tuple[str, ...] | None = None,
+    ) -> list[MemorySyncEvent]:
+        active: dict[str, MemorySyncEvent] = {}
+        for event in self._load_journal_events(min_seq=1):
+            if namespace is not None and self._event_namespace(event) != namespace:
+                continue
+            if event.event_type == "memory_delete":
+                active.pop(str(event.record_id or "").strip(), None)
+                continue
+            active[str(event.record_id or "").strip()] = event
+        return sorted(active.values(), key=lambda item: int(item.seq))
+
     def _load_journal_events(self, *, min_seq: int = 1) -> list[MemorySyncEvent]:
         if not self.journal_file.exists():
             return []
@@ -3523,6 +3593,9 @@ class MemoryManager:
                 continue
             if not isinstance(payload, dict):
                 continue
+            metadata = payload.get("metadata")
+            if metadata is not None and not isinstance(metadata, dict):
+                payload["metadata"] = {}
             try:
                 event = MemorySyncEvent(**payload)
             except Exception:
@@ -3610,6 +3683,11 @@ class MemoryManager:
                 text = " ".join(str(row.get("text", "") or "").split()).strip()
                 if not text:
                     continue
+                event_type = str(row.get("event_type") or "memory_write").strip().lower()
+                if event_type not in {"memory_write", "memory_delete"}:
+                    event_type = "memory_write"
+                metadata = row.get("metadata")
+                metadata_payload = dict(metadata or {}) if isinstance(metadata, dict) else {}
                 event = MemorySyncEvent(
                     seq=next_seq,
                     event_id=str(row.get("event_id") or uuid.uuid4().hex[:12]),
@@ -3621,6 +3699,8 @@ class MemoryManager:
                     session_key=str(row.get("session_key") or ""),
                     channel=str(row.get("channel") or "unknown"),
                     chat_id=str(row.get("chat_id") or "unknown"),
+                    event_type=event_type,  # type: ignore[arg-type]
+                    metadata=metadata_payload,
                     created_at=str(row.get("created_at") or _now_iso()),
                     updated_at=str(row.get("updated_at") or row.get("created_at") or _now_iso()),
                 )
@@ -3650,10 +3730,22 @@ class MemoryManager:
                 except Exception as exc:
                     self._mark_backend_failure(exc)
 
+    @staticmethod
+    def _history_line_for_event(event: MemorySyncEvent) -> str:
+        stamp = str(event.created_at or _now_iso()).replace("T", " ")[:16]
+        source = str(event.source or "turn").upper()
+        metadata = dict(event.metadata or {}) if isinstance(event.metadata, dict) else {}
+        if event.event_type == "memory_delete":
+            key = str(metadata.get("key") or "").strip()
+            detail = str(event.text or "").strip() or (f"replaced key={key}" if key else "deleted memory record")
+            return f"[{stamp}] {source} DELETE: {detail}"
+        return f"[{stamp}] {source}: {event.text}"
+
     async def _sync_legacy_projection(self) -> None:
         if not self._legacy_mirror_enabled():
             return
         events = self._load_journal_events(min_seq=1)
+        active_events = self._active_memory_events()
         threshold = float(getattr(getattr(self.config, "guard", None), "auto_fact_confidence", 0.8) or 0.8)
         lines = [
             "# Managed Memory Mirror",
@@ -3663,7 +3755,7 @@ class MemoryManager:
             "## Facts",
         ]
         seen_fact_hashes: set[str] = set()
-        for event in events:
+        for event in active_events:
             text_hash = self._stable_text_hash(event.text)
             if text_hash in seen_fact_hashes:
                 continue
@@ -3680,8 +3772,7 @@ class MemoryManager:
             "",
         ]
         for event in events:
-            stamp = str(event.created_at or _now_iso()).replace("T", " ")[:16]
-            history_lines.append(f"[{stamp}] {str(event.source or 'turn').upper()}: {event.text}")
+            history_lines.append(self._history_line_for_event(event))
             history_lines.append("")
         async with self._io_lock:
             await asyncio.to_thread(self.memory_file.write_text, "\n".join(lines).rstrip() + "\n", "utf-8")
@@ -3913,7 +4004,7 @@ class MemoryManager:
         ranked: list[tuple[float, MemorySyncEvent]] = []
         seen_hashes: set[str] = set()
         journal_total = max(1.0, float(self._journal_seq()))
-        for event in self._load_journal_events(min_seq=1):
+        for event in self._active_memory_events():
             text_hash = self._stable_text_hash(event.text)
             if text_hash in seen_hashes:
                 continue
@@ -4114,6 +4205,127 @@ class MemoryManager:
                     after=asdict(events[0]),
                 )
             )
+
+    async def write_explicit_memory_items(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        channel_safe, chat_safe = self._safe_channel_chat(session_key, channel, chat_id)
+        namespace = self.namespace_for(channel=channel_safe, chat_id=chat_safe)
+        active_events = self._active_memory_events(namespace=namespace)
+        active_by_key: dict[str, list[MemorySyncEvent]] = {}
+        for event in active_events:
+            tags = {str(tag or "").strip() for tag in list(event.tags or []) if str(tag or "").strip()}
+            key = self._event_key_tag(event)
+            if not key or "explicit_memory" not in tags:
+                continue
+            active_by_key.setdefault(key, []).append(event)
+
+        trace_id = uuid.uuid4().hex[:12]
+        now = _now_iso()
+        rows: list[dict[str, Any]] = []
+        deleted: list[dict[str, str]] = []
+        write_index: dict[str, dict[str, str]] = {}
+
+        for raw in list(items or []):
+            item = dict(raw or {}) if isinstance(raw, dict) else {}
+            kind = str(item.get("kind") or "other").strip() or "other"
+            key = str(item.get("key") or "").strip()
+            value = str(item.get("value") or "").strip()
+            statement = " ".join(str(item.get("statement") or "").split()).strip()
+            source_excerpt = " ".join(str(item.get("source_excerpt") or "").split()).strip()
+            if not key or not statement:
+                continue
+
+            for old_event in list(active_by_key.get(key) or []):
+                delete_metadata = {
+                    "key": key,
+                    "kind": str((old_event.metadata or {}).get("kind") or kind).strip() or kind,
+                    "value": str((old_event.metadata or {}).get("value") or value).strip(),
+                    "source_excerpt": str((old_event.metadata or {}).get("source_excerpt") or "").strip(),
+                    "write_mode": "explicit_tool",
+                    "deleted_record_id": old_event.record_id,
+                }
+                rows.append(
+                    {
+                        "record_id": old_event.record_id,
+                        "text": f"replaced key={key}",
+                        "source": "explicit_tool",
+                        "confidence": 1.0,
+                        "tags": [
+                            "explicit_memory",
+                            "persistent",
+                            f"memory_key:{key}",
+                            "memory_delete",
+                        ],
+                        "session_key": session_key,
+                        "channel": channel_safe,
+                        "chat_id": chat_safe,
+                        "event_type": "memory_delete",
+                        "metadata": delete_metadata,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                deleted.append({"record_id": old_event.record_id, "key": key})
+            active_by_key[key] = []
+
+            record_id = self._next_record_id()
+            rows.append(
+                {
+                    "record_id": record_id,
+                    "text": statement,
+                    "source": "explicit_tool",
+                    "confidence": 1.0,
+                    "tags": [
+                        "explicit_memory",
+                        "persistent",
+                        f"memory_kind:{kind}",
+                        f"memory_key:{key}",
+                    ],
+                    "session_key": session_key,
+                    "channel": channel_safe,
+                    "chat_id": chat_safe,
+                    "event_type": "memory_write",
+                    "metadata": {
+                        "kind": kind,
+                        "key": key,
+                        "value": value,
+                        "source_excerpt": source_excerpt,
+                        "write_mode": "explicit_tool",
+                    },
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+            write_index[record_id] = {"record_id": record_id, "key": key, "kind": kind}
+
+        events = await self._append_memory_events(rows=rows)
+        written = [
+            dict(write_index[event.record_id])
+            for event in events
+            if event.event_type == "memory_write" and event.record_id in write_index
+        ]
+        await self._append_audit(
+            AuditEvent(
+                action="upsert",
+                reason="explicit_memory_write",
+                actor="memory_manager",
+                session_key=session_key,
+                trace_id=trace_id,
+                after={"written": list(written), "deleted": list(deleted)},
+            )
+        )
+        return {
+            "ok": True,
+            "written": written,
+            "deleted": deleted,
+            "searchable": True,
+        }
 
     async def list_pending(self, limit: int = 50) -> list[PendingFact]:
         if not self.pending_file.exists():

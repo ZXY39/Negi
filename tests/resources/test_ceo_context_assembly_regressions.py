@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.assembly import ContextAssemblyService
+from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 
 
 class _PromptBuilder:
@@ -117,6 +119,15 @@ def _family(
         metadata=dict(metadata or {}),
         actions=[SimpleNamespace(executor_names=[tool_id])],
     )
+
+
+def test_ceo_prompt_builder_includes_memory_write_guidance() -> None:
+    builder = CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd()))
+
+    prompt = builder.build(skills=[])
+
+    assert 'memory_write' in prompt
+    assert '长期记住' in prompt
 
 
 class _TaskService:
@@ -483,3 +494,27 @@ async def test_ceo_context_assembly_uses_dense_only_retrieval_scope_when_semanti
         'allowed_resource_record_ids': ['tool:agent_browser', 'tool:web_fetch'],
         'allowed_skill_record_ids': ['skill:focused-skill', 'skill:secondary-skill'],
     }
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_adds_memory_write_hint_for_explicit_memory_request() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response='')
+    service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='Please remember: default to pnpm from now on.',
+        exposure={
+            'skills': [],
+            'tool_families': [],
+            'tool_names': ['memory_write'],
+        },
+        persisted_session=None,
+    )
+
+    assert 'Long-Term Memory Write Hint' in result.system_prompt
+    assert '`memory_write`' in result.system_prompt
+    assert result.trace['memory_write_hint']['triggered'] is True
+    assert result.trace['memory_write_hint']['visible'] is True
+    assert 'default to' in result.trace['memory_write_hint']['matched_terms']

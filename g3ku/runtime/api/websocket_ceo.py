@@ -394,6 +394,7 @@ def _normalize_snapshot_tool_events(raw_events: Any) -> list[dict[str, Any]]:
             'is_error': bool(raw.get('is_error')),
             'is_update': bool(raw.get('is_update')),
             'kind': str(raw.get('kind') or '').strip(),
+            'source': str(raw.get('source') or '').strip().lower() or 'user',
         }
         elapsed_seconds = raw.get('elapsed_seconds')
         if isinstance(elapsed_seconds, (int, float)):
@@ -461,6 +462,7 @@ def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
     tool_name = str(payload.get('tool_name') or 'tool').strip() or 'tool'
     text = str(payload.get('text') or '').strip()
     is_error = bool(payload.get('is_error'))
+    source = str(payload.get('source') or data.get('source') or '').strip().lower() or 'user'
     if event.type == 'tool_execution_start':
         status = 'running'
         is_update = False
@@ -481,6 +483,7 @@ def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
         'is_error': is_error,
         'is_update': is_update,
         'kind': str(payload.get('kind') or '').strip(),
+        'source': source,
     }
 
 
@@ -776,7 +779,7 @@ async def ceo_websocket(websocket: WebSocket):
             message_type = str(data.get('type') or '')
             if message_type == 'client.pause_turn':
                 if _current_session_is_running():
-                    await session.pause()
+                    await session.pause(manual=True)
                 else:
                     await _push_stream_event('ceo.control_ack', {'action': 'pause', 'accepted': False, 'reason': 'no_active_turn'})
                 continue

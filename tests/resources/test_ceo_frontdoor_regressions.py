@@ -14,6 +14,7 @@ from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.assembly import ContextAssemblyService
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
+from g3ku.runtime.frontdoor.interaction_trace import new_interaction_trace, record_stage_round, submit_next_stage
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import Session, SessionManager
 from main.service.runtime_service import CreateAsyncTaskTool
@@ -76,6 +77,30 @@ def _frontdoor_summary_message(summary: str) -> dict[str, object]:
             f'{{"kind":"frontdoor_context","summary":"{summary}","summary_turn_count":2,"raw_tail_turns":4}}'
         ),
     }
+
+
+def test_ceo_memory_write_does_not_count_against_stage_budget() -> None:
+    trace = new_interaction_trace()
+    trace, _ = submit_next_stage(trace, stage_goal='remember durable preference', tool_round_budget=1)
+    trace, round_payload = record_stage_round(
+        trace,
+        tool_calls=[{'id': 'tool-1', 'name': 'memory_write'}],
+        extra_non_budget_tools=CeoFrontDoorRunner._CEO_NON_BUDGET_TOOLS,
+    )
+
+    assert round_payload is not None
+    assert round_payload['budget_counted'] is False
+    assert trace['stages'][0]['tool_rounds_used'] == 0
+
+
+def test_ceo_frontdoor_recommends_focus_execution_policy_by_default() -> None:
+    assert CeoFrontDoorRunner._recommended_execution_policy_mode('整理一份AI行业当天最新消息给我') == 'focus'
+    assert CeoFrontDoorRunner._recommended_execution_policy_mode('帮我写一版发布公告初稿') == 'focus'
+
+
+def test_ceo_frontdoor_recommends_coverage_execution_policy_when_user_explicitly_requests_full_coverage() -> None:
+    assert CeoFrontDoorRunner._recommended_execution_policy_mode('全面盘点今天 AI 行业所有重要动态，不要遗漏') == 'coverage'
+    assert CeoFrontDoorRunner._recommended_execution_policy_mode('give me exhaustive coverage and do not miss anything') == 'coverage'
 
 
 class _FilesystemTool(Tool):
@@ -721,8 +746,10 @@ async def test_ceo_frontdoor_runner_uses_cron_internal_system_message_and_cron_o
     messages = backend.calls[0]['messages']
     assert messages[0] == {'role': 'system', 'content': 'SYSTEM PROMPT'}
     assert messages[1]['role'] == 'system'
-    assert 'Current cron job id: job-77' in str(messages[1]['content'])
-    assert 'Exit condition: 发布完成后或用户要求取消' in str(messages[1]['content'])
+    assert 'execution_policy.mode' in str(messages[1]['content'])
+    assert messages[2]['role'] == 'system'
+    assert 'Current cron job id: job-77' in str(messages[2]['content'])
+    assert 'Exit condition: 发布完成后或用户要求取消' in str(messages[2]['content'])
 
 
 @pytest.mark.asyncio
@@ -807,6 +834,7 @@ async def test_ceo_frontdoor_runner_reuses_existing_continuation_task_when_user_
                         arguments={
                             'task': '继续完成失败任务，不要从零开始',
                             'core_requirement': '继续完成打开网页的自动化流程',
+                            'execution_policy': {'mode': 'focus'},
                             'continuation_of_task_id': 'task:old-1',
                         },
                     )
@@ -1218,6 +1246,8 @@ async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_co
     await runner.run_turn(user_input=SimpleNamespace(content='dispatch work'), session=session)
 
     assert loop.tools.runtime_contexts[-1]['task_defaults'] == {'max_depth': 4}
+    assert loop.tools.runtime_contexts[-1]['recommended_execution_policy'] == {'mode': 'focus'}
+    assert loop.tools.runtime_contexts[-1]['recommended_execution_policy'] == {'mode': 'focus'}
 
 
 @pytest.mark.asyncio

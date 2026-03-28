@@ -7,7 +7,7 @@ import pytest
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.agent.tools.base import Tool
 from main.protocol import now_iso
-from main.runtime.internal_tools import SubmitNextStageTool
+from main.runtime.internal_tools import SpawnChildNodesTool, SubmitNextStageTool
 from main.runtime.stage_budget import STAGE_TOOL_NAME, visible_tools_for_stage_iteration
 from main.service.runtime_service import MainRuntimeService
 
@@ -219,6 +219,27 @@ def test_stage_visibility_keeps_all_tools_visible_before_stage_and_after_budget(
 
     assert set(before_stage) == {STAGE_TOOL_NAME, 'ordinary_tool'}
     assert set(exhausted_stage) == {STAGE_TOOL_NAME, 'ordinary_tool'}
+
+
+def test_spawn_child_nodes_tool_requires_execution_policy_for_each_child() -> None:
+    async def _spawn_callback(specs, call_id):
+        _ = specs, call_id
+        return []
+
+    tool = SpawnChildNodesTool(_spawn_callback)
+
+    errors = tool.validate_params(
+        {
+            'children': [
+                {
+                    'goal': 'child goal',
+                    'prompt': 'child prompt',
+                }
+            ]
+        }
+    )
+
+    assert 'missing required children[0].execution_policy' in errors
 
 
 @pytest.mark.asyncio

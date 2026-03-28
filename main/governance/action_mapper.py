@@ -70,6 +70,20 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
             }
         ],
     },
+    'memory_write': {
+        'tool_id': 'memory',
+        'display_name': 'Memory',
+        'description': 'Write explicit permanent memory items.',
+        'actions': [
+            {
+                'id': 'write',
+                'label': 'Write Memory',
+                'risk_level': 'medium',
+                'destructive': False,
+                'allowed_roles': ['ceo'],
+            }
+        ],
+    },
     'memory_runtime': {
         'tool_id': 'memory',
         'display_name': 'Memory',

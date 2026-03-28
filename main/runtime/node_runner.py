@@ -5,7 +5,6 @@ import copy
 import json
 import os
 import platform
-import re
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +21,7 @@ from main.models import (
     SpawnChildResult,
     SpawnChildSpec,
     TokenUsageSummary,
+    normalize_execution_policy_metadata,
     normalize_final_acceptance_metadata,
     normalize_result_payload,
 )
@@ -42,9 +42,19 @@ ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE = (
     'verify that those identifiers actually appear in the cited file lines or a targeted reopened local slice. '
     'If the cited identifiers drift from the cited source, reject the deliverable with failed+final.'
 )
-CORE_REQUIREMENT_NOTICE_TEMPLATE = '注意：你正在完成的任务是核心需求【{core_requirement}】的细分任务之一，不要做与核心需求或以下细分任务无关的事。'
-CORE_REQUIREMENT_NOTICE_PATTERN = re.compile(
-    r'^注意：你正在完成的任务是核心需求【.*】的细分任务之一，不要做与核心需求或以下细分任务无关的事。$'
+CORE_REQUIREMENT_NOTICE_PREFIXES = (
+    '注意：你正在完成的任务是核心需求【',
+    '你正在完成的任务是核心需求【',
+)
+CORE_REQUIREMENT_NOTICE_FOCUS_TEMPLATE = (
+    '你正在完成的任务是核心需求【{core_requirement}】的细分任务之一。'
+    '只允许抓最关键事实、做最高价值行为和完成当前目标所必需的验证，'
+    '不得额外扩展范围、补做边缘分支或系统性全量操作。'
+)
+CORE_REQUIREMENT_NOTICE_COVERAGE_TEMPLATE = (
+    '你正在完成的任务是核心需求【{core_requirement}】的细分任务之一。'
+    '优先抓最关键事实、做最高价值行为和完成当前目标所必需的验证，'
+    '必要时额外扩展范围、补做边缘分支或系统性全量操作。'
 )
 
 
@@ -304,6 +314,8 @@ class NodeRunner:
 
     async def _build_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
         system_prompt = self._build_system_prompt(node=node)
+        core_requirement = self._resolve_core_requirement(task)
+        execution_policy = self._resolve_execution_policy(task, node=node)
         payload: dict[str, Any] = {
             'task_id': task.task_id,
             'node_id': node.node_id,
@@ -311,8 +323,13 @@ class NodeRunner:
             'depth': node.depth,
             'can_spawn_children': bool(node.can_spawn_children),
             'goal': node.goal,
-            'prompt': node.prompt,
-            'core_requirement': self._resolve_core_requirement(task),
+            'prompt': self._inject_core_requirement_notice(
+                node.prompt,
+                core_requirement,
+                execution_policy.mode,
+            ),
+            'core_requirement': core_requirement,
+            'execution_policy': execution_policy.model_dump(mode='json'),
             'runtime_environment': self._runtime_environment_payload(),
         }
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
@@ -514,6 +531,13 @@ class NodeRunner:
             raise ValueError('parent task or node missing')
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
+        task_execution_policy = self._resolve_execution_policy(task, node=parent)
+        for index, spec in enumerate(list(specs or [])):
+            spec_execution_policy = normalize_execution_policy_metadata(spec.execution_policy)
+            if spec_execution_policy.mode != task_execution_policy.mode:
+                raise ValueError(
+                    f'children[{index}].execution_policy.mode must match parent task execution_policy.mode'
+                )
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = str(call_id or f'call:{len(specs)}')
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
@@ -973,7 +997,11 @@ class NodeRunner:
         spec: SpawnChildSpec,
         exclude_node_ids: set[str],
     ) -> NodeRecord | None:
-        expected_prompt = self._inject_core_requirement_notice(spec.prompt, self._resolve_core_requirement(task))
+        expected_prompt = self._inject_core_requirement_notice(
+            spec.prompt,
+            self._resolve_core_requirement(task),
+            normalize_execution_policy_metadata(spec.execution_policy).mode,
+        )
         expected_fingerprint = self._execution_child_recovery_fingerprint(
             parent_node_id=parent.node_id,
             goal=spec.goal,
@@ -1011,6 +1039,7 @@ class NodeRunner:
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
             core_requirement=self._resolve_core_requirement(task),
+            execution_policy_mode=self._resolve_execution_policy(task, node=accepted_node).mode,
         )
         expected_fingerprint = self._acceptance_node_recovery_fingerprint(
             parent_node_id=parent_node_id,
@@ -1100,31 +1129,50 @@ class NodeRunner:
         )
 
     @staticmethod
-    def _core_requirement_notice(core_requirement: str) -> str:
-        return CORE_REQUIREMENT_NOTICE_TEMPLATE.format(core_requirement=str(core_requirement or '').strip())
+    def _core_requirement_notice(core_requirement: str, execution_policy_mode: str) -> str:
+        template = (
+            CORE_REQUIREMENT_NOTICE_COVERAGE_TEMPLATE
+            if str(execution_policy_mode or '').strip().lower() == 'coverage'
+            else CORE_REQUIREMENT_NOTICE_FOCUS_TEMPLATE
+        )
+        return template.format(core_requirement=str(core_requirement or '').strip())
 
     def _resolve_core_requirement(self, task) -> str:
         metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
         return str(metadata.get('core_requirement') or getattr(task, 'user_request', '') or getattr(task, 'title', '') or '').strip()
 
-    def _inject_core_requirement_notice(self, prompt: str, core_requirement: str) -> str:
+    def _resolve_execution_policy(self, task, *, node: NodeRecord | None = None):
+        task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
+        node_metadata = node.metadata if node is not None and isinstance(getattr(node, 'metadata', None), dict) else {}
+        return normalize_execution_policy_metadata(
+            node_metadata.get('execution_policy', task_metadata.get('execution_policy'))
+        )
+
+    def _inject_core_requirement_notice(self, prompt: str, core_requirement: str, execution_policy_mode: str) -> str:
         normalized_core_requirement = str(core_requirement or '').strip()
         base_lines = []
         for line in str(prompt or '').splitlines():
-            if CORE_REQUIREMENT_NOTICE_PATTERN.fullmatch(str(line or '').strip()):
+            stripped = str(line or '').strip()
+            if any(stripped.startswith(prefix) for prefix in CORE_REQUIREMENT_NOTICE_PREFIXES):
                 continue
             base_lines.append(line)
         base_prompt = '\n'.join(base_lines).strip()
         if not normalized_core_requirement:
             return base_prompt
-        notice = self._core_requirement_notice(normalized_core_requirement)
+        notice = self._core_requirement_notice(normalized_core_requirement, execution_policy_mode)
         if not base_prompt:
             return notice
         return f'{notice}\n\n{base_prompt}'
 
     def _create_execution_child(self, *, task, parent: NodeRecord, spec: SpawnChildSpec) -> NodeRecord:
-        child_prompt = self._inject_core_requirement_notice(spec.prompt, self._resolve_core_requirement(task))
+        execution_policy = normalize_execution_policy_metadata(spec.execution_policy)
+        child_prompt = self._inject_core_requirement_notice(
+            spec.prompt,
+            self._resolve_core_requirement(task),
+            execution_policy.mode,
+        )
         metadata = {
+            'execution_policy': execution_policy.model_dump(mode='json'),
             _RECOVERY_FINGERPRINT_KEY: self._execution_child_recovery_fingerprint(
                 parent_node_id=parent.node_id,
                 goal=spec.goal,
@@ -1164,6 +1212,7 @@ class NodeRunner:
         parent_node_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> NodeRecord:
+        execution_policy = self._resolve_execution_policy(task, node=accepted_node)
         child_handoff = self._child_handoff_payload(
             task_id=task.task_id,
             node=accepted_node,
@@ -1176,9 +1225,11 @@ class NodeRunner:
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
             core_requirement=self._resolve_core_requirement(task),
+            execution_policy_mode=execution_policy.mode,
         )
         base_metadata = {
             'accepted_node_id': accepted_node.node_id,
+            'execution_policy': execution_policy.model_dump(mode='json'),
             _RECOVERY_FINGERPRINT_KEY: self._acceptance_node_recovery_fingerprint(
                 parent_node_id=parent_node_id or accepted_node.node_id,
                 goal=goal,
@@ -1218,6 +1269,7 @@ class NodeRunner:
         result_payload_ref: str,
         evidence_summary: str,
         core_requirement: str,
+        execution_policy_mode: str,
     ) -> str:
         prompt = (
             f'{acceptance_prompt}\n\n'
@@ -1229,7 +1281,7 @@ class NodeRunner:
         if node_output_ref or result_payload_ref:
             prompt = f'{prompt}\n{ACCEPTANCE_REF_GUIDANCE}\n'
         prompt = f'{prompt}\n{ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE}\n'
-        return self._inject_core_requirement_notice(prompt, core_requirement)
+        return self._inject_core_requirement_notice(prompt, core_requirement, execution_policy_mode)
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:
         latest = self._log_service.ensure_node_output_externalized(task_id, node.node_id) or self._store.get_node(node.node_id) or node

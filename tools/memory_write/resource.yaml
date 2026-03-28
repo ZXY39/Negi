@@ -1,0 +1,68 @@
+schema_version: 1
+kind: tool
+name: memory_write
+description: Write explicit permanent memory items and make them searchable for future retrieval.
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Repository-managed structured memory write tool for explicit CEO long-term memory saves.
+  compare_rule: Treat changes in main implementation, parameters, permissions, settings, or return payload shape as version changes.
+  source_of_truth: This resource.yaml and the main implementation are authoritative; toolskills supplement usage guidance when present.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    items:
+      type: array
+      description: One to five normalized permanent memory items to save immediately.
+      items:
+        type: object
+        properties:
+          kind:
+            type: string
+            enum:
+              - profile
+              - preference
+              - constraint
+              - default
+              - avoidance
+              - workflow
+              - project_fact
+              - other
+            description: Memory item category.
+          key:
+            type: string
+            description: Stable snake_case key used for deterministic replacement.
+          value:
+            type: string
+            description: Canonical value for the memory item.
+          statement:
+            type: string
+            description: Human-readable normalized statement that will be indexed for retrieval.
+          source_excerpt:
+            type: string
+            description: Short excerpt from the current user turn supporting this memory.
+        required:
+          - kind
+          - key
+          - value
+          - statement
+          - source_excerpt
+  required:
+    - items
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

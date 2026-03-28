@@ -37,7 +37,14 @@ from main.governance import (
 )
 from main.governance.roles import to_public_allowed_roles
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
-from main.models import NodeRecord, TaskArtifactRecord, TaskRecord, TokenUsageSummary, normalize_final_acceptance_metadata
+from main.models import (
+    NodeRecord,
+    TaskArtifactRecord,
+    TaskRecord,
+    TokenUsageSummary,
+    normalize_execution_policy_metadata,
+    normalize_final_acceptance_metadata,
+)
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.query_service import TaskQueryService
@@ -586,7 +593,9 @@ class MainRuntimeService:
             updated_at=now,
             token_usage=TokenUsageSummary(tracked=True),
             token_usage_by_model=[],
-            metadata={},
+            metadata={
+                'execution_policy': dict(task_metadata.get('execution_policy') or {}),
+            },
         )
         return record, root
 
@@ -1556,6 +1565,7 @@ class MainRuntimeService:
             payload['core_requirement'] = core_requirement
         else:
             payload.pop('core_requirement', None)
+        payload['execution_policy'] = normalize_execution_policy_metadata(payload.get('execution_policy')).model_dump(mode='json')
         payload['final_acceptance'] = normalize_final_acceptance_metadata(payload.get('final_acceptance')).model_dump(mode='json')
         return payload
 
@@ -3377,6 +3387,7 @@ class CreateAsyncTaskTool(Tool):
         if explicit_max_depth in (None, ''):
             explicit_max_depth = _runtime_task_default_max_depth(runtime)
         normalized_core_requirement = str(core_requirement or kwargs.get('core_requirement') or '').strip() or str(task or '').strip()
+        normalized_execution_policy = normalize_execution_policy_metadata(kwargs.get('execution_policy'))
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))
@@ -3404,6 +3415,7 @@ class CreateAsyncTaskTool(Tool):
             max_depth=explicit_max_depth,
             metadata={
                 'core_requirement': normalized_core_requirement,
+                'execution_policy': normalized_execution_policy.model_dump(mode='json'),
                 'continuation_of_task_id': continuation_of_task_id,
                 'created_by_source': created_by_source,
                 'final_acceptance': {

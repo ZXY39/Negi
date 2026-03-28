@@ -1514,6 +1514,50 @@ async def test_memory_search_reads_manifest_settings(tmp_path: Path):
     assert manager.last_call['limit'] == 11
 
 
+@pytest.mark.asyncio
+async def test_memory_write_builds_without_rag_store_and_writes_explicit_items(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
+
+    class _FakeMemoryManager:
+        def __init__(self):
+            self.last_call = None
+
+        async def write_explicit_memory_items(self, **kwargs):
+            self.last_call = kwargs
+            return {'ok': True, 'written': [{'record_id': 'rec-1', 'key': 'preferred_package_manager', 'kind': 'default'}], 'deleted': [], 'searchable': True}
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['memory_write']
+    manager = _FakeMemoryManager()
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            items=[
+                {
+                    'kind': 'default',
+                    'key': 'preferred_package_manager',
+                    'value': 'pnpm',
+                    'statement': 'Default to pnpm for package management.',
+                    'source_excerpt': '以后默认用 pnpm',
+                }
+            ],
+            __g3ku_runtime={'session_key': 'cli:demo'},
+        )
+    )
+    assert payload['ok'] is True
+    assert payload['searchable'] is True
+    assert manager.last_call['channel'] == 'cli'
+    assert manager.last_call['chat_id'] == 'demo'
+    assert manager.last_call['items'][0]['key'] == 'preferred_package_manager'
+
+
 def test_resource_loader_injects_tool_secrets(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

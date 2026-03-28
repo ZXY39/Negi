@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,6 +94,10 @@ def _receive_until_type(ws, expected_type: str) -> dict[str, object]:
 async def _create_web_task(service: MainRuntimeService):
     _mark_worker_online(service)
     return await service.create_task("test task", session_id="web:shared")
+
+
+def _execution_policy(mode: str = "focus") -> dict[str, str]:
+    return {"mode": mode}
 
 
 def _mark_worker_at(
@@ -972,7 +977,7 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
     child = service.node_runner._create_execution_child(
         task=task,
         parent=root,
-        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
     service.log_service.update_node_status(
         record.task_id,
@@ -1030,7 +1035,7 @@ def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path)
     child = service.node_runner._create_execution_child(
         task=task,
         parent=root,
-        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
     service.log_service.update_node_status(
         record.task_id,
@@ -1083,7 +1088,7 @@ def test_failed_node_ids_follow_projection_tree_for_failed_acceptance(tmp_path: 
     child = service.node_runner._create_execution_child(
         task=task,
         parent=root,
-        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
     service.log_service.update_node_status(
         record.task_id,
@@ -1108,6 +1113,154 @@ def test_failed_node_ids_follow_projection_tree_for_failed_acceptance(tmp_path: 
     )
 
     assert service.failed_node_ids(record.task_id) == f'- {acceptance.node_id}'
+
+
+@pytest.mark.asyncio
+async def test_execution_policy_focus_propagates_to_task_payload_child_and_acceptance_prompt(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.task_runner.start_background = lambda task_id: None
+
+    try:
+        record = await service.create_task(
+            "帮我写一版发布公告初稿",
+            session_id="web:shared",
+            metadata={
+                "core_requirement": "完成一版可直接交付的发布公告初稿",
+                "execution_policy": _execution_policy(),
+            },
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+        assert task.metadata["execution_policy"] == {"mode": "focus"}
+        assert root.metadata["execution_policy"] == {"mode": "focus"}
+
+        messages = await service.node_runner._build_messages(task=task, node=root)
+        payload = json.loads(messages[1]["content"])
+        expected_notice = (
+            "你正在完成的任务是核心需求【完成一版可直接交付的发布公告初稿】的细分任务之一。"
+            "只允许抓最关键事实、做最高价值行为和完成当前目标所必需的验证，"
+            "不得额外扩展范围、补做边缘分支或系统性全量操作。"
+        )
+
+        assert payload["execution_policy"] == {"mode": "focus"}
+        assert payload["prompt"].startswith(expected_notice)
+
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(
+                goal="起草首版公告正文",
+                prompt="输出首版可读正文。",
+                execution_policy=_execution_policy(),
+            ),
+        )
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=child,
+            goal="accept:draft",
+            acceptance_prompt="检查公告草稿是否满足交付要求。",
+            parent_node_id=child.node_id,
+        )
+
+        assert child.metadata["execution_policy"] == {"mode": "focus"}
+        assert child.prompt.startswith(expected_notice)
+        assert acceptance.metadata["execution_policy"] == {"mode": "focus"}
+        assert acceptance.prompt.startswith(expected_notice)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_policy_coverage_notice_uses_expanded_variant(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.task_runner.start_background = lambda task_id: None
+
+    try:
+        record = await service.create_task(
+            "全面梳理项目对外发布材料",
+            session_id="web:shared",
+            metadata={
+                "core_requirement": "系统完成项目对外发布材料的整理与补漏",
+                "execution_policy": _execution_policy("coverage"),
+            },
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        messages = await service.node_runner._build_messages(task=task, node=root)
+        payload = json.loads(messages[1]["content"])
+        expected_notice = (
+            "你正在完成的任务是核心需求【系统完成项目对外发布材料的整理与补漏】的细分任务之一。"
+            "优先抓最关键事实、做最高价值行为和完成当前目标所必需的验证，"
+            "必要时额外扩展范围、补做边缘分支或系统性全量操作。"
+        )
+
+        assert payload["execution_policy"] == {"mode": "coverage"}
+        assert payload["prompt"].startswith(expected_notice)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_children_rejects_execution_policy_mode_mismatch(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.task_runner.start_background = lambda task_id: None
+
+    try:
+        record = await service.create_task(
+            "整理需求",
+            session_id="web:shared",
+            metadata={
+                "core_requirement": "完成聚焦整理",
+                "execution_policy": _execution_policy(),
+            },
+        )
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        with pytest.raises(ValueError, match="children\\[0\\]\\.execution_policy\\.mode must match parent task execution_policy\\.mode"):
+            await service.node_runner._spawn_children(
+                task_id=record.task_id,
+                parent_node_id=root.node_id,
+                specs=[
+                    SpawnChildSpec(
+                        goal="覆盖补漏",
+                        prompt="补做所有边缘分支。",
+                        execution_policy=_execution_policy("coverage"),
+                    )
+                ],
+                call_id="mismatch-policy",
+            )
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio
@@ -1165,8 +1318,8 @@ async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp
             task_id=record.task_id,
             parent_node_id=root.node_id,
             specs=[
-                SpawnChildSpec(goal="bad child", prompt="bad prompt"),
-                SpawnChildSpec(goal="good child", prompt="good prompt"),
+                SpawnChildSpec(goal="bad child", prompt="bad prompt", execution_policy=_execution_policy()),
+                SpawnChildSpec(goal="good child", prompt="good prompt", execution_policy=_execution_policy()),
             ],
             call_id="round-failure-info",
         )
@@ -1240,7 +1393,7 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
-            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", acceptance_prompt="check child")],
+            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy(), acceptance_prompt="check child")],
             call_id="round-acceptance-failure",
         )
 
@@ -1282,7 +1435,7 @@ async def test_spawn_children_surfaces_runtime_failure_info_for_pipeline_excepti
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
-            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt")],
+            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy())],
             call_id="round-runtime-failure",
         )
 
@@ -1354,13 +1507,13 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
         first_results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
-            specs=[SpawnChildSpec(goal="bad child", prompt="bad prompt")],
+            specs=[SpawnChildSpec(goal="bad child", prompt="bad prompt", execution_policy=_execution_policy())],
             call_id="round-1",
         )
         second_results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
-            specs=[SpawnChildSpec(goal="bad child", prompt="bad prompt refined")],
+            specs=[SpawnChildSpec(goal="bad child", prompt="bad prompt refined", execution_policy=_execution_policy())],
             call_id="round-2",
         )
 
@@ -1573,7 +1726,7 @@ def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: P
     child = service.node_runner._create_execution_child(
         task=task,
         parent=root,
-        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
     service.log_service.submit_next_stage(
         record.task_id,
@@ -2080,7 +2233,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         success_child = service.node_runner._create_execution_child(
             task=task,
             parent=root,
-            spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+            spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
         )
         service.log_service.update_node_status(
             record.task_id,
@@ -2092,12 +2245,12 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         in_progress_child = service.node_runner._create_execution_child(
             task=task,
             parent=root,
-            spec=SpawnChildSpec(goal="bad child", prompt="bad prompt"),
+            spec=SpawnChildSpec(goal="bad child", prompt="bad prompt", execution_policy=_execution_policy()),
         )
         nested_success = service.node_runner._create_execution_child(
             task=task,
             parent=in_progress_child,
-            spec=SpawnChildSpec(goal="nested child", prompt="nested prompt"),
+            spec=SpawnChildSpec(goal="nested child", prompt="nested prompt", execution_policy=_execution_policy()),
         )
         service.log_service.update_node_status(
             record.task_id,
@@ -2171,7 +2324,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         results = await restarted.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=record.root_node_id,
-            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt")],
+            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy())],
             call_id="recovery-call",
         )
         after_child_ids = [node.node_id for node in restarted.store.list_children(record.root_node_id)]
@@ -2209,7 +2362,7 @@ def test_terminal_task_clears_runtime_frames_and_rejects_late_runtime_updates(tm
     child = service.node_runner._create_execution_child(
         task=task,
         parent=root,
-        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
     service.log_service.update_runtime_state(
         record.task_id,
@@ -2281,7 +2434,7 @@ def test_terminal_event_emits_once_even_if_late_node_updates_arrive(tmp_path: Pa
     child = service.node_runner._create_execution_child(
         task=task,
         parent=root,
-        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
 
     service.log_service.update_node_status(
@@ -2333,7 +2486,7 @@ async def test_run_node_short_circuits_when_task_is_already_terminal(tmp_path: P
     child = service.node_runner._create_execution_child(
         task=task,
         parent=root,
-        spec=SpawnChildSpec(goal="child goal", prompt="child prompt"),
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
 
     service.log_service.update_node_status(

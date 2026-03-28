@@ -240,6 +240,14 @@ class _HeartbeatRecorder:
         self.calls.append((session_id, dict(payload)))
 
 
+class _HeartbeatController:
+    def __init__(self) -> None:
+        self.clear_calls: list[str] = []
+
+    def clear_session(self, session_id: str) -> None:
+        self.clear_calls.append(str(session_id or ""))
+
+
 class _FakeToolExecutionManager:
     def __init__(self, results: list[dict[str, object]]) -> None:
         self._results = [dict(item) for item in results]
@@ -686,6 +694,105 @@ async def test_runtime_agent_session_pause_emits_single_pause_ack_and_snapshot(m
     assert len(paused_snapshots) == 1
 
 
+@pytest.mark.asyncio
+async def test_runtime_agent_session_manual_pause_freezes_heartbeat_and_persists_follow_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    started = asyncio.Event()
+    turn_task_ref: dict[str, asyncio.Task[object] | None] = {"task": None}
+    heartbeat = _HeartbeatController()
+
+    class _BlockingRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session, on_progress
+            started.set()
+            await asyncio.Future()
+
+    async def _cancel_session_tasks(_session_key: str) -> int:
+        task = turn_task_ref.get("task")
+        if task is None:
+            return 0
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return 1
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_BlockingRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        web_session_heartbeat=heartbeat,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:pause-manual", channel="web", chat_id="pause-manual")
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+    turn_task = asyncio.create_task(session.prompt(UserInputMessage(content="Pause and wait"), persist_transcript=False))
+    turn_task_ref["task"] = turn_task
+
+    await started.wait()
+    await session.pause(manual=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn_task
+
+    pause_ack = next(
+        event
+        for event in events
+        if event.type == "control_ack" and str(event.payload.get("action") or "") == "pause"
+    )
+    paused_state = next(
+        event
+        for event in events
+        if event.type == "state_snapshot"
+        and str((event.payload.get("state") or {}).get("status") or "") == "paused"
+    )
+    follow_up = next(event for event in events if event.type == "message_end")
+
+    assert pause_ack.payload["manual_pause_waiting_reason"] is True
+    assert pause_ack.payload["source"] == "user"
+    assert paused_state.payload["state"]["manual_pause_waiting_reason"] is True
+    assert follow_up.payload["text"] == (
+        "我先不继续自动分析或续跑任务。请告诉我为什么想暂停，我会根据你的原因再决定下一步。"
+    )
+    assert follow_up.payload["source"] == "user"
+    assert heartbeat.clear_calls == ["web:pause-manual"]
+    assert session.manual_pause_waiting_reason() is True
+    assert session.inflight_turn_snapshot() is None
+    assert web_ceo_sessions.read_inflight_turn_snapshot("web:pause-manual") is None
+
+    reloaded = SessionManager(tmp_path).get_or_create("web:pause-manual")
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
+    assert reloaded.messages[0]["content"] == "Pause and wait"
+    assert reloaded.messages[1]["metadata"]["source"] == "manual_pause_follow_up"
+    assert "请告诉我为什么想暂停" in str(reloaded.messages[1]["content"])
+    normalized_metadata = web_ceo_sessions.normalize_ceo_metadata(reloaded.metadata, session_key="web:pause-manual")
+    assert normalized_metadata["manual_pause_waiting_reason"] is True
+
+
 def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     session = RuntimeAgentSession(
@@ -1006,7 +1113,7 @@ def test_ceo_websocket_error_payload_carries_interaction_trace(tmp_path: Path, m
     assert error_events[0]["data"]["interaction_trace"]["stages"][0]["stage_goal"] == "Open bilibili"
 
 
-def test_ceo_websocket_restores_paused_inflight_turn_after_runtime_session_reset(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_websocket_manual_pause_emits_follow_up_and_hides_inflight_turn(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
     async def _ensure_services(_agent) -> None:
@@ -1045,6 +1152,7 @@ def test_ceo_websocket_restores_paused_inflight_turn_after_runtime_session_reset
             self.commit_service = None
             self.prompt_trace = False
             self._active_tasks: dict[str, set[asyncio.Task[object]]] = {}
+            self.web_session_heartbeat = _HeartbeatController()
 
         def create_session_cancellation_token(self, _session_key: str):
             return _CancelToken()
@@ -1091,31 +1199,39 @@ def test_ceo_websocket_restores_paused_inflight_turn_after_runtime_session_reset
 
         ws.send_json({"type": "client.user_message", "text": "Pause and restore me"})
 
-        _recv_until(
+        tool_event, _tool_seen = _recv_until(
             ws,
             lambda payload: payload.get("type") == "ceo.agent.tool"
             and payload.get("data", {}).get("tool_name") == "skill-installer",
         )
+        assert tool_event["data"]["source"] == "user"
 
         ws.send_json({"type": "client.pause_turn"})
 
-        _recv_until(
+        follow_up, seen = _recv_until(
             ws,
-            lambda payload: payload.get("type") == "ceo.state"
-            and str(payload.get("data", {}).get("state", {}).get("status") or "") == "paused",
+            lambda payload: payload.get("type") == "ceo.reply.final"
+            and "请告诉我为什么想暂停" in str(payload.get("data", {}).get("text") or ""),
         )
+        pause_ack = next(item for item in seen if item.get("type") == "ceo.control_ack")
+        paused_state = next(item for item in seen if item.get("type") == "ceo.state")
+        assert pause_ack["data"]["manual_pause_waiting_reason"] is True
+        assert pause_ack["data"]["source"] == "user"
+        assert paused_state["data"]["state"]["manual_pause_waiting_reason"] is True
+        assert follow_up["data"]["source"] == "user"
 
     holder.manager = SessionRuntimeManager(agent)
 
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
         snapshot, _seen = _recv_until(ws, lambda payload: payload.get("type") == "snapshot.ceo")
 
-    inflight = snapshot["data"].get("inflight_turn")
-    assert inflight is not None
-    assert inflight["status"] == "paused"
-    assert inflight["user_message"]["content"] == "Pause and restore me"
-    assert inflight["assistant_text"] == "Working on it..."
-    assert [item["tool_name"] for item in inflight["tool_events"]].count("skill-installer") >= 1
+    assert snapshot["data"].get("inflight_turn") is None
+    persisted = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in persisted.messages] == ["user", "assistant"]
+    assert persisted.messages[0]["content"] == "Pause and restore me"
+    assert persisted.messages[1]["metadata"]["source"] == "manual_pause_follow_up"
+    assert "请告诉我为什么想暂停" in str(persisted.messages[1]["content"])
+    assert agent.web_session_heartbeat.clear_calls == [session_id]
 
 
 def test_ceo_websocket_does_not_restore_terminal_error_inflight_snapshot_from_disk(tmp_path: Path, monkeypatch) -> None:
@@ -1171,6 +1287,23 @@ def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": HEARTBEAT_OK}
     ) is False
+
+
+def test_ceo_tool_event_serializers_preserve_source() -> None:
+    serialized = websocket_ceo._serialize_tool_event(
+        AgentEvent(
+            type="tool_execution_start",
+            timestamp="2026-03-28T01:00:00",
+            payload={"tool_name": "skill-installer", "text": "started", "source": "heartbeat"},
+        )
+    )
+    normalized = websocket_ceo._normalize_snapshot_tool_events(
+        [{"tool_name": "skill-installer", "text": "started", "source": "heartbeat"}]
+    )
+
+    assert serialized is not None
+    assert serialized["source"] == "heartbeat"
+    assert normalized[0]["source"] == "heartbeat"
 
 
 def test_ceo_snapshot_filters_internal_cron_user_message() -> None:
@@ -1270,6 +1403,62 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
 
     assert len(live_session.prompts) >= 2
     assert manager.calls[:2] == [("tool-exec:1", 0.1), ("tool-exec:1", 0.1)]
+
+
+def test_web_session_heartbeat_skips_enqueues_while_waiting_for_manual_pause_reason(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-manual-pause"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    persisted.metadata = web_ceo_sessions.normalize_ceo_metadata(
+        {"manual_pause_waiting_reason": True},
+        session_key=session_id,
+    )
+    session_manager.save(persisted)
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=SimpleNamespace(get=lambda _key: None),
+        main_task_service=_TaskService(),
+        session_manager=session_manager,
+    )
+
+    accepted_terminal = service.enqueue_task_terminal_payload(
+        {
+            "task_id": "task:manual-pause-terminal",
+            "session_id": session_id,
+            "status": "success",
+            "finished_at": "2026-03-28T01:34:32+08:00",
+            "dedupe_key": "task-terminal:task:manual-pause-terminal:success:2026-03-28T01:34:32+08:00",
+        }
+    )
+    accepted_stall = service.enqueue_task_stall_payload(
+        {
+            "task_id": "task:manual-pause-stall",
+            "session_id": session_id,
+            "bucket_minutes": 15,
+            "dedupe_key": "task-stall:task:manual-pause-stall:15",
+        }
+    )
+    service.enqueue_tool_background(
+        session_id=session_id,
+        payload={
+            "status": "background_running",
+            "tool_name": "skill-installer",
+            "execution_id": "tool-exec:manual-pause",
+        },
+    )
+    service.enqueue_tool_terminal(
+        session_id=session_id,
+        payload={
+            "status": "completed",
+            "tool_name": "skill-installer",
+            "execution_id": "tool-exec:manual-pause",
+        },
+    )
+
+    assert accepted_terminal is False
+    assert accepted_stall is False
+    assert service._events.peek(session_id) == []
 
 
 @pytest.mark.asyncio

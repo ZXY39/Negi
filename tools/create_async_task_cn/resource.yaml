@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "创建异步任务"
 name: create_async_task
-description: 把用户需求转交为后台异步任务。调用时必须提供一句高度概括核心需求的 core_requirement，并可按需声明最终结果是否需要最终验收。
+description: 把用户需求转交为后台异步任务。调用时必须提供一句高度概括核心需求的 core_requirement，并必须显式传入 execution_policy.mode 来约束任务是聚焦执行还是全面执行。必要时可按需声明最终结果是否需要最终验收。
 source:
   type: ''
   url: ''
@@ -27,13 +27,28 @@ parameters:
     core_requirement:
       type: string
       description: CEO 对用户需求的核心需求概括。只能是一句高度概括核心需求的句子；不能等于 task 内容，不能复制 task 的大段原文。该句子会沿任务树传播到所有下游子节点。
+    execution_policy:
+      type: object
+      description: 执行策略。focus 表示只做最高价值、最必要、与当前目标直接相关的动作；coverage 表示仍然先做最高价值动作，但在需要时允许扩展范围、补做边缘分支或系统性全量操作。
+      properties:
+        mode:
+          type: string
+          description: 执行策略 mode，只允许 `focus` 或 `coverage`。
+          enum: [focus, coverage]
+      required: [mode]
     requires_final_acceptance:
       type: boolean
       description: 是否需要在 root execution 完成后再做最终验收。
     final_acceptance_prompt:
       type: string
       description: 最终验收提示词。仅当 requires_final_acceptance=true 时必填。
-  required: [task, core_requirement]
+    continuation_of_task_id:
+      type: string
+      description: 若这是对某个已失败任务的续跑，请传入原失败任务 id，格式为 task:xxxx。
+    reuse_existing:
+      type: boolean
+      description: 是否优先复用同一会话下、针对同一个 continuation_of_task_id 的进行中续跑任务。默认 true。
+  required: [task, core_requirement, execution_policy]
 exposure:
   agent: true
   main_runtime: false

@@ -20,6 +20,9 @@ class NodeOutputEntry(Model):
 
 
 RESULT_SCHEMA_VERSION = 2
+EXECUTION_POLICY_FOCUS = 'focus'
+EXECUTION_POLICY_COVERAGE = 'coverage'
+EXECUTION_POLICY_MODES = (EXECUTION_POLICY_FOCUS, EXECUTION_POLICY_COVERAGE)
 
 
 class NodeEvidenceItem(Model):
@@ -76,6 +79,10 @@ class FinalAcceptanceState(Model):
     status: str = 'pending'
 
 
+class ExecutionPolicyState(Model):
+    mode: Literal['focus', 'coverage'] = EXECUTION_POLICY_FOCUS
+
+
 class ExecutionStageRound(Model):
     round_id: str = ''
     round_index: int = 0
@@ -107,6 +114,7 @@ class ExecutionStageState(Model):
 class SpawnChildSpec(Model):
     goal: str
     prompt: str
+    execution_policy: ExecutionPolicyState
     acceptance_prompt: str = ''
     requires_acceptance: bool | None = None
 
@@ -230,6 +238,39 @@ def normalize_final_acceptance_metadata(value: Any) -> FinalAcceptanceState:
         node_id=str(payload.get('node_id') or '').strip(),
         status=status,
     )
+
+
+def normalize_execution_policy_metadata(
+    value: Any,
+    *,
+    default_mode: str = EXECUTION_POLICY_FOCUS,
+) -> ExecutionPolicyState:
+    payload = value.model_dump(mode='json') if isinstance(value, ExecutionPolicyState) else (dict(value) if isinstance(value, dict) else {})
+    fallback_mode = str(default_mode or EXECUTION_POLICY_FOCUS).strip().lower()
+    if fallback_mode not in EXECUTION_POLICY_MODES:
+        fallback_mode = EXECUTION_POLICY_FOCUS
+    mode = str(payload.get('mode') or fallback_mode).strip().lower()
+    if mode not in EXECUTION_POLICY_MODES:
+        mode = fallback_mode
+    return ExecutionPolicyState(mode=mode)
+
+
+def build_execution_policy_schema(*, description: str) -> dict[str, Any]:
+    return {
+        'type': 'object',
+        'description': str(description or '').strip(),
+        'properties': {
+            'mode': {
+                'type': 'string',
+                'description': (
+                    '执行策略模式。`focus` 表示只做最高价值、最必要、与当前目标直接相关的动作；'
+                    '`coverage` 表示仍然先做最高价值动作，但在需要时允许扩展范围、补做边缘分支或系统性全量操作。'
+                ),
+                'enum': list(EXECUTION_POLICY_MODES),
+            },
+        },
+        'required': ['mode'],
+    }
 
 
 def normalize_execution_stage_metadata(value: Any) -> ExecutionStageState:

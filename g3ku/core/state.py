@@ -31,6 +31,7 @@ class AgentState:
     messages: list[Any] = field(default_factory=list)
     is_running: bool = False
     paused: bool = False
+    manual_pause_waiting_reason: bool = False
     status: str = "idle"
     latest_message: str = ""
     stream_message: Any | None = None

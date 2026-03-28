@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
-from main.models import SpawnChildResult, SpawnChildSpec
+from main.models import SpawnChildResult, SpawnChildSpec, build_execution_policy_schema
 
 
 class SubmitNextStageTool(Tool):
@@ -21,7 +21,7 @@ class SubmitNextStageTool(Tool):
 
     @property
     def description(self) -> str:
-        return '创建或切换到当前节点的下一个阶段。开始工作前必须先创建阶段；当当前阶段预算耗尽时，也必须先调用它。'
+        return 'Create or switch to the next stage for the current node. You must create a stage before ordinary work, and again when the current stage budget is exhausted.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -30,12 +30,15 @@ class SubmitNextStageTool(Tool):
             'properties': {
                 'stage_goal': {
                     'type': 'string',
-                    'description': '当前阶段的简短目标。执行节点要写清楚哪些工作优先派生子节点、哪些工作由当前节点自行完成；验收节点要写清楚本阶段重点核验哪些证据与结论。',
+                    'description': (
+                        'Concise goal for the current stage. Execution nodes should explain which work is better delegated to child nodes and which work stays local; '
+                        'acceptance nodes should explain which evidence and conclusions this stage will verify.'
+                    ),
                     'minLength': 1,
                 },
                 'tool_round_budget': {
                     'type': 'integer',
-                    'description': '当前阶段允许使用的普通工具轮次数，范围 1 到 10。',
+                    'description': 'How many ordinary tool rounds this stage may use. Must be between 1 and 10.',
                     'minimum': 1,
                     'maximum': 10,
                 },
@@ -61,7 +64,7 @@ class SpawnChildNodesTool(Tool):
 
     @property
     def description(self) -> str:
-        return '并发创建多个子节点。'
+        return 'Create multiple child nodes and run them in parallel.'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -70,22 +73,35 @@ class SpawnChildNodesTool(Tool):
             'properties': {
                 'goal': {
                     'type': 'string',
-                    'description': '子节点目标。',
+                    'description': 'Goal for the child node.',
                 },
                 'prompt': {
                     'type': 'string',
-                    'description': '发送给子节点执行模型的提示词。只传文件路径、目录路径、artifact/content 引用、搜索线索和交付要求，不要直接内联待读正文。',
+                    'description': (
+                        'Prompt for the child node. Pass file paths, directory paths, artifact/content references, search clues, and delivery expectations only; '
+                        'do not inline large source bodies.'
+                    ),
                 },
+                'execution_policy': build_execution_policy_schema(
+                    description=(
+                        'Execution strategy for the child node. It must stay consistent with the parent task: '
+                        '`focus` means only the highest-value, strictly necessary actions for the goal; '
+                        '`coverage` means still start with the highest-value actions, then expand scope when fuller coverage is explicitly needed.'
+                    ),
+                ),
                 'requires_acceptance': {
                     'type': 'boolean',
-                    'description': '是否需要为该子节点追加验收节点。仅在范围广、复杂度高，出错代价大，或需要一致性复核时设为 true。',
+                    'description': (
+                        'Whether this child should get a follow-up acceptance node. Use true only when the child scope is broad, costly to get wrong, '
+                        'or needs a consistency pass before the parent can trust it.'
+                    ),
                 },
                 'acceptance_prompt': {
                     'type': 'string',
-                    'description': '发送给验收节点的提示词。仅当 requires_acceptance=true 时必填，用于说明验收标准。',
+                    'description': 'Prompt for the acceptance node. Required only when requires_acceptance=true.',
                 },
             },
-            'required': ['goal', 'prompt'],
+            'required': ['goal', 'prompt', 'execution_policy'],
         }
         return {
             'type': 'object',
