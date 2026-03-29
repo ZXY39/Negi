@@ -334,6 +334,7 @@ class ContextAssemblyService:
                 'matched_terms': list(memory_write_terms),
                 'visible': memory_write_visible,
             },
+            'authoritative_memory_fact': self._extract_authoritative_retrieved_memory_fact(retrieved_memory) if memory_write_terms else '',
             'recent_history_count': len(recent_history),
             'tokens': {
                 'system_prompt': estimate_tokens(system_prompt),

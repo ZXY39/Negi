@@ -677,7 +677,7 @@ class FilesystemTool:
         if scope_type == 'file':
             suggestions.append('Open a local excerpt first, then search within that smaller context.')
         else:
-            suggestions.append('List or describe the directory first, then search a smaller subtree.')
+            suggestions.append('List the directory first, then search a smaller subtree.')
             suggestions.append('Limit the query to a filename pattern or extension before retrying.')
         return {
             'ok': True,

@@ -22,10 +22,6 @@ _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 class RuntimeAgentSession:
     """Primary AgentSession implementation backed by the runtime engine."""
 
-    _MANUAL_PAUSE_FOLLOW_UP_TEXT = (
-        "我先不继续自动分析或续跑任务。请告诉我为什么想暂停，我会根据你的原因再决定下一步。"
-    )
-
     def __init__(
         self,
         loop,
@@ -472,36 +468,39 @@ class RuntimeAgentSession:
         self._sync_persisted_inflight_turn()
         await self._emit("state_snapshot", state=self.state_dict())
 
-    async def _emit_manual_pause_follow_up(self, text: str | None = None) -> None:
-        follow_up_text = str(text or self._MANUAL_PAUSE_FOLLOW_UP_TEXT).strip() or self._MANUAL_PAUSE_FOLLOW_UP_TEXT
+    async def _persist_manual_pause_user_message(self) -> None:
         prompt = self._last_prompt
         user_input = prompt if isinstance(prompt, UserInputMessage) else UserInputMessage(content=self._history_text(prompt))
-        internal_source = self._internal_prompt_source(user_input)
-        interaction_flow = self._interaction_flow_snapshot()
-        interaction_trace = self.interaction_trace_snapshot()
-        stage_snapshot = self.current_stage_snapshot()
+        if self._internal_prompt_source(user_input) is not None:
+            return
         user_text = self._history_text(user_input.content)
-        self._state.latest_message = follow_up_text
-        await self._persist_turn_transcript(
-            user_input=user_input,
-            user_text=user_text,
-            assistant_text=follow_up_text,
-            interaction_flow=interaction_flow,
-            interaction_trace=interaction_trace,
-            internal_source=internal_source,
-            route_kind="manual_pause_follow_up",
-            assistant_metadata={"source": "manual_pause_follow_up"},
-        )
-        await self._emit(
-            "message_end",
-            role="assistant",
-            text=follow_up_text,
-            heartbeat_internal=False,
-            source=internal_source or "user",
-            interaction_trace=interaction_trace,
-            stage=stage_snapshot,
-        )
-        self.clear_interaction_trace()
+        if not user_text.strip() and not user_input.attachments:
+            return
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            persisted_session.add_message(
+                "user",
+                user_text,
+                attachments=list(user_input.attachments or []),
+                metadata=dict(user_input.metadata or {}),
+            )
+            if self._state.session_key.startswith("web:"):
+                from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
+
+                update_ceo_session_after_turn(
+                    persisted_session,
+                    user_text=user_text,
+                    assistant_text="",
+                    route_kind="",
+                )
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            await self._emit(
+                "message_delta",
+                channel="analysis",
+                kind="persistence_warning",
+                text="Manual pause transcript persistence failed; the paused user message is still available in-memory.",
+            )
 
     async def _handle_progress(
         self,
@@ -926,6 +925,7 @@ class RuntimeAgentSession:
                     heartbeat.clear_session(self._state.session_key)
                 except Exception:
                     logger.debug("manual pause heartbeat clear skipped for {}", self._state.session_key)
+            await self._persist_manual_pause_user_message()
         await self._emit(
             "control_ack",
             action="pause",
@@ -935,7 +935,7 @@ class RuntimeAgentSession:
         )
         await self._emit_state_snapshot()
         if manual:
-            await self._emit_manual_pause_follow_up()
+            self.clear_interaction_trace()
 
     async def resume(self, *, replan: bool = False, additional_context: str | None = None) -> RunResult:
         self._set_manual_pause_waiting_reason(False)

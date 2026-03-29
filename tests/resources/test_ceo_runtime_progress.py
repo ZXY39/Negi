@@ -770,25 +770,18 @@ async def test_runtime_agent_session_manual_pause_freezes_heartbeat_and_persists
         if event.type == "state_snapshot"
         and str((event.payload.get("state") or {}).get("status") or "") == "paused"
     )
-    follow_up = next(event for event in events if event.type == "message_end")
-
     assert pause_ack.payload["manual_pause_waiting_reason"] is True
     assert pause_ack.payload["source"] == "user"
     assert paused_state.payload["state"]["manual_pause_waiting_reason"] is True
-    assert follow_up.payload["text"] == (
-        "我先不继续自动分析或续跑任务。请告诉我为什么想暂停，我会根据你的原因再决定下一步。"
-    )
-    assert follow_up.payload["source"] == "user"
+    assert all(event.type != "message_end" for event in events)
     assert heartbeat.clear_calls == ["web:pause-manual"]
     assert session.manual_pause_waiting_reason() is True
     assert session.inflight_turn_snapshot() is None
     assert web_ceo_sessions.read_inflight_turn_snapshot("web:pause-manual") is None
 
     reloaded = SessionManager(tmp_path).get_or_create("web:pause-manual")
-    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
+    assert [message["role"] for message in reloaded.messages] == ["user"]
     assert reloaded.messages[0]["content"] == "Pause and wait"
-    assert reloaded.messages[1]["metadata"]["source"] == "manual_pause_follow_up"
-    assert "请告诉我为什么想暂停" in str(reloaded.messages[1]["content"])
     normalized_metadata = web_ceo_sessions.normalize_ceo_metadata(reloaded.metadata, session_key="web:pause-manual")
     assert normalized_metadata["manual_pause_waiting_reason"] is True
 
@@ -1113,7 +1106,7 @@ def test_ceo_websocket_error_payload_carries_interaction_trace(tmp_path: Path, m
     assert error_events[0]["data"]["interaction_trace"]["stages"][0]["stage_goal"] == "Open bilibili"
 
 
-def test_ceo_websocket_manual_pause_emits_follow_up_and_hides_inflight_turn(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_websocket_manual_pause_hides_inflight_turn_without_final_reply(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
     async def _ensure_services(_agent) -> None:
@@ -1208,17 +1201,16 @@ def test_ceo_websocket_manual_pause_emits_follow_up_and_hides_inflight_turn(tmp_
 
         ws.send_json({"type": "client.pause_turn"})
 
-        follow_up, seen = _recv_until(
+        paused_state, seen = _recv_until(
             ws,
-            lambda payload: payload.get("type") == "ceo.reply.final"
-            and "请告诉我为什么想暂停" in str(payload.get("data", {}).get("text") or ""),
+            lambda payload: payload.get("type") == "ceo.state"
+            and str(payload.get("data", {}).get("state", {}).get("status") or "") == "paused",
         )
         pause_ack = next(item for item in seen if item.get("type") == "ceo.control_ack")
-        paused_state = next(item for item in seen if item.get("type") == "ceo.state")
         assert pause_ack["data"]["manual_pause_waiting_reason"] is True
         assert pause_ack["data"]["source"] == "user"
         assert paused_state["data"]["state"]["manual_pause_waiting_reason"] is True
-        assert follow_up["data"]["source"] == "user"
+        assert all(item.get("type") != "ceo.reply.final" for item in seen)
 
     holder.manager = SessionRuntimeManager(agent)
 
@@ -1226,11 +1218,11 @@ def test_ceo_websocket_manual_pause_emits_follow_up_and_hides_inflight_turn(tmp_
         snapshot, _seen = _recv_until(ws, lambda payload: payload.get("type") == "snapshot.ceo")
 
     assert snapshot["data"].get("inflight_turn") is None
+    assert [message["role"] for message in snapshot["data"].get("messages", [])] == ["user"]
+    assert snapshot["data"]["messages"][0]["content"] == "Pause and restore me"
     persisted = SessionManager(tmp_path).get_or_create(session_id)
-    assert [message["role"] for message in persisted.messages] == ["user", "assistant"]
+    assert [message["role"] for message in persisted.messages] == ["user"]
     assert persisted.messages[0]["content"] == "Pause and restore me"
-    assert persisted.messages[1]["metadata"]["source"] == "manual_pause_follow_up"
-    assert "请告诉我为什么想暂停" in str(persisted.messages[1]["content"])
     assert agent.web_session_heartbeat.clear_calls == [session_id]
 
 

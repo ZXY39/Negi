@@ -92,17 +92,6 @@ def test_ceo_memory_write_does_not_count_against_stage_budget() -> None:
     assert round_payload['budget_counted'] is False
     assert trace['stages'][0]['tool_rounds_used'] == 0
 
-
-def test_ceo_frontdoor_recommends_focus_execution_policy_by_default() -> None:
-    assert CeoFrontDoorRunner._recommended_execution_policy_mode('整理一份AI行业当天最新消息给我') == 'focus'
-    assert CeoFrontDoorRunner._recommended_execution_policy_mode('帮我写一版发布公告初稿') == 'focus'
-
-
-def test_ceo_frontdoor_recommends_coverage_execution_policy_when_user_explicitly_requests_full_coverage() -> None:
-    assert CeoFrontDoorRunner._recommended_execution_policy_mode('全面盘点今天 AI 行业所有重要动态，不要遗漏') == 'coverage'
-    assert CeoFrontDoorRunner._recommended_execution_policy_mode('give me exhaustive coverage and do not miss anything') == 'coverage'
-
-
 class _FilesystemTool(Tool):
     def __init__(self, *, description: str) -> None:
         self._description = description
@@ -819,10 +808,9 @@ async def test_ceo_frontdoor_runner_uses_cron_internal_system_message_and_cron_o
     messages = backend.calls[0]['messages']
     assert messages[0] == {'role': 'system', 'content': 'SYSTEM PROMPT'}
     assert messages[1]['role'] == 'system'
-    assert 'execution_policy.mode' in str(messages[1]['content'])
-    assert messages[2]['role'] == 'system'
-    assert 'Current cron job id: job-77' in str(messages[2]['content'])
-    assert 'Exit condition: 发布完成后或用户要求取消' in str(messages[2]['content'])
+    assert 'Current cron job id: job-77' in str(messages[1]['content'])
+    assert 'Exit condition: 发布完成后或用户要求取消' in str(messages[1]['content'])
+    assert all('execution_policy.mode' not in str(message.get('content') or '') for message in messages)
 
 
 @pytest.mark.asyncio
@@ -1413,8 +1401,7 @@ async def test_ceo_frontdoor_runner_passes_session_task_defaults_into_runtime_co
     await runner.run_turn(user_input=SimpleNamespace(content='dispatch work'), session=session)
 
     assert loop.tools.runtime_contexts[-1]['task_defaults'] == {'max_depth': 4}
-    assert loop.tools.runtime_contexts[-1]['recommended_execution_policy'] == {'mode': 'focus'}
-    assert loop.tools.runtime_contexts[-1]['recommended_execution_policy'] == {'mode': 'focus'}
+    assert 'recommended_execution_policy' not in loop.tools.runtime_contexts[-1]
 
 
 @pytest.mark.asyncio
@@ -1845,6 +1832,60 @@ async def test_ceo_frontdoor_runner_still_uses_persisted_session_history_when_ch
 
     assert output == 'done'
     assert captured['persisted_session'] is not None
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_answers_from_authoritative_memory_without_model_call(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder([LLMResponse(content='should not be used', finish_reason='stop')])
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_filesystem_tool(description='Read files from disk')]),
+        max_iterations=12,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['filesystem']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['filesystem'],
+            trace={'authoritative_memory_fact': '用户要求以后所有整理文档类的结果默认放在桌面。'},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(
+        user_input=SimpleNamespace(content='你理解错了，我的意思是以后所有整理文档类的结果默认放哪里'),
+        session=session,
+    )
+
+    assert output == '根据我已保存的长期记忆，用户要求以后所有整理文档类的结果默认放在桌面。'
+    assert backend.calls == []
+    assert getattr(session, '_last_route_kind', '') == 'direct_reply'
 
 
 class _ProviderRecorder:

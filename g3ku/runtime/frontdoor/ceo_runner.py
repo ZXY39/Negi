@@ -121,28 +121,17 @@ class CeoFrontDoorRunner:
     _CEO_NON_BUDGET_TOOLS = {"create_async_task", "memory_write"}
     _EMPTY_RESPONSE_RETRY_LIMIT = 1
     _STAGE_SETUP_ONLY_RETRY_LIMIT = 1
-    _EXECUTION_POLICY_FOCUS = "focus"
-    _EXECUTION_POLICY_COVERAGE = "coverage"
-    _COVERAGE_INTENT_MARKERS = (
-        "全面盘点",
-        "全面梳理",
-        "系统盘点",
-        "系统梳理",
-        "系统性覆盖",
-        "全量覆盖",
-        "全景梳理",
-        "不要遗漏",
-        "不要漏掉",
-        "尽可能完整",
-        "尽量完整",
-        "完整列出",
-        "full coverage",
-        "cover everything",
-        "don't miss anything",
-        "do not miss anything",
-        "comprehensive",
-        "exhaustive",
-        "systematic coverage",
+    _AUTHORITATIVE_DEFAULT_QUERY_MARKERS = (
+        "默认放哪里",
+        "默认放哪",
+        "默认放哪儿",
+        "默认放在哪里",
+        "默认应该放",
+        "默认存哪",
+        "默认保存到哪",
+        "default location",
+        "default path",
+        "where should",
     )
 
     def __init__(self, *, loop) -> None:
@@ -178,6 +167,25 @@ class CeoFrontDoorRunner:
                     parts.append(text.strip())
             return "\n".join(parts).strip()
         return str(value or "")
+
+    @classmethod
+    def _should_answer_from_authoritative_memory(cls, *, query_text: str, authoritative_fact: str) -> bool:
+        query = str(query_text or "").strip().lower()
+        fact = str(authoritative_fact or "").strip()
+        if not query or not fact:
+            return False
+        if "默认" not in query and "default" not in query:
+            return False
+        return any(marker in query for marker in cls._AUTHORITATIVE_DEFAULT_QUERY_MARKERS)
+
+    @staticmethod
+    def _authoritative_memory_reply(authoritative_fact: str) -> str:
+        fact = str(authoritative_fact or "").strip()
+        if not fact:
+            return ""
+        if fact[-1] not in "。！？!?.":
+            fact = f"{fact}。"
+        return f"根据我已保存的长期记忆，{fact}"
 
     @staticmethod
     def _model_content(value: Any) -> Any:
@@ -267,30 +275,6 @@ class CeoFrontDoorRunner:
         )
         max_parallel = role_limit if role_limit is not None else (getattr(react_loop, "_max_parallel_tool_calls", 10) if react_loop is not None else 10)
         return enabled, max_parallel
-
-    @classmethod
-    def _recommended_execution_policy_mode(cls, query_text: str) -> str:
-        normalized = " ".join(str(query_text or "").split())
-        lowered = normalized.lower()
-        for marker in cls._COVERAGE_INTENT_MARKERS:
-            if marker in normalized or marker in lowered:
-                return cls._EXECUTION_POLICY_COVERAGE
-        return cls._EXECUTION_POLICY_FOCUS
-
-    @classmethod
-    def _execution_policy_guidance_message(cls, query_text: str) -> dict[str, str]:
-        recommended_mode = cls._recommended_execution_policy_mode(query_text)
-        lines = [
-            '异步任务执行策略规则：',
-            '- 当你调用 `create_async_task` 创建或续跑异步任务时，必须显式传入 `execution_policy.mode`。',
-            '- 允许的 mode 只有 `focus` 与 `coverage`。',
-            '- 默认使用 `focus`；只有当用户明确要求全面盘点、不要遗漏、尽可能完整、全量覆盖或系统梳理时，才使用 `coverage`。',
-            '- `focus` 适用于各种任务类型，表示只做最高价值、最必要、与当前目标直接相关的动作。',
-            '- `coverage` 也适用于各种任务类型，表示仍先做最高价值动作，但在需要时允许扩展范围、补做边缘分支或系统性全量操作。',
-            '- 任务说明文本必须与所选 mode 保持一致，后续派生子节点也必须沿用同一 mode。',
-            f'- 当前用户请求推荐使用的 `execution_policy.mode` 是 `{recommended_mode}`。',
-        ]
-        return {'role': 'system', 'content': '\n'.join(lines)}
 
     def _registered_tools(self, tool_names: list[str]) -> dict[str, Tool]:
         tools: dict[str, Tool] = {}
@@ -1038,14 +1022,17 @@ class CeoFrontDoorRunner:
             exposure=exposure,
             persisted_session=persisted_session,
         )
+        authoritative_fact = str((getattr(assembly, "trace", None) or {}).get("authoritative_memory_fact") or "").strip()
+        if self._should_answer_from_authoritative_memory(query_text=query_text, authoritative_fact=authoritative_fact):
+            output = self._authoritative_memory_reply(authoritative_fact)
+            setattr(session, "_last_route_kind", "direct_reply")
+            return output
         tool_names = list(assembly.tool_names or list(exposure.get("tool_names") or []))
         if cron_internal:
             tool_names = ["cron"]
         cron_system_message = self._cron_internal_system_message(metadata)
-        recommended_execution_policy = {'mode': self._recommended_execution_policy_mode(query_text)}
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": assembly.system_prompt},
-            self._execution_policy_guidance_message(query_text),
         ]
         if cron_system_message is not None:
             messages.append(cron_system_message)
@@ -1074,7 +1061,6 @@ class CeoFrontDoorRunner:
             "temp_dir": str(getattr(self._loop, "temp_dir", "") or ""),
             "loop": self._loop,
             "task_defaults": session_task_defaults,
-            "recommended_execution_policy": recommended_execution_policy,
             "project_python": str(project_environment.get("project_python") or ""),
             "project_python_dir": str(project_environment.get("project_python_dir") or ""),
             "project_scripts_dir": str(project_environment.get("project_scripts_dir") or ""),
