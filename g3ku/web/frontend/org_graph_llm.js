@@ -383,8 +383,37 @@
     return trim(section.jsonText) !== trim(section.initialJsonText);
   }
 
+  function memorySectionNeedsInitialSave(section) {
+    if (!section) return false;
+    return !trim(section.configId) && !trim(section.error) && !!trim(section.jsonText);
+  }
+
+  function memorySectionHasPendingChanges(section) {
+    return memorySectionNeedsInitialSave(section) || memorySectionIsModified(section);
+  }
+
   function modifiedMemorySectionKeys(memory = llmState().editor.memory) {
-    return ["embedding", "rerank"].filter((sectionKey) => memorySectionIsModified(memory?.[sectionKey]));
+    return ["embedding", "rerank"].filter((sectionKey) => memorySectionHasPendingChanges(memory?.[sectionKey]));
+  }
+
+  function memorySectionKeyFromTextareaId(elementId) {
+    const text = trim(elementId);
+    if (!text.startsWith("llm-memory-") || !text.endsWith("-json")) return "";
+    return trim(text.slice("llm-memory-".length, -"-json".length));
+  }
+
+  function refreshMemorySaveButtonState() {
+    const button = U.llmEditorShell?.querySelector('[data-llm-action="save-memory"]');
+    if (!button) return;
+    button.disabled = !canSaveMemoryEditor() || !!llmState().saving;
+  }
+
+  function handleMemorySectionInput(sectionKey) {
+    const section = syncMemorySectionText(sectionKey);
+    if (!section) return;
+    section.validation = null;
+    section.probe = null;
+    refreshMemorySaveButtonState();
   }
 
   function setMemorySectionValidationError(section, message, field = "json") {
@@ -1380,6 +1409,11 @@
       if (event.target?.id === "llm-provider-select") void handleProviderChange();
       const memoryTemplateSection = event.target?.dataset?.llmMemoryTemplate;
       if (memoryTemplateSection) void handleMemoryTemplateChange(memoryTemplateSection);
+    });
+    U.llmEditorShell?.addEventListener("input", (event) => {
+      const sectionKey = memorySectionKeyFromTextareaId(event.target?.id);
+      if (!sectionKey) return;
+      handleMemorySectionInput(sectionKey);
     });
     U.llmEditorShell?.addEventListener("click", (event) => {
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
