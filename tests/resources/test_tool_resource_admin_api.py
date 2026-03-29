@@ -1571,7 +1571,7 @@ def test_task_rest_endpoint_normalizes_short_task_id():
 
         def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False):
             captured['detail_task_id'] = task_id
-            return {'task': {'task_id': task_id}, 'progress': {'task_id': task_id, 'mark_read': mark_read}}
+            return {'task': {'task_id': task_id}, 'summary': {'task_id': task_id}}
 
     from main.api import rest as task_rest
 

@@ -1110,6 +1110,14 @@ class TaskLogService:
                 if key in {'active_node_ids', 'runnable_node_ids', 'waiting_node_ids', 'frames'}:
                     continue
                 current[key] = copy.deepcopy(value)
+            if 'frames' in payload:
+                current['frames'] = [dict(item) for item in list(payload.get('frames') or []) if isinstance(item, dict)]
+            if 'active_node_ids' in payload:
+                current['active_node_ids'] = [str(item) for item in list(payload.get('active_node_ids') or []) if str(item or '').strip()]
+            if 'runnable_node_ids' in payload:
+                current['runnable_node_ids'] = [str(item) for item in list(payload.get('runnable_node_ids') or []) if str(item or '').strip()]
+            if 'waiting_node_ids' in payload:
+                current['waiting_node_ids'] = [str(item) for item in list(payload.get('waiting_node_ids') or []) if str(item or '').strip()]
             current['task_id'] = task.task_id
             current['root_node_id'] = task.root_node_id
             current['updated_at'] = now_iso()
@@ -1121,6 +1129,44 @@ class TaskLogService:
                 current = self._coerce_terminal_runtime_state(current)
                 for record in list(self._store.list_task_runtime_frames(task.task_id) or []):
                     self._store.delete_task_runtime_frame(task.task_id, record.node_id)
+            else:
+                should_sync_frames = any(key in payload for key in {'active_node_ids', 'runnable_node_ids', 'waiting_node_ids', 'frames'})
+                if should_sync_frames:
+                    provided_frames = {
+                        str(item.get('node_id') or '').strip(): self._sanitize_runtime_frame(item)
+                        for item in list(current.get('frames') or [])
+                        if isinstance(item, dict) and str(item.get('node_id') or '').strip()
+                    }
+                    active_node_ids = {
+                        str(item or '').strip()
+                        for item in list(current.get('active_node_ids') or [])
+                        if str(item or '').strip()
+                    }
+                    runnable_node_ids = {
+                        str(item or '').strip()
+                        for item in list(current.get('runnable_node_ids') or [])
+                        if str(item or '').strip()
+                    }
+                    waiting_node_ids = {
+                        str(item or '').strip()
+                        for item in list(current.get('waiting_node_ids') or [])
+                        if str(item or '').strip()
+                    }
+                    frame_records: list[TaskProjectionRuntimeFrameRecord] = []
+                    for node_id in sorted(set(provided_frames) | active_node_ids | runnable_node_ids | waiting_node_ids):
+                        frame_payload = provided_frames.get(node_id) or self._default_frame(node_id=node_id)
+                        record = self._runtime_frame_record(task=task, frame=frame_payload)
+                        frame_records.append(
+                            record.model_copy(
+                                update={
+                                    'active': node_id in active_node_ids if 'active_node_ids' in payload else bool(record.active),
+                                    'runnable': node_id in runnable_node_ids if 'runnable_node_ids' in payload else bool(record.runnable),
+                                    'waiting': node_id in waiting_node_ids if 'waiting_node_ids' in payload else bool(record.waiting),
+                                    'updated_at': str(current.get('updated_at') or now_iso()),
+                                }
+                            )
+                        )
+                    self._store.replace_task_runtime_frames(task.task_id, frame_records)
             self._store.upsert_runtime_state(
                 task_id=task.task_id,
                 session_id=task.session_id,
@@ -1230,6 +1276,8 @@ class TaskLogService:
                 }
             )
             self._store.upsert_task(updated)
+            if self._is_terminal_status(next_status):
+                self._store.replace_task_runtime_frames(updated.task_id, [])
             runtime_state = self.read_runtime_state(task_id)
             if runtime_state is not None:
                 runtime_state['updated_at'] = now_iso()
@@ -1825,10 +1873,6 @@ class TaskLogService:
             'auxiliary_children': [self._compact_tree_payload(child) for child in list(getattr(root, 'auxiliary_children', []) or [])],
             'children': [self._compact_tree_payload(child) for child in list(root.children or [])],
         }
-
-    @staticmethod
-    def _default_selected_node_id(root) -> str:
-        return str(getattr(root, 'node_id', '') or '')
 
     @classmethod
     def _sanitize_runtime_state(cls, payload: dict[str, Any]) -> dict[str, Any]:

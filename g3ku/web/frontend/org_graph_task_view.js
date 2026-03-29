@@ -1,4 +1,4 @@
-// Task tree and task detail view layer extracted from org_graph_app.js.
+﻿// Task tree and task detail view layer extracted from org_graph_app.js.
 // Loaded before org_graph_app.js and relies on globals initialized there at runtime.
 
 function setTaskSelectionEmptyVisible(visible) {
@@ -301,17 +301,16 @@ function hasManualTreeRoundSelections() {
 }
 
 function taskDetailStatusLabel(task) {
-    return ({ in_progress: "运行中", success: "已完成", failed: "失败", blocked: "已暂停", unknown: "未知" })[taskStatusKey(task)] || "未知";
+    return ({ in_progress: "Running", success: "Completed", failed: "Failed", blocked: "Paused", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
 }
 
-function taskInitialPromptText(task = null, progress = null) {
-    return String(task?.user_request || task?.title || task?.final_output || progress?.text || "暂无初始提示词").trim() || "暂无初始提示词";
+function taskInitialPromptText(task = null) {
+    return String(task?.user_request || task?.title || task?.final_output || "No task prompt").trim() || "No task prompt";
 }
 
 function renderTaskDetailHeader({ resetPromptDisclosure = false } = {}) {
     const task = S.currentTask || null;
-    const progress = S.currentTaskProgress || null;
-    const promptText = taskInitialPromptText(task, progress);
+    const promptText = taskInitialPromptText(task);
     if (resetPromptDisclosure && U.tdPromptDisclosure) U.tdPromptDisclosure.open = false;
     if (U.tdTitle) {
         U.tdTitle.textContent = promptText;
@@ -335,7 +334,7 @@ function syncTaskTreeHeaderState(projectedRoot = null) {
         U.taskTreeResetRounds.disabled = !hasManual;
         U.taskTreeResetRounds.classList.toggle("active", hasManual);
         U.taskTreeResetRounds.title = hasManual
-            ? "恢复所有节点的最新树视图"
+            ? "鎭㈠鎵€鏈夎妭鐐圭殑鏈€鏂版爲瑙嗗浘"
             : "";
     }
 }
@@ -465,7 +464,7 @@ function nodeOutputText(node) {
 function truncateNodeTitle(text, maxChars = 20) {
     const chars = Array.from(String(text || ""));
     if (chars.length <= maxChars) return chars.join("");
-    return `${chars.slice(0, maxChars).join("")}…`;
+    return `${chars.slice(0, maxChars).join("")}...`;
 }
 
 function resolveNodeTitle(node, detail) {
@@ -474,7 +473,7 @@ function resolveNodeTitle(node, detail) {
     const rawTitle = goal || String(node?.title || node?.node_id || "").trim() || String(node?.node_id || "");
     const acceptanceTitle = rawTitle.replace(/^accept\s*:\s*/i, "").trim();
     const fullTitle = nodeKind === "acceptance"
-        ? (acceptanceTitle ? `检验 · ${acceptanceTitle}` : "检验")
+        ? (acceptanceTitle ? `Acceptance | ${acceptanceTitle}` : "Acceptance")
         : rawTitle;
     return {
         goal: nodeKind === "acceptance" ? fullTitle : (goal || fullTitle),
@@ -493,7 +492,7 @@ function isInspectionActiveStatus(status) {
 
 function resolveTreeNodeStatusLabel(status, { kind = "", inspectionActive = false } = {}) {
     if (inspectionActive || (isAcceptanceNodeKind(kind) && isInspectionActiveStatus(status))) {
-        return { visualState: "inspecting", displayState: "检验中" };
+        return { visualState: "inspecting", displayState: "妫€楠屼腑" };
     }
     const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
     return {
@@ -521,11 +520,19 @@ function compactNodeHeading(node, maxChars = 72) {
     return `${chars.slice(0, maxChars).join("")}...`;
 }
 
-function liveFramesByNodeId(progress) {
-    const frames = Array.isArray(progress?.live_state?.frames) ? progress.live_state.frames : [];
+function indexTaskLiveFrames(frames) {
+    return Object.fromEntries(
+        (Array.isArray(frames) ? frames : [])
+            .map((frame) => [String(frame?.node_id || "").trim(), frame])
+            .filter(([nodeId]) => !!nodeId),
+    );
+}
+
+function liveFramesByNodeId() {
+    const frames = Object.entries(S.liveFrameMap || {});
     return new Map(
         frames
-            .map((frame) => [String(frame?.node_id || "").trim(), frame])
+            .map(([nodeId, frame]) => [String(nodeId || "").trim(), frame])
             .filter(([nodeId]) => !!nodeId),
     );
 }
@@ -611,8 +618,8 @@ function normalizeExecutionStageTrace(stage, index = 0) {
     return {
         stage_id: String(stage?.stage_id || ""),
         stage_index: normalizeInt(stage?.stage_index, index + 1),
-        mode: String(stage?.mode || "自主执行").trim() || "自主执行",
-        status: String(stage?.status || "进行中").trim() || "进行中",
+        mode: String(stage?.mode || "鑷富鎵ц").trim() || "鑷富鎵ц",
+        status: String(stage?.status || "in_progress").trim() || "in_progress",
         stage_goal: String(stage?.stage_goal || "").trim(),
         stage_total_steps: normalizeInt(stage?.tool_round_budget, 0),
         tool_rounds_used: normalizeInt(stage?.tool_rounds_used, 0),
@@ -641,9 +648,9 @@ function normalizeExecutionStageTrace(stage, index = 0) {
 
 function stageTraceStatus(stage) {
     return ({
-        "进行中": "running",
-        "完成": "success",
-        "失败": "error",
+        "in_progress": "running",
+        "瀹屾垚": "success",
+        "澶辫触": "error",
     }[String(stage?.status || "").trim()] || "info");
 }
 
@@ -692,7 +699,7 @@ function resolveTraceStepOpenState(step, state, index) {
     return !!step.open;
 }
 
-function renderTraceMessage(value, emptyText = "暂无内容") {
+function renderTraceMessage(value, emptyText = "鏆傛棤鍐呭") {
     const text = String(value || "").trim() || emptyText;
     return `
         <div class="task-trace-field">
@@ -704,33 +711,33 @@ function renderTraceMessage(value, emptyText = "暂无内容") {
 function renderExecutionStageRounds(stage) {
     const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
     if (!rounds.length) {
-        return renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次");
+        return renderTraceField("闃舵杞", "", "褰撳墠闃舵鏆傛棤宸ュ叿杞");
     }
     return rounds.map((round, index) => {
         const title = round.budget_counted
-            ? `第 ${round.round_index || index + 1} 轮`
-            : "派生节点";
+            ? `Round ${round.round_index || index + 1}`
+            : "娲剧敓鑺傜偣";
         const tools = Array.isArray(round.tools) ? round.tools : [];
         const toolDetails = tools.length
             ? tools.map((step, toolIndex) => renderTraceStep({
                 traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}:tool:${step.tool_call_id || toolIndex}`,
-                title: `工具 · ${step.tool_name || "tool"}`,
+                title: `宸ュ叿 路 ${step.tool_name || "tool"}`,
                 status: step.status || "info",
                 open: false,
                 bodyHtml: [
-                    renderTraceField("参数", step.arguments_text, "无参数"),
+                    renderTraceField("Arguments", step.arguments_text, "No arguments"),
                     renderTraceField(
-                        "工具输出",
+                        "宸ュ叿杈撳嚭",
                         step.output_text,
-                        step.status === "running" ? "等待工具输出..." : "暂无工具输出",
+                        step.status === "running" ? "绛夊緟宸ュ叿杈撳嚭..." : "鏆傛棤宸ュ叿杈撳嚭",
                         { decodeEscapes: true },
                     ),
                 ].join(""),
             })).join("")
-            : renderTraceField("工具", "", "本轮暂无工具记录");
+            : renderTraceField("宸ュ叿", "", "鏈疆鏆傛棤宸ュ叿璁板綍");
         return renderTraceStep({
             traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}`,
-            title: `${title}${round.created_at ? ` · ${formatCompactTime(round.created_at)}` : ""}`,
+            title: `${title}${round.created_at ? ` 路 ${formatCompactTime(round.created_at)}` : ""}`,
             status: roundTraceStatus(round),
             open: false,
             bodyHtml: toolDetails,
@@ -751,13 +758,13 @@ function buildExecutionTraceSteps(trace, node) {
             initialPromptStep,
             ...trace.stages.map((stage, index) => ({
                 traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
-                title: `${stage.mode || "自主执行"}${stage.created_at ? ` · ${formatCompactTime(stage.created_at)}` : ""}`,
+                title: `${stage.mode || "鑷富鎵ц"}${stage.created_at ? ` 路 ${formatCompactTime(stage.created_at)}` : ""}`,
                 status: stageTraceStatus(stage),
                 open: index === trace.stages.length - 1,
                 bodyHtml: [
-                    renderTraceMessage(`本阶段最大轮数为${stage.stage_total_steps || 0}`, "本阶段最大轮数为0"),
-                    renderTraceField("状态", String(stage.status || "进行中"), "进行中"),
-                    renderTraceField("阶段目标", stage.stage_goal, "暂无阶段目标"),
+                    renderTraceMessage(`鏈樁娈垫渶澶ц疆鏁颁负${stage.stage_total_steps || 0}`, "鏈樁娈垫渶澶ц疆鏁颁负0"),
+                    renderTraceField("Status", String(stage.status || "in_progress"), "in_progress"),
+                    renderTraceField("闃舵鐩爣", stage.stage_goal, "鏆傛棤闃舵鐩爣"),
                     renderExecutionStageRounds(stage),
                 ].join(""),
             })),
@@ -859,25 +866,25 @@ function renderExecutionTrace(node) {
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node);
     const steps = [
         renderTraceStep({
-            title: "初始提示词",
+            title: "Initial Prompt",
             status: "info",
             open: false,
-            bodyHtml: renderTraceField("内容", trace.initial_prompt, "暂无初始提示词"),
+            bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
         }),
         ...trace.tool_steps.map((step) => renderTraceStep({
-            title: `使用工具 · ${step.tool_name || "tool"}`,
+            title: `浣跨敤宸ュ叿 路 ${step.tool_name || "tool"}`,
             status: step.status || "info",
             open: false,
             bodyHtml: [
-                renderTraceField("参数", step.arguments_text, "无参数"),
-                renderTraceField("工具输出", step.output_text, step.status === "running" ? "等待工具输出…" : "暂无工具输出"),
+                renderTraceField("Arguments", step.arguments_text, "No arguments"),
+                renderTraceField("Tool Output", step.output_text, step.status === "running" ? "Waiting for tool output..." : "No tool output"),
             ].join(""),
         })),
         renderTraceStep({
-            title: "最终输出",
+            title: "Final Output",
             status: nodeFinalTraceStatus(node),
             open: true,
-            bodyHtml: renderTraceField("内容", trace.final_output, "暂无最终输出"),
+            bodyHtml: renderTraceField("Content", trace.final_output, "No final output"),
         }),
     ];
     U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
@@ -898,7 +905,7 @@ function renderExecutionTrace(node) {
 
 function renderAcceptanceResult(text) {
     if (!U.adAcceptance) return;
-    U.adAcceptance.textContent = String(text || "").trim() || "暂无验收结果";
+    U.adAcceptance.textContent = String(text || "").trim() || "鏆傛棤楠屾敹缁撴灉";
 }
 
 function traceStatusLabel(status) {
@@ -962,7 +969,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     if (!U.adFlow) return;
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
     const preservedTraceScrollTop = Number(effectiveViewState?.traceScrollTop || 0);
-    const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
+    const liveFrameMap = liveFramesByNodeId();
     const fallbackLiveFrame = liveFrameMap.get(String(node?.node_id || "").trim()) || null;
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node, fallbackLiveFrame);
     const stepDescriptors = buildExecutionTraceSteps(trace, node);
@@ -1012,7 +1019,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
 
 function renderFinalOutput(text) {
     if (!U.adOutput) return;
-    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无最终输出" });
+    const nextText = readableText(text, { decodeEscapes: true, emptyText: "No final output" });
     const changed = U.adOutput.textContent !== nextText;
     if (changed) U.adOutput.textContent = nextText;
     return changed;
@@ -1020,7 +1027,7 @@ function renderFinalOutput(text) {
 
 function renderAcceptanceResult(text) {
     if (!U.adAcceptance) return;
-    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无验收结果" });
+    const nextText = readableText(text, { decodeEscapes: true, emptyText: "鏆傛棤楠屾敹缁撴灉" });
     const changed = U.adAcceptance.textContent !== nextText;
     if (changed) U.adAcceptance.textContent = nextText;
     return changed;
@@ -1029,10 +1036,10 @@ function renderAcceptanceResult(text) {
 function formatRoundLabel(label, roundIndex) {
     const normalizedLabel = String(label || "").trim();
     const normalizedIndex = normalizeInt(roundIndex, 0);
-    const fallbackLabel = normalizedIndex > 0 ? `第${normalizedIndex}轮树` : "轮次";
+    const fallbackLabel = normalizedIndex > 0 ? `绗?{normalizedIndex}杞爲` : "杞";
     if (!normalizedLabel) return fallbackLabel;
     const matchedRound = normalizedLabel.match(/^Round\s+(\d+)$/i);
-    if (matchedRound) return `第${matchedRound[1]}轮树`;
+    if (matchedRound) return `绗?{matchedRound[1]}杞爲`;
     return normalizedLabel;
 }
 
@@ -1077,9 +1084,16 @@ function buildNodeRoundState(node) {
 
 function buildExecutionTree(rawTree) {
     if (!rawTree) return null;
-    const nodeRecords = Array.isArray(S.currentTaskProgress?.nodes) ? S.currentTaskProgress.nodes : [];
-    const nodeMap = new Map(nodeRecords.map((item) => [String(item.node_id || ""), item]));
-    const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
+    const nodeMap = new Map();
+    if (S.rootNode && String(S.rootNode?.node_id || "").trim()) {
+        nodeMap.set(String(S.rootNode.node_id || "").trim(), S.rootNode);
+    }
+    Object.entries(S.taskNodeDetails || {}).forEach(([nodeId, item]) => {
+        const normalizedNodeId = String(nodeId || "").trim();
+        if (!normalizedNodeId || !item || typeof item !== "object") return;
+        nodeMap.set(normalizedNodeId, item);
+    });
+    const liveFrameMap = liveFramesByNodeId();
     const walk = (node) => {
         const nodeId = String(node.node_id || "");
         const detail = nodeMap.get(nodeId) || {};
@@ -1217,7 +1231,7 @@ function renderTree() {
         button.dataset.status = nodeStatus;
         button.title = fullTitle;
         button.setAttribute("aria-pressed", S.selectedNodeId === node.node_id ? "true" : "false");
-        button.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">暂无其他可切换子树</span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>`;
+        button.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">鏆傛棤鍏朵粬鍙垏鎹㈠瓙鏍?/span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>`;
         button.addEventListener("click", (event) => handleTreeNodeClick(node, event));
         return button;
     };
@@ -1247,14 +1261,14 @@ function renderTree() {
             });
             const label = document.createElement("span");
             label.className = "execution-tree-round-label";
-            label.textContent = "轮次";
+            label.textContent = "杞";
             const select = document.createElement("select");
             select.className = "execution-tree-round-select resource-select";
-            select.dataset.resourceSelectLabel = `${fullTitle} 轮次`;
+            select.dataset.resourceSelectLabel = `${fullTitle} 杞`;
             roundOptions.forEach((round) => {
                 const option = document.createElement("option");
                 option.value = round.roundId;
-                option.textContent = round.isLatest ? `${round.label}（最新）` : round.label;
+                option.textContent = round.isLatest ? `${round.label}锛堟渶鏂帮級` : round.label;
                 select.appendChild(option);
             });
             if (node.selectedRoundId) select.value = node.selectedRoundId;
@@ -1471,7 +1485,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     const detail = await ensureTaskNodeDetail(nodeId, { force: forceRefresh });
     if (renderToken !== S.taskDetailRenderToken) return;
     if (String(S.selectedNodeId || "").trim() !== nodeId) return;
-    const liveFrameMap = liveFramesByNodeId(S.currentTaskProgress);
+    const liveFrameMap = liveFramesByNodeId();
     const mergedNode = {
         ...node,
         ...(detail || {}),
@@ -1483,7 +1497,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
     if (U.adRole) U.adRole.hidden = true;
-    if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
+    if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "No child rounds");
     U.adStatus.textContent = String(mergedNode.display_state || mergedNode.state || mergedNode.status || "");
     U.adStatus.dataset.status = mergedNode.visual_state || mergedNode.state || mergedNode.status || node.visual_state || node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
@@ -1516,18 +1530,17 @@ function applyTaskPayload(payload) {
     const nextTaskId = String(payload.task?.task_id || "").trim();
     const rootNode = payload.root_node || null;
     const treeRoot = rootNode ? buildTaskTreeNodeFromDetail(rootNode) : null;
-    const runtimeSummary = payload.runtime_summary || null;
+    const frontier = Array.isArray(payload.frontier) ? payload.frontier : [];
+    const recentModelCalls = Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [];
     S.currentTask = payload.task;
-    S.currentTaskTreeRoot = treeRoot;
-    S.currentTaskRuntimeSummary = runtimeSummary;
-    S.currentTaskProgress = {
-        live_state: runtimeSummary,
-        root: treeRoot,
-        nodes: rootNode ? [rootNode] : [],
-        model_calls: Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [],
-        token_usage: payload.task?.token_usage || null,
-        token_usage_by_model: Array.isArray(rootNode?.token_usage_by_model) ? rootNode.token_usage_by_model : [],
-    };
+    S.taskSummary = payload.summary || null;
+    S.rootNode = rootNode;
+    S.frontier = frontier;
+    S.recentModelCalls = recentModelCalls;
+    S.liveFrameMap = indexTaskLiveFrames(frontier);
+    if (rootNode && String(rootNode?.node_id || "").trim()) {
+        S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [String(rootNode.node_id || "").trim()]: rootNode };
+    }
     S.tree = treeRoot;
     S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
     renderTaskDetailHeader({ resetPromptDisclosure: previousTaskId !== nextTaskId });

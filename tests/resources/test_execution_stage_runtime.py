@@ -586,7 +586,7 @@ async def test_stage_summary_is_exposed_in_live_runtime_frame(tmp_path: Path):
 
         snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
         assert snapshot is not None
-        frames = list((snapshot['progress']['live_state'] or {}).get('frames') or [])
+        frames = list(snapshot['frontier'] or [])
         assert frames
         root_frame = next(item for item in frames if item['node_id'] == record.root_node_id)
         assert root_frame['stage_status'] == '进行中'

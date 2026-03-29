@@ -364,13 +364,16 @@ def summarize_runtime_snapshot(
             "summary_text": "当前还没有可用的运行快照。",
         }
 
-    if isinstance(payload, dict) and isinstance(payload.get("task"), dict) and isinstance(payload.get("progress"), dict):
+    if isinstance(payload, dict) and isinstance(payload.get("task"), dict) and (
+        isinstance(payload.get("root_node"), dict) or isinstance(payload.get("frontier"), list)
+    ):
         task = payload["task"]
-        progress = payload["progress"]
-        latest_node = progress.get("latest_node") if isinstance(progress.get("latest_node"), dict) else {}
-        root = progress.get("root") if isinstance(progress.get("root"), dict) else {}
-        live_state = progress.get("live_state") if isinstance(progress.get("live_state"), dict) else payload.get("runtime_summary")
-        tool_steps = _progress_tool_steps(progress, preferred_node_id=latest_node.get("node_id"))
+        root_node = payload.get("root_node") if isinstance(payload.get("root_node"), dict) else {}
+        frontier = [item for item in list(payload.get("frontier") or []) if isinstance(item, dict)]
+        preferred_node_id = str((frontier[0] if frontier else {}).get("node_id") or root_node.get("node_id") or "").strip()
+        live_state = {"frames": frontier}
+        execution_trace = root_node.get("execution_trace") if isinstance(root_node.get("execution_trace"), dict) else {}
+        tool_steps = [item for item in list(execution_trace.get("tool_steps") or []) if isinstance(item, dict)]
         if not tool_steps:
             tool_steps = _runtime_summary_tool_steps(live_state)
         recent_tools = [
@@ -382,17 +385,31 @@ def summarize_runtime_snapshot(
             for item in tool_steps[-list_limit:]
             if isinstance(item, dict)
         ]
-        latest_summary_source = latest_node.get("output") or _runtime_summary_tool_calls_summary(
-            live_state,
-            preferred_node_id=latest_node.get("node_id"),
-            limit=list_limit,
-        ) or _tool_steps_summary(tool_steps, limit=list_limit)
+        latest_summary_source = (
+            root_node.get("final_output")
+            or root_node.get("output")
+            or root_node.get("failure_reason")
+            or str((frontier[0] if frontier else {}).get("stage_goal") or "")
+            or _runtime_summary_tool_calls_summary(
+                live_state,
+                preferred_node_id=preferred_node_id,
+                limit=list_limit,
+            )
+            or _tool_steps_summary(tool_steps, limit=list_limit)
+        )
         latest_summary = _clip_text(
             latest_summary_source,
             limit=text_char_limit,
         )
+        latest_node = {
+            "title": root_node.get("goal") or root_node.get("title") or "",
+            "node_id": root_node.get("node_id") or preferred_node_id,
+            "updated_at": root_node.get("updated_at") or "",
+            "status": root_node.get("status") or task.get("status") or "in_progress",
+        }
+        root = {"goal": root_node.get("goal") or ""}
         node_title = str(latest_node.get("title") or root.get("goal") or latest_node.get("node_id") or "当前节点")
-        node_status = str(latest_node.get("status") or task.get("status") or "in_progress")
+        node_status = str(root_node.get("status") or task.get("status") or "in_progress")
         summary_text = f"任务仍在进行中；最近节点“{node_title}”状态为 {node_status}。"
         if latest_summary:
             summary_text = f"{summary_text} 最近输出：{latest_summary}"

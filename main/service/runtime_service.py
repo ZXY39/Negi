@@ -1478,25 +1478,37 @@ class MainRuntimeService:
             }
         )
 
-    @staticmethod
-    def _task_stall_latest_node_summary(detail: dict[str, Any]) -> str:
-        progress = detail.get('progress') if isinstance(detail.get('progress'), dict) else {}
-        latest_node = progress.get('latest_node') if isinstance(progress.get('latest_node'), dict) else {}
-        if not latest_node:
+    def _task_stall_latest_node_summary(self, detail: dict[str, Any]) -> str:
+        payload = detail if isinstance(detail, dict) else {}
+        task_id = str((payload.get('task') or {}).get('task_id') or '').strip()
+        root_node = payload.get('root_node') if isinstance(payload.get('root_node'), dict) else {}
+        frontier = [item for item in list(payload.get('frontier') or []) if isinstance(item, dict)]
+        candidate = root_node
+        frontier_node_id = str(frontier[0].get('node_id') or '').strip() if frontier else ''
+        root_node_id = str(root_node.get('node_id') or '').strip()
+        if task_id and frontier_node_id and frontier_node_id != root_node_id:
+            detail_payload = self.get_node_detail_payload(task_id, frontier_node_id) or {}
+            candidate = detail_payload.get('item') if isinstance(detail_payload.get('item'), dict) else candidate
+        if not candidate:
             return ''
-        title = str(latest_node.get('title') or latest_node.get('node_id') or 'node').strip() or 'node'
-        status = str(latest_node.get('status') or 'in_progress').strip() or 'in_progress'
-        output = str(latest_node.get('output') or latest_node.get('output_excerpt') or '').strip()
+        title = str(candidate.get('goal') or candidate.get('title') or candidate.get('node_id') or 'node').strip() or 'node'
+        status = str(candidate.get('status') or 'in_progress').strip() or 'in_progress'
+        output = str(
+            candidate.get('final_output')
+            or candidate.get('output')
+            or candidate.get('failure_reason')
+            or ''
+        ).strip()
+        if not output and frontier:
+            output = str(frontier[0].get('stage_goal') or frontier[0].get('phase') or '').strip()
         text = f'{title} [{status}]'
         if output:
             text = f'{text}: {output}'
         return text[:240]
 
-    @staticmethod
-    def _task_stall_runtime_summary(detail: dict[str, Any]) -> str:
-        progress = detail.get('progress') if isinstance(detail.get('progress'), dict) else {}
-        live_state = progress.get('live_state') if isinstance(progress.get('live_state'), dict) else {}
-        frames = [item for item in list(live_state.get('frames') or []) if isinstance(item, dict)]
+    def _task_stall_runtime_summary(self, detail: dict[str, Any]) -> str:
+        payload = detail if isinstance(detail, dict) else {}
+        frames = [item for item in list(payload.get('frontier') or []) if isinstance(item, dict)]
         parts: list[str] = []
         for frame in frames[:3]:
             node_id = str(frame.get('node_id') or '').strip() or 'node'

@@ -138,20 +138,20 @@ class TaskQueryService:
         return failed_node_ids
 
     def get_task_snapshot(self, task_id: str, *, mark_read: bool = True) -> dict[str, Any] | None:
-        progress = self.view_progress(task_id, mark_read=mark_read)
-        if progress is None:
-            return None
         task = self._store.get_task(task_id)
         if task is None:
             return None
-        root = self._compact_tree_payload(progress.root)
-        runtime_summary = progress.live_state.model_dump(mode='json') if progress.live_state is not None else {
+        if mark_read:
+            self._log_service.mark_task_read(task_id)
+            task = self._store.get_task(task_id) or task
+        live_state = self._projection_live_state(task.task_id)
+        root_node = self.get_node_detail(task.task_id, task.root_node_id)
+        runtime_summary = live_state.model_dump(mode='json') if live_state is not None else {
             'active_node_ids': [],
             'runnable_node_ids': [],
             'waiting_node_ids': [],
             'frames': [],
         }
-        root_node = self.get_node_detail(task.task_id, task.root_node_id)
         counts = {
             'total_nodes': len(self._store.list_task_nodes(task.task_id)),
             'total_rounds': len(self._store.list_task_node_rounds(task.task_id)),
@@ -160,17 +160,13 @@ class TaskQueryService:
             'waiting_node_count': len(list(runtime_summary.get('waiting_node_ids') or [])),
         }
         frontier = [
-            {
-                'node_id': str(frame.node_id or ''),
-                'depth': int(frame.depth or 0),
-                'node_kind': str(frame.node_kind or 'execution'),
-                'phase': str(frame.phase or ''),
-                'stage_goal': str(frame.stage_goal or ''),
-                'tool_call_count': len(list(frame.tool_calls or [])),
-                'child_pipeline_count': len(list(frame.child_pipelines or [])),
-            }
-            for frame in list(progress.live_state.frames or [])
-        ] if progress.live_state is not None else []
+            frame.model_dump(mode='json')
+            for frame in list(live_state.frames or [])
+        ] if live_state is not None else []
+        token_usage_by_model = [
+            item.model_dump(mode='json')
+            for item in self._projection_token_usage_by_model(task.task_id)
+        ]
         return {
             'task': task.model_dump(mode='json'),
             'summary': {
@@ -178,28 +174,13 @@ class TaskQueryService:
                 'status': task.status,
                 'brief': task.brief_text,
                 'updated_at': task.updated_at,
+                'token_usage_by_model': token_usage_by_model,
                 **counts,
             },
             'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
             'frontier': frontier,
             'counts': counts,
-            'recent_model_calls': [item.model_dump(mode='json') for item in list(progress.model_calls or [])],
-            'tree_root': root,
-            'runtime_summary': runtime_summary,
-            'default_selected_node_id': str(getattr(progress.root, 'node_id', '') or ''),
-            'progress': {
-                'task_id': progress.task_id,
-                'task_status': progress.task_status,
-                'tree_text': progress.tree_text,
-                'root': root,
-                'latest_node': progress.latest_node.model_dump(mode='json') if progress.latest_node is not None else None,
-                'live_state': runtime_summary,
-                'nodes': list(progress.nodes or []),
-                'token_usage': progress.token_usage.model_dump(mode='json'),
-                'token_usage_by_model': [item.model_dump(mode='json') for item in list(progress.token_usage_by_model or [])],
-                'model_calls': [item.model_dump(mode='json') for item in list(progress.model_calls or [])],
-                'text': progress.text,
-            },
+            'recent_model_calls': [item.model_dump(mode='json') for item in self._recent_model_calls(task.task_id)],
         }
 
     def get_node_detail(self, task_id: str, node_id: str) -> TaskNodeDetail | None:
@@ -466,11 +447,61 @@ class TaskQueryService:
             )
         return records[-max(1, int(limit or 1)) :]
 
+    def _projection_token_usage_by_model(self, task_id: str) -> list[ModelTokenUsageRecord]:
+        aggregates: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for record in list(self._store.list_task_node_details(task_id) or []):
+            payload = dict(record.payload or {})
+            for item in list(payload.get('token_usage_by_model') or []):
+                if not isinstance(item, dict):
+                    continue
+                model_usage = ModelTokenUsageRecord.model_validate(item)
+                key = (
+                    str(model_usage.model_key or '').strip(),
+                    str(model_usage.provider_id or '').strip(),
+                    str(model_usage.provider_model or '').strip(),
+                )
+                bucket = aggregates.setdefault(
+                    key,
+                    {
+                        'model_key': key[0],
+                        'provider_id': key[1],
+                        'provider_model': key[2],
+                        'tracked': False,
+                        'input_tokens': 0,
+                        'output_tokens': 0,
+                        'cache_hit_tokens': 0,
+                        'call_count': 0,
+                        'calls_with_usage': 0,
+                        'calls_without_usage': 0,
+                        'is_partial': False,
+                    },
+                )
+                bucket['tracked'] = bool(bucket['tracked']) or bool(model_usage.tracked)
+                bucket['input_tokens'] += int(model_usage.input_tokens or 0)
+                bucket['output_tokens'] += int(model_usage.output_tokens or 0)
+                bucket['cache_hit_tokens'] += int(model_usage.cache_hit_tokens or 0)
+                bucket['call_count'] += int(model_usage.call_count or 0)
+                bucket['calls_with_usage'] += int(model_usage.calls_with_usage or 0)
+                bucket['calls_without_usage'] += int(model_usage.calls_without_usage or 0)
+                bucket['is_partial'] = bool(bucket['is_partial']) or bool(model_usage.is_partial)
+        items = [ModelTokenUsageRecord.model_validate(item) for item in aggregates.values()]
+        items.sort(
+            key=lambda item: (
+                -(int(item.input_tokens or 0) + int(item.output_tokens or 0)),
+                str(item.model_key or ''),
+                str(item.provider_model or ''),
+            )
+        )
+        return items
+
     def _projection_live_state(self, task_id: str) -> TaskLiveState | None:
+        runtime_state = self._log_service.read_runtime_state(task_id)
+        runtime_live_state = self._live_state(runtime_state or {})
+        if runtime_live_state is not None:
+            return runtime_live_state
         frames = self._store.list_task_runtime_frames(task_id)
         if not frames:
-            runtime_state = self._log_service.read_runtime_state(task_id)
-            return self._live_state(runtime_state or {})
+            return None
         live_frames: list[TaskLiveFrame] = []
         active_node_ids: list[str] = []
         runnable_node_ids: list[str] = []

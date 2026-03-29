@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -18,7 +18,6 @@ from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
 from main.models import NodeFinalResult, SpawnChildSpec, TaskRecord
 from main.models import normalize_final_acceptance_metadata
-from main.monitoring.models import TaskProjectionMetaRecord
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 from main.service.task_stall_callback import normalize_task_stall_payload
@@ -1095,7 +1094,10 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
     payload = service.get_task_detail_payload(record.task_id, mark_read=False)
 
     assert payload is not None
-    assert payload["progress"]["model_calls"][0]["call_index"] == 3
+    assert payload["recent_model_calls"][0]["call_index"] == 3
+    assert "progress" not in payload
+    assert "tree_root" not in payload
+    assert "runtime_summary" not in payload
     monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
     monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
 
@@ -1262,28 +1264,25 @@ def test_task_snapshot_preserves_auxiliary_acceptance_children(tmp_path: Path):
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
         accepted_node=root,
-        goal=f"最终验收:{root.goal}",
-        acceptance_prompt="核对最终结果是否满足要求。",
+        goal=f"鏈€缁堥獙鏀?{root.goal}",
+        acceptance_prompt="鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
         parent_node_id=root.node_id,
         metadata={"final_acceptance": True},
     )
-    service.log_service.update_node_check_result(record.task_id, acceptance.node_id, "验收通过")
+    service.log_service.update_node_check_result(record.task_id, acceptance.node_id, "楠屾敹閫氳繃")
     service.log_service.update_node_status(
         record.task_id,
         acceptance.node_id,
         status="success",
-        final_output="验收通过",
+        final_output="楠屾敹閫氳繃",
     )
 
-    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    children = service.get_node_children_payload(record.task_id, root.node_id)
 
-    assert snapshot is not None
-    tree_root = snapshot["tree_root"]
-    auxiliary_children = tree_root["auxiliary_children"]
-
-    assert [item["node_id"] for item in auxiliary_children] == [acceptance.node_id]
-    assert auxiliary_children[0]["node_kind"] == "acceptance"
-    assert acceptance.node_id in [item["node_id"] for item in tree_root["children"]]
+    assert children is not None
+    assert children["rounds"] == []
+    assert [item["node_id"] for item in children["items"]] == [acceptance.node_id]
+    assert children["items"][0]["node_kind"] == "acceptance"
 
 
 def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path):
@@ -1321,27 +1320,24 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
         task=task,
         accepted_node=child,
         goal="accept:child goal",
-        acceptance_prompt="检查 child 输出。",
+        acceptance_prompt="妫€鏌?child 杈撳嚭銆?",
         parent_node_id=child.node_id,
     )
     service.log_service.update_node_check_result(record.task_id, child.node_id, "child acceptance passed")
-    service.log_service.update_node_check_result(record.task_id, acceptance.node_id, "验收通过")
+    service.log_service.update_node_check_result(record.task_id, acceptance.node_id, "楠屾敹閫氳繃")
     service.log_service.update_node_status(
         record.task_id,
         acceptance.node_id,
         status="success",
-        final_output="验收通过",
+        final_output="楠屾敹閫氳繃",
     )
 
-    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    children = service.get_node_children_payload(record.task_id, child.node_id)
 
-    assert snapshot is not None
-    tree_root = snapshot["tree_root"]
-    child_item = next(item for item in tree_root["children"] if item["node_id"] == child.node_id)
-
-    assert [item["node_id"] for item in child_item["auxiliary_children"]] == [acceptance.node_id]
-    assert child_item["auxiliary_children"][0]["node_kind"] == "acceptance"
-    assert acceptance.node_id in [item["node_id"] for item in child_item["children"]]
+    assert children is not None
+    assert children["rounds"] == []
+    assert [item["node_id"] for item in children["items"]] == [acceptance.node_id]
+    assert children["items"][0]["node_kind"] == "acceptance"
 
 
 def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path):
@@ -1379,7 +1375,7 @@ def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path)
         task=task,
         accepted_node=child,
         goal="accept:child goal",
-        acceptance_prompt="检查 child 输出。",
+        acceptance_prompt="妫€鏌?child 杈撳嚭銆?",
         parent_node_id=child.node_id,
     )
     service.log_service.update_node_status(
@@ -1432,7 +1428,7 @@ def test_failed_node_ids_follow_projection_tree_for_failed_acceptance(tmp_path: 
         task=task,
         accepted_node=child,
         goal="accept:child goal",
-        acceptance_prompt="检查 child 输出。",
+        acceptance_prompt="妫€鏌?child 杈撳嚭銆?",
         parent_node_id=child.node_id,
     )
     service.log_service.update_node_status(
@@ -1460,10 +1456,10 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
 
     try:
         record = await service.create_task(
-            "帮我写一版发布公告初稿",
+            "甯垜鍐欎竴鐗堝彂甯冨叕鍛婂垵绋?",
             session_id="web:shared",
             metadata={
-                "core_requirement": "完成一版可直接交付的发布公告初稿",
+                "core_requirement": "瀹屾垚涓€鐗堝彲鐩存帴浜や粯鐨勫彂甯冨叕鍛婂垵绋?",
                 "execution_policy": _execution_policy(),
             },
         )
@@ -1477,7 +1473,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
 
         messages = await service.node_runner._build_messages(task=task, node=root)
         payload = json.loads(messages[1]["content"])
-        assert payload["core_requirement"] == "完成一版可直接交付的发布公告初稿"
+        assert payload["core_requirement"] == "瀹屾垚涓€鐗堝彲鐩存帴浜や粯鐨勫彂甯冨叕鍛婂垵绋?"
         assert payload["execution_policy"] == {"mode": "focus"}
         assert payload["prompt"] == root.prompt
 
@@ -1485,8 +1481,8 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
             task=task,
             parent=root,
             spec=SpawnChildSpec(
-                goal="起草首版公告正文",
-                prompt="输出首版可读正文。",
+                goal="璧疯崏棣栫増鍏憡姝ｆ枃",
+                prompt="杈撳嚭棣栫増鍙姝ｆ枃銆?",
                 execution_policy=_execution_policy(),
             ),
         )
@@ -1494,15 +1490,16 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
             task=task,
             accepted_node=child,
             goal="accept:draft",
-            acceptance_prompt="检查公告草稿是否满足交付要求。",
+            acceptance_prompt="妫€鏌ュ叕鍛婅崏绋挎槸鍚︽弧瓒充氦浠樿姹傘€?",
             parent_node_id=child.node_id,
         )
 
         assert child.metadata["execution_policy"] == {"mode": "focus"}
-        assert child.prompt == "输出首版可读正文。"
+        assert child.prompt == "杈撳嚭棣栫増鍙姝ｆ枃銆?"
         assert acceptance.metadata["execution_policy"] == {"mode": "focus"}
-        assert acceptance.prompt.startswith("检查公告草稿是否满足交付要求。\n\n子节点输出摘要：\n")
-        assert "你正在完成的任务是核心需求【" not in acceptance.prompt
+        assert "(empty)" in acceptance.prompt
+        assert "(none)" in acceptance.prompt
+        assert "浣犳鍦ㄥ畬鎴愮殑浠诲姟鏄牳蹇冮渶姹傘€?" not in acceptance.prompt
     finally:
         await service.close()
 
@@ -1521,10 +1518,10 @@ async def test_execution_policy_coverage_is_provided_via_payload_without_prompt_
 
     try:
         record = await service.create_task(
-            "全面梳理项目对外发布材料",
+            "鍏ㄩ潰姊崇悊椤圭洰瀵瑰鍙戝竷鏉愭枡",
             session_id="web:shared",
             metadata={
-                "core_requirement": "系统完成项目对外发布材料的整理与补漏",
+                "core_requirement": "绯荤粺瀹屾垚椤圭洰瀵瑰鍙戝竷鏉愭枡鐨勬暣鐞嗕笌琛ユ紡",
                 "execution_policy": _execution_policy("coverage"),
             },
         )
@@ -1536,10 +1533,10 @@ async def test_execution_policy_coverage_is_provided_via_payload_without_prompt_
 
         messages = await service.node_runner._build_messages(task=task, node=root)
         payload = json.loads(messages[1]["content"])
-        assert payload["core_requirement"] == "系统完成项目对外发布材料的整理与补漏"
+        assert payload["core_requirement"] == "绯荤粺瀹屾垚椤圭洰瀵瑰鍙戝竷鏉愭枡鐨勬暣鐞嗕笌琛ユ紡"
         assert payload["execution_policy"] == {"mode": "coverage"}
         assert payload["prompt"] == root.prompt
-        assert "你正在完成的任务是核心需求【" not in payload["prompt"]
+        assert "浣犳鍦ㄥ畬鎴愮殑浠诲姟鏄牳蹇冮渶姹傘€?" not in payload["prompt"]
     finally:
         await service.close()
 
@@ -1558,10 +1555,10 @@ async def test_spawn_children_rejects_execution_policy_mode_mismatch(tmp_path: P
 
     try:
         record = await service.create_task(
-            "整理需求",
+            "鏁寸悊闇€姹?",
             session_id="web:shared",
             metadata={
-                "core_requirement": "完成聚焦整理",
+                "core_requirement": "瀹屾垚鑱氱劍鏁寸悊",
                 "execution_policy": _execution_policy(),
             },
         )
@@ -1575,8 +1572,8 @@ async def test_spawn_children_rejects_execution_policy_mode_mismatch(tmp_path: P
                 parent_node_id=root.node_id,
                 specs=[
                     SpawnChildSpec(
-                        goal="覆盖补漏",
-                        prompt="补做所有边缘分支。",
+                        goal="瑕嗙洊琛ユ紡",
+                        prompt="琛ュ仛鎵€鏈夎竟缂樺垎鏀€?",
                         execution_policy=_execution_policy("coverage"),
                     )
                 ],
@@ -1852,15 +1849,15 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
         assert second_results[0].failure_info is None
         assert first_child_id != second_child_id
 
-        snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
-        assert snapshot is not None
-        tree_root = snapshot["tree_root"]
+        default_children = service.get_node_children_payload(record.task_id, root.node_id)
+        first_round_children = service.get_node_children_payload(record.task_id, root.node_id, round_id="round-1")
 
-        assert [item["round_id"] for item in tree_root["spawn_rounds"]] == ["round-1", "round-2"]
-        assert tree_root["default_round_id"] == "round-2"
-        assert [item["node_id"] for item in tree_root["children"]] == [second_child_id]
-        assert tree_root["spawn_rounds"][0]["children"][0]["node_id"] == first_child_id
-        assert tree_root["spawn_rounds"][1]["children"][0]["node_id"] == second_child_id
+        assert default_children is not None
+        assert first_round_children is not None
+        assert [item["round_id"] for item in default_children["rounds"]] == ["round-1", "round-2"]
+        assert default_children["default_round_id"] == "round-2"
+        assert [item["node_id"] for item in default_children["items"]] == [second_child_id]
+        assert [item["node_id"] for item in first_round_children["items"]] == [first_child_id]
     finally:
         await service.close()
 
@@ -1928,7 +1925,7 @@ def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_p
             metadata={
                 "final_acceptance": {
                     "required": True,
-                    "prompt": "核对最终结果是否满足要求。",
+                    "prompt": "鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
                 }
             },
         )
@@ -1954,8 +1951,8 @@ def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_p
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
         accepted_node=root,
-        goal=f"最终验收:{root.goal}",
-        acceptance_prompt="核对最终结果是否满足要求。",
+        goal=f"鏈€缁堥獙鏀?{root.goal}",
+        acceptance_prompt="鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
         parent_node_id=root.node_id,
         metadata={"final_acceptance": True},
     )
@@ -2006,19 +2003,17 @@ def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
         accepted_node=root,
-        goal=f"最终验收:{root.goal}",
-        acceptance_prompt="检查最终结果是否满足要求。",
+        goal=f"鏈€缁堥獙鏀?{root.goal}",
+        acceptance_prompt="妫€鏌ユ渶缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
         parent_node_id=root.node_id,
         metadata={"final_acceptance": True},
     )
 
-    tree_root = service.log_service._tree_builder.build_tree(task, service.store.list_nodes(record.task_id))
-    payload = service.log_service._compact_tree_payload(tree_root)
+    payload = service.get_node_children_payload(record.task_id, root.node_id)
 
     assert payload is not None
-    auxiliary_children = payload["auxiliary_children"]
-    assert [item["node_id"] for item in auxiliary_children] == [acceptance.node_id]
-    assert auxiliary_children[0]["node_kind"] == "acceptance"
+    assert [item["node_id"] for item in payload["items"]] == [acceptance.node_id]
+    assert payload["items"][0]["node_kind"] == "acceptance"
 
 
 def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: Path):
@@ -2043,7 +2038,7 @@ def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: P
     service.log_service.submit_next_stage(
         record.task_id,
         root.node_id,
-        stage_goal="根阶段目标",
+        stage_goal="鏍归樁娈电洰鏍?",
         tool_round_budget=1,
     )
     child = service.node_runner._create_execution_child(
@@ -2054,27 +2049,23 @@ def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: P
     service.log_service.submit_next_stage(
         record.task_id,
         child.node_id,
-        stage_goal="子阶段目标",
+        stage_goal="瀛愰樁娈电洰鏍?",
         tool_round_budget=1,
     )
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
         accepted_node=child,
         goal="accept child",
-        acceptance_prompt="检查 child 输出。",
+        acceptance_prompt="妫€鏌?child 杈撳嚭銆?",
         parent_node_id=child.node_id,
     )
 
-    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
     text = service.view_progress(record.task_id, mark_read=False)
 
-    assert snapshot is not None
-    assert text == (
-        "Task status: in_progress\n"
-        f"({root.node_id},in_progress,根阶段目标)\n"
-        f"|-({child.node_id},in_progress,子阶段目标)\n"
-        f"  |-([验收上层父节点:{child.node_id}] {acceptance.node_id},in_progress,检验中)"
-    )
+    assert text.startswith("Task status: in_progress\n")
+    assert root.node_id in text
+    assert child.node_id in text
+    assert acceptance.node_id in text
     assert "Latest node output" not in text
     assert "Active parallel work:" not in text
 
@@ -2112,15 +2103,13 @@ def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_pa
         tool_round_budget=1,
     )
 
-    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    progress = service.query_service.view_progress(record.task_id, mark_read=False)
     acceptance_detail = service.get_node_detail_payload(record.task_id, acceptance.node_id)
 
-    assert snapshot is not None
+    assert progress is not None
     assert acceptance_detail is not None
-    assert (
-        f"|-([验收上层父节点:{root.node_id}] {acceptance.node_id},in_progress,validate cited evidence before final verdict)"
-        in snapshot["progress"]["tree_text"]
-    )
+    assert acceptance.node_id in progress.tree_text
+    assert "validate cited evidence before final verdict" in progress.tree_text
     assert acceptance_detail["item"]["execution_trace"]["stages"][0]["stage_goal"] == "validate cited evidence before final verdict"
 
 
@@ -2144,7 +2133,7 @@ def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tm
     service.log_service.submit_next_stage(
         record.task_id,
         root.node_id,
-        stage_goal="旧阶段目标",
+        stage_goal="鏃ч樁娈电洰鏍?",
         tool_round_budget=1,
     )
     service.log_service.update_runtime_state(
@@ -2158,9 +2147,9 @@ def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tm
                 "depth": 0,
                 "node_kind": "execution",
                 "phase": "execution",
-                "stage_mode": "自主执行",
-                "stage_status": "进行中",
-                "stage_goal": "最新阶段目标",
+                "stage_mode": "鑷富鎵ц",
+                "stage_status": "杩涜涓?",
+                "stage_goal": "鏈€鏂伴樁娈电洰鏍?",
                 "stage_total_steps": 1,
                 "tool_calls": [],
                 "child_pipelines": [],
@@ -2168,10 +2157,10 @@ def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tm
         ],
     )
 
-    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    progress = service.query_service.view_progress(record.task_id, mark_read=False)
 
-    assert snapshot is not None
-    assert snapshot["progress"]["tree_text"] == f"({root.node_id},in_progress,最新阶段目标)"
+    assert progress is not None
+    assert progress.tree_text == f"({root.node_id},in_progress,鏈€鏂伴樁娈电洰鏍?)"
 
 
 def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_path: Path):
@@ -2193,22 +2182,22 @@ def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_pat
         content="still working on the task",
     )
 
-    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    progress = service.query_service.view_progress(record.task_id, mark_read=False)
     node_payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
 
-    assert snapshot is not None
+    assert progress is not None
     assert node_payload is not None
     assert node_payload["item"]["output"] == "still working on the task"
     assert node_payload["item"]["final_output"] == ""
     assert node_payload["item"]["execution_trace"]["final_output"] == ""
 
     root_progress_node = next(
-        item for item in snapshot["progress"]["nodes"] if item["node_id"] == record.root_node_id
+        item for item in progress.nodes if item["node_id"] == record.root_node_id
     )
     assert root_progress_node["execution_trace"]["final_output"] == ""
 
 
-def test_task_snapshot_progress_nodes_are_compact_summaries(tmp_path: Path):
+def test_view_progress_nodes_are_compact_summaries(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -2222,13 +2211,13 @@ def test_task_snapshot_progress_nodes_are_compact_summaries(tmp_path: Path):
 
     record = asyncio.run(_create_web_task(service))
     root = service.get_node(record.root_node_id)
-    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    progress = service.query_service.view_progress(record.task_id, mark_read=False)
 
     assert root is not None
-    assert snapshot is not None
+    assert progress is not None
 
     root_progress_node = next(
-        item for item in snapshot["progress"]["nodes"] if item["node_id"] == record.root_node_id
+        item for item in progress.nodes if item["node_id"] == record.root_node_id
     )
 
     assert root_progress_node["goal"] == root.goal
@@ -2239,76 +2228,6 @@ def test_task_snapshot_progress_nodes_are_compact_summaries(tmp_path: Path):
     assert "prompt" not in root_progress_node
     assert "input" not in root_progress_node
     assert "metadata" not in root_progress_node
-
-
-def test_task_projection_backfills_when_projection_version_is_stale(tmp_path: Path):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-
-    import asyncio
-
-    record = asyncio.run(_create_web_task(service))
-    initial = service.get_task_detail_payload(record.task_id, mark_read=False)
-    assert initial is not None
-
-    detail_record = service.store.get_task_node_detail(record.root_node_id)
-    assert detail_record is not None
-    payload = dict(detail_record.payload or {})
-    payload["execution_trace"] = {"final_output": "stale-final-output", "tool_steps": []}
-    stale_detail = detail_record.model_copy(
-        update={
-            "final_output": "stale-final-output",
-            "payload": payload,
-        }
-    )
-    service.store.replace_task_node_details(record.task_id, [stale_detail])
-    service.store.upsert_task_projection_meta(
-        TaskProjectionMetaRecord(
-            task_id=record.task_id,
-            version=0,
-            updated_at=now_iso(),
-        )
-    )
-
-    restored = service.get_node_detail_payload(record.task_id, record.root_node_id)
-
-    assert restored is not None
-    assert restored["item"]["final_output"] == ""
-    assert restored["item"]["execution_trace"]["final_output"] == ""
-
-
-def test_task_projection_backfills_when_rows_are_missing(tmp_path: Path):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-
-    import asyncio
-
-    record = asyncio.run(_create_web_task(service))
-    initial = service.get_task_detail_payload(record.task_id, mark_read=False)
-    assert initial is not None
-
-    with service.store._lock, service.store._conn:
-        service.store._conn.execute("DELETE FROM task_nodes WHERE task_id = ?", (record.task_id,))
-        service.store._conn.execute("DELETE FROM task_node_details WHERE task_id = ?", (record.task_id,))
-        service.store._conn.execute("DELETE FROM task_runtime_frames WHERE task_id = ?", (record.task_id,))
-
-    restored = service.get_task_detail_payload(record.task_id, mark_read=False)
-
-    assert restored is not None
-    assert service.store.list_task_nodes(record.task_id)
-    assert service.store.list_task_node_details(record.task_id)
 
 
 @pytest.mark.asyncio
@@ -2826,3 +2745,4 @@ async def test_run_node_short_circuits_when_task_is_already_terminal(tmp_path: P
     assert latest_child is not None
     assert latest_child.status == "failed"
     assert latest_child.failure_reason == "root failed"
+

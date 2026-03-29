@@ -606,9 +606,11 @@ function resetTaskView() {
     }
     clearTaskDetailSession();
     S.currentTask = null;
-    S.currentTaskProgress = null;
-    S.currentTaskTreeRoot = null;
-    S.currentTaskRuntimeSummary = null;
+    S.taskSummary = null;
+    S.rootNode = null;
+    S.frontier = [];
+    S.recentModelCalls = [];
+    S.liveFrameMap = {};
     S.currentNodeDetail = null;
     S.taskNodeDetails = {};
     S.taskNodeDetailRequests = {};
@@ -679,7 +681,7 @@ function setTaskTokenStatsOpen(open) {
 
 function renderTaskTokenStats() {
     if (!U.taskTokenContent || !U.taskTokenSummaryText) return;
-    const summary = taskTokenUsage(S.currentTask, S.currentTaskProgress);
+    const summary = taskTokenUsage(S.currentTask, null);
     U.taskTokenSummaryText.textContent = taskTokenSummaryLine(summary);
     if (U.taskTokenButton) U.taskTokenButton.title = taskTokenSummaryLine(summary);
     if (!summary.tracked) {
@@ -690,15 +692,15 @@ function renderTaskTokenStats() {
         `;
         return;
     }
-    const modelRows = Array.isArray(S.currentTaskProgress?.token_usage_by_model)
-        ? S.currentTaskProgress.token_usage_by_model.map(normalizeModelTokenUsage).sort((a, b) => {
+    const modelRows = Array.isArray(S.taskSummary?.token_usage_by_model)
+        ? S.taskSummary.token_usage_by_model.map(normalizeModelTokenUsage).sort((a, b) => {
             const delta = tokenKnownTotal(b) - tokenKnownTotal(a);
             if (delta !== 0) return delta;
             return String(a.model_key || "").localeCompare(String(b.model_key || ""));
         })
         : [];
-    const recentModelCalls = Array.isArray(S.currentTaskProgress?.model_calls)
-        ? S.currentTaskProgress.model_calls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
+    const recentModelCalls = Array.isArray(S.recentModelCalls)
+        ? S.recentModelCalls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
         : [];
     const partialNote = summary.is_partial
         ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
@@ -855,6 +857,7 @@ async function openTask(taskId) {
 function handleTaskEvent(payload) {
     if (payload.type === "task.summary.patch" && payload.data?.task) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
+        S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
         patchTaskListItem(payload.data.task);
         renderTaskDetailHeader();
         renderTaskTokenStats();
@@ -862,24 +865,53 @@ function handleTaskEvent(payload) {
     }
     if (payload.type === "task.model.call") {
         const nextCall = normalizeTaskModelCall(payload.data || {});
-        const existing = Array.isArray(S.currentTaskProgress?.model_calls) ? S.currentTaskProgress.model_calls : [];
+        const existing = Array.isArray(S.recentModelCalls) ? S.recentModelCalls : [];
         const withoutSame = existing.filter((item) => Number(item?.call_index || 0) !== Number(nextCall.call_index || 0));
         const merged = [...withoutSame, nextCall]
             .sort((a, b) => Number(a?.call_index || 0) - Number(b?.call_index || 0))
             .slice(-50);
-        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), model_calls: merged };
+        S.recentModelCalls = merged;
         renderTaskTokenStats();
         return;
     }
     if (payload.type === "task.live.patch") {
-        S.currentTaskRuntimeSummary = payload.data?.runtime_summary || null;
-        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), live_state: S.currentTaskRuntimeSummary };
+        const runtimeSummary = payload.data?.runtime_summary || {};
+        const frames = Array.isArray(runtimeSummary?.frames) ? runtimeSummary.frames : [];
+        const activeNodeIds = Array.isArray(runtimeSummary?.active_node_ids) ? runtimeSummary.active_node_ids : [];
+        const runnableNodeIds = Array.isArray(runtimeSummary?.runnable_node_ids) ? runtimeSummary.runnable_node_ids : [];
+        const waitingNodeIds = Array.isArray(runtimeSummary?.waiting_node_ids) ? runtimeSummary.waiting_node_ids : [];
+        S.frontier = frames;
+        S.liveFrameMap = indexTaskLiveFrames(frames);
+        S.taskSummary = {
+            ...(S.taskSummary || {}),
+            active_node_count: activeNodeIds.length,
+            runnable_node_count: runnableNodeIds.length,
+            waiting_node_count: waitingNodeIds.length,
+        };
         if (S.tree) renderTree();
         return;
     }
     if (payload.type === "task.node.patch") {
-        const nodeId = String(payload.data?.node?.node_id || "").trim();
+        const nextNode = payload.data?.node && typeof payload.data.node === "object" ? payload.data.node : {};
+        const nodeId = String(nextNode?.node_id || "").trim();
         if (nodeId) {
+            const rootNodeId = String(S.rootNode?.node_id || "").trim();
+            if (rootNodeId && rootNodeId === nodeId) {
+                S.rootNode = { ...(S.rootNode || {}), ...nextNode };
+            }
+            if (S.taskNodeDetails[nodeId]) {
+                S.taskNodeDetails = {
+                    ...(S.taskNodeDetails || {}),
+                    [nodeId]: { ...(S.taskNodeDetails[nodeId] || {}), ...nextNode },
+                };
+            }
+            if (S.tree) {
+                updateTaskTreeNode(S.tree, nodeId, (node) => {
+                    const patchNode = buildTaskTreeNodeFromDetail(nextNode, node);
+                    Object.assign(node, patchNode);
+                });
+                renderTree();
+            }
             if (String(S.selectedNodeId || "") === nodeId) {
                 const currentViewState = captureTaskDetailViewState();
                 stashTaskDetailViewState({ nodeId, viewState: currentViewState });
@@ -887,7 +919,9 @@ function handleTaskEvent(payload) {
                 const selected = findTreeNode(S.treeView || S.tree, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
                 void showAgent(selected, { preserveViewState: true, forceRefresh: true });
             } else {
-                delete S.taskNodeDetails[nodeId];
+                const nextDetails = { ...(S.taskNodeDetails || {}) };
+                delete nextDetails[nodeId];
+                S.taskNodeDetails = nextDetails;
             }
         }
         return;
@@ -902,6 +936,7 @@ function handleTaskEvent(payload) {
     }
     if (payload.type === "task.terminal" && payload.data?.task) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
+        S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
         renderTaskTokenStats();
     }
 }
