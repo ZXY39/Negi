@@ -855,8 +855,9 @@ function handleTaskEvent(payload) {
         applyTaskPayload(payload.data || {});
         return;
     }
-    if (payload.type === "task.summary.updated" && payload.data?.task) {
+    if (payload.type === "task.summary.patch" && payload.data?.task) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
+        patchTaskListItem(payload.data.task);
         renderTaskDetailHeader();
         renderTaskTokenStats();
         return;
@@ -872,21 +873,14 @@ function handleTaskEvent(payload) {
         renderTaskTokenStats();
         return;
     }
-    if (payload.type === "task.tree.updated") {
-        S.tree = payload.data?.tree_root || null;
-        S.currentTaskTreeRoot = S.tree;
-        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), root: S.tree };
-        renderTree();
-        return;
-    }
-    if (payload.type === "task.runtime.updated") {
+    if (payload.type === "task.live.patch") {
         S.currentTaskRuntimeSummary = payload.data?.runtime_summary || null;
         S.currentTaskProgress = { ...(S.currentTaskProgress || {}), live_state: S.currentTaskRuntimeSummary };
         if (S.tree) renderTree();
         return;
     }
-    if (payload.type === "task.node.updated") {
-        const nodeId = String(payload.data?.node_id || "").trim();
+    if (payload.type === "task.node.patch") {
+        const nodeId = String(payload.data?.node?.node_id || "").trim();
         if (nodeId) {
             if (String(S.selectedNodeId || "") === nodeId) {
                 const currentViewState = captureTaskDetailViewState();
@@ -1054,7 +1048,7 @@ function initTasksWs() {
             applyTaskWorkerStatus(payload.data || {});
             return;
         }
-        if (payload.type === "task.list.patch") {
+        if (payload.type === "task.summary.patch") {
             patchTaskListItem(payload.data?.task || {});
             return;
         }

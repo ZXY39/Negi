@@ -12,7 +12,14 @@ from main.service.task_terminal_callback import (
 
 
 TASK_EVENT_CALLBACK_PATH = "/api/internal/task-event"
-_ALLOWED_TASK_EVENT_TYPES = {"task.snapshot", "task.list.patch", "task.worker.status"}
+_ALLOWED_TASK_EVENT_TYPES = {
+    "task.snapshot",
+    "task.summary.patch",
+    "task.node.patch",
+    "task.live.patch",
+    "task.terminal",
+    "task.worker.status",
+}
 
 
 def _replace_callback_path(url: str, *, expected_path: str, target_path: str) -> str:
@@ -77,7 +84,7 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
             "data": data,
         }
 
-    if event_type == "task.list.patch":
+    if event_type == "task.summary.patch":
         task_payload = dict(data.get("task") or {}) if isinstance(data.get("task"), dict) else {}
         task_id = _normalize_task_id(task_payload.get("task_id") or task_payload.get("taskId") or task_id)
         if not task_id:
@@ -89,6 +96,18 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
             "session_id": session_id,
             "task_id": task_id,
             "data": {"task": task_payload},
+        }
+
+    if event_type in {"task.node.patch", "task.live.patch", "task.terminal"}:
+        if not task_id:
+            return {}
+        if not session_id:
+            session_id = "web:shared"
+        return {
+            "event_type": event_type,
+            "session_id": session_id,
+            "task_id": task_id,
+            "data": data,
         }
 
     worker_payload = dict(data.get("worker") or {}) if isinstance(data.get("worker"), dict) else None

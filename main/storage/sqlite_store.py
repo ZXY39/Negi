@@ -190,6 +190,15 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            CREATE TABLE IF NOT EXISTS task_model_calls (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
+            '''
             CREATE TABLE IF NOT EXISTS task_terminal_outbox (
                 dedupe_key TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -246,6 +255,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_node_details_task_id ON task_node_details(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_runtime_frames_task_id ON task_runtime_frames(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_rounds_task_parent ON task_node_rounds(task_id, parent_node_id, round_index)',
+            'CREATE INDEX IF NOT EXISTS idx_task_model_calls_task_id_seq ON task_model_calls(task_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_task_terminal_outbox_state_created_at ON task_terminal_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_stall_outbox_state_created_at ON task_stall_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
@@ -377,6 +387,7 @@ class SQLiteTaskStore:
             self._conn.execute('DELETE FROM task_runtime_frames WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_node_details WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
+            self._conn.execute('DELETE FROM task_model_calls WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM runtime_states WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
@@ -853,6 +864,45 @@ class SQLiteTaskStore:
                     ),
                 )
 
+    def upsert_task_node(self, record: TaskProjectionNodeRecord) -> TaskProjectionNodeRecord:
+        self._upsert(
+            'task_nodes',
+            [
+                'node_id',
+                'task_id',
+                'parent_node_id',
+                'root_node_id',
+                'depth',
+                'node_kind',
+                'status',
+                'title',
+                'updated_at',
+                'default_round_id',
+                'selected_round_id',
+                'round_options_count',
+                'sort_key',
+                'payload_json',
+            ],
+            [
+                record.node_id,
+                record.task_id,
+                record.parent_node_id,
+                record.root_node_id,
+                int(record.depth or 0),
+                record.node_kind,
+                record.status,
+                record.title,
+                record.updated_at,
+                record.default_round_id,
+                record.selected_round_id,
+                int(record.round_options_count or 0),
+                record.sort_key,
+                record.model_dump_json(),
+            ],
+            'node_id',
+        )
+        return record
+
     def list_task_nodes(self, task_id: str) -> list[TaskProjectionNodeRecord]:
         rows = self._fetchall('SELECT payload_json FROM task_nodes WHERE task_id = ? ORDER BY sort_key ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskProjectionNodeRecord) for row in rows]
@@ -887,6 +937,47 @@ class SQLiteTaskStore:
                     ),
                 )
 
+    def upsert_task_node_detail(self, record: TaskProjectionNodeDetailRecord) -> TaskProjectionNodeDetailRecord:
+        self._upsert(
+            'task_node_details',
+            [
+                'node_id',
+                'task_id',
+                'updated_at',
+                'input_text',
+                'input_ref',
+                'output_text',
+                'output_ref',
+                'check_result',
+                'check_result_ref',
+                'final_output',
+                'final_output_ref',
+                'failure_reason',
+                'prompt_summary',
+                'execution_trace_ref',
+                'payload_json',
+            ],
+            [
+                record.node_id,
+                record.task_id,
+                record.updated_at,
+                record.input_text,
+                record.input_ref,
+                record.output_text,
+                record.output_ref,
+                record.check_result,
+                record.check_result_ref,
+                record.final_output,
+                record.final_output_ref,
+                record.failure_reason,
+                record.prompt_summary,
+                record.execution_trace_ref,
+                record.model_dump_json(),
+            ],
+            'node_id',
+        )
+        return record
+
     def get_task_node_detail(self, node_id: str) -> TaskProjectionNodeDetailRecord | None:
         row = self._fetchone('SELECT payload_json FROM task_node_details WHERE node_id = ?', (node_id,))
         return self._parse(row['payload_json'], TaskProjectionNodeDetailRecord) if row else None
@@ -915,6 +1006,49 @@ class SQLiteTaskStore:
                         record.model_dump_json(),
                     ),
                 )
+
+    def upsert_task_runtime_frame(self, record: TaskProjectionRuntimeFrameRecord) -> TaskProjectionRuntimeFrameRecord:
+        with self._lock, self._conn:
+            self._conn.execute(
+                'INSERT INTO task_runtime_frames (task_id, node_id, depth, node_kind, phase, active, runnable, waiting, updated_at, payload_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(task_id, node_id) DO UPDATE SET '
+                'depth=excluded.depth, '
+                'node_kind=excluded.node_kind, '
+                'phase=excluded.phase, '
+                'active=excluded.active, '
+                'runnable=excluded.runnable, '
+                'waiting=excluded.waiting, '
+                'updated_at=excluded.updated_at, '
+                'payload_json=excluded.payload_json',
+                (
+                    record.task_id,
+                    record.node_id,
+                    int(record.depth or 0),
+                    record.node_kind,
+                    record.phase,
+                    1 if record.active else 0,
+                    1 if record.runnable else 0,
+                    1 if record.waiting else 0,
+                    record.updated_at,
+                    record.model_dump_json(),
+                ),
+            )
+        return record
+
+    def get_task_runtime_frame(self, task_id: str, node_id: str) -> TaskProjectionRuntimeFrameRecord | None:
+        row = self._fetchone(
+            'SELECT payload_json FROM task_runtime_frames WHERE task_id = ? AND node_id = ?',
+            (task_id, node_id),
+        )
+        return self._parse(row['payload_json'], TaskProjectionRuntimeFrameRecord) if row else None
+
+    def delete_task_runtime_frame(self, task_id: str, node_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                'DELETE FROM task_runtime_frames WHERE task_id = ? AND node_id = ?',
+                (str(task_id or '').strip(), str(node_id or '').strip()),
+            )
 
     def list_task_runtime_frames(self, task_id: str) -> list[TaskProjectionRuntimeFrameRecord]:
         rows = self._fetchall('SELECT payload_json FROM task_runtime_frames WHERE task_id = ? ORDER BY depth ASC, node_id ASC', (task_id,))
@@ -945,12 +1079,81 @@ class SQLiteTaskStore:
                     ),
                 )
 
+    def replace_task_node_rounds_for_parent(
+        self,
+        task_id: str,
+        parent_node_id: str,
+        records: list[TaskProjectionRoundRecord],
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                'DELETE FROM task_node_rounds WHERE task_id = ? AND parent_node_id = ?',
+                (task_id, parent_node_id),
+            )
+            for record in records:
+                self._conn.execute(
+                    'INSERT INTO task_node_rounds (task_id, parent_node_id, round_id, round_index, label, is_latest, created_at, source, total_children, completed_children, running_children, failed_children, child_node_ids_json, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (
+                        record.task_id,
+                        record.parent_node_id,
+                        record.round_id,
+                        int(record.round_index or 0),
+                        record.label,
+                        1 if record.is_latest else 0,
+                        record.created_at,
+                        record.source,
+                        int(record.total_children or 0),
+                        int(record.completed_children or 0),
+                        int(record.running_children or 0),
+                        int(record.failed_children or 0),
+                        json.dumps(list(record.child_node_ids or []), ensure_ascii=False),
+                        record.model_dump_json(),
+                    ),
+                )
+
     def list_task_node_rounds(self, task_id: str) -> list[TaskProjectionRoundRecord]:
         rows = self._fetchall(
             'SELECT payload_json FROM task_node_rounds WHERE task_id = ? ORDER BY parent_node_id ASC, round_index ASC, round_id ASC',
             (task_id,),
         )
         return [self._parse(row['payload_json'], TaskProjectionRoundRecord) for row in rows]
+
+    def append_task_model_call(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        created_at: str,
+        payload: dict[str, object],
+    ) -> int:
+        payload_json = json.dumps(payload)
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                'INSERT INTO task_model_calls (task_id, node_id, created_at, payload_json) VALUES (?, ?, ?, ?)',
+                (task_id, node_id, created_at, payload_json),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_task_model_calls(self, task_id: str, *, limit: int = 50) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            'SELECT seq, task_id, node_id, created_at, payload_json FROM task_model_calls WHERE task_id = ? ORDER BY seq DESC LIMIT ?',
+            (task_id, max(1, int(limit or 50))),
+        )
+        items: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(row['payload_json'])
+            items.append(
+                {
+                    'seq': int(row['seq']),
+                    'task_id': row['task_id'],
+                    'node_id': row['node_id'],
+                    'created_at': row['created_at'],
+                    'payload': payload if isinstance(payload, dict) else {},
+                }
+            )
+        items.reverse()
+        return items
 
     def _upsert(self, table: str, columns: list[str], values: list[object], primary_key: str) -> None:
         with self._lock, self._conn:

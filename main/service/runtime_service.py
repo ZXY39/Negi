@@ -109,6 +109,39 @@ _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定�
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
 
 
+_TASK_RUNTIME_V2_MARKER = '.task-runtime-v2'
+
+
+def _prepare_task_runtime_v2_root(
+    *,
+    store_path: Path,
+    files_base_dir: Path,
+    artifact_dir: Path,
+) -> None:
+    runtime_root = store_path.parent
+    marker_path = runtime_root / _TASK_RUNTIME_V2_MARKER
+    if marker_path.exists():
+        return
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    for candidate in (
+        store_path,
+        store_path.with_name(f'{store_path.name}-wal'),
+        store_path.with_name(f'{store_path.name}-shm'),
+    ):
+        try:
+            if candidate.exists():
+                candidate.unlink()
+        except FileNotFoundError:
+            continue
+    for directory in (files_base_dir, artifact_dir):
+        try:
+            if directory.exists():
+                shutil.rmtree(directory, ignore_errors=True)
+        except Exception:
+            logger.debug('task runtime v2 cleanup skipped for {}', directory)
+    marker_path.write_text('task-runtime-v2\n', encoding='utf-8')
+
+
 class ResourceDeleteBlockedError(ValueError):
     def __init__(
         self,
@@ -187,9 +220,17 @@ class MainRuntimeService:
             normalized_mode = 'embedded'
         self.execution_mode = normalized_mode
         self.worker_id = str(worker_id or (new_worker_id() if normalized_mode == 'worker' else '')).strip()
-        self.store = SQLiteTaskStore(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
-        self.file_store = TaskFileStore(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
-        self.artifact_store = TaskArtifactStore(artifact_dir=artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'), store=self.store)
+        resolved_store_path = Path(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
+        resolved_files_base_dir = Path(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
+        resolved_artifact_dir = Path(artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'))
+        _prepare_task_runtime_v2_root(
+            store_path=resolved_store_path,
+            files_base_dir=resolved_files_base_dir,
+            artifact_dir=resolved_artifact_dir,
+        )
+        self.store = SQLiteTaskStore(resolved_store_path)
+        self.file_store = TaskFileStore(resolved_files_base_dir)
+        self.artifact_store = TaskArtifactStore(artifact_dir=resolved_artifact_dir, store=self.store)
         self.content_store = ContentNavigationService(
             workspace=Path.cwd(),
             artifact_store=self.artifact_store,
@@ -1027,13 +1068,13 @@ class MainRuntimeService:
                 target_session_id=target_session_id,
                 session_id=normalized_session_id,
                 task_id=normalized_task_id,
-                event_type='task.list.patch',
+                event_type='task.summary.patch',
                 data=data,
             )
         if self.execution_mode == 'worker' and not bridge:
             self._schedule_task_event_callback(
                 {
-                    'event_type': 'task.list.patch',
+                    'event_type': 'task.summary.patch',
                     'session_id': normalized_session_id,
                     'task_id': normalized_task_id,
                     'data': data,
@@ -1074,6 +1115,62 @@ class MainRuntimeService:
         self.registry.publish_global_task(task.task_id, payload)
 
     def _publish_live_snapshot(self, task: TaskRecord, payload: dict[str, Any], publish_summary: bool) -> None:
+        event_type = str(payload.get('event_type') or '').strip()
+        data = dict(payload.get('data') or {})
+        if event_type == 'task.summary.patch':
+            self._publish_task_list_envelope(
+                target_session_id=task.session_id,
+                session_id=task.session_id,
+                task_id=task.task_id,
+                event_type=event_type,
+                data=data,
+            )
+            self._publish_task_list_envelope(
+                target_session_id='all',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                event_type=event_type,
+                data=data,
+            )
+            detail_payload = build_envelope(
+                channel='task',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                seq=self.registry.next_global_task_seq(task.task_id),
+                type=event_type,
+                data=data,
+            )
+            self.registry.publish_global_task(task.task_id, detail_payload)
+            if self.execution_mode == 'worker':
+                self._schedule_task_event_callback(
+                    {
+                        'event_type': event_type,
+                        'session_id': task.session_id,
+                        'task_id': task.task_id,
+                        'data': data,
+                    }
+                )
+            return
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.terminal'}:
+            detail_payload = build_envelope(
+                channel='task',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                seq=self.registry.next_global_task_seq(task.task_id),
+                type=event_type,
+                data=data,
+            )
+            self.registry.publish_global_task(task.task_id, detail_payload)
+            if self.execution_mode == 'worker':
+                self._schedule_task_event_callback(
+                    {
+                        'event_type': event_type,
+                        'session_id': task.session_id,
+                        'task_id': task.task_id,
+                        'data': data,
+                    }
+                )
+            return
         self._publish_task_snapshot_event(
             session_id=task.session_id,
             task_id=task.task_id,
@@ -1101,12 +1198,38 @@ class MainRuntimeService:
                 bridge=True,
             )
             return True
-        if event_type == 'task.list.patch':
-            self._publish_task_list_patch_event(
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.terminal'} and task_id:
+            payload = build_envelope(
+                channel='task',
                 session_id=session_id,
-                task_payload=dict(data.get('task') or {}),
-                bridge=True,
+                task_id=task_id,
+                seq=self.registry.next_global_task_seq(task_id),
+                type=event_type,
+                data=data,
             )
+            self.registry.publish_global_task(task_id, payload)
+            return True
+        if event_type == 'task.summary.patch':
+            normalized_task_payload = dict(data.get('task') or {})
+            normalized_task_id = self.normalize_task_id(str(normalized_task_payload.get('task_id') or task_id or '').strip())
+            normalized_task_payload['task_id'] = normalized_task_id
+            for target_session_id in {session_id, 'all'}:
+                self._publish_task_list_envelope(
+                    target_session_id=target_session_id,
+                    session_id=session_id,
+                    task_id=normalized_task_id,
+                    event_type='task.summary.patch',
+                    data={'task': normalized_task_payload},
+                )
+            payload = build_envelope(
+                channel='task',
+                session_id=session_id,
+                task_id=normalized_task_id,
+                seq=self.registry.next_global_task_seq(normalized_task_id),
+                type='task.summary.patch',
+                data={'task': normalized_task_payload},
+            )
+            self.registry.publish_global_task(normalized_task_id, payload)
             return True
         if event_type == 'task.worker.status':
             self.publish_worker_status_event(
@@ -2981,6 +3104,27 @@ class MainRuntimeService:
             'node_id': node_id,
             'item': detail.model_dump(mode='json'),
         }
+
+    def get_node_children_payload(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        round_id: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        payload = self.query_service.get_node_children(
+            normalized_task_id,
+            node_id,
+            round_id=round_id,
+            offset=offset,
+            limit=limit,
+        )
+        if payload is None:
+            return None
+        return {'ok': True, **payload}
 
     def node_detail(self, task_id: str, node_id: str) -> dict[str, Any] | str:
         normalized_task_id = self.normalize_task_id(task_id)

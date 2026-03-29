@@ -79,6 +79,30 @@ async def get_task_node_detail(task_id: str, node_id: str):
     return payload
 
 
+@router.get('/tasks/{task_id}/nodes/{node_id}/children')
+async def get_task_node_children(
+    task_id: str,
+    node_id: str,
+    round_id: str | None = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = service.get_node_children_payload(
+        task_id,
+        node_id,
+        round_id=round_id,
+        offset=offset,
+        limit=limit,
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return payload
+
+
 @router.post('/tasks/{task_id}/pause')
 async def pause_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)

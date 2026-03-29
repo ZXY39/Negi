@@ -151,8 +151,39 @@ class TaskQueryService:
             'waiting_node_ids': [],
             'frames': [],
         }
+        root_node = self.get_node_detail(task.task_id, task.root_node_id)
+        counts = {
+            'total_nodes': len(self._store.list_task_nodes(task.task_id)),
+            'total_rounds': len(self._store.list_task_node_rounds(task.task_id)),
+            'active_node_count': len(list(runtime_summary.get('active_node_ids') or [])),
+            'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
+            'waiting_node_count': len(list(runtime_summary.get('waiting_node_ids') or [])),
+        }
+        frontier = [
+            {
+                'node_id': str(frame.node_id or ''),
+                'depth': int(frame.depth or 0),
+                'node_kind': str(frame.node_kind or 'execution'),
+                'phase': str(frame.phase or ''),
+                'stage_goal': str(frame.stage_goal or ''),
+                'tool_call_count': len(list(frame.tool_calls or [])),
+                'child_pipeline_count': len(list(frame.child_pipelines or [])),
+            }
+            for frame in list(progress.live_state.frames or [])
+        ] if progress.live_state is not None else []
         return {
             'task': task.model_dump(mode='json'),
+            'summary': {
+                'task_id': task.task_id,
+                'status': task.status,
+                'brief': task.brief_text,
+                'updated_at': task.updated_at,
+                **counts,
+            },
+            'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
+            'frontier': frontier,
+            'counts': counts,
+            'recent_model_calls': [item.model_dump(mode='json') for item in list(progress.model_calls or [])],
             'tree_root': root,
             'runtime_summary': runtime_summary,
             'default_selected_node_id': str(getattr(progress.root, 'node_id', '') or ''),
@@ -205,6 +236,55 @@ class TaskQueryService:
             ],
         )
         return detail
+
+    def get_node_children(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        round_id: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any] | None:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        parent = self._store.get_task_node(node_id)
+        if parent is None or str(parent.task_id or '').strip() != task.task_id:
+            return None
+        child_ids: list[str] = []
+        rounds = [item for item in self._store.list_task_node_rounds(task.task_id) if str(item.parent_node_id or '').strip() == str(node_id or '').strip()]
+        normalized_round_id = str(round_id or '').strip()
+        if normalized_round_id:
+            selected = next((item for item in rounds if str(item.round_id or '').strip() == normalized_round_id), None)
+            child_ids = [str(item or '').strip() for item in list(selected.child_node_ids or [])] if selected is not None else []
+        else:
+            explicit_ids = {
+                str(child_id or '').strip()
+                for round_item in rounds
+                for child_id in list(round_item.child_node_ids or [])
+                if str(child_id or '').strip()
+            }
+            direct_children = [item for item in self._store.list_task_nodes(task.task_id) if str(item.parent_node_id or '').strip() == str(node_id or '').strip()]
+            child_ids = [
+                str(item.node_id or '').strip()
+                for item in direct_children
+                if str(item.node_id or '').strip() and str(item.node_id or '').strip() not in explicit_ids
+            ]
+        child_ids = child_ids[max(0, int(offset or 0)) : max(0, int(offset or 0)) + max(1, int(limit or 50))]
+        details = []
+        for child_id in child_ids:
+            detail = self.get_node_detail(task.task_id, child_id)
+            if detail is not None:
+                details.append(detail.model_dump(mode='json'))
+        return {
+            'task_id': task.task_id,
+            'parent_node_id': str(node_id or '').strip(),
+            'round_id': normalized_round_id,
+            'items': details,
+            'offset': max(0, int(offset or 0)),
+            'limit': max(1, int(limit or 50)),
+        }
 
     def _compact_tree_payload(self, root) -> dict[str, Any] | None:
         if root is None:
@@ -345,11 +425,8 @@ class TaskQueryService:
         return _build(task.root_node_id)
 
     def _recent_model_calls(self, task_id: str, *, limit: int = 50) -> list[TaskModelCallRecord]:
-        events = self._store.list_task_events(after_seq=0, task_id=task_id, limit=1000)
         records: list[TaskModelCallRecord] = []
-        for event in list(events or []):
-            if str(event.get('event_type') or '') != 'task.model.call':
-                continue
+        for event in list(self._store.list_task_model_calls(task_id, limit=max(1, int(limit or 50))) or []):
             payload = dict(event.get('payload') or {})
             records.append(
                 TaskModelCallRecord(
@@ -366,7 +443,6 @@ class TaskQueryService:
                     ],
                 )
             )
-        records.sort(key=lambda item: int(item.call_index or 0))
         return records[-max(1, int(limit or 1)) :]
 
     def _projection_live_state(self, task_id: str) -> TaskLiveState | None:

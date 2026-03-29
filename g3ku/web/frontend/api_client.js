@@ -405,6 +405,17 @@ class ApiClient {
         return data.item || null;
     }
 
+    static async getTaskNodeChildren(taskId, nodeId, { roundId = "", offset = 0, limit = 50 } = {}) {
+        return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/children`, {
+            params: {
+                round_id: roundId || undefined,
+                offset,
+                limit,
+            },
+            requestKey: `tasks:node-children:${taskId}:${nodeId}:${roundId || "default"}:${offset}:${limit}`,
+        });
+    }
+
     static async pauseTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/pause`);
         return data.task || null;
