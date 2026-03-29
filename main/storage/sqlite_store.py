@@ -25,15 +25,26 @@ class SQLiteTaskStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._read_lock = threading.RLock()
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._conn:
             self._conn.execute('PRAGMA journal_mode=WAL')
         self._setup()
+        self._read_conn = self._open_read_conn()
 
     def close(self) -> None:
+        with self._read_lock:
+            self._read_conn.close()
         with self._lock:
             self._conn.close()
+
+    def _open_read_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        with conn:
+            conn.execute('PRAGMA query_only=ON')
+        return conn
 
     def _setup(self) -> None:
         statements = [
@@ -1165,12 +1176,12 @@ class SQLiteTaskStore:
         self._conn.execute(sql, values)
 
     def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
-        with self._lock:
-            return self._conn.execute(sql, params).fetchone()
+        with self._read_lock:
+            return self._read_conn.execute(sql, params).fetchone()
 
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
-        with self._lock:
-            return list(self._conn.execute(sql, params).fetchall())
+        with self._read_lock:
+            return list(self._read_conn.execute(sql, params).fetchall())
 
     @staticmethod
     def _task_terminal_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:

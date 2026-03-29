@@ -127,38 +127,7 @@ async function ensureTaskNodeChildren(nodeId, { roundId = "", force = false } = 
         try {
             const payload = await ApiClient.getTaskNodeChildren(taskId, normalizedNodeId, { roundId: normalizedRoundId, offset: 0, limit: 200 });
             if (String(S.currentTaskId || "").trim() !== taskId) return null;
-            const items = Array.isArray(payload?.items) ? payload.items : [];
-            const rounds = Array.isArray(payload?.rounds) ? payload.rounds : [];
-            const defaultRoundId = String(payload?.default_round_id || "").trim();
-            const treeItems = items.map((item) => buildTaskTreeNodeFromDetail(item)).filter((item) => String(item?.node_id || "").trim());
-            S.taskNodeChildrenCache = { ...(S.taskNodeChildrenCache || {}), [cacheKey]: payload };
-            if (S.tree) {
-                updateTaskTreeNode(S.tree, normalizedNodeId, (node) => {
-                    node.default_round_id = defaultRoundId || node.default_round_id || "";
-                    const currentRounds = Array.isArray(node.spawn_rounds) ? node.spawn_rounds : [];
-                    const roundMap = new Map(currentRounds.map((round) => [String(round?.round_id || "").trim(), round]));
-                    node.spawn_rounds = rounds.map((round) => {
-                        const roundKey = String(round?.round_id || "").trim();
-                        const previous = roundMap.get(roundKey) || {};
-                        const nextRound = {
-                            ...previous,
-                            ...round,
-                            round_id: roundKey,
-                            children: roundKey === String(payload?.round_id || defaultRoundId || "").trim()
-                                ? treeItems
-                                : (Array.isArray(previous?.children) ? previous.children : []),
-                        };
-                        return nextRound;
-                    });
-                    const selectedRoundId = String(payload?.round_id || defaultRoundId || "").trim();
-                    node.children = treeItems;
-                    if (!selectedRoundId) {
-                        node.auxiliary_children = treeItems;
-                    }
-                });
-                S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
-                renderTree();
-            }
+            applyTaskNodeChildrenSnapshot(payload, { render: true });
             return payload;
         } catch (error) {
             if (!isAbortLike(error)) {
@@ -173,6 +142,44 @@ async function ensureTaskNodeChildren(nodeId, { roundId = "", force = false } = 
     })();
     S.taskNodeChildrenRequests = { ...(S.taskNodeChildrenRequests || {}), [cacheKey]: request };
     return request;
+}
+
+function applyTaskNodeChildrenSnapshot(payload, { render = true } = {}) {
+    const normalizedNodeId = String(payload?.parent_node_id || "").trim();
+    const normalizedRoundId = String(payload?.round_id || "").trim();
+    if (!normalizedNodeId) return;
+    const cacheKey = `${normalizedNodeId}::${normalizedRoundId || "default"}`;
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const rounds = Array.isArray(payload?.rounds) ? payload.rounds : [];
+    const defaultRoundId = String(payload?.default_round_id || "").trim();
+    const treeItems = items.map((item) => buildTaskTreeNodeFromDetail(item)).filter((item) => String(item?.node_id || "").trim());
+    S.taskNodeChildrenCache = { ...(S.taskNodeChildrenCache || {}), [cacheKey]: payload };
+    if (S.tree) {
+        updateTaskTreeNode(S.tree, normalizedNodeId, (node) => {
+            node.default_round_id = defaultRoundId || node.default_round_id || "";
+            const currentRounds = Array.isArray(node.spawn_rounds) ? node.spawn_rounds : [];
+            const roundMap = new Map(currentRounds.map((round) => [String(round?.round_id || "").trim(), round]));
+            node.spawn_rounds = rounds.map((round) => {
+                const roundKey = String(round?.round_id || "").trim();
+                const previous = roundMap.get(roundKey) || {};
+                return {
+                    ...previous,
+                    ...round,
+                    round_id: roundKey,
+                    children: roundKey === String(payload?.round_id || defaultRoundId || "").trim()
+                        ? treeItems
+                        : (Array.isArray(previous?.children) ? previous.children : []),
+                };
+            });
+            const selectedRoundId = String(payload?.round_id || defaultRoundId || "").trim();
+            node.children = treeItems;
+            if (!selectedRoundId) {
+                node.auxiliary_children = treeItems;
+            }
+        });
+        S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
+        if (render) renderTree();
+    }
 }
 
 function pruneTreeRoundSelections(root, selections) {

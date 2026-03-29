@@ -84,10 +84,10 @@ def _mark_worker_online(service: MainRuntimeService, *, active_task_count: int =
     _mark_worker_at(service, now_iso(), active_task_count=active_task_count)
 
 
-def _receive_until_type(ws, expected_type: str) -> dict[str, object]:
+def _receive_until_type(ws, expected_type: str, predicate=None) -> dict[str, object]:
     while True:
         payload = ws.receive_json()
-        if payload.get("type") == expected_type:
+        if payload.get("type") == expected_type and (predicate is None or bool(predicate(payload))):
             return payload
 
 
@@ -1351,6 +1351,48 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
     assert children["rounds"] == []
     assert [item["node_id"] for item in children["items"]] == [acceptance.node_id]
     assert children["items"][0]["node_kind"] == "acceptance"
+
+
+def test_task_detail_websocket_streams_children_snapshot_for_parent(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
+        assert ws.receive_json()["type"] == "hello"
+
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
+        )
+
+        children_event = _receive_until_type(
+            ws,
+            "task.node.children.snapshot",
+            predicate=lambda item: item["data"]["parent_node_id"] == root.node_id,
+        )
+        assert children_event["type"] == "task.node.children.snapshot"
+        assert children_event["data"]["parent_node_id"] == root.node_id
+        assert [item["node_id"] for item in children_event["data"]["items"]] == [child.node_id]
 
 
 def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path):

@@ -49,7 +49,7 @@ from main.models import (
 )
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
-from main.monitoring.query_service import TaskQueryService
+from main.monitoring.query_service_v2 import TaskQueryServiceV2
 from main.protocol import build_envelope, now_iso
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.global_scheduler import GlobalScheduler
@@ -89,6 +89,7 @@ from main.service.task_stall_notifier import (
     stalled_minutes_since,
     stall_bucket_minutes,
 )
+from main.service.worker_heartbeat_service_v2 import WorkerHeartbeatServiceV2
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -247,7 +248,7 @@ class MainRuntimeService:
         self.task_stall_notifier = TaskStallNotifier(service=self)
         self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
-        self.query_service = TaskQueryService(store=self.store, file_store=self.file_store, log_service=self.log_service)
+        self.query_service = TaskQueryServiceV2(store=self.store, file_store=self.file_store, log_service=self.log_service)
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
         self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
         self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
@@ -299,6 +300,13 @@ class MainRuntimeService:
             runner=self.task_actor_service,
             max_concurrent_tasks=scheduler_concurrency,
             per_task_limit=1,
+        )
+        self.worker_heartbeat_service = WorkerHeartbeatServiceV2(
+            store=self.store,
+            scheduler=self.global_scheduler,
+            execution_mode=self.execution_mode,
+            worker_id=self.worker_id or 'worker',
+            publish_status=self.publish_worker_status_event,
         )
         self._started = False
         self._runtime_loop = None
@@ -504,35 +512,7 @@ class MainRuntimeService:
                 await asyncio.sleep(0.5)
 
     async def _worker_heartbeat_loop(self) -> None:
-        while True:
-            try:
-                active_task_count = self.global_scheduler.active_task_count() + self.global_scheduler.queued_task_count()
-                updated_at = now_iso()
-                payload = {
-                    'execution_mode': self.execution_mode,
-                    'active_task_count': active_task_count,
-                }
-                self.store.upsert_worker_status(
-                    worker_id=self.worker_id or 'worker',
-                    role='task_worker',
-                    status='running',
-                    updated_at=updated_at,
-                    payload=payload,
-                )
-                self.publish_worker_status_event(
-                    item={
-                        'worker_id': self.worker_id or 'worker',
-                        'role': 'task_worker',
-                        'status': 'running',
-                        'updated_at': updated_at,
-                        'payload': payload,
-                    }
-                )
-                await asyncio.sleep(1.0 if active_task_count > 0 else 5.0)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                await asyncio.sleep(1.0)
+        await self.worker_heartbeat_service.run_forever()
 
     async def _process_worker_command(self, command: dict[str, Any]) -> None:
         command_id = str(command.get('command_id') or '').strip()
@@ -1093,6 +1073,45 @@ class MainRuntimeService:
         )
         self.registry.publish_global_task(task.task_id, payload)
 
+    def _publish_task_node_children_snapshot(
+        self,
+        *,
+        task: TaskRecord,
+        parent_node_id: str,
+        round_id: str | None = None,
+    ) -> None:
+        normalized_parent_node_id = str(parent_node_id or '').strip()
+        if not normalized_parent_node_id:
+            return
+        payload = self.get_node_children_payload(
+            task.task_id,
+            normalized_parent_node_id,
+            round_id=round_id,
+            offset=0,
+            limit=200,
+        )
+        if payload is None:
+            return
+        data = dict(payload)
+        event = build_envelope(
+            channel='task',
+            session_id=task.session_id,
+            task_id=task.task_id,
+            seq=self.registry.next_global_task_seq(task.task_id),
+            type='task.node.children.snapshot',
+            data=data,
+        )
+        self.registry.publish_global_task(task.task_id, event)
+        if self.execution_mode == 'worker':
+            self._schedule_task_event_callback(
+                {
+                    'event_type': 'task.node.children.snapshot',
+                    'session_id': task.session_id,
+                    'task_id': task.task_id,
+                    'data': data,
+                }
+            )
+
     def _publish_live_snapshot(self, task: TaskRecord, payload: dict[str, Any], publish_summary: bool) -> None:
         event_type = str(payload.get('event_type') or '').strip()
         data = dict(payload.get('data') or {})
@@ -1149,6 +1168,14 @@ class MainRuntimeService:
                         'data': data,
                     }
                 )
+            if event_type == 'task.node.patch':
+                node_payload = dict(data.get('node') or {}) if isinstance(data.get('node'), dict) else {}
+                node_id = str(node_payload.get('node_id') or '').strip()
+                parent_node_id = str(node_payload.get('parent_node_id') or '').strip()
+                if node_id:
+                    self._publish_task_node_children_snapshot(task=task, parent_node_id=node_id)
+                if parent_node_id and parent_node_id != node_id:
+                    self._publish_task_node_children_snapshot(task=task, parent_node_id=parent_node_id)
             return
         return
 
@@ -1160,7 +1187,7 @@ class MainRuntimeService:
         session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
         task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip()) if normalized.get('task_id') else ''
         data = dict(normalized.get('data') or {})
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'} and task_id:
+        if event_type in {'task.node.patch', 'task.node.children.snapshot', 'task.live.patch', 'task.model.call', 'task.terminal'} and task_id:
             payload = build_envelope(
                 channel='task',
                 session_id=session_id,

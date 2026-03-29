@@ -926,6 +926,10 @@ function handleTaskEvent(payload) {
         }
         return;
     }
+    if (payload.type === "task.node.children.snapshot") {
+        applyTaskNodeChildrenSnapshot(payload.data || {}, { render: true });
+        return;
+    }
     if (payload.type === "task.artifact.added" || payload.type === "task.artifact.applied" || payload.type === "artifact.applied") {
         void loadTaskArtifacts();
         return;

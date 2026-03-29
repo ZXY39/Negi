@@ -34,6 +34,8 @@ from main.monitoring.models import (
     TaskProjectionRoundRecord,
     TaskProjectionRuntimeFrameRecord,
 )
+from main.monitoring.task_event_writer import TaskEventWriter
+from main.monitoring.task_projector import TaskProjector
 from main.protocol import build_envelope, now_iso
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 
@@ -69,6 +71,8 @@ class TaskLogService:
         self._file_store = file_store
         self._registry = registry
         self._content_store = content_store
+        self._event_writer = TaskEventWriter(store=store)
+        self._projector = TaskProjector(store=store)
         self._live_snapshot_publishers: list[Callable[[TaskRecord, dict[str, Any], bool], None]] = []
         self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
         self._task_visible_output_listeners: list[Callable[[str, str], None]] = []
@@ -311,7 +315,7 @@ class TaskLogService:
                         request_message_count=request_message_count,
                         request_message_chars=request_message_chars,
                     )
-                    self._store.append_task_model_call(
+                    self._event_writer.append_task_model_call(
                         task_id=task_id,
                         node_id=node_id,
                         created_at=changed_at,
@@ -1156,7 +1160,7 @@ class TaskLogService:
                         }
                     )
                 )
-            self._store.replace_task_runtime_frames(task.task_id, frame_records)
+            self._projector.replace_runtime_frames(task.task_id, frame_records)
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task)
             return self.read_runtime_state(task_id) or {}
@@ -1291,13 +1295,15 @@ class TaskLogService:
             return self._store.get_task(task_id)
 
     def _sync_node_read_models_locked(self, node: NodeRecord) -> None:
-        self._store.upsert_task_node(self._task_projection_node_record(node))
-        self._store.upsert_task_node_detail(self._task_projection_node_detail_record(node))
+        self._projector.sync_node(
+            self._task_projection_node_record(node),
+            self._task_projection_node_detail_record(node),
+        )
 
     def _sync_task_node_rounds_locked(self, node: NodeRecord) -> None:
         if node is None:
             return
-        self._store.replace_task_node_rounds_for_parent(
+        self._projector.sync_rounds_for_parent(
             node.task_id,
             node.node_id,
             self._task_projection_round_records(node),
@@ -1765,12 +1771,11 @@ class TaskLogService:
         return task
 
     def _append_task_event(self, *, task: TaskRecord, event_type: str, data: dict[str, Any]) -> None:
-        self._store.append_task_event(
+        self._event_writer.append_task_event(
             task_id=task.task_id,
             session_id=task.session_id,
             event_type=event_type,
-            created_at=now_iso(),
-            payload=data,
+            data=data,
         )
 
     @staticmethod
