@@ -32,30 +32,6 @@ from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SU
 
 SKIPPED_CHECK_RESULT = '未检验'
 _RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
-ACCEPTANCE_REF_GUIDANCE = (
-    'If more detail is needed, use content.search first and then content.open for targeted reads. '
-    'Do not request the full document body.'
-)
-ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE = (
-    'Evidence consistency check: when the child output or evidence notes cite concrete identifiers '
-    'such as function, method, class, field, config key, CLI command, or search keyword names, '
-    'verify that those identifiers actually appear in the cited file lines or a targeted reopened local slice. '
-    'If the cited identifiers drift from the cited source, reject the deliverable with failed+final.'
-)
-CORE_REQUIREMENT_NOTICE_PREFIXES = (
-    '注意：你正在完成的任务是核心需求【',
-    '你正在完成的任务是核心需求【',
-)
-CORE_REQUIREMENT_NOTICE_FOCUS_TEMPLATE = (
-    '你正在完成的任务是核心需求【{core_requirement}】的细分任务之一。'
-    '只允许抓最关键事实、做最高价值行为和完成当前目标所必需的验证，'
-    '不得额外扩展范围、补做边缘分支或系统性全量操作。'
-)
-CORE_REQUIREMENT_NOTICE_COVERAGE_TEMPLATE = (
-    '你正在完成的任务是核心需求【{core_requirement}】的细分任务之一。'
-    '优先抓最关键事实、做最高价值行为和完成当前目标所必需的验证，'
-    '必要时额外扩展范围、补做边缘分支或系统性全量操作。'
-)
 
 
 _UNSET = object()
@@ -323,11 +299,7 @@ class NodeRunner:
             'depth': node.depth,
             'can_spawn_children': bool(node.can_spawn_children),
             'goal': node.goal,
-            'prompt': self._inject_core_requirement_notice(
-                node.prompt,
-                core_requirement,
-                execution_policy.mode,
-            ),
+            'prompt': str(node.prompt or ''),
             'core_requirement': core_requirement,
             'execution_policy': execution_policy.model_dump(mode='json'),
             'runtime_environment': self._runtime_environment_payload(),
@@ -352,9 +324,7 @@ class NodeRunner:
 
     def _build_system_prompt(self, *, node: NodeRecord) -> str:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
-        prompt = load_prompt(system_name).strip()
-        environment_guidance = self._environment_context_guidance(node=node)
-        return f'{prompt}\n\n{environment_guidance}'
+        return load_prompt(system_name).strip()
 
     def _execution_stage_payload(self, *, task, node: NodeRecord) -> dict[str, Any]:
         return self._log_service.execution_stage_prompt_payload(task.task_id, node.node_id)
@@ -469,49 +439,18 @@ class NodeRunner:
                 'exec_requires_explicit_working_dir_for_target_dir': True,
             },
             'tool_guidance': {
-                'filesystem': 'Use absolute paths. Prefer filesystem.search for recursive directory searches.',
-                'content': 'Use ref navigation or absolute file paths for a single content body; do not expect directory search here.',
+                'filesystem': '使用绝对路径。需要递归搜索目录时，优先使用 filesystem.search。',
+                'content': '单个内容体优先用 ref 导航或绝对文件路径；不要把它当成目录搜索工具。',
                 'exec': (
-                    'Exec runs in PowerShell on Windows and in the host shell elsewhere. '
-                    'It inherits the same Python environment as the current G3KU process and injects '
-                    'that interpreter onto PATH. Do not assume bash heredocs, rg, or Unix shell '
-                    'builtins such as `true` are available. Pass an explicit working_dir when you '
-                    f"need a specific directory. When exact interpreter choice matters, prefer `{project_environment.get('project_python_hint') or 'python'}` "
-                    'instead of assuming bare `python` resolves correctly.'
+                    'Windows 上的 exec 运行在 PowerShell 中，其他系统运行在宿主 shell 中。'
+                    '它会继承当前 G3KU 进程使用的同一套 Python 环境，并把该解释器注入 PATH。'
+                    '不要假设 bash heredoc、rg 或 `true` 这类 Unix shell 内建一定可用。'
+                    '需要特定目录时，显式传入 working_dir。'
+                    f"当解释器选择必须精确一致时，优先使用 `{project_environment.get('project_python_hint') or 'python'}`，"
+                    '不要假设裸 `python` 一定会解析到正确解释器。'
                 ),
             },
         }
-
-    def _environment_context_guidance(self, *, node: NodeRecord) -> str:
-        env = self._runtime_environment_payload()
-        path_policy = env['path_policy']
-        tool_guidance = env['tool_guidance']
-        lines = [
-            'Runtime environment:',
-            f"- OS family: {env['os_family']}",
-            f"- Shell family for `exec`: {env['shell_family']}",
-            f"- Current process cwd: {env['process_cwd']}",
-            f"- Workspace root: {env['workspace_root']}",
-            f"- Project Python for exact `exec` calls: {env['project_python']}",
-            f"- Project Python shell hint: {env['project_python_hint']}",
-            '- Relative path policy: Do not assume relative paths bind to workspace. '
-            f"`filesystem` absolute-only={str(path_policy['filesystem_requires_absolute_path']).lower()}, "
-            f"`content` absolute-only={str(path_policy['content_requires_absolute_path']).lower()}, "
-            f"`exec` default working_dir={path_policy['exec_default_working_dir']}.",
-            '- Tool usage guidance:',
-        ]
-        if str(env.get('project_virtual_env') or '').strip():
-            lines.append(f"- Active virtual environment: {env['project_virtual_env']}")
-        lines.extend(
-            [
-                f"- `filesystem`: {tool_guidance['filesystem']}",
-                f"- `content`: {tool_guidance['content']}",
-                f"- `exec`: {tool_guidance['exec']}",
-                '- If the real target project is outside the current workspace, use explicit absolute paths to that '
-                'target instead of broad fallback searches inside the current repo.',
-            ]
-        )
-        return '\n'.join(lines)
 
     @staticmethod
     def _actor_role_for_node(node: NodeRecord) -> str:
@@ -997,11 +936,7 @@ class NodeRunner:
         spec: SpawnChildSpec,
         exclude_node_ids: set[str],
     ) -> NodeRecord | None:
-        expected_prompt = self._inject_core_requirement_notice(
-            spec.prompt,
-            self._resolve_core_requirement(task),
-            normalize_execution_policy_metadata(spec.execution_policy).mode,
-        )
+        expected_prompt = str(spec.prompt or '')
         expected_fingerprint = self._execution_child_recovery_fingerprint(
             parent_node_id=parent.node_id,
             goal=spec.goal,
@@ -1038,8 +973,6 @@ class NodeRunner:
             node_output_ref=str(child_handoff.get('output_ref') or ''),
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
-            core_requirement=self._resolve_core_requirement(task),
-            execution_policy_mode=self._resolve_execution_policy(task, node=accepted_node).mode,
         )
         expected_fingerprint = self._acceptance_node_recovery_fingerprint(
             parent_node_id=parent_node_id,
@@ -1128,15 +1061,6 @@ class NodeRunner:
             }
         )
 
-    @staticmethod
-    def _core_requirement_notice(core_requirement: str, execution_policy_mode: str) -> str:
-        template = (
-            CORE_REQUIREMENT_NOTICE_COVERAGE_TEMPLATE
-            if str(execution_policy_mode or '').strip().lower() == 'coverage'
-            else CORE_REQUIREMENT_NOTICE_FOCUS_TEMPLATE
-        )
-        return template.format(core_requirement=str(core_requirement or '').strip())
-
     def _resolve_core_requirement(self, task) -> str:
         metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
         return str(metadata.get('core_requirement') or getattr(task, 'user_request', '') or getattr(task, 'title', '') or '').strip()
@@ -1148,29 +1072,9 @@ class NodeRunner:
             node_metadata.get('execution_policy', task_metadata.get('execution_policy'))
         )
 
-    def _inject_core_requirement_notice(self, prompt: str, core_requirement: str, execution_policy_mode: str) -> str:
-        normalized_core_requirement = str(core_requirement or '').strip()
-        base_lines = []
-        for line in str(prompt or '').splitlines():
-            stripped = str(line or '').strip()
-            if any(stripped.startswith(prefix) for prefix in CORE_REQUIREMENT_NOTICE_PREFIXES):
-                continue
-            base_lines.append(line)
-        base_prompt = '\n'.join(base_lines).strip()
-        if not normalized_core_requirement:
-            return base_prompt
-        notice = self._core_requirement_notice(normalized_core_requirement, execution_policy_mode)
-        if not base_prompt:
-            return notice
-        return f'{notice}\n\n{base_prompt}'
-
     def _create_execution_child(self, *, task, parent: NodeRecord, spec: SpawnChildSpec) -> NodeRecord:
         execution_policy = normalize_execution_policy_metadata(spec.execution_policy)
-        child_prompt = self._inject_core_requirement_notice(
-            spec.prompt,
-            self._resolve_core_requirement(task),
-            execution_policy.mode,
-        )
+        child_prompt = str(spec.prompt or '')
         metadata = {
             'execution_policy': execution_policy.model_dump(mode='json'),
             _RECOVERY_FINGERPRINT_KEY: self._execution_child_recovery_fingerprint(
@@ -1224,8 +1128,6 @@ class NodeRunner:
             node_output_ref=str(child_handoff.get('output_ref') or ''),
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
-            core_requirement=self._resolve_core_requirement(task),
-            execution_policy_mode=execution_policy.mode,
         )
         base_metadata = {
             'accepted_node_id': accepted_node.node_id,
@@ -1268,20 +1170,16 @@ class NodeRunner:
         node_output_ref: str,
         result_payload_ref: str,
         evidence_summary: str,
-        core_requirement: str,
-        execution_policy_mode: str,
     ) -> str:
+        normalized_acceptance_prompt = str(acceptance_prompt or '').strip()
         prompt = (
-            f'{acceptance_prompt}\n\n'
-            f'Child node output summary:\n{node_output or "(empty)"}\n\n'
-            f'Child node output ref: {node_output_ref or "(none)"}\n'
-            f'Child node result payload ref: {result_payload_ref or "(none)"}\n'
-            f'Child node evidence summary:\n{evidence_summary or "(none)"}\n'
+            f'{normalized_acceptance_prompt}\n\n'
+            f'子节点输出摘要：\n{node_output or "(empty)"}\n\n'
+            f'子节点输出 ref：{node_output_ref or "(none)"}\n'
+            f'子节点结果载荷 ref：{result_payload_ref or "(none)"}\n'
+            f'子节点证据摘要：\n{evidence_summary or "(none)"}\n'
         )
-        if node_output_ref or result_payload_ref:
-            prompt = f'{prompt}\n{ACCEPTANCE_REF_GUIDANCE}\n'
-        prompt = f'{prompt}\n{ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE}\n'
-        return self._inject_core_requirement_notice(prompt, core_requirement, execution_policy_mode)
+        return prompt
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:
         latest = self._log_service.ensure_node_output_externalized(task_id, node.node_id) or self._store.get_node(node.node_id) or node
@@ -1332,7 +1230,7 @@ class NodeRunner:
 
     @staticmethod
     def _runtime_spawn_failure_info(error_text: str) -> SpawnChildFailureInfo:
-        text = str(error_text or 'Error: child pipeline failed').strip() or 'Error: child pipeline failed'
+        text = str(error_text or '错误：子节点流水线失败').strip() or '错误：子节点流水线失败'
         return SpawnChildFailureInfo(
             source='runtime',
             summary=text,

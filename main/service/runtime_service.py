@@ -3219,11 +3219,6 @@ class MainRuntimeService:
             if not isinstance(payload, dict):
                 continue
             payload['visible_skills'] = skill_items
-            payload['skill_usage_rules'] = {
-                'visible_only': True,
-                'skill_discovery_allowed': False,
-                'load_skill_context_requires_visible_skill_id': True,
-            }
             enriched[index] = {
                 **message,
                 'content': json.dumps(payload, ensure_ascii=False, indent=2),

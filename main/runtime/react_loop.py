@@ -1136,44 +1136,42 @@ class ReActToolLoop:
         normalized_kind = str(node_kind or '').strip().lower()
         if normalized_kind == 'acceptance':
             return (
-                f'Your previous reply was not valid result JSON for schema v{RESULT_SCHEMA_VERSION}. '
-                'Reply with only one JSON object using exactly these keys: '
+                f'你上一条回复不符合结果 JSON 协议 v{RESULT_SCHEMA_VERSION}。'
+                '请只回复一个 JSON 对象，并且只使用以下键：'
                 '{"status":"success|failed","delivery_status":"final|partial|blocked","summary":"...",'
                 '"answer":"...","evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
-                '"remaining_work":["..."],"blocking_reason":"..."}. '
-                'Do not use Markdown. '
+                '"remaining_work":["..."],"blocking_reason":"..."}。'
+                '不要使用 Markdown。'
                 f'{guidance}'
             )
         return (
-            f'Your previous reply was not valid result JSON for schema v{RESULT_SCHEMA_VERSION}. '
-            'If you are ending the node now, reply with only one JSON object using exactly these keys: '
+            f'你上一条回复不符合结果 JSON 协议 v{RESULT_SCHEMA_VERSION}。'
+            '如果你现在要结束当前节点，只回复一个 JSON 对象，并且只使用以下键：'
             '{"status":"success|failed","delivery_status":"final|partial|blocked","summary":"...",'
             '"answer":"...","evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
-            '"remaining_work":["..."],"blocking_reason":"..."}. '
-            'If the task is not complete yet, do not emit prose or a premature result JSON; continue with tool calls, '
-            'stage transitions, or child-node actions instead. '
-            'Do not use Markdown when you do return the final JSON. '
+            '"remaining_work":["..."],"blocking_reason":"..."}。'
+            '如果任务实际上还没有完成，不要输出 prose 或提前结束的结果 JSON，而是继续使用工具调用、阶段切换或子节点动作推进。'
+            '当你真正返回最终 JSON 时，也不要使用 Markdown。'
             f'{guidance}'
         )
 
     @staticmethod
     def _result_contract_violation_message(violations: list[str], *, node_kind: str = 'execution') -> str:
-        bullet_text = '; '.join(str(item or '').strip() for item in violations if str(item or '').strip()) or 'result contract violation'
+        bullet_text = '; '.join(str(item or '').strip() for item in violations if str(item or '').strip()) or '结果协议违规'
         guidance = ReActToolLoop._result_repair_guidance(node_kind=node_kind)
         normalized_kind = str(node_kind or '').strip().lower()
         if normalized_kind == 'acceptance':
             return (
-                f'Your previous reply produced parseable JSON but violated result schema v{RESULT_SCHEMA_VERSION}: {bullet_text}. '
-                'Fix every violation and reply with only one JSON object. '
-                'Do not claim success unless the deliverable is fully complete. '
+                f'你上一条回复虽然能解析成 JSON，但违反了结果协议 v{RESULT_SCHEMA_VERSION}：{bullet_text}。'
+                '请修复所有违规项，并只回复一个 JSON 对象。'
+                '除非交付物已经完整满足要求，否则不要声称 success。'
                 f'{guidance}'
             )
         return (
-            f'Your previous reply produced parseable JSON but violated result schema v{RESULT_SCHEMA_VERSION}: {bullet_text}. '
-            'If you are ending the node now, fix every violation and reply with only one JSON object. '
-            'If the task is not actually complete yet, do not force another premature result JSON; continue with tool '
-            'calls, stage transitions, or child-node actions instead. '
-            'Do not claim success unless the deliverable is fully complete. '
+            f'你上一条回复虽然能解析成 JSON，但违反了结果协议 v{RESULT_SCHEMA_VERSION}：{bullet_text}。'
+            '如果你现在要结束当前节点，请修复所有违规项，并只回复一个 JSON 对象。'
+            '如果任务实际上还没有完成，不要强行再输出一个提前结束的结果 JSON，而是继续使用工具调用、阶段切换或子节点动作推进。'
+            '除非交付物已经完整满足要求，否则不要声称 success。'
             f'{guidance}'
         )
 
@@ -1182,14 +1180,14 @@ class ReActToolLoop:
         normalized_kind = str(node_kind or '').strip().lower()
         if normalized_kind == 'acceptance':
             return (
-                'Do not use delivery_status="partial" for acceptance nodes. '
-                'If you are rejecting the deliverable, return failed+final. '
-                'If missing evidence, unreadable artifacts, or insufficient context block verification, return failed+blocked.'
+                '验收节点不要使用 delivery_status="partial"。'
+                '如果你是在拒绝交付，返回 failed+final。'
+                '如果因为证据缺失、artifact 不可读或上下文不足而无法完成验收，返回 failed+blocked。'
             )
         return (
-            'Do not use delivery_status="partial" for execution nodes. '
-            'If the task is not actually complete yet, continue working with tool calls or stage transitions instead of emitting more result JSON. '
-            'Only return failed+blocked when you are truly blocked under the current permissions, environment, and tools.'
+            '执行节点不要使用 delivery_status="partial"。'
+            '如果任务实际上还没有完成，继续通过工具调用或阶段切换推进，而不是继续输出结果 JSON。'
+            '只有在当前权限、环境和工具条件下确实被阻塞时，才返回 failed+blocked。'
         )
 
     @staticmethod
@@ -1513,8 +1511,8 @@ class ReActToolLoop:
             return False
         content = str((message or {}).get('content') or '').strip()
         return (
-            content.startswith('Your previous reply was not valid result JSON for schema v')
-            or content.startswith('Your previous reply produced parseable JSON but violated result schema v')
+            content.startswith('你上一条回复不符合结果 JSON 协议 v')
+            or content.startswith('你上一条回复虽然能解析成 JSON，但违反了结果协议 v')
         )
 
     def _dedupe_tool_messages(self, tool_messages: list[dict[str, Any]], *, existing_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

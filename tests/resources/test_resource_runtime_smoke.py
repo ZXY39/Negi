@@ -1769,11 +1769,6 @@ async def test_execution_node_messages_include_visible_skill_inventory(tmp_path:
                 'description': 'Demo skill for resource smoke tests.',
             }
         ]
-        assert payload['skill_usage_rules'] == {
-            'visible_only': True,
-            'skill_discovery_allowed': False,
-            'load_skill_context_requires_visible_skill_id': True,
-        }
     finally:
         await service.close()
         manager.close()

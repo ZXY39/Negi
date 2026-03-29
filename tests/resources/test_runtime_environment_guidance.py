@@ -51,7 +51,7 @@ def test_ceo_prompt_builder_mentions_clawhub_skill_manager(monkeypatch) -> None:
     assert 'load_skill_context(skill_id="clawhub-skill-manager")' in prompt
 
 
-def test_node_runner_runtime_context_and_guidance_include_project_python(monkeypatch) -> None:
+def test_node_runner_runtime_context_and_prompt_contract_include_project_python(monkeypatch) -> None:
     monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
     runner = NodeRunner(
         store=None,
@@ -65,12 +65,14 @@ def test_node_runner_runtime_context_and_guidance_include_project_python(monkeyp
     node = SimpleNamespace(node_id='node:1', depth=0, node_kind='execution', can_spawn_children=False)
 
     runtime_context = runner._runtime_context(task=task, node=node)
-    guidance = runner._environment_context_guidance(node=node)
+    prompt = runner._build_system_prompt(node=node)
 
     assert runtime_context['project_python'] == r'C:\Python314\python.exe'
     assert runtime_context['project_python_hint'] == r"& 'C:\Python314\python.exe'"
-    assert 'same Python environment as the current G3KU process' in guidance
-    assert r"& 'C:\Python314\python.exe'" in guidance
+    assert 'runtime_environment' in prompt
+    assert 'project_python_hint' in prompt
+    assert 'tool_guidance' in prompt
+    assert r"& 'C:\Python314\python.exe'" not in prompt
 
 
 def test_node_execution_prompt_mentions_visible_skill_only_policy(monkeypatch) -> None:

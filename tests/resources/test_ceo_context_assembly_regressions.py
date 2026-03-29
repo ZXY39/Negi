@@ -555,9 +555,10 @@ async def test_ceo_context_assembly_adds_retrieved_memory_resolution_hint_for_me
     )
 
     assert 'Retrieved Memory Resolution Hint' in result.system_prompt
-    assert 'Authoritative Retrieved Default' in result.system_prompt
+    assert 'Authoritative Retrieved Default' not in result.system_prompt
     assert 'restate the retrieved default directly' in result.system_prompt
     assert '用户要求以后所有整理文档类的结果默认放在桌面' in result.system_prompt
+    assert 'authoritative_memory_fact' not in result.trace
 
 
 @pytest.mark.asyncio

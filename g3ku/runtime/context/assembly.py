@@ -110,45 +110,6 @@ class ContextAssemblyService:
             ]
         )
 
-    @staticmethod
-    def _extract_authoritative_retrieved_memory_fact(retrieved_memory: str) -> str:
-        text = str(retrieved_memory or '')
-        if not text:
-            return ''
-        current_label = ''
-        for raw_line in text.splitlines():
-            line = str(raw_line or '').strip()
-            if not line:
-                continue
-            if line.startswith('- ['):
-                marker = '] '
-                idx = line.find(marker)
-                if idx >= 0:
-                    current_label = line[3:idx].strip()
-                    content = line[idx + len(marker) :].strip()
-                    if content and current_label and ':' not in current_label:
-                        return content
-                continue
-            if line.startswith('L2:') or line.startswith('L1:'):
-                content = line[3:].strip()
-                if content:
-                    return content
-        return ''
-
-    @classmethod
-    def _authoritative_retrieved_memory_fact_block(cls, retrieved_memory: str) -> str:
-        fact = cls._extract_authoritative_retrieved_memory_fact(retrieved_memory)
-        if not fact:
-            return ''
-        return '\n'.join(
-            [
-                '## Authoritative Retrieved Default',
-                '- A previously confirmed user default relevant to this turn was found in long-term memory.',
-                f'- Default to follow right now: {fact}',
-                '- Answer by restating this default directly before adding any optional clarifications.',
-            ]
-        )
-
     async def build_for_ceo(
         self,
         *,
@@ -248,11 +209,9 @@ class ContextAssemblyService:
             retrieval_tokens = estimate_tokens(retrieved_memory)
             retrieved_block = retrieved_memory if '# Retrieved Context' in retrieved_memory else f"# Retrieved Context\n\n{retrieved_memory}"
             if memory_write_terms:
-                authority_block = self._authoritative_retrieved_memory_fact_block(retrieved_memory)
-                hint_parts = [self._retrieved_memory_resolution_hint_block()]
-                if authority_block:
-                    hint_parts.append(authority_block)
-                retrieved_block = f"{'\n\n'.join(hint_parts)}\n\n{retrieved_block}"
+                retrieved_block = (
+                    f"{self._retrieved_memory_resolution_hint_block()}\n\n{retrieved_block}"
+                )
             system_prompt = f"{system_prompt}\n\n{retrieved_block}"
 
         memory_write_visible = 'memory_write' in {str(name or '').strip() for name in list(exposure.get('tool_names') or [])}
@@ -334,7 +293,6 @@ class ContextAssemblyService:
                 'matched_terms': list(memory_write_terms),
                 'visible': memory_write_visible,
             },
-            'authoritative_memory_fact': self._extract_authoritative_retrieved_memory_fact(retrieved_memory) if memory_write_terms else '',
             'recent_history_count': len(recent_history),
             'tokens': {
                 'system_prompt': estimate_tokens(system_prompt),

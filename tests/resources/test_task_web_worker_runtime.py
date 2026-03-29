@@ -1474,14 +1474,9 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
 
         messages = await service.node_runner._build_messages(task=task, node=root)
         payload = json.loads(messages[1]["content"])
-        expected_notice = (
-            "你正在完成的任务是核心需求【完成一版可直接交付的发布公告初稿】的细分任务之一。"
-            "只允许抓最关键事实、做最高价值行为和完成当前目标所必需的验证，"
-            "不得额外扩展范围、补做边缘分支或系统性全量操作。"
-        )
-
+        assert payload["core_requirement"] == "完成一版可直接交付的发布公告初稿"
         assert payload["execution_policy"] == {"mode": "focus"}
-        assert payload["prompt"].startswith(expected_notice)
+        assert payload["prompt"] == root.prompt
 
         child = service.node_runner._create_execution_child(
             task=task,
@@ -1501,15 +1496,16 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
         )
 
         assert child.metadata["execution_policy"] == {"mode": "focus"}
-        assert child.prompt.startswith(expected_notice)
+        assert child.prompt == "输出首版可读正文。"
         assert acceptance.metadata["execution_policy"] == {"mode": "focus"}
-        assert acceptance.prompt.startswith(expected_notice)
+        assert acceptance.prompt.startswith("检查公告草稿是否满足交付要求。\n\n子节点输出摘要：\n")
+        assert "你正在完成的任务是核心需求【" not in acceptance.prompt
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_execution_policy_coverage_notice_uses_expanded_variant(tmp_path: Path):
+async def test_execution_policy_coverage_is_provided_via_payload_without_prompt_notice(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -1537,14 +1533,10 @@ async def test_execution_policy_coverage_notice_uses_expanded_variant(tmp_path: 
 
         messages = await service.node_runner._build_messages(task=task, node=root)
         payload = json.loads(messages[1]["content"])
-        expected_notice = (
-            "你正在完成的任务是核心需求【系统完成项目对外发布材料的整理与补漏】的细分任务之一。"
-            "优先抓最关键事实、做最高价值行为和完成当前目标所必需的验证，"
-            "必要时额外扩展范围、补做边缘分支或系统性全量操作。"
-        )
-
+        assert payload["core_requirement"] == "系统完成项目对外发布材料的整理与补漏"
         assert payload["execution_policy"] == {"mode": "coverage"}
-        assert payload["prompt"].startswith(expected_notice)
+        assert payload["prompt"] == root.prompt
+        assert "你正在完成的任务是核心需求【" not in payload["prompt"]
     finally:
         await service.close()
 
