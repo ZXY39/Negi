@@ -126,8 +126,27 @@ function taskSessionQueryValue() {
     return "all";
 }
 
+function normalizeTaskWorkerState(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (["starting", "online", "stale", "stopped", "offline"].includes(normalized)) return normalized;
+    return normalized === "dead" ? "stopped" : "offline";
+}
+
+function taskWorkerControlsAvailable() {
+    return normalizeTaskWorkerState(S.tasksWorkerState) === "online";
+}
+
+function taskWorkerNoticeText(state = S.tasksWorkerState) {
+    const normalized = normalizeTaskWorkerState(state);
+    if (normalized === "starting") return "Task worker is starting. You can browse records while controls warm up.";
+    if (normalized === "stale") return "Task worker status is temporarily stale. You can browse records while controls wait for reconnection.";
+    if (normalized === "stopped" || normalized === "offline") return "Task worker is offline. You can still browse records, but create/resume controls are unavailable.";
+    return "";
+}
+
 function taskSessionEmptyText() {
-    if (S.tasksWorkerOnline === false) return "Worker is offline. Task control is unavailable.";
+    const message = taskWorkerNoticeText();
+    if (message) return message;
     return "No tasks yet.";
 }
 
@@ -184,8 +203,9 @@ function taskGridRenderSignature(meta) {
         total: Number(meta?.total || 0),
         currentPage: Number(meta?.currentPage || 1),
         pageSize: Number(S.taskPageSize || 0),
-        workerOnline: S.tasksWorkerOnline !== false,
-        workerState: String(S.tasksWorker?.status || S.tasksWorker?.state || ""),
+        workerOnline: taskWorkerControlsAvailable(),
+        workerState: normalizeTaskWorkerState(S.tasksWorkerState),
+        workerLastSeenAt: String(S.tasksWorkerLastSeenAt || ""),
         taskBusy: !!S.taskBusy,
         multiSelectMode: !!S.multiSelectMode,
         emptyText: taskSessionEmptyText(),
@@ -222,15 +242,17 @@ function renderTasks() {
     S.taskGridSignature = signature;
     U.taskGrid.innerHTML = "";
     const metricAnimationTaskIds = S.taskMetricAnimationTaskIds || new Set();
-    if (S.tasksWorkerOnline === false) {
+    const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
+    const workerNotice = taskWorkerNoticeText(workerState);
+    if (workerNotice) {
         const warning = document.createElement("div");
-        warning.className = "empty-state error";
+        warning.className = `empty-state${workerState === "stale" || workerState === "starting" ? "" : " error"}`;
         warning.style.gridColumn = "1/-1";
-        warning.textContent = "Task worker is offline. You can still browse records, but create/resume controls are unavailable.";
+        warning.textContent = workerNotice;
         U.taskGrid.appendChild(warning);
     }
     if (!meta.total) {
-        if (S.tasksWorkerOnline === false) {
+        if (workerNotice) {
             const empty = document.createElement("div");
             empty.className = "empty-state";
             empty.style.gridColumn = "1/-1";
@@ -370,13 +392,14 @@ function updateTaskToolbar() {
     const batchButtons = [...(U.taskBatchMenu?.querySelectorAll("[data-batch-action]") || [])];
     batchButtons.forEach((button) => {
         const action = button.dataset.batchAction;
-        const enabled = action === "pause"
+        const workerReady = !["pause", "resume", "retry"].includes(String(action || "")) || taskWorkerControlsAvailable();
+        const enabled = workerReady && (action === "pause"
             ? selected.some((task) => canPause(task))
             : action === "resume"
                 ? selected.some((task) => canResume(task))
                 : action === "retry"
                     ? selected.some((task) => canRetry(task))
-                    : selected.some((task) => canDelete(task));
+                    : selected.some((task) => canDelete(task)));
         button.disabled = S.taskBusy || !enabled;
     });
     setTaskMenuVisibility();
@@ -390,17 +413,17 @@ function taskActionTone(action) {
 
 function taskCardActions(task) {
     const actions = [];
-    if (canPause(task)) actions.push("pause");
-    if (canResume(task)) actions.push("resume");
-    if (canRetry(task)) actions.push("retry");
+    if (taskWorkerControlsAvailable() && canPause(task)) actions.push("pause");
+    if (taskWorkerControlsAvailable() && canResume(task)) actions.push("resume");
+    if (taskWorkerControlsAvailable() && canRetry(task)) actions.push("retry");
     if (canDelete(task)) actions.push("delete");
     return actions.map((action) => ({ action, label: taskActionText(action), tone: taskActionTone(action) }));
 }
 
 function primaryTaskAction(task) {
-    if (canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
-    if (canResume(task)) return { action: "resume", label: "开始", tone: "success" };
-    if (canRetry(task)) return { action: "retry", label: "重试", tone: "success" };
+    if (taskWorkerControlsAvailable() && canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
+    if (taskWorkerControlsAvailable() && canResume(task)) return { action: "resume", label: "开始", tone: "success" };
+    if (taskWorkerControlsAvailable() && canRetry(task)) return { action: "retry", label: "重试", tone: "success" };
     return null;
 }
 
@@ -430,6 +453,10 @@ function taskActionErrorText(action, error) {
     return message || "Unknown error";
 }
 
+function taskActionRequiresWorker(action) {
+    return ["pause", "resume", "retry"].includes(String(action || "").trim().toLowerCase());
+}
+
 async function requestTaskAction(taskId, action) {
     if (action === "pause") return ApiClient.pauseTask(taskId);
     if (action === "resume") return ApiClient.resumeTask(taskId);
@@ -456,6 +483,11 @@ async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
 
 async function performTaskAction(taskId, action) {
     if (!taskId || !action) return;
+    if (taskActionRequiresWorker(action) && !taskWorkerControlsAvailable()) {
+        showToast({ title: taskActionFailureTitle(action), text: taskWorkerNoticeText(), kind: "warn" });
+        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        return;
+    }
     S.taskBusy = true;
     renderTasks();
     try {
@@ -470,6 +502,7 @@ async function performTaskAction(taskId, action) {
             await loadTaskArtifacts();
         }
     } catch (e) {
+        if (Number(e?.status || 0) === 503) void refreshTaskWorkerStatus({ render: S.view === "tasks" });
         showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, e), kind: "error" });
     } finally {
         S.taskBusy = false;
@@ -506,6 +539,11 @@ async function runTaskBatchAction(action, { returnFocus = null } = {}) {
 }
 
 async function performTaskBatchAction(action, eligible) {
+    if (taskActionRequiresWorker(action) && !taskWorkerControlsAvailable()) {
+        showToast({ title: taskActionFailureTitle(action), text: taskWorkerNoticeText(), kind: "warn" });
+        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        return;
+    }
     S.taskBusy = true;
     renderTasks();
     try {
@@ -524,6 +562,9 @@ async function performTaskBatchAction(action, eligible) {
             await loadTaskArtifacts();
         }
         if (failed.length && !succeeded.length) {
+            if (failed.some((item) => Number(item?.error?.status || 0) === 503)) {
+                void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+            }
             showToast({
                 title: taskActionFailureTitle(action),
                 text: taskActionErrorText(action, failed[0].error),
@@ -549,6 +590,9 @@ async function performTaskBatchAction(action, eligible) {
             text: successText,
             kind: "success",
         });
+        if (failed.some((item) => Number(item?.error?.status || 0) === 503)) {
+            void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        }
     } finally {
         S.taskBusy = false;
         renderTasks();
@@ -883,41 +927,69 @@ function applyTaskListResponse(payload = {}) {
     renderTasks();
 }
 
-function resolveTaskWorkerOnlineState({
+function resolveTaskWorkerState({
     worker = S.tasksWorker,
-    reportedOnline = S.tasksWorkerReportedOnline,
+    reportedState = S.tasksWorkerReportedState,
     staleAfterSeconds = S.tasksWorkerStaleAfterSeconds,
+    lastSeenAt = S.tasksWorkerLastSeenAt,
 } = {}) {
     const record = worker && typeof worker === "object" ? worker : null;
-    const status = String(record?.status || record?.state || "").trim().toLowerCase();
-    if (["stopped", "offline", "dead"].includes(status)) return false;
-    const updatedAt = String(record?.updated_at || "").trim();
+    const normalizedReportedState = normalizeTaskWorkerState(
+        reportedState
+        || record?.worker_state
+        || record?.state
+        || (S.tasksWorkerReportedOnline === false ? "offline" : "online")
+    );
+    if (["starting", "stopped", "offline"].includes(normalizedReportedState)) return normalizedReportedState;
+    const updatedAt = String(lastSeenAt || record?.updated_at || "").trim();
     const staleWindowSeconds = Number(staleAfterSeconds);
     if (updatedAt && Number.isFinite(staleWindowSeconds) && staleWindowSeconds > 0) {
         const updatedMs = Date.parse(updatedAt);
-        if (Number.isFinite(updatedMs)) {
-            return Math.max(0, Date.now() - updatedMs) <= staleWindowSeconds * 1000;
+        if (Number.isFinite(updatedMs) && Math.max(0, Date.now() - updatedMs) > staleWindowSeconds * 1000) {
+            return "stale";
         }
     }
-    return reportedOnline !== false;
+    return normalizedReportedState === "stale" ? "stale" : "online";
 }
 
-function refreshTaskWorkerOnlineState({ render = true, force = false } = {}) {
-    const next = resolveTaskWorkerOnlineState();
-    const changed = next !== S.tasksWorkerOnline;
-    S.tasksWorkerOnline = next;
+function refreshTaskWorkerState({ render = true, force = false } = {}) {
+    const next = resolveTaskWorkerState();
+    const changed = next !== normalizeTaskWorkerState(S.tasksWorkerState);
+    S.tasksWorkerState = next;
+    S.tasksWorkerOnline = next === "online";
+    S.tasksWorkerControlAvailable = next === "online";
     if (render && (force || changed)) renderTasks();
     return changed;
+}
+
+function refreshTaskWorkerOnlineState(options = {}) {
+    return refreshTaskWorkerState(options);
 }
 
 function applyTaskWorkerStatus(payload = {}, { render = true } = {}) {
     S.tasksWorkerReportedOnline = payload?.worker_online !== false;
     S.tasksWorker = payload?.worker || null;
+    S.tasksWorkerReportedState = normalizeTaskWorkerState(
+        payload?.worker_state
+        || S.tasksWorker?.worker_state
+        || S.tasksWorker?.state
+        || (payload?.worker_online === false ? "offline" : "online")
+    );
+    S.tasksWorkerLastSeenAt = String(payload?.worker_last_seen_at || S.tasksWorker?.updated_at || "").trim();
     const staleAfterSeconds = Number(payload?.worker_stale_after_seconds);
     if (Number.isFinite(staleAfterSeconds) && staleAfterSeconds > 0) {
         S.tasksWorkerStaleAfterSeconds = staleAfterSeconds;
     }
-    refreshTaskWorkerOnlineState({ render, force: true });
+    refreshTaskWorkerState({ render, force: true });
+}
+
+async function refreshTaskWorkerStatus({ render = true } = {}) {
+    try {
+        const payload = await ApiClient.getTaskWorkerStatus();
+        applyTaskWorkerStatus(payload || {}, { render });
+    } catch (error) {
+        if (isAbortLike(error)) return;
+    }
 }
 
 function patchTaskListItem(task) {
@@ -950,11 +1022,28 @@ function closeTasksWs() {
     socket.close();
 }
 
+function startTaskWorkerStatusPolling() {
+    if (S.taskWorkerStatusPollId) return;
+    void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+    S.taskWorkerStatusPollId = window.setInterval(() => {
+        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+    }, 10000);
+}
+
+function stopTaskWorkerStatusPolling() {
+    if (!S.taskWorkerStatusPollId) return;
+    window.clearInterval(S.taskWorkerStatusPollId);
+    S.taskWorkerStatusPollId = null;
+}
+
 function initTasksWs() {
     if (S.tasksWs && S.tasksWs.readyState <= 1) return;
     closeTasksWs();
     const socket = new WebSocket(ApiClient.getTasksWsUrl(taskSessionQueryValue()));
     S.tasksWs = socket;
+    socket.onopen = () => {
+        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+    };
     socket.onmessage = (event) => {
         const payload = JSON.parse(event.data || "{}");
         if (payload.type === "task.list.snapshot") {
@@ -975,6 +1064,7 @@ function initTasksWs() {
     };
     socket.onclose = () => {
         if (S.view !== "tasks") return;
+        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
         window.setTimeout(() => {
             if (S.view === "tasks") initTasksWs();
         }, 1000);

@@ -422,6 +422,24 @@ class DashScopeMultimodalEmbeddings(Embeddings):
         data = response.json()
         return _extract_embedding_vectors(data, expected_count=len(texts))
 
+    def _embed_batch_resilient(self, texts: list[str]) -> list[list[float]]:
+        try:
+            return self._embed_batch(texts)
+        except Exception as exc:
+            if len(texts) <= 1:
+                raise
+            message = str(exc)
+            if "(400)" not in message and "failed (400)" not in message:
+                raise
+            mid = max(1, len(texts) // 2)
+            logger.debug(
+                "DashScope embedding batch rejected with 400; splitting batch of {} into {} + {}",
+                len(texts),
+                mid,
+                len(texts) - mid,
+            )
+            return self._embed_batch_resilient(texts[:mid]) + self._embed_batch_resilient(texts[mid:])
+
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
@@ -429,7 +447,7 @@ class DashScopeMultimodalEmbeddings(Embeddings):
         out: list[list[float]] = []
         for start in range(0, len(normalized), self.batch_size):
             chunk = normalized[start : start + self.batch_size]
-            out.extend(self._embed_batch(chunk))
+            out.extend(self._embed_batch_resilient(chunk))
         return out
 
     def embed_query(self, text: str) -> list[float]:
@@ -1206,6 +1224,138 @@ class G3kuHybridStore(BaseStore):
             out.append((record, float(score)))
         return out
 
+    def _count_dense_points(self) -> int:
+        if not self._dense_enabled or self._qdrant is None:
+            return 0
+        client = getattr(self._qdrant, "client", None)
+        if client is None or not hasattr(client, "count"):
+            return 0
+        result = client.count(collection_name=self.qdrant_collection, exact=True)
+        return int(getattr(result, "count", 0) or 0)
+
+    def _count_context_v2_dense_eligible(self) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COUNT(1) AS total
+            FROM context_items_v2
+            WHERE TRIM(COALESCE(l1, '')) <> '' OR TRIM(COALESCE(l0, '')) <> ''
+            """
+        ).fetchone()
+        return int((row["total"] if row is not None else 0) or 0)
+
+    def _sample_context_v2_dense_point_ids(self, *, limit: int = 8) -> list[str]:
+        rows = self._conn.execute(
+            """
+            SELECT namespace, record_id
+            FROM context_items_v2
+            WHERE TRIM(COALESCE(l1, '')) <> '' OR TRIM(COALESCE(l0, '')) <> ''
+            ORDER BY updated_at DESC, record_id DESC
+            LIMIT ?
+            """,
+            (max(limit, 1),),
+        ).fetchall()
+        return [
+            _vector_point_id(f"v2::{str(row['namespace'] or '')}", str(row["record_id"] or ""))
+            for row in rows
+            if str(row["namespace"] or "").strip() and str(row["record_id"] or "").strip()
+        ]
+
+    def _missing_context_v2_dense_sample(self, *, sample_limit: int = 8) -> bool:
+        if not self._dense_enabled or self._qdrant is None:
+            return False
+        client = getattr(self._qdrant, "client", None)
+        if client is None or not hasattr(client, "retrieve"):
+            return False
+        point_ids = self._sample_context_v2_dense_point_ids(limit=sample_limit)
+        if not point_ids:
+            return False
+        records = client.retrieve(
+            collection_name=self.qdrant_collection,
+            ids=point_ids,
+            with_payload=False,
+            with_vectors=False,
+        )
+        existing_ids = {
+            str(getattr(record, "id", "") or "").strip()
+            for record in list(records or [])
+            if str(getattr(record, "id", "") or "").strip()
+        }
+        return any(str(point_id) not in existing_ids for point_id in point_ids)
+
+    def ensure_context_v2_dense_backfill(self, *, batch_size: int | None = None) -> dict[str, Any]:
+        if not self._dense_enabled or self._qdrant is None:
+            return {"needed": False, "eligible": 0, "indexed": 0, "dense_points": 0}
+
+        eligible = self._count_context_v2_dense_eligible()
+        if eligible <= 0:
+            return {"needed": False, "eligible": 0, "indexed": 0, "dense_points": self._count_dense_points()}
+
+        dense_points = self._count_dense_points()
+        sample_missing = self._missing_context_v2_dense_sample()
+        if dense_points >= eligible and not sample_missing:
+            return {
+                "needed": False,
+                "eligible": eligible,
+                "indexed": 0,
+                "dense_points": dense_points,
+                "sample_missing": False,
+            }
+
+        rows = self._conn.execute(
+            """
+            SELECT namespace, record_id, context_type, uri, l0, l1
+            FROM context_items_v2
+            WHERE TRIM(COALESCE(l1, '')) <> '' OR TRIM(COALESCE(l0, '')) <> ''
+            ORDER BY updated_at ASC, record_id ASC
+            """
+        ).fetchall()
+
+        resolved_batch_size = max(1, int(batch_size or self.embedding_batch_size or 1))
+        texts: list[str] = []
+        metadatas: list[dict[str, Any]] = []
+        ids: list[str] = []
+        indexed = 0
+
+        def _flush() -> None:
+            nonlocal indexed, texts, metadatas, ids
+            if not texts:
+                return
+            self._qdrant.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+            indexed += len(texts)
+            texts = []
+            metadatas = []
+            ids = []
+
+        for row in rows:
+            namespace_raw = str(row["namespace"] or "").strip()
+            record_id = str(row["record_id"] or "").strip()
+            dense_text = str(row["l1"] or row["l0"] or "").strip()
+            if not namespace_raw or not record_id or not dense_text:
+                continue
+            texts.append(dense_text)
+            metadatas.append(
+                {
+                    "version": "v2",
+                    "namespace": namespace_raw,
+                    "key": record_id,
+                    "context_type": str(row["context_type"] or "").strip(),
+                    "uri": str(row["uri"] or "").strip(),
+                    "layer": "l1",
+                }
+            )
+            ids.append(_vector_point_id(f"v2::{namespace_raw}", record_id))
+            if len(texts) >= resolved_batch_size:
+                _flush()
+
+        _flush()
+        return {
+            "needed": True,
+            "eligible": eligible,
+            "indexed": indexed,
+            "dense_points": dense_points,
+            "sample_missing": sample_missing,
+        }
+
     def search_context_v2(
         self,
         namespace_prefix: tuple[str, ...] | None,
@@ -1667,6 +1817,14 @@ class _RagMemoryBackend:
 
         indexer = ContextCatalogIndexer(memory_manager=self, service=service)
         return await indexer.sync(skill_ids=skill_ids, tool_ids=tool_ids)
+
+    async def ensure_dense_backfill(self) -> dict[str, Any]:
+        if self.arch_version != 'v2' or not self._feature_enabled('unified_context'):
+            return {'needed': False, 'eligible': 0, 'indexed': 0, 'dense_points': 0}
+        return await asyncio.to_thread(
+            self.store.ensure_context_v2_dense_backfill,
+            batch_size=getattr(self.store, 'embedding_batch_size', 32),
+        )
 
     async def write_context_assembly_trace(
         self,
@@ -3378,6 +3536,7 @@ class MemoryManager:
         current_task = asyncio.current_task()
         try:
             await self._replay_journal_to_rag(backend)
+            await self._ensure_dense_backfill(backend)
         except Exception as exc:
             self._mark_backend_failure(exc)
         else:
@@ -3690,6 +3849,7 @@ class MemoryManager:
                 self._backend_state = "rag_recovering"
                 self._last_backend_error = ""
                 await self._replay_journal_to_rag(backend)
+                await self._ensure_dense_backfill(backend)
                 self._backend_state = "rag_healthy"
                 return backend
             except Exception as exc:
@@ -3704,6 +3864,20 @@ class MemoryManager:
                 self._last_backend_error = str(exc)
                 logger.warning("RAG memory backend unavailable; using legacy fallback: {}", exc)
                 return None
+
+    async def _ensure_dense_backfill(self, backend: _RagMemoryBackend) -> None:
+        ensure_fn = getattr(backend, "ensure_dense_backfill", None)
+        if not callable(ensure_fn):
+            return
+        result = await ensure_fn()
+        if bool((result or {}).get("needed")):
+            logger.info(
+                "Dense context backfill completed (eligible={}, indexed={}, dense_points_before={}, sample_missing={})",
+                int((result or {}).get("eligible", 0) or 0),
+                int((result or {}).get("indexed", 0) or 0),
+                int((result or {}).get("dense_points", 0) or 0),
+                bool((result or {}).get("sample_missing", False)),
+            )
 
     async def _replay_journal_to_rag(self, backend: _RagMemoryBackend) -> None:
         mode = str(getattr(self.config, "bootstrap_mode", "new_only") or "new_only").lower()

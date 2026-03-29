@@ -2220,3 +2220,42 @@ async def get_context_assembly_traces(limit: int = Query(20, ge=1, le=200)):
     service = _service()
     await service.startup()
     return await service.get_context_traces(trace_kind='context_assembly', limit=limit)
+
+
+@router.get('/memory/runtime-stats')
+async def get_memory_runtime_stats():
+    agent = get_agent()
+    service = getattr(agent, 'main_task_service', None)
+    if service is None:
+        raise HTTPException(status_code=503, detail='main_task_service_unavailable')
+    await service.startup()
+
+    async def _stats_for(manager: Any | None) -> dict[str, Any] | None:
+        if manager is None:
+            return None
+        stats_fn = getattr(manager, 'stats', None)
+        if not callable(stats_fn):
+            return {'available': False}
+        try:
+            stats = await stats_fn()
+        except Exception as exc:
+            return {
+                'available': True,
+                'error': str(exc),
+            }
+        return {
+            'available': True,
+            'manager_type': type(manager).__name__,
+            'stats': stats,
+        }
+
+    loop_manager = getattr(agent, 'memory_manager', None)
+    service_manager = getattr(service, 'memory_manager', None)
+    return {
+        'ok': True,
+        'item': {
+            'same_object': loop_manager is service_manager,
+            'loop_manager': await _stats_for(loop_manager),
+            'service_manager': await _stats_for(service_manager),
+        },
+    }

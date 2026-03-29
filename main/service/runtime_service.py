@@ -13,6 +13,7 @@ import httpx
 from loguru import logger
 
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.web.worker_control import managed_worker_snapshot
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
 from g3ku.content import ContentNavigationService
@@ -94,6 +95,15 @@ from main.storage.sqlite_store import SQLiteTaskStore
 _UNSET = object()
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
 _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
+_WORKER_STATUS_STARTING_GRACE_SECONDS = 10.0
+_WORKER_STATUS_CALLBACK_RETRY_DELAYS = [0.0, 0.5, 2.0, 5.0]
+_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS = 2.0
+_WORKER_STATE_STARTING = 'starting'
+_WORKER_STATE_ONLINE = 'online'
+_WORKER_STATE_STALE = 'stale'
+_WORKER_STATE_STOPPED = 'stopped'
+_WORKER_STATE_OFFLINE = 'offline'
+_WORKER_STATUS_TERMINAL_STATES = frozenset({'stopped', 'offline', 'dead'})
 _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
@@ -248,6 +258,7 @@ class MainRuntimeService:
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_worker_status_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_event_dispatch_tasks: set[asyncio.Task[Any]] = set()
         if self.execution_mode == 'worker':
             self.log_service.add_task_terminal_listener(self._enqueue_task_terminal_callback)
@@ -281,6 +292,7 @@ class MainRuntimeService:
             self.task_stall_notifier.bootstrap_running_tasks()
         if self.execution_mode == 'worker':
             self._start_worker_loops()
+            self._schedule_pending_task_worker_status_callbacks()
             self._schedule_pending_task_terminal_callbacks()
             self._schedule_pending_task_stall_callbacks()
 
@@ -754,6 +766,28 @@ class MainRuntimeService:
         items = self.store.list_worker_status(role='task_worker')
         return items[0] if items else None
 
+    @staticmethod
+    def _parse_worker_timestamp(value: Any) -> datetime | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _managed_worker_runtime_snapshot(self) -> dict[str, object]:
+        if self.execution_mode != 'web':
+            return {}
+        try:
+            snapshot = managed_worker_snapshot(starting_grace_s=_WORKER_STATUS_STARTING_GRACE_SECONDS)
+        except Exception:
+            return {}
+        return dict(snapshot or {}) if isinstance(snapshot, dict) else {}
+
     def _worker_status_stale_after_seconds(
         self,
         item: dict[str, Any] | None,
@@ -786,31 +820,62 @@ class MainRuntimeService:
         *,
         stale_after_seconds: float | None = None,
     ) -> bool:
+        if not item:
+            return self.execution_mode in {'embedded', 'worker'}
+        status = str(item.get('status') or item.get('state') or '').strip().lower()
+        if status in _WORKER_STATUS_TERMINAL_STATES:
+            return False
         if self.execution_mode in {'embedded', 'worker'}:
             return True
-        if not item:
+        updated_dt = self._parse_worker_timestamp(item.get('updated_at'))
+        if updated_dt is None:
             return False
-        status = str(item.get('status') or item.get('state') or '').strip().lower()
-        if status in {'stopped', 'offline', 'dead'}:
-            return False
-        updated_at = str(item.get('updated_at') or '').strip()
-        if not updated_at:
-            return False
-        try:
-            updated_dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
-        except ValueError:
-            return False
-        if updated_dt.tzinfo is None:
-            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-        age_seconds = max(0.0, (datetime.now(timezone.utc) - updated_dt.astimezone(timezone.utc)).total_seconds())
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - updated_dt).total_seconds())
         stale_window_seconds = self._worker_status_stale_after_seconds(item, override_seconds=stale_after_seconds)
         return age_seconds <= stale_window_seconds
 
+    def _managed_worker_is_starting(
+        self,
+        *,
+        item: dict[str, Any] | None,
+        snapshot: dict[str, object] | None = None,
+    ) -> bool:
+        current = item if isinstance(item, dict) else {}
+        worker_snapshot = dict(snapshot or {}) if isinstance(snapshot, dict) else self._managed_worker_runtime_snapshot()
+        if not worker_snapshot:
+            return False
+        if not bool(worker_snapshot.get('active')) or not bool(worker_snapshot.get('auto_worker_enabled')):
+            return False
+        if not bool(worker_snapshot.get('starting')):
+            return False
+        started_at_dt = self._parse_worker_timestamp(worker_snapshot.get('started_at'))
+        if not current:
+            return True
+        current_updated_at = self._parse_worker_timestamp(current.get('updated_at'))
+        if started_at_dt is None or current_updated_at is None:
+            return True
+        return current_updated_at < started_at_dt
+
+    def worker_state(
+        self,
+        *,
+        item: dict[str, Any] | None = None,
+        stale_after_seconds: float | None = None,
+    ) -> str:
+        current = dict(item or self.latest_worker_status() or {})
+        if self._managed_worker_is_starting(item=current if current else None):
+            return _WORKER_STATE_STARTING
+        if not current:
+            return _WORKER_STATE_ONLINE if self.execution_mode in {'embedded', 'worker'} else _WORKER_STATE_OFFLINE
+        status = str(current.get('status') or current.get('state') or '').strip().lower()
+        if status in _WORKER_STATUS_TERMINAL_STATES:
+            return _WORKER_STATE_STOPPED
+        if self._worker_online_from_item(current, stale_after_seconds=stale_after_seconds):
+            return _WORKER_STATE_ONLINE
+        return _WORKER_STATE_STALE
+
     def is_worker_online(self, *, stale_after_seconds: float | None = None) -> bool:
-        return self._worker_online_from_item(
-            self.latest_worker_status(),
-            stale_after_seconds=stale_after_seconds,
-        )
+        return self.worker_state(stale_after_seconds=stale_after_seconds) == _WORKER_STATE_ONLINE
 
     def worker_status_payload(
         self,
@@ -823,12 +888,17 @@ class MainRuntimeService:
             item=current if current else None,
             override_seconds=stale_after_seconds,
         )
+        state = self.worker_state(
+            item=current if current else None,
+            stale_after_seconds=window_seconds,
+        )
+        last_seen_at = str(current.get('updated_at') or '').strip()
         return {
             'worker': current or None,
-            'worker_online': self._worker_online_from_item(
-                current if current else None,
-                stale_after_seconds=window_seconds,
-            ),
+            'worker_online': state == _WORKER_STATE_ONLINE,
+            'worker_state': state,
+            'worker_last_seen_at': last_seen_at,
+            'worker_control_available': state == _WORKER_STATE_ONLINE,
             'worker_stale_after_seconds': window_seconds,
         }
 
@@ -903,13 +973,7 @@ class MainRuntimeService:
                 data=data,
             )
         if self.execution_mode == 'worker' and not bridge:
-            self._schedule_task_event_callback(
-                {
-                    'event_type': 'task.worker.status',
-                    'session_id': 'all',
-                    'data': data,
-                }
-            )
+            self._enqueue_task_worker_status_callback(data)
         return data
 
     def _publish_task_snapshot_event(
@@ -1045,13 +1109,24 @@ class MainRuntimeService:
             )
             return True
         if event_type == 'task.worker.status':
-            self.publish_worker_status_event(payload=data, bridge=True)
+            self.publish_worker_status_event(
+                item=dict(data.get('worker') or {}) if isinstance(data.get('worker'), dict) else None,
+                bridge=True,
+            )
             return True
         return False
 
     def _assert_worker_available(self) -> None:
-        if self.execution_mode == 'web' and not self.is_worker_online():
-            raise ValueError('task_worker_offline')
+        if self.execution_mode != 'web':
+            return
+        state = self.worker_state()
+        if state == _WORKER_STATE_ONLINE:
+            return
+        if state == _WORKER_STATE_STARTING:
+            raise ValueError('task_worker_starting')
+        if state == _WORKER_STATE_STALE:
+            raise ValueError('task_worker_stale')
+        raise ValueError('task_worker_offline')
 
     @staticmethod
     def _normalize_session_key(session_id: str | None) -> str:
@@ -1367,6 +1442,102 @@ class MainRuntimeService:
                 summary = f'{summary} children_running={running_children}/{len(child_pipelines)}'
             parts.append(summary)
         return '; '.join(parts)[:320]
+
+    def _enqueue_task_worker_status_callback(self, payload: dict[str, Any] | None) -> None:
+        if self.execution_mode != 'worker':
+            return
+        normalized = normalize_task_event_payload(
+            {
+                'event_type': 'task.worker.status',
+                'session_id': 'all',
+                'data': dict(payload or {}),
+            }
+        )
+        if not normalized:
+            return
+        data = dict(normalized.get('data') or {})
+        worker = dict(data.get('worker') or {}) if isinstance(data.get('worker'), dict) else {}
+        worker_id = str(worker.get('worker_id') or '').strip()
+        if not worker_id:
+            return
+        created_at = str(worker.get('updated_at') or now_iso()).strip() or now_iso()
+        try:
+            self.store.put_task_worker_status_outbox(
+                worker_id=worker_id,
+                created_at=created_at,
+                payload=normalized,
+            )
+        except Exception:
+            logger.exception('failed to persist worker status outbox for {}', worker_id)
+            return
+        self._schedule_task_worker_status_delivery(worker_id)
+
+    def _schedule_pending_task_worker_status_callbacks(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        for entry in self.store.list_pending_task_worker_status_outbox(limit=500):
+            worker_id = str(entry.get('worker_id') or '').strip()
+            if worker_id:
+                self._schedule_task_worker_status_delivery(worker_id)
+
+    def _schedule_task_worker_status_delivery(self, worker_id: str) -> None:
+        key = str(worker_id or '').strip()
+        if self.execution_mode != 'worker' or not key:
+            return
+        current = self._task_worker_status_delivery_tasks.get(key)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._deliver_task_worker_status_outbox(key), name=f'main-runtime-worker-status:{key}')
+        self._task_worker_status_delivery_tasks[key] = task
+        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_worker_status_delivery_task(stored_key, done_task))
+
+    def _clear_task_worker_status_delivery_task(self, worker_id: str, done_task: asyncio.Task[Any]) -> None:
+        current = self._task_worker_status_delivery_tasks.get(worker_id)
+        if current is done_task:
+            self._task_worker_status_delivery_tasks.pop(worker_id, None)
+
+    async def _deliver_task_worker_status_outbox(self, worker_id: str) -> None:
+        for delay_seconds in _WORKER_STATUS_CALLBACK_RETRY_DELAYS:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            entry = self.store.get_task_worker_status_outbox(worker_id)
+            if not entry:
+                return
+            if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+                return
+            payload = dict(entry.get('payload') or {})
+            callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
+            if not callback_url:
+                self.store.mark_task_worker_status_outbox_attempt(
+                    worker_id,
+                    attempted_at=now_iso(),
+                    error_text='task_event_callback_url_unavailable',
+                )
+                return
+            headers: dict[str, str] = {}
+            callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
+            if callback_token:
+                headers['x-g3ku-internal-token'] = callback_token
+            try:
+                async with httpx.AsyncClient(timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS) as client:
+                    response = await client.post(callback_url, json=payload, headers=headers)
+                if 200 <= int(response.status_code or 0) < 300:
+                    self.store.mark_task_worker_status_outbox_delivered(worker_id, delivered_at=now_iso())
+                    return
+                error_text = f'task_event_callback_http_{int(response.status_code or 0)}'
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_text = str(exc or 'task_event_callback_failed').strip() or 'task_event_callback_failed'
+            self.store.mark_task_worker_status_outbox_attempt(
+                worker_id,
+                attempted_at=now_iso(),
+                error_text=error_text,
+            )
 
     def _enqueue_task_stall_callback(self, payload: dict[str, Any]) -> None:
         if self.execution_mode != 'worker':
@@ -3157,6 +3328,12 @@ class MainRuntimeService:
         if stall_delivery_tasks:
             await asyncio.gather(*stall_delivery_tasks, return_exceptions=True)
         self._task_stall_delivery_tasks.clear()
+        worker_status_delivery_tasks = [task for task in self._task_worker_status_delivery_tasks.values() if task is not None and not task.done()]
+        for task in worker_status_delivery_tasks:
+            task.cancel()
+        if worker_status_delivery_tasks:
+            await asyncio.gather(*worker_status_delivery_tasks, return_exceptions=True)
+        self._task_worker_status_delivery_tasks.clear()
         callback_tasks = [task for task in list(self._task_event_dispatch_tasks) if task is not None and not task.done()]
         for task in callback_tasks:
             task.cancel()

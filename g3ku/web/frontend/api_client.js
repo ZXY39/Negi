@@ -36,6 +36,12 @@ class ApiClient {
                 return "任务运行服务暂未就绪，请稍后再试。";
             case "main_task_service_unavailable":
                 return "主任务服务暂未就绪，请稍后再试。";
+            case "task_worker_starting":
+                return "Task worker is starting. Controls will be available shortly.";
+            case "task_worker_stale":
+                return "Task worker status is temporarily stale. Wait for reconnection and try again.";
+            case "task_worker_offline":
+                return "Task worker is offline. Controls are unavailable right now.";
             default:
                 return "";
         }
@@ -376,6 +382,13 @@ class ApiClient {
             requestKey: `tasks:list:${sessionId}:${scope}`,
         });
         return data || { items: [] };
+    }
+
+    static async getTaskWorkerStatus() {
+        const data = await this._request("GET", "/api/tasks/worker-status", {
+            requestKey: "tasks:worker-status",
+        });
+        return data || {};
     }
 
     static async getTask(taskId, markRead = false) {

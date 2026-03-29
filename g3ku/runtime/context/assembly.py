@@ -99,6 +99,56 @@ class ContextAssemblyService:
             ]
         )
 
+    @staticmethod
+    def _retrieved_memory_resolution_hint_block() -> str:
+        return '\n'.join(
+            [
+                '## Retrieved Memory Resolution Hint',
+                '- The retrieved memory below already contains previously confirmed user defaults or preferences relevant to this turn.',
+                '- If the user is asking what the default is, restate the retrieved default directly.',
+                '- Do not invent a new default, propose alternatives, or replace the retrieved default with general best practices unless the user explicitly asks to change the rule.',
+            ]
+        )
+
+    @staticmethod
+    def _extract_authoritative_retrieved_memory_fact(retrieved_memory: str) -> str:
+        text = str(retrieved_memory or '')
+        if not text:
+            return ''
+        current_label = ''
+        for raw_line in text.splitlines():
+            line = str(raw_line or '').strip()
+            if not line:
+                continue
+            if line.startswith('- ['):
+                marker = '] '
+                idx = line.find(marker)
+                if idx >= 0:
+                    current_label = line[3:idx].strip()
+                    content = line[idx + len(marker) :].strip()
+                    if content and current_label and ':' not in current_label:
+                        return content
+                continue
+            if line.startswith('L2:') or line.startswith('L1:'):
+                content = line[3:].strip()
+                if content:
+                    return content
+        return ''
+
+    @classmethod
+    def _authoritative_retrieved_memory_fact_block(cls, retrieved_memory: str) -> str:
+        fact = cls._extract_authoritative_retrieved_memory_fact(retrieved_memory)
+        if not fact:
+            return ''
+        return '\n'.join(
+            [
+                '## Authoritative Retrieved Default',
+                '- A previously confirmed user default relevant to this turn was found in long-term memory.',
+                f'- Default to follow right now: {fact}',
+                '- Answer by restating this default directly before adding any optional clarifications.',
+            ]
+        )
+
     async def build_for_ceo(
         self,
         *,
@@ -127,6 +177,8 @@ class ContextAssemblyService:
             except Exception:
                 pass
 
+        memory_write_terms = self._detect_memory_write_intent(query_text)
+
         visible_skills = list(exposure.get('skills') or [])
         visible_families = list(exposure.get('tool_families') or [])
         semantic_frontdoor = await semantic_catalog_rankings(
@@ -148,6 +200,14 @@ class ContextAssemblyService:
             visible_families=visible_families,
             semantic_frontdoor=semantic_frontdoor,
         )
+        if memory_write_terms:
+            retrieval_scope = {
+                **retrieval_scope,
+                'search_context_types': ['memory'],
+                'allowed_context_types': ['memory'],
+                'allowed_resource_record_ids': [],
+                'allowed_skill_record_ids': [],
+            }
         prompt_skills = list(selected_skills)
         system_prompt = self._prompt_builder.build(skills=prompt_skills)
 
@@ -186,12 +246,15 @@ class ContextAssemblyService:
                 retrieved_memory = ''
         if retrieved_memory:
             retrieval_tokens = estimate_tokens(retrieved_memory)
-            if '# Retrieved Context' in retrieved_memory:
-                system_prompt = f"{system_prompt}\n\n{retrieved_memory}"
-            else:
-                system_prompt = f"{system_prompt}\n\n# Retrieved Context\n\n{retrieved_memory}"
+            retrieved_block = retrieved_memory if '# Retrieved Context' in retrieved_memory else f"# Retrieved Context\n\n{retrieved_memory}"
+            if memory_write_terms:
+                authority_block = self._authoritative_retrieved_memory_fact_block(retrieved_memory)
+                hint_parts = [self._retrieved_memory_resolution_hint_block()]
+                if authority_block:
+                    hint_parts.append(authority_block)
+                retrieved_block = f"{'\n\n'.join(hint_parts)}\n\n{retrieved_block}"
+            system_prompt = f"{system_prompt}\n\n{retrieved_block}"
 
-        memory_write_terms = self._detect_memory_write_intent(query_text)
         memory_write_visible = 'memory_write' in {str(name or '').strip() for name in list(exposure.get('tool_names') or [])}
         if memory_write_terms and memory_write_visible:
             system_prompt = f"{system_prompt}\n\n{self._memory_write_hint_block(memory_write_terms)}"

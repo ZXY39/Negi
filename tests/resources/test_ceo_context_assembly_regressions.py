@@ -128,6 +128,7 @@ def test_ceo_prompt_builder_includes_memory_write_guidance() -> None:
 
     assert 'memory_write' in prompt
     assert '长期记住' in prompt
+    assert 'Retrieved Context' in prompt
 
 
 class _TaskService:
@@ -494,6 +495,69 @@ async def test_ceo_context_assembly_uses_dense_only_retrieval_scope_when_semanti
         'allowed_resource_record_ids': ['tool:agent_browser', 'tool:web_fetch'],
         'allowed_skill_record_ids': ['skill:focused-skill', 'skill:secondary-skill'],
     }
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_prefers_memory_only_retrieval_for_memory_intent_even_when_semantic_available() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _SemanticMemoryManager(
+        response='',
+        skill_record_ids=['skill:focused-skill', 'skill:secondary-skill'],
+        tool_record_ids=['tool:agent_browser', 'tool:web_fetch'],
+    )
+    service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='from now on default to the focused browser workflow',
+        exposure={
+            'skills': [
+                _skill('focused-skill', 'Primary workflow'),
+                _skill('secondary-skill', 'Secondary workflow'),
+            ],
+            'tool_families': [
+                _family('agent_browser', 'Browser automation via semantic shortlist.'),
+                _family('web_fetch', 'HTTP fetch helper.'),
+            ],
+            'tool_names': ['filesystem', 'agent_browser', 'web_fetch', 'memory_write'],
+        },
+        persisted_session=None,
+    )
+
+    assert memory_manager.calls[0]['search_context_types'] == ['memory']
+    assert memory_manager.calls[0]['allowed_context_types'] == ['memory']
+    assert memory_manager.calls[0]['allowed_resource_record_ids'] == []
+    assert memory_manager.calls[0]['allowed_skill_record_ids'] == []
+    assert result.trace['retrieval_scope'] == {
+        'mode': 'dense_only',
+        'search_context_types': ['memory'],
+        'allowed_context_types': ['memory'],
+        'allowed_resource_record_ids': [],
+        'allowed_skill_record_ids': [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_adds_retrieved_memory_resolution_hint_for_memory_intent() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response='# Retrieved Context\n\n- [memory] 用户要求以后所有整理文档类的结果默认放在桌面。')
+    service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='以后所有整理文档类的结果默认放哪里',
+        exposure={
+            'skills': [],
+            'tool_families': [],
+            'tool_names': ['memory_write'],
+        },
+        persisted_session=None,
+    )
+
+    assert 'Retrieved Memory Resolution Hint' in result.system_prompt
+    assert 'Authoritative Retrieved Default' in result.system_prompt
+    assert 'restate the retrieved default directly' in result.system_prompt
+    assert '用户要求以后所有整理文档类的结果默认放在桌面' in result.system_prompt
 
 
 @pytest.mark.asyncio

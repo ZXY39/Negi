@@ -121,8 +121,13 @@ const S = {
     taskNodeBusy: false,
     tasksWorkerOnline: true,
     tasksWorkerReportedOnline: true,
+    tasksWorkerState: "online",
+    tasksWorkerReportedState: "online",
+    tasksWorkerLastSeenAt: "",
+    tasksWorkerControlAvailable: true,
     tasksWorker: null,
     tasksWorkerStaleAfterSeconds: 15,
+    taskWorkerStatusPollId: null,
     taskTokenStatsOpen: false,
     taskArtifacts: [],
     selectedArtifactId: "",
@@ -3265,8 +3270,8 @@ function refreshLiveDurationBadges() {
         if (!(runtimeEl instanceof HTMLElement)) return;
         updateRuntimeBadge(item, runtimeEl);
     });
-    if (typeof refreshTaskWorkerOnlineState === "function") {
-        refreshTaskWorkerOnlineState({ render: S.view === "tasks" });
+    if (typeof refreshTaskWorkerState === "function") {
+        refreshTaskWorkerState({ render: S.view === "tasks" });
     }
 }
 
@@ -6114,6 +6119,11 @@ function switchView(view) {
         initTasksWs();
     } else {
         closeTasksWs();
+    }
+    if (navView === "tasks" && typeof startTaskWorkerStatusPolling === "function") {
+        startTaskWorkerStatusPolling();
+    } else if (typeof stopTaskWorkerStatusPolling === "function") {
+        stopTaskWorkerStatusPolling();
     }
     if (view === "skills") void loadSkills();
     if (view === "tools") void loadTools();

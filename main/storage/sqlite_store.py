@@ -219,6 +219,19 @@ class SQLiteTaskStore:
                 payload_json TEXT NOT NULL
             )
             ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_worker_status_outbox (
+                worker_id TEXT PRIMARY KEY,
+                delivery_state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                last_attempt_at TEXT NOT NULL,
+                last_error TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
             'CREATE INDEX IF NOT EXISTS idx_nodes_task_id ON nodes(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id)',
@@ -235,6 +248,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_node_rounds_task_parent ON task_node_rounds(task_id, parent_node_id, round_index)',
             'CREATE INDEX IF NOT EXISTS idx_task_terminal_outbox_state_created_at ON task_terminal_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_stall_outbox_state_created_at ON task_stall_outbox(delivery_state, created_at)',
+            'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
         ]
         with self._lock, self._conn:
             for statement in statements:
@@ -681,6 +695,86 @@ class SQLiteTaskStore:
                 ('delivered', delivered_at, delivered_at, '', key),
             )
 
+    def put_task_worker_status_outbox(
+        self,
+        *,
+        worker_id: str,
+        created_at: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        key = str(worker_id or '').strip()
+        if not key:
+            raise ValueError('worker_id_required')
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                'SELECT worker_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+                'FROM task_worker_status_outbox WHERE worker_id = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                self._conn.execute(
+                    'INSERT INTO task_worker_status_outbox (worker_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (key, 'pending', created_at, created_at, '', 0, '', '', payload_json),
+                )
+            else:
+                existing_created_at = str(row['created_at'] or created_at).strip() or created_at
+                self._conn.execute(
+                    'UPDATE task_worker_status_outbox SET delivery_state = ?, created_at = ?, updated_at = ?, delivered_at = ?, attempts = ?, last_attempt_at = ?, last_error = ?, payload_json = ? '
+                    'WHERE worker_id = ?',
+                    ('pending', existing_created_at, created_at, '', 0, '', '', payload_json, key),
+                )
+            row = self._conn.execute(
+                'SELECT worker_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+                'FROM task_worker_status_outbox WHERE worker_id = ?',
+                (key,),
+            ).fetchone()
+        return self._task_worker_status_outbox_row(row)
+
+    def get_task_worker_status_outbox(self, worker_id: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT worker_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+            'FROM task_worker_status_outbox WHERE worker_id = ?',
+            (str(worker_id or '').strip(),),
+        )
+        return self._task_worker_status_outbox_row(row) if row else None
+
+    def list_pending_task_worker_status_outbox(self, *, limit: int = 200) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            'SELECT worker_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+            'FROM task_worker_status_outbox WHERE delivery_state != ? ORDER BY updated_at ASC LIMIT ?',
+            ('delivered', max(1, int(limit or 200))),
+        )
+        return [self._task_worker_status_outbox_row(row) for row in rows]
+
+    def mark_task_worker_status_outbox_attempt(self, worker_id: str, *, attempted_at: str, error_text: str) -> None:
+        key = str(worker_id or '').strip()
+        if not key:
+            return
+        with self._lock, self._conn:
+            row = self._conn.execute('SELECT attempts, delivery_state FROM task_worker_status_outbox WHERE worker_id = ?', (key,)).fetchone()
+            if row is None:
+                return
+            delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
+            if delivery_state == 'delivered':
+                return
+            attempts = int(row['attempts'] or 0) + 1
+            self._conn.execute(
+                'UPDATE task_worker_status_outbox SET delivery_state = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE worker_id = ?',
+                ('pending', attempts, attempted_at, str(error_text or ''), key),
+            )
+
+    def mark_task_worker_status_outbox_delivered(self, worker_id: str, *, delivered_at: str) -> None:
+        key = str(worker_id or '').strip()
+        if not key:
+            return
+        with self._lock, self._conn:
+            self._conn.execute(
+                'UPDATE task_worker_status_outbox SET delivery_state = ?, delivered_at = ?, last_error = ? WHERE worker_id = ?',
+                ('delivered', delivered_at, '', key),
+            )
+
     def upsert_worker_status(
         self,
         *,
@@ -904,6 +998,23 @@ class SQLiteTaskStore:
             'dedupe_key': row['dedupe_key'],
             'task_id': row['task_id'],
             'session_id': row['session_id'],
+            'delivery_state': row['delivery_state'],
+            'created_at': row['created_at'],
+            'updated_at': row['updated_at'],
+            'delivered_at': row['delivered_at'],
+            'attempts': int(row['attempts'] or 0),
+            'last_attempt_at': row['last_attempt_at'],
+            'last_error': row['last_error'],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
+
+    @staticmethod
+    def _task_worker_status_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return {}
+        payload = json.loads(row['payload_json'])
+        return {
+            'worker_id': row['worker_id'],
             'delivery_state': row['delivery_state'],
             'created_at': row['created_at'],
             'updated_at': row['updated_at'],

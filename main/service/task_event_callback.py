@@ -98,6 +98,9 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
         "task_id": "",
         "data": {
             "worker_online": data.get("worker_online") is not False,
+            "worker_state": str(data.get("worker_state") or "").strip().lower(),
+            "worker_last_seen_at": str(data.get("worker_last_seen_at") or "").strip(),
+            "worker_control_available": data.get("worker_control_available") is True,
             "worker_stale_after_seconds": data.get("worker_stale_after_seconds"),
         },
     }

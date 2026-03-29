@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -401,11 +402,10 @@ async def test_ensure_web_runtime_services_starts_managed_worker(tmp_path: Path,
         execution_mode="web",
     )
     heartbeat = _HeartbeatRecorder()
-    worker_calls: list[MainRuntimeService] = []
+    worker_calls: list[tuple[MainRuntimeService, float]] = []
 
     async def _ensure_worker(current_service, *, wait_timeout_s: float = 5.0) -> bool:
-        _ = wait_timeout_s
-        worker_calls.append(current_service)
+        worker_calls.append((current_service, float(wait_timeout_s)))
         return True
 
     async def _skip_china(_agent=None) -> None:
@@ -423,7 +423,7 @@ async def test_ensure_web_runtime_services_starts_managed_worker(tmp_path: Path,
 
     await web_shell.ensure_web_runtime_services(SimpleNamespace(main_task_service=service))
 
-    assert worker_calls == [service]
+    assert worker_calls == [(service, 5.0)]
     assert heartbeat.started == 1
 
 
@@ -499,6 +499,174 @@ def test_worker_task_stall_emit_persists_outbox_and_schedules_delivery(tmp_path:
     assert len(pending) == 1
     assert pending[0]["task_id"] == "task:demo-stall"
     assert scheduled == [pending[0]["dedupe_key"]]
+
+
+def test_worker_task_status_persists_outbox_and_schedules_delivery(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    scheduled: list[str] = []
+    service._schedule_task_worker_status_delivery = lambda worker_id: scheduled.append(str(worker_id))
+
+    payload = service.publish_worker_status_event(
+        item={
+            "worker_id": "worker:test",
+            "role": "task_worker",
+            "status": "running",
+            "updated_at": now_iso(),
+            "payload": {"execution_mode": "worker", "active_task_count": 0},
+        }
+    )
+
+    pending = service.store.list_pending_task_worker_status_outbox(limit=10)
+    assert len(pending) == 1
+    assert pending[0]["worker_id"] == "worker:test"
+    assert pending[0]["payload"]["event_type"] == "task.worker.status"
+    assert pending[0]["payload"]["data"]["worker"]["worker_id"] == "worker:test"
+    assert payload["worker_state"] == "online"
+    assert scheduled == ["worker:test"]
+
+
+def test_worker_task_status_outbox_keeps_latest_payload(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    service._schedule_task_worker_status_delivery = lambda _worker_id: None
+
+    first_updated_at = now_iso()
+    second_updated_at = (datetime.now(timezone.utc) + timedelta(seconds=3)).isoformat()
+    service.publish_worker_status_event(
+        item={
+            "worker_id": "worker:test",
+            "role": "task_worker",
+            "status": "running",
+            "updated_at": first_updated_at,
+            "payload": {"execution_mode": "worker", "active_task_count": 0},
+        }
+    )
+    service.publish_worker_status_event(
+        item={
+            "worker_id": "worker:test",
+            "role": "task_worker",
+            "status": "running",
+            "updated_at": second_updated_at,
+            "payload": {"execution_mode": "worker", "active_task_count": 1},
+        }
+    )
+
+    pending = service.store.list_pending_task_worker_status_outbox(limit=10)
+    assert len(pending) == 1
+    assert pending[0]["payload"]["data"]["worker"]["updated_at"] == second_updated_at
+    assert pending[0]["payload"]["data"]["worker"]["payload"]["active_task_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_task_status_outbox_retries_and_marks_delivered(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    service._schedule_task_worker_status_delivery = lambda _worker_id: None
+    service.publish_worker_status_event(
+        item={
+            "worker_id": "worker:test",
+            "role": "task_worker",
+            "status": "running",
+            "updated_at": now_iso(),
+            "payload": {"execution_mode": "worker", "active_task_count": 0},
+        }
+    )
+    monkeypatch.setenv("G3KU_INTERNAL_CALLBACK_URL", "http://127.0.0.1:18790/api/internal/task-terminal")
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+
+    attempts: list[str] = []
+
+    class _AsyncClient:
+        def __init__(self, timeout: float):
+            assert float(timeout) == 2.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, json: dict | None = None, headers: dict | None = None):
+            attempts.append(str(url))
+            assert str(headers.get("x-g3ku-internal-token") or "") == "secret-token"
+            if len(attempts) == 1:
+                return httpx.Response(500, json={"error": "retry"})
+            return httpx.Response(200, json={"ok": True})
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("main.service.runtime_service.httpx.AsyncClient", _AsyncClient)
+    monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
+
+    await service._deliver_task_worker_status_outbox("worker:test")
+
+    entry = service.store.get_task_worker_status_outbox("worker:test")
+    assert entry is not None
+    assert entry["delivery_state"] == "delivered"
+    assert entry["attempts"] == 1
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_replays_pending_worker_status_outbox(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    scheduled: list[str] = []
+    service._start_worker_loops = lambda: None
+    service._schedule_task_worker_status_delivery = lambda worker_id: scheduled.append(str(worker_id))
+    service.store.put_task_worker_status_outbox(
+        worker_id="worker:pending",
+        created_at=now_iso(),
+        payload={
+            "event_type": "task.worker.status",
+            "session_id": "all",
+            "task_id": "",
+            "data": {
+                "worker": {
+                    "worker_id": "worker:pending",
+                    "role": "task_worker",
+                    "status": "running",
+                    "updated_at": now_iso(),
+                    "payload": {"execution_mode": "worker", "active_task_count": 0},
+                },
+                "worker_online": True,
+                "worker_state": "online",
+                "worker_last_seen_at": now_iso(),
+                "worker_control_available": True,
+                "worker_stale_after_seconds": 15.0,
+            },
+        },
+    )
+
+    await service.startup()
+
+    assert scheduled == ["worker:pending"]
 
 
 def test_web_mode_create_task_enqueues_command_without_running(tmp_path: Path):
@@ -583,6 +751,7 @@ def test_global_tasks_websocket_pushes_worker_status_recovery(tmp_path: Path, mo
         snapshot = ws.receive_json()
         assert snapshot["type"] == "task.list.snapshot"
         assert snapshot["data"]["worker_online"] is False
+        assert snapshot["data"]["worker_state"] == "stale"
         assert float(snapshot["data"]["worker_stale_after_seconds"]) > 0
 
         _mark_worker_online(service)
@@ -590,6 +759,7 @@ def test_global_tasks_websocket_pushes_worker_status_recovery(tmp_path: Path, mo
         worker_event = _receive_until_type(ws, "task.worker.status")
         assert worker_event["type"] == "task.worker.status"
         assert worker_event["data"]["worker_online"] is True
+        assert worker_event["data"]["worker_state"] == "online"
         assert float(worker_event["data"]["worker_stale_after_seconds"]) > 0
         assert worker_event["data"]["worker"]["worker_id"] == "worker:test"
 
@@ -618,7 +788,35 @@ def test_tasks_rest_includes_worker_stale_after_seconds(tmp_path: Path, monkeypa
     assert payload["ok"] is True
     assert isinstance(payload["worker"], dict)
     assert payload["worker_online"] is True
+    assert payload["worker_state"] == "online"
+    assert payload["worker_control_available"] is True
+    assert payload["worker_last_seen_at"]
     assert float(payload["worker_stale_after_seconds"]) > 0
+
+
+def test_task_worker_status_rest_endpoint_returns_worker_metadata(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    _mark_worker_online(service)
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    client = TestClient(_build_app())
+    response = client.get("/api/tasks/worker-status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["worker_online"] is True
+    assert payload["worker_state"] == "online"
+    assert payload["worker_control_available"] is True
+    assert payload["worker_last_seen_at"]
 
 
 def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
@@ -635,9 +833,11 @@ def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
 
     _mark_worker_at(service, recent_but_not_tiny)
     assert service.is_worker_online() is True
+    assert service.worker_state() == "online"
 
     _mark_worker_at(service, definitely_stale)
     assert service.is_worker_online() is False
+    assert service.worker_state() == "stale"
 
 
 def test_web_mode_worker_online_extends_stale_window_for_active_tasks(tmp_path: Path):
@@ -654,9 +854,11 @@ def test_web_mode_worker_online_extends_stale_window_for_active_tasks(tmp_path: 
 
     _mark_worker_at(service, active_but_still_recent, active_task_count=1)
     assert service.is_worker_online() is True
+    assert service.worker_state() == "online"
 
     _mark_worker_at(service, definitely_stale_even_with_grace, active_task_count=1)
     assert service.is_worker_online() is False
+    assert service.worker_state() == "stale"
 
 
 def test_web_mode_worker_online_treats_stopped_status_as_offline(tmp_path: Path):
@@ -671,6 +873,81 @@ def test_web_mode_worker_online_treats_stopped_status_as_offline(tmp_path: Path)
 
     _mark_worker_at(service, now_iso(), status="stopped")
     assert service.is_worker_online() is False
+    assert service.worker_state() == "stopped"
+
+
+def test_web_mode_worker_state_reports_offline_without_worker_status(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    assert service.worker_state() == "offline"
+    assert service.is_worker_online() is False
+
+
+def test_web_mode_worker_state_reports_starting_for_recent_managed_worker(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    started_at = now_iso()
+    monkeypatch.setattr(
+        "main.service.runtime_service.managed_worker_snapshot",
+        lambda starting_grace_s=10.0: {
+            "pid": 123,
+            "active": True,
+            "auto_worker_enabled": True,
+            "started_at": started_at,
+            "starting": True,
+            "starting_grace_seconds": starting_grace_s,
+        },
+    )
+
+    assert service.worker_state() == "starting"
+    assert service.is_worker_online() is False
+
+
+@pytest.mark.parametrize(
+    ("worker_state", "detail", "route"),
+    [
+        ("starting", "task_worker_starting", "/api/tasks/demo/pause"),
+        ("stale", "task_worker_stale", "/api/tasks/demo/resume"),
+        ("offline", "task_worker_offline", "/api/tasks/demo/cancel"),
+    ],
+)
+def test_task_control_routes_surface_specific_worker_state_errors(
+    tmp_path: Path,
+    monkeypatch,
+    worker_state: str,
+    detail: str,
+    route: str,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    monkeypatch.setattr(service, "worker_state", lambda **kwargs: worker_state)
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    client = TestClient(_build_app())
+    response = client.post(route)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == detail
 
 
 def test_global_tasks_websocket_does_not_replay_historical_patches_after_snapshot(tmp_path: Path, monkeypatch):

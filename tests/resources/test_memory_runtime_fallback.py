@@ -139,6 +139,88 @@ def test_memory_manager_bootstrap_full_replays_journal_on_normal_startup(monkeyp
         manager.close()
 
 
+def test_memory_manager_bootstrap_new_only_backfills_dense_when_journal_is_already_applied(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _RecordingBackend:
+        instances: list["_RecordingBackend"] = []
+
+        def __init__(self, workspace, cfg):
+            _ = workspace, cfg
+            self.store = object()
+            self.applied: list[rag_memory.MemorySyncEvent] = []
+            self.ensure_dense_backfill_calls = 0
+            type(self).instances.append(self)
+
+        async def apply_sync_event(self, event: rag_memory.MemorySyncEvent) -> dict[str, object]:
+            self.applied.append(event)
+            return {"record_id": event.record_id}
+
+        async def ensure_dense_backfill(self) -> dict[str, object]:
+            self.ensure_dense_backfill_calls += 1
+            return {
+                "needed": True,
+                "eligible": 1,
+                "indexed": 1,
+                "dense_points": 0,
+                "sample_missing": True,
+            }
+
+        async def stats(self) -> dict[str, object]:
+            return {
+                "records": len(self.applied),
+                "records_v2": len(self.applied),
+                "pending": 0,
+                "records_by_type": {"memory": len(self.applied)},
+                "layer_distribution": {"l0": len(self.applied), "l1": len(self.applied), "l2": 0},
+                "dense_enabled": True,
+                "sqlite_path": "",
+                "qdrant_path": "",
+                "planner_calls": 0,
+                "commit_calls": 0,
+                "rerank_calls": 0,
+                "token_in": 0,
+                "token_out": 0,
+                "cost_delta_pct": 0.0,
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(rag_memory, "_RagMemoryBackend", _RecordingBackend)
+    _seed_desktop_default_memory(tmp_path, rag_applied_seq=1)
+
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg(bootstrap_mode="new_only"))
+    try:
+        backend = _RecordingBackend.instances[-1]
+        assert backend.applied == []
+        assert backend.ensure_dense_backfill_calls == 1
+        assert manager._backend_state == "rag_healthy"
+    finally:
+        manager.close()
+
+
+def test_dashscope_embeddings_split_batch_when_api_rejects_large_request() -> None:
+    emb = rag_memory.DashScopeMultimodalEmbeddings(api_key="sk-test", batch_size=32)
+    calls: list[int] = []
+
+    def _fake_embed_batch(texts: list[str]) -> list[list[float]]:
+        calls.append(len(texts))
+        if len(texts) > 4:
+            raise RuntimeError("DashScope embedding API call failed (400) at https://example.test")
+        return [[float(index)] for index, _ in enumerate(texts, start=1)]
+
+    emb._embed_batch = _fake_embed_batch  # type: ignore[method-assign]
+
+    result = emb.embed_documents([f"text-{index}" for index in range(10)])
+
+    assert len(result) == 10
+    assert calls[0] == 10
+    assert max(calls) == 10
+    assert any(size <= 4 for size in calls[1:])
+
+
 @pytest.mark.asyncio
 async def test_memory_manager_fallback_ingest_and_retrieve_when_rag_backend_bootstrap_fails(
     monkeypatch,
