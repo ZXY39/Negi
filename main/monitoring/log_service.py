@@ -91,6 +91,21 @@ class TaskLogService:
         if callable(listener):
             self._task_visible_output_listeners.append(listener)
 
+    def append_task_event(
+        self,
+        *,
+        task_id: str | None,
+        session_id: str,
+        event_type: str,
+        data: dict[str, Any],
+    ) -> int:
+        return self._event_writer.append_task_event(
+            task_id=task_id,
+            session_id=session_id,
+            event_type=event_type,
+            data=data,
+        )
+
     def _task_lock(self, task_id: str) -> threading.RLock:
         key = str(task_id or '').strip()
         with self._task_locks_guard:

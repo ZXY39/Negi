@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from main.models import NodeRecord, TaskRecord, TokenUsageSummary
@@ -71,5 +72,43 @@ def test_sqlite_task_store_read_connection_observes_writer_updates(tmp_path: Pat
         assert task.task_id == task_id
         assert node is not None
         assert node.node_id == root_node_id
+    finally:
+        store.close()
+
+
+def test_sqlite_task_store_uses_dedicated_writer_thread_for_serialized_writes(tmp_path: Path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    try:
+        assert store._writer_thread is not None
+        assert store._writer_thread.is_alive()
+
+        task_id = "task:demo"
+        root_node_id = "node:root"
+        store.upsert_task(_task_record(task_id, root_node_id))
+
+        failures: list[BaseException] = []
+
+        def write_event(index: int) -> None:
+            try:
+                store.append_task_event(
+                    task_id=task_id,
+                    session_id="web:shared",
+                    event_type="task.summary.patch",
+                    created_at=f"2026-03-29T00:00:{index:02d}+08:00",
+                    payload={"index": index},
+                )
+            except BaseException as exc:  # pragma: no cover - surfaced in assertion
+                failures.append(exc)
+
+        threads = [threading.Thread(target=write_event, args=(index,)) for index in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert failures == []
+        events = store.list_task_events(task_id=task_id, limit=20)
+        assert len(events) == 10
+        assert sorted(int(event["payload"]["index"]) for event in events) == list(range(10))
     finally:
         store.close()

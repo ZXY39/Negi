@@ -770,12 +770,11 @@ class MainRuntimeService:
         self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
         self.file_store.delete_task_files(task_id)
         self.store.delete_task(task_id)
-        self.store.append_task_event(
+        self.log_service.append_task_event(
             task_id=task.task_id,
             session_id=task.session_id,
             event_type='task.deleted',
-            created_at=now_iso(),
-            payload={'task_id': task.task_id},
+            data={'task_id': task.task_id},
         )
         self._publish_task_deleted_event(session_id=task.session_id, task_id=task.task_id)
         await self.registry.forget_task(task.session_id, task_id)
@@ -3283,12 +3282,11 @@ class MainRuntimeService:
         task = self.get_task(task_id)
         self.refresh_resource_paths([target_path], trigger='artifact-apply', session_id=(task.session_id if task is not None else 'web:shared'))
         if task is not None:
-            self.store.append_task_event(
+            self.log_service.append_task_event(
                 task_id=task.task_id,
                 session_id=task.session_id,
                 event_type='task.artifact.applied',
-                created_at=now_iso(),
-                payload={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True, 'task_id': task.task_id},
+                data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True, 'task_id': task.task_id},
             )
             self._publish_task_artifact_applied_event(
                 task=task,

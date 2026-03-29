@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import threading
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 
@@ -18,6 +19,7 @@ from main.monitoring.models import (
 )
 
 T = TypeVar('T', bound=BaseModel)
+R = TypeVar('R')
 
 
 class SQLiteTaskStore:
@@ -26,14 +28,32 @@ class SQLiteTaskStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._read_lock = threading.RLock()
+        self._closed = False
+        self._writer_queue: queue.Queue[tuple[Callable[[sqlite3.Connection], Any] | None, threading.Event | None, dict[str, Any] | None]] = queue.Queue()
+        self._writer_thread: threading.Thread | None = None
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._conn:
             self._conn.execute('PRAGMA journal_mode=WAL')
         self._setup()
         self._read_conn = self._open_read_conn()
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            name=f'sqlite-task-store-writer:{self.path.name}',
+            daemon=True,
+        )
+        self._writer_thread.start()
 
     def close(self) -> None:
+        writer_thread: threading.Thread | None = None
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            writer_thread = self._writer_thread
+            self._writer_queue.put((None, None, None))
+        if writer_thread is not None:
+            writer_thread.join(timeout=5.0)
         with self._read_lock:
             self._read_conn.close()
         with self._lock:
@@ -270,9 +290,43 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_stall_outbox_state_created_at ON task_stall_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
         ]
-        with self._lock, self._conn:
+        with self._conn:
             for statement in statements:
                 self._conn.execute(statement)
+
+    def _writer_loop(self) -> None:
+        while True:
+            operation, done, outcome = self._writer_queue.get()
+            try:
+                if operation is None:
+                    break
+                with self._conn:
+                    value = operation(self._conn)
+                if outcome is not None:
+                    outcome['value'] = value
+            except Exception as exc:
+                if outcome is not None:
+                    outcome['error'] = exc
+            finally:
+                if done is not None:
+                    done.set()
+                self._writer_queue.task_done()
+
+    def _run_write(self, operation: Callable[[sqlite3.Connection], R]) -> R:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('sqlite_task_store_closed')
+        outcome: dict[str, Any] = {}
+        done = threading.Event()
+        self._writer_queue.put((operation, done, outcome))
+        done.wait()
+        error = outcome.get('error')
+        if error is not None:
+            raise error
+        return outcome.get('value')  # type: ignore[return-value]
+
+    def _execute_write(self, sql: str, params: tuple[object, ...] = ()) -> None:
+        self._run_write(lambda conn: conn.execute(sql, params))
 
     def upsert_task(self, record: TaskRecord) -> TaskRecord:
         self._upsert(
@@ -295,19 +349,21 @@ class SQLiteTaskStore:
         return [self._parse(row['payload_json'], TaskRecord) for row in rows]
 
     def update_task(self, task_id: str, mutator) -> TaskRecord | None:
-        with self._lock, self._conn:
-            row = self._conn.execute('SELECT payload_json FROM tasks WHERE task_id = ?', (task_id,)).fetchone()
+        def operation(conn: sqlite3.Connection) -> TaskRecord | None:
+            row = conn.execute('SELECT payload_json FROM tasks WHERE task_id = ?', (task_id,)).fetchone()
             if row is None:
                 return None
             record = self._parse(row['payload_json'], TaskRecord)
             updated = mutator(record)
-            self._upsert_unlocked(
+            self._upsert_conn(
+                conn,
                 'tasks',
                 ['task_id', 'session_id', 'status', 'updated_at', 'payload_json'],
                 [updated.task_id, updated.session_id, updated.status, updated.updated_at, updated.model_dump_json()],
                 'task_id',
             )
             return updated
+        return self._run_write(operation)
 
     def upsert_node(self, record: NodeRecord) -> NodeRecord:
         self._upsert(
@@ -345,17 +401,17 @@ class SQLiteTaskStore:
         if not normalized_ids:
             return
         placeholders = ', '.join('?' for _ in normalized_ids)
-        with self._lock, self._conn:
-            self._conn.execute(f'DELETE FROM nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+        self._execute_write(f'DELETE FROM nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
 
     def update_node(self, node_id: str, mutator) -> NodeRecord | None:
-        with self._lock, self._conn:
-            row = self._conn.execute('SELECT payload_json FROM nodes WHERE node_id = ?', (node_id,)).fetchone()
+        def operation(conn: sqlite3.Connection) -> NodeRecord | None:
+            row = conn.execute('SELECT payload_json FROM nodes WHERE node_id = ?', (node_id,)).fetchone()
             if row is None:
                 return None
             record = self._parse(row['payload_json'], NodeRecord)
             updated = mutator(record)
-            self._upsert_unlocked(
+            self._upsert_conn(
+                conn,
                 'nodes',
                 ['node_id', 'task_id', 'parent_node_id', 'root_node_id', 'depth', 'status', 'created_at', 'updated_at', 'payload_json'],
                 [
@@ -372,6 +428,7 @@ class SQLiteTaskStore:
                 'node_id',
             )
             return updated
+        return self._run_write(operation)
 
     def upsert_artifact(self, record: TaskArtifactRecord) -> TaskArtifactRecord:
         self._upsert(
@@ -391,20 +448,21 @@ class SQLiteTaskStore:
         return [self._parse(row['payload_json'], TaskArtifactRecord) for row in rows]
 
     def delete_task(self, task_id: str) -> None:
-        with self._lock, self._conn:
-            self._conn.execute('DELETE FROM task_projection_meta WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_node_rounds WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_runtime_frames WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_node_details WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_model_calls WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_runtime_meta WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM task_stall_outbox WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM artifacts WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute('DELETE FROM task_projection_meta WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_node_rounds WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_runtime_frames WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_node_details WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_model_calls WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_runtime_meta WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_stall_outbox WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM artifacts WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
+        self._run_write(operation)
 
     def upsert_task_runtime_meta(self, *, task_id: str, updated_at: str, payload: dict[str, object]) -> None:
         payload_json = json.dumps(payload)
@@ -432,12 +490,13 @@ class SQLiteTaskStore:
         payload: dict[str, object],
     ) -> int:
         payload_json = json.dumps(payload)
-        with self._lock, self._conn:
-            cursor = self._conn.execute(
+        def operation(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
                 'INSERT INTO task_events (task_id, session_id, event_type, created_at, payload_json) VALUES (?, ?, ?, ?, ?)',
                 (task_id, session_id, event_type, created_at, payload_json),
             )
             return int(cursor.lastrowid or 0)
+        return self._run_write(operation)
 
     def list_task_events(
         self,
@@ -507,12 +566,11 @@ class SQLiteTaskStore:
         payload: dict[str, object],
     ) -> None:
         payload_json = json.dumps(payload)
-        with self._lock, self._conn:
-            self._conn.execute(
-                'INSERT INTO task_commands (command_id, task_id, session_id, command_type, status, created_at, payload_json) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (command_id, task_id, session_id, command_type, 'pending', created_at, payload_json),
-            )
+        self._execute_write(
+            'INSERT INTO task_commands (command_id, task_id, session_id, command_type, status, created_at, payload_json) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (command_id, task_id, session_id, command_type, 'pending', created_at, payload_json),
+        )
 
     def claim_pending_task_commands(
         self,
@@ -521,9 +579,9 @@ class SQLiteTaskStore:
         claimed_at: str,
         limit: int = 20,
     ) -> list[dict[str, object]]:
-        with self._lock, self._conn:
+        def operation(conn: sqlite3.Connection) -> list[dict[str, object]]:
             rows = list(
-                self._conn.execute(
+                conn.execute(
                     'SELECT command_id, task_id, session_id, command_type, created_at, payload_json '
                     'FROM task_commands WHERE status = ? ORDER BY created_at ASC LIMIT ?',
                     ('pending', max(1, int(limit or 20))),
@@ -533,24 +591,25 @@ class SQLiteTaskStore:
                 return []
             command_ids = [str(row['command_id']) for row in rows]
             for command_id in command_ids:
-                self._conn.execute(
+                conn.execute(
                     'UPDATE task_commands SET status = ?, worker_id = ?, claimed_at = ? WHERE command_id = ?',
                     ('claimed', worker_id, claimed_at, command_id),
                 )
-        commands: list[dict[str, object]] = []
-        for row in rows:
-            payload = json.loads(row['payload_json'])
-            commands.append(
-                {
-                    'command_id': row['command_id'],
-                    'task_id': row['task_id'],
-                    'session_id': row['session_id'],
-                    'command_type': row['command_type'],
-                    'created_at': row['created_at'],
-                    'payload': payload if isinstance(payload, dict) else {},
-                }
-            )
-        return commands
+            commands: list[dict[str, object]] = []
+            for row in rows:
+                payload = json.loads(row['payload_json'])
+                commands.append(
+                    {
+                        'command_id': row['command_id'],
+                        'task_id': row['task_id'],
+                        'session_id': row['session_id'],
+                        'command_type': row['command_type'],
+                        'created_at': row['created_at'],
+                        'payload': payload if isinstance(payload, dict) else {},
+                    }
+                )
+            return commands
+        return self._run_write(operation)
 
     def finish_task_command(
         self,
@@ -560,11 +619,10 @@ class SQLiteTaskStore:
         success: bool,
         error_text: str = '',
     ) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                'UPDATE task_commands SET status = ?, finished_at = ?, error_text = ? WHERE command_id = ?',
-                ('completed' if success else 'failed', finished_at, str(error_text or ''), command_id),
-            )
+        self._execute_write(
+            'UPDATE task_commands SET status = ?, finished_at = ?, error_text = ? WHERE command_id = ?',
+            ('completed' if success else 'failed', finished_at, str(error_text or ''), command_id),
+        )
 
     def put_task_terminal_outbox(
         self,
@@ -578,25 +636,26 @@ class SQLiteTaskStore:
         key = str(dedupe_key or '').strip()
         if not key:
             raise ValueError('dedupe_key_required')
-        with self._lock, self._conn:
-            row = self._conn.execute(
+        def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            row = conn.execute(
                 'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
                 'FROM task_terminal_outbox WHERE dedupe_key = ?',
                 (key,),
             ).fetchone()
             if row is None:
                 payload_json = json.dumps(payload, ensure_ascii=False)
-                self._conn.execute(
+                conn.execute(
                     'INSERT INTO task_terminal_outbox (dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (key, task_id, session_id, 'pending', created_at, created_at, '', 0, '', '', payload_json),
                 )
-                row = self._conn.execute(
+                row = conn.execute(
                     'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
                     'FROM task_terminal_outbox WHERE dedupe_key = ?',
                     (key,),
                 ).fetchone()
-        return self._task_terminal_outbox_row(row)
+            return self._task_terminal_outbox_row(row)
+        return self._run_write(operation)
 
     def get_task_terminal_outbox(self, dedupe_key: str) -> dict[str, object] | None:
         row = self._fetchone(
@@ -618,28 +677,28 @@ class SQLiteTaskStore:
         key = str(dedupe_key or '').strip()
         if not key:
             return
-        with self._lock, self._conn:
-            row = self._conn.execute('SELECT attempts, delivery_state FROM task_terminal_outbox WHERE dedupe_key = ?', (key,)).fetchone()
+        def operation(conn: sqlite3.Connection) -> None:
+            row = conn.execute('SELECT attempts, delivery_state FROM task_terminal_outbox WHERE dedupe_key = ?', (key,)).fetchone()
             if row is None:
                 return
             delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
             if delivery_state == 'delivered':
                 return
             attempts = int(row['attempts'] or 0) + 1
-            self._conn.execute(
+            conn.execute(
                 'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE dedupe_key = ?',
                 ('pending', attempted_at, attempts, attempted_at, str(error_text or ''), key),
             )
+        self._run_write(operation)
 
     def mark_task_terminal_outbox_delivered(self, dedupe_key: str, *, delivered_at: str) -> None:
         key = str(dedupe_key or '').strip()
         if not key:
             return
-        with self._lock, self._conn:
-            self._conn.execute(
-                'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ? WHERE dedupe_key = ?',
-                ('delivered', delivered_at, delivered_at, '', key),
-            )
+        self._execute_write(
+            'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ? WHERE dedupe_key = ?',
+            ('delivered', delivered_at, delivered_at, '', key),
+        )
 
     def put_task_stall_outbox(
         self,
@@ -653,25 +712,26 @@ class SQLiteTaskStore:
         key = str(dedupe_key or '').strip()
         if not key:
             raise ValueError('dedupe_key_required')
-        with self._lock, self._conn:
-            row = self._conn.execute(
+        def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            row = conn.execute(
                 'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
                 'FROM task_stall_outbox WHERE dedupe_key = ?',
                 (key,),
             ).fetchone()
             if row is None:
                 payload_json = json.dumps(payload, ensure_ascii=False)
-                self._conn.execute(
+                conn.execute(
                     'INSERT INTO task_stall_outbox (dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (key, task_id, session_id, 'pending', created_at, created_at, '', 0, '', '', payload_json),
                 )
-                row = self._conn.execute(
+                row = conn.execute(
                     'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
                     'FROM task_stall_outbox WHERE dedupe_key = ?',
                     (key,),
                 ).fetchone()
-        return self._task_stall_outbox_row(row)
+            return self._task_stall_outbox_row(row)
+        return self._run_write(operation)
 
     def get_task_stall_outbox(self, dedupe_key: str) -> dict[str, object] | None:
         row = self._fetchone(
@@ -693,28 +753,28 @@ class SQLiteTaskStore:
         key = str(dedupe_key or '').strip()
         if not key:
             return
-        with self._lock, self._conn:
-            row = self._conn.execute('SELECT attempts, delivery_state FROM task_stall_outbox WHERE dedupe_key = ?', (key,)).fetchone()
+        def operation(conn: sqlite3.Connection) -> None:
+            row = conn.execute('SELECT attempts, delivery_state FROM task_stall_outbox WHERE dedupe_key = ?', (key,)).fetchone()
             if row is None:
                 return
             delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
             if delivery_state == 'delivered':
                 return
             attempts = int(row['attempts'] or 0) + 1
-            self._conn.execute(
+            conn.execute(
                 'UPDATE task_stall_outbox SET delivery_state = ?, updated_at = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE dedupe_key = ?',
                 ('pending', attempted_at, attempts, attempted_at, str(error_text or ''), key),
             )
+        self._run_write(operation)
 
     def mark_task_stall_outbox_delivered(self, dedupe_key: str, *, delivered_at: str) -> None:
         key = str(dedupe_key or '').strip()
         if not key:
             return
-        with self._lock, self._conn:
-            self._conn.execute(
-                'UPDATE task_stall_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ? WHERE dedupe_key = ?',
-                ('delivered', delivered_at, delivered_at, '', key),
-            )
+        self._execute_write(
+            'UPDATE task_stall_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ? WHERE dedupe_key = ?',
+            ('delivered', delivered_at, delivered_at, '', key),
+        )
 
     def put_task_worker_status_outbox(
         self,
@@ -727,31 +787,32 @@ class SQLiteTaskStore:
         if not key:
             raise ValueError('worker_id_required')
         payload_json = json.dumps(payload, ensure_ascii=False)
-        with self._lock, self._conn:
-            row = self._conn.execute(
+        def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            row = conn.execute(
                 'SELECT worker_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
                 'FROM task_worker_status_outbox WHERE worker_id = ?',
                 (key,),
             ).fetchone()
             if row is None:
-                self._conn.execute(
+                conn.execute(
                     'INSERT INTO task_worker_status_outbox (worker_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (key, 'pending', created_at, created_at, '', 0, '', '', payload_json),
                 )
             else:
                 existing_created_at = str(row['created_at'] or created_at).strip() or created_at
-                self._conn.execute(
+                conn.execute(
                     'UPDATE task_worker_status_outbox SET delivery_state = ?, created_at = ?, updated_at = ?, delivered_at = ?, attempts = ?, last_attempt_at = ?, last_error = ?, payload_json = ? '
                     'WHERE worker_id = ?',
                     ('pending', existing_created_at, created_at, '', 0, '', '', payload_json, key),
                 )
-            row = self._conn.execute(
+            row = conn.execute(
                 'SELECT worker_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
                 'FROM task_worker_status_outbox WHERE worker_id = ?',
                 (key,),
             ).fetchone()
-        return self._task_worker_status_outbox_row(row)
+            return self._task_worker_status_outbox_row(row)
+        return self._run_write(operation)
 
     def get_task_worker_status_outbox(self, worker_id: str) -> dict[str, object] | None:
         row = self._fetchone(
@@ -773,28 +834,28 @@ class SQLiteTaskStore:
         key = str(worker_id or '').strip()
         if not key:
             return
-        with self._lock, self._conn:
-            row = self._conn.execute('SELECT attempts, delivery_state FROM task_worker_status_outbox WHERE worker_id = ?', (key,)).fetchone()
+        def operation(conn: sqlite3.Connection) -> None:
+            row = conn.execute('SELECT attempts, delivery_state FROM task_worker_status_outbox WHERE worker_id = ?', (key,)).fetchone()
             if row is None:
                 return
             delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
             if delivery_state == 'delivered':
                 return
             attempts = int(row['attempts'] or 0) + 1
-            self._conn.execute(
+            conn.execute(
                 'UPDATE task_worker_status_outbox SET delivery_state = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE worker_id = ?',
                 ('pending', attempts, attempted_at, str(error_text or ''), key),
             )
+        self._run_write(operation)
 
     def mark_task_worker_status_outbox_delivered(self, worker_id: str, *, delivered_at: str) -> None:
         key = str(worker_id or '').strip()
         if not key:
             return
-        with self._lock, self._conn:
-            self._conn.execute(
-                'UPDATE task_worker_status_outbox SET delivery_state = ?, delivered_at = ?, last_error = ? WHERE worker_id = ?',
-                ('delivered', delivered_at, '', key),
-            )
+        self._execute_write(
+            'UPDATE task_worker_status_outbox SET delivery_state = ?, delivered_at = ?, last_error = ? WHERE worker_id = ?',
+            ('delivered', delivered_at, '', key),
+        )
 
     def upsert_worker_status(
         self,
@@ -850,10 +911,10 @@ class SQLiteTaskStore:
         return self._parse(row['payload_json'], TaskProjectionMetaRecord) if row else None
 
     def replace_task_nodes(self, task_id: str, records: list[TaskProjectionNodeRecord]) -> None:
-        with self._lock, self._conn:
-            self._conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
             for record in records:
-                self._conn.execute(
+                conn.execute(
                     'INSERT INTO task_nodes (node_id, task_id, parent_node_id, root_node_id, depth, node_kind, status, title, updated_at, default_round_id, selected_round_id, round_options_count, sort_key, payload_json) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (
@@ -873,6 +934,7 @@ class SQLiteTaskStore:
                         record.model_dump_json(),
                     ),
                 )
+        self._run_write(operation)
 
     def upsert_task_node(self, record: TaskProjectionNodeRecord) -> TaskProjectionNodeRecord:
         self._upsert(
@@ -922,10 +984,10 @@ class SQLiteTaskStore:
         return self._parse(row['payload_json'], TaskProjectionNodeRecord) if row else None
 
     def replace_task_node_details(self, task_id: str, records: list[TaskProjectionNodeDetailRecord]) -> None:
-        with self._lock, self._conn:
-            self._conn.execute('DELETE FROM task_node_details WHERE task_id = ?', (task_id,))
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute('DELETE FROM task_node_details WHERE task_id = ?', (task_id,))
             for record in records:
-                self._conn.execute(
+                conn.execute(
                     'INSERT INTO task_node_details (node_id, task_id, updated_at, input_text, input_ref, output_text, output_ref, check_result, check_result_ref, final_output, final_output_ref, failure_reason, prompt_summary, execution_trace_ref, payload_json) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (
@@ -946,6 +1008,7 @@ class SQLiteTaskStore:
                         record.model_dump_json(),
                     ),
                 )
+        self._run_write(operation)
 
     def upsert_task_node_detail(self, record: TaskProjectionNodeDetailRecord) -> TaskProjectionNodeDetailRecord:
         self._upsert(
@@ -997,10 +1060,10 @@ class SQLiteTaskStore:
         return [self._parse(row['payload_json'], TaskProjectionNodeDetailRecord) for row in rows]
 
     def replace_task_runtime_frames(self, task_id: str, records: list[TaskProjectionRuntimeFrameRecord]) -> None:
-        with self._lock, self._conn:
-            self._conn.execute('DELETE FROM task_runtime_frames WHERE task_id = ?', (task_id,))
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute('DELETE FROM task_runtime_frames WHERE task_id = ?', (task_id,))
             for record in records:
-                self._conn.execute(
+                conn.execute(
                     'INSERT INTO task_runtime_frames (task_id, node_id, depth, node_kind, phase, active, runnable, waiting, updated_at, payload_json) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (
@@ -1016,10 +1079,11 @@ class SQLiteTaskStore:
                         record.model_dump_json(),
                     ),
                 )
+        self._run_write(operation)
 
     def upsert_task_runtime_frame(self, record: TaskProjectionRuntimeFrameRecord) -> TaskProjectionRuntimeFrameRecord:
-        with self._lock, self._conn:
-            self._conn.execute(
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
                 'INSERT INTO task_runtime_frames (task_id, node_id, depth, node_kind, phase, active, runnable, waiting, updated_at, payload_json) '
                 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
                 'ON CONFLICT(task_id, node_id) DO UPDATE SET '
@@ -1044,6 +1108,7 @@ class SQLiteTaskStore:
                     record.model_dump_json(),
                 ),
             )
+        self._run_write(operation)
         return record
 
     def get_task_runtime_frame(self, task_id: str, node_id: str) -> TaskProjectionRuntimeFrameRecord | None:
@@ -1054,21 +1119,20 @@ class SQLiteTaskStore:
         return self._parse(row['payload_json'], TaskProjectionRuntimeFrameRecord) if row else None
 
     def delete_task_runtime_frame(self, task_id: str, node_id: str) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                'DELETE FROM task_runtime_frames WHERE task_id = ? AND node_id = ?',
-                (str(task_id or '').strip(), str(node_id or '').strip()),
-            )
+        self._execute_write(
+            'DELETE FROM task_runtime_frames WHERE task_id = ? AND node_id = ?',
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
 
     def list_task_runtime_frames(self, task_id: str) -> list[TaskProjectionRuntimeFrameRecord]:
         rows = self._fetchall('SELECT payload_json FROM task_runtime_frames WHERE task_id = ? ORDER BY depth ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskProjectionRuntimeFrameRecord) for row in rows]
 
     def replace_task_node_rounds(self, task_id: str, records: list[TaskProjectionRoundRecord]) -> None:
-        with self._lock, self._conn:
-            self._conn.execute('DELETE FROM task_node_rounds WHERE task_id = ?', (task_id,))
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute('DELETE FROM task_node_rounds WHERE task_id = ?', (task_id,))
             for record in records:
-                self._conn.execute(
+                conn.execute(
                     'INSERT INTO task_node_rounds (task_id, parent_node_id, round_id, round_index, label, is_latest, created_at, source, total_children, completed_children, running_children, failed_children, child_node_ids_json, payload_json) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (
@@ -1088,6 +1152,7 @@ class SQLiteTaskStore:
                         record.model_dump_json(),
                     ),
                 )
+        self._run_write(operation)
 
     def replace_task_node_rounds_for_parent(
         self,
@@ -1095,13 +1160,13 @@ class SQLiteTaskStore:
         parent_node_id: str,
         records: list[TaskProjectionRoundRecord],
     ) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
                 'DELETE FROM task_node_rounds WHERE task_id = ? AND parent_node_id = ?',
                 (task_id, parent_node_id),
             )
             for record in records:
-                self._conn.execute(
+                conn.execute(
                     'INSERT INTO task_node_rounds (task_id, parent_node_id, round_id, round_index, label, is_latest, created_at, source, total_children, completed_children, running_children, failed_children, child_node_ids_json, payload_json) '
                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (
@@ -1121,6 +1186,7 @@ class SQLiteTaskStore:
                         record.model_dump_json(),
                     ),
                 )
+        self._run_write(operation)
 
     def list_task_node_rounds(self, task_id: str) -> list[TaskProjectionRoundRecord]:
         rows = self._fetchall(
@@ -1138,12 +1204,13 @@ class SQLiteTaskStore:
         payload: dict[str, object],
     ) -> int:
         payload_json = json.dumps(payload)
-        with self._lock, self._conn:
-            cursor = self._conn.execute(
+        def operation(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
                 'INSERT INTO task_model_calls (task_id, node_id, created_at, payload_json) VALUES (?, ?, ?, ?)',
                 (task_id, node_id, created_at, payload_json),
             )
             return int(cursor.lastrowid or 0)
+        return self._run_write(operation)
 
     def list_task_model_calls(self, task_id: str, *, limit: int = 50) -> list[dict[str, object]]:
         rows = self._fetchall(
@@ -1166,14 +1233,20 @@ class SQLiteTaskStore:
         return items
 
     def _upsert(self, table: str, columns: list[str], values: list[object], primary_key: str) -> None:
-        with self._lock, self._conn:
-            self._upsert_unlocked(table, columns, values, primary_key)
+        self._run_write(lambda conn: self._upsert_conn(conn, table, columns, values, primary_key))
 
-    def _upsert_unlocked(self, table: str, columns: list[str], values: list[object], primary_key: str) -> None:
+    @staticmethod
+    def _upsert_conn(
+        conn: sqlite3.Connection,
+        table: str,
+        columns: list[str],
+        values: list[object],
+        primary_key: str,
+    ) -> None:
         placeholders = ', '.join('?' for _ in columns)
         updates = ', '.join(f"{column}=excluded.{column}" for column in columns if column != primary_key)
         sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) ON CONFLICT({primary_key}) DO UPDATE SET {updates}"
-        self._conn.execute(sql, values)
+        conn.execute(sql, values)
 
     def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
         with self._read_lock:
