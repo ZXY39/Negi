@@ -308,11 +308,11 @@ function hasManualTreeRoundSelections() {
 }
 
 function taskDetailStatusLabel(task) {
-    return ({ in_progress: "Running", success: "Completed", failed: "Failed", blocked: "Paused", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
+    return ({ in_progress: "运行中", success: "已完成", failed: "失败", blocked: "已暂停", unknown: "未知" })[taskStatusKey(task)] || "未知";
 }
 
 function taskInitialPromptText(task = null) {
-    return String(task?.user_request || task?.title || task?.final_output || "No task prompt").trim() || "No task prompt";
+    return String(task?.user_request || task?.title || task?.final_output || "暂无初始提示词").trim() || "暂无初始提示词";
 }
 
 function renderTaskDetailHeader({ resetPromptDisclosure = false } = {}) {
@@ -341,7 +341,7 @@ function syncTaskTreeHeaderState(projectedRoot = null) {
         U.taskTreeResetRounds.disabled = !hasManual;
         U.taskTreeResetRounds.classList.toggle("active", hasManual);
         U.taskTreeResetRounds.title = hasManual
-            ? "鎭㈠鎵€鏈夎妭鐐圭殑鏈€鏂版爲瑙嗗浘"
+            ? "恢复所有节点的最新树视图"
             : "";
     }
 }
@@ -480,7 +480,7 @@ function resolveNodeTitle(node, detail) {
     const rawTitle = goal || String(node?.title || node?.node_id || "").trim() || String(node?.node_id || "");
     const acceptanceTitle = rawTitle.replace(/^accept\s*:\s*/i, "").trim();
     const fullTitle = nodeKind === "acceptance"
-        ? (acceptanceTitle ? `Acceptance | ${acceptanceTitle}` : "Acceptance")
+        ? (acceptanceTitle ? `检验 · ${acceptanceTitle}` : "检验")
         : rawTitle;
     return {
         goal: nodeKind === "acceptance" ? fullTitle : (goal || fullTitle),
@@ -499,7 +499,7 @@ function isInspectionActiveStatus(status) {
 
 function resolveTreeNodeStatusLabel(status, { kind = "", inspectionActive = false } = {}) {
     if (inspectionActive || (isAcceptanceNodeKind(kind) && isInspectionActiveStatus(status))) {
-        return { visualState: "inspecting", displayState: "妫€楠屼腑" };
+        return { visualState: "inspecting", displayState: "检验中" };
     }
     const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
     return {
@@ -625,8 +625,8 @@ function normalizeExecutionStageTrace(stage, index = 0) {
     return {
         stage_id: String(stage?.stage_id || ""),
         stage_index: normalizeInt(stage?.stage_index, index + 1),
-        mode: String(stage?.mode || "鑷富鎵ц").trim() || "鑷富鎵ц",
-        status: String(stage?.status || "in_progress").trim() || "in_progress",
+        mode: String(stage?.mode || "自主执行").trim() || "自主执行",
+        status: String(stage?.status || "进行中").trim() || "进行中",
         stage_goal: String(stage?.stage_goal || "").trim(),
         stage_total_steps: normalizeInt(stage?.tool_round_budget, 0),
         tool_rounds_used: normalizeInt(stage?.tool_rounds_used, 0),
@@ -655,9 +655,15 @@ function normalizeExecutionStageTrace(stage, index = 0) {
 
 function stageTraceStatus(stage) {
     return ({
+        "进行中": "running",
         "in_progress": "running",
-        "瀹屾垚": "success",
-        "澶辫触": "error",
+        "running": "running",
+        "完成": "success",
+        "success": "success",
+        "completed": "success",
+        "失败": "error",
+        "failed": "error",
+        "error": "error",
     }[String(stage?.status || "").trim()] || "info");
 }
 
@@ -706,7 +712,7 @@ function resolveTraceStepOpenState(step, state, index) {
     return !!step.open;
 }
 
-function renderTraceMessage(value, emptyText = "鏆傛棤鍐呭") {
+function renderTraceMessage(value, emptyText = "暂无内容") {
     const text = String(value || "").trim() || emptyText;
     return `
         <div class="task-trace-field">
@@ -718,33 +724,33 @@ function renderTraceMessage(value, emptyText = "鏆傛棤鍐呭") {
 function renderExecutionStageRounds(stage) {
     const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
     if (!rounds.length) {
-        return renderTraceField("闃舵杞", "", "褰撳墠闃舵鏆傛棤宸ュ叿杞");
+        return renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次");
     }
     return rounds.map((round, index) => {
         const title = round.budget_counted
-            ? `Round ${round.round_index || index + 1}`
-            : "娲剧敓鑺傜偣";
+            ? `第 ${round.round_index || index + 1} 轮`
+            : "派生节点";
         const tools = Array.isArray(round.tools) ? round.tools : [];
         const toolDetails = tools.length
             ? tools.map((step, toolIndex) => renderTraceStep({
                 traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}:tool:${step.tool_call_id || toolIndex}`,
-                title: `宸ュ叿 路 ${step.tool_name || "tool"}`,
+                title: `工具 · ${step.tool_name || "tool"}`,
                 status: step.status || "info",
                 open: false,
                 bodyHtml: [
-                    renderTraceField("Arguments", step.arguments_text, "No arguments"),
+                    renderTraceField("参数", step.arguments_text, "无参数"),
                     renderTraceField(
-                        "宸ュ叿杈撳嚭",
+                        "工具输出",
                         step.output_text,
-                        step.status === "running" ? "绛夊緟宸ュ叿杈撳嚭..." : "鏆傛棤宸ュ叿杈撳嚭",
+                        step.status === "running" ? "等待工具输出..." : "暂无工具输出",
                         { decodeEscapes: true },
                     ),
                 ].join(""),
             })).join("")
-            : renderTraceField("宸ュ叿", "", "鏈疆鏆傛棤宸ュ叿璁板綍");
+            : renderTraceField("工具", "", "本轮暂无工具记录");
         return renderTraceStep({
             traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}`,
-            title: `${title}${round.created_at ? ` 路 ${formatCompactTime(round.created_at)}` : ""}`,
+            title: `${title}${round.created_at ? ` · ${formatCompactTime(round.created_at)}` : ""}`,
             status: roundTraceStatus(round),
             open: false,
             bodyHtml: toolDetails,
@@ -752,26 +758,40 @@ function renderExecutionStageRounds(stage) {
     }).join("");
 }
 
+function displayTaskStageStatus(status) {
+    return ({
+        "进行中": "进行中",
+        "in_progress": "进行中",
+        "running": "进行中",
+        "完成": "完成",
+        "success": "完成",
+        "completed": "完成",
+        "失败": "失败",
+        "failed": "失败",
+        "error": "失败",
+    }[String(status || "").trim()]) || String(status || "").trim() || "进行中";
+}
+
 function buildExecutionTraceSteps(trace, node) {
     const initialPromptStep = {
         traceKey: "initial_prompt",
-        title: "Initial Prompt",
+        title: "初始提示词",
         status: "info",
         open: false,
-        bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
+        bodyHtml: renderTraceField("内容", trace.initial_prompt, "暂无初始提示词"),
     };
     if (Array.isArray(trace?.stages) && trace.stages.length) {
         return [
             initialPromptStep,
             ...trace.stages.map((stage, index) => ({
                 traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
-                title: `${stage.mode || "鑷富鎵ц"}${stage.created_at ? ` 路 ${formatCompactTime(stage.created_at)}` : ""}`,
+                title: `${stage.mode || "自主执行"}${stage.created_at ? ` · ${formatCompactTime(stage.created_at)}` : ""}`,
                 status: stageTraceStatus(stage),
                 open: index === trace.stages.length - 1,
                 bodyHtml: [
-                    renderTraceMessage(`鏈樁娈垫渶澶ц疆鏁颁负${stage.stage_total_steps || 0}`, "鏈樁娈垫渶澶ц疆鏁颁负0"),
-                    renderTraceField("Status", String(stage.status || "in_progress"), "in_progress"),
-                    renderTraceField("闃舵鐩爣", stage.stage_goal, "鏆傛棤闃舵鐩爣"),
+                    renderTraceMessage(`本阶段最大轮数为${stage.stage_total_steps || 0}`, "本阶段最大轮数为0"),
+                    renderTraceField("状态", displayTaskStageStatus(stage.status), "进行中"),
+                    renderTraceField("阶段目标", stage.stage_goal, "暂无阶段目标"),
                     renderExecutionStageRounds(stage),
                 ].join(""),
             })),
@@ -873,25 +893,25 @@ function renderExecutionTrace(node) {
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node);
     const steps = [
         renderTraceStep({
-            title: "Initial Prompt",
+            title: "初始提示词",
             status: "info",
             open: false,
-            bodyHtml: renderTraceField("Content", trace.initial_prompt, "No initial prompt"),
+            bodyHtml: renderTraceField("内容", trace.initial_prompt, "暂无初始提示词"),
         }),
         ...trace.tool_steps.map((step) => renderTraceStep({
-            title: `浣跨敤宸ュ叿 路 ${step.tool_name || "tool"}`,
+            title: `使用工具 · ${step.tool_name || "tool"}`,
             status: step.status || "info",
             open: false,
             bodyHtml: [
-                renderTraceField("Arguments", step.arguments_text, "No arguments"),
-                renderTraceField("Tool Output", step.output_text, step.status === "running" ? "Waiting for tool output..." : "No tool output"),
+                renderTraceField("参数", step.arguments_text, "无参数"),
+                renderTraceField("工具输出", step.output_text, step.status === "running" ? "等待工具输出..." : "暂无工具输出"),
             ].join(""),
         })),
         renderTraceStep({
-            title: "Final Output",
+            title: "最终输出",
             status: nodeFinalTraceStatus(node),
             open: true,
-            bodyHtml: renderTraceField("Content", trace.final_output, "No final output"),
+            bodyHtml: renderTraceField("内容", trace.final_output, "暂无最终输出"),
         }),
     ];
     U.adFlow.innerHTML = `<div class="task-trace-list">${steps.join("")}</div>`;
@@ -912,19 +932,19 @@ function renderExecutionTrace(node) {
 
 function renderAcceptanceResult(text) {
     if (!U.adAcceptance) return;
-    U.adAcceptance.textContent = String(text || "").trim() || "鏆傛棤楠屾敹缁撴灉";
+    U.adAcceptance.textContent = String(text || "").trim() || "暂无验收结果";
 }
 
 function traceStatusLabel(status) {
     return ({
-        info: "Info",
-        running: "Running",
-        success: "Success",
-        error: "Error",
-    }[String(status || "")] || "Info");
+        info: "信息",
+        running: "进行中",
+        success: "完成",
+        error: "失败",
+    }[String(status || "")] || "信息");
 }
 
-function renderTraceField(label, value, emptyText = "No content", { decodeEscapes = false } = {}) {
+function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false } = {}) {
     const text = readableText(value, { decodeEscapes, emptyText });
     return `
         <div class="task-trace-field">
@@ -1026,7 +1046,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
 
 function renderFinalOutput(text) {
     if (!U.adOutput) return;
-    const nextText = readableText(text, { decodeEscapes: true, emptyText: "No final output" });
+    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无最终输出" });
     const changed = U.adOutput.textContent !== nextText;
     if (changed) U.adOutput.textContent = nextText;
     return changed;
@@ -1034,7 +1054,7 @@ function renderFinalOutput(text) {
 
 function renderAcceptanceResult(text) {
     if (!U.adAcceptance) return;
-    const nextText = readableText(text, { decodeEscapes: true, emptyText: "鏆傛棤楠屾敹缁撴灉" });
+    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无验收结果" });
     const changed = U.adAcceptance.textContent !== nextText;
     if (changed) U.adAcceptance.textContent = nextText;
     return changed;
@@ -1043,10 +1063,10 @@ function renderAcceptanceResult(text) {
 function formatRoundLabel(label, roundIndex) {
     const normalizedLabel = String(label || "").trim();
     const normalizedIndex = normalizeInt(roundIndex, 0);
-    const fallbackLabel = normalizedIndex > 0 ? `绗?{normalizedIndex}杞爲` : "杞";
+    const fallbackLabel = normalizedIndex > 0 ? `第${normalizedIndex}轮树` : "轮次";
     if (!normalizedLabel) return fallbackLabel;
     const matchedRound = normalizedLabel.match(/^Round\s+(\d+)$/i);
-    if (matchedRound) return `绗?{matchedRound[1]}杞爲`;
+    if (matchedRound) return `第${matchedRound[1]}轮树`;
     return normalizedLabel;
 }
 
@@ -1068,24 +1088,24 @@ function buildNodeRoundState(node) {
             options: [],
             selectedRoundId: "",
             defaultRoundId: "",
-            summary: "No child rounds",
+            summary: "当前节点无派生轮次",
         };
     }
     const defaultRoundId = resolveDefaultRoundId(node);
     const selectedRoundId = String(node?.selected_round_id || defaultRoundId || "");
     const selectedRound = rounds.find((round) => round.roundId === selectedRoundId) || rounds[rounds.length - 1];
-    const selectionMode = selectedRound.roundId && selectedRound.roundId !== defaultRoundId ? "manual" : "latest";
+    const selectionMode = selectedRound.roundId && selectedRound.roundId !== defaultRoundId ? "手动" : "最新";
     const totalChildren = selectedRound.totalChildren || selectedRound.childCount;
     const counts = [
-        `${selectedRound.completedChildren}/${totalChildren || selectedRound.childCount} completed`,
-        selectedRound.runningChildren ? `${selectedRound.runningChildren} running` : "",
-        selectedRound.failedChildren ? `${selectedRound.failedChildren} failed` : "",
-    ].filter(Boolean).join(", ");
+        `${selectedRound.completedChildren}/${totalChildren || selectedRound.childCount} 完成`,
+        selectedRound.runningChildren ? `${selectedRound.runningChildren} 进行中` : "",
+        selectedRound.failedChildren ? `${selectedRound.failedChildren} 失败` : "",
+    ].filter(Boolean).join("，");
     return {
         options: rounds,
         selectedRoundId,
         defaultRoundId,
-        summary: `${selectedRound.label}${selectedRound.isLatest ? " (latest)" : ""} | ${selectionMode} | ${counts || `${selectedRound.childCount} children`} | ${rounds.length} rounds`,
+        summary: `${selectedRound.label}${selectedRound.isLatest ? "（最新）" : ""} | ${selectionMode} | ${counts || `${selectedRound.childCount} 个子节点`} | 共 ${rounds.length} 轮`,
     };
 }
 
@@ -1238,7 +1258,7 @@ function renderTree() {
         button.dataset.status = nodeStatus;
         button.title = fullTitle;
         button.setAttribute("aria-pressed", S.selectedNodeId === node.node_id ? "true" : "false");
-        button.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">鏆傛棤鍏朵粬鍙垏鎹㈠瓙鏍?/span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>`;
+        button.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">暂无其他可切换子树</span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>`;
         button.addEventListener("click", (event) => handleTreeNodeClick(node, event));
         return button;
     };
@@ -1268,14 +1288,14 @@ function renderTree() {
             });
             const label = document.createElement("span");
             label.className = "execution-tree-round-label";
-            label.textContent = "杞";
+            label.textContent = "轮次";
             const select = document.createElement("select");
             select.className = "execution-tree-round-select resource-select";
-            select.dataset.resourceSelectLabel = `${fullTitle} 杞`;
+            select.dataset.resourceSelectLabel = `${fullTitle} 轮次`;
             roundOptions.forEach((round) => {
                 const option = document.createElement("option");
                 option.value = round.roundId;
-                option.textContent = round.isLatest ? `${round.label}锛堟渶鏂帮級` : round.label;
+                option.textContent = round.isLatest ? `${round.label}（最新）` : round.label;
                 select.appendChild(option);
             });
             if (node.selectedRoundId) select.value = node.selectedRoundId;
@@ -1504,7 +1524,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
     if (U.adRole) U.adRole.hidden = true;
-    if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "No child rounds");
+    if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
     U.adStatus.textContent = String(mergedNode.display_state || mergedNode.state || mergedNode.status || "");
     U.adStatus.dataset.status = mergedNode.visual_state || mergedNode.state || mergedNode.status || node.visual_state || node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
