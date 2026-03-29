@@ -1017,34 +1017,6 @@ class MainRuntimeService:
             self._enqueue_task_worker_status_callback(data)
         return data
 
-    def _publish_task_snapshot_event(
-        self,
-        *,
-        session_id: str,
-        task_id: str,
-        data: dict[str, Any],
-        bridge: bool = False,
-    ) -> dict[str, Any]:
-        payload = build_envelope(
-            channel='task',
-            session_id=session_id,
-            task_id=task_id,
-            seq=self.registry.next_global_task_seq(task_id),
-            type='task.snapshot',
-            data=data,
-        )
-        self.registry.publish_global_task(task_id, payload)
-        if self.execution_mode == 'worker' and not bridge:
-            self._schedule_task_event_callback(
-                {
-                    'event_type': 'task.snapshot',
-                    'session_id': session_id,
-                    'task_id': task_id,
-                    'data': data,
-                }
-            )
-        return payload
-
     def _publish_task_list_patch_event(
         self,
         *,
@@ -1151,7 +1123,7 @@ class MainRuntimeService:
                     }
                 )
             return
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.terminal'}:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'}:
             detail_payload = build_envelope(
                 channel='task',
                 session_id=task.session_id,
@@ -1171,16 +1143,7 @@ class MainRuntimeService:
                     }
                 )
             return
-        self._publish_task_snapshot_event(
-            session_id=task.session_id,
-            task_id=task.task_id,
-            data=payload,
-        )
-        if publish_summary:
-            self._publish_task_list_patch_event(
-                session_id=task.session_id,
-                task_payload=self.log_service._task_summary_payload(task),
-            )
+        return
 
     def forward_live_task_event(self, payload: dict[str, Any] | None) -> bool:
         normalized = normalize_task_event_payload(payload)
@@ -1190,15 +1153,7 @@ class MainRuntimeService:
         session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
         task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip()) if normalized.get('task_id') else ''
         data = dict(normalized.get('data') or {})
-        if event_type == 'task.snapshot' and task_id:
-            self._publish_task_snapshot_event(
-                session_id=session_id,
-                task_id=task_id,
-                data=data,
-                bridge=True,
-            )
-            return True
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.terminal'} and task_id:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'} and task_id:
             payload = build_envelope(
                 channel='task',
                 session_id=session_id,

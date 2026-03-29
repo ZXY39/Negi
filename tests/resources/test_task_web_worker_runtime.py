@@ -125,16 +125,10 @@ def _mark_worker_at(
     service.publish_worker_status_event(item=item)
 
 
-def _publish_task_snapshot(service: MainRuntimeService, task_id: str) -> None:
+def _publish_task_live_patch(service: MainRuntimeService, task_id: str) -> None:
     task = service.get_task(task_id)
-    payload = service.get_task_detail_payload(task_id, mark_read=False)
     assert task is not None
-    assert payload is not None
-    service._publish_task_snapshot_event(
-        session_id=task.session_id,
-        task_id=task.task_id,
-        data=payload,
-    )
+    service.log_service.update_runtime_state(task_id, publish_snapshot=True)
 
 
 def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp_path: Path, monkeypatch):
@@ -244,7 +238,7 @@ def test_internal_task_stall_callback_persists_pending_outbox_and_dedupes(tmp_pa
     assert len(heartbeat.stall_payloads) == 1
 
 
-def test_internal_task_event_callback_forwards_live_snapshot(tmp_path: Path, monkeypatch):
+def test_internal_task_event_callback_forwards_live_patch(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -266,13 +260,15 @@ def test_internal_task_event_callback_forwards_live_snapshot(tmp_path: Path, mon
     record = asyncio.run(_create_web_task(service))
     with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
         assert ws.receive_json()["type"] == "hello"
-        assert ws.receive_json()["type"] == "task.snapshot"
 
         payload = {
-            "event_type": "task.snapshot",
+            "event_type": "task.live.patch",
             "session_id": record.session_id,
             "task_id": record.task_id,
-            "data": service.get_task_detail_payload(record.task_id, mark_read=False),
+            "data": {
+                "task_id": record.task_id,
+                "runtime_summary": {"active_node_ids": [record.root_node_id], "runnable_node_ids": [], "waiting_node_ids": [], "frames": []},
+            },
         }
         response = client.post(
             "/api/internal/task-event",
@@ -282,8 +278,8 @@ def test_internal_task_event_callback_forwards_live_snapshot(tmp_path: Path, mon
         assert response.status_code == 200
         assert response.json()["accepted"] is True
 
-        pushed = _receive_until_type(ws, "task.snapshot")
-        assert pushed["data"]["task"]["task_id"] == record.task_id
+        pushed = _receive_until_type(ws, "task.live.patch")
+        assert pushed["data"]["task_id"] == record.task_id
 
 
 @pytest.mark.asyncio
@@ -717,17 +713,15 @@ def test_global_tasks_websocket_reads_sqlite_events(tmp_path: Path, monkeypatch)
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/tasks?session_id=all&after_seq={after_seq}") as ws:
         assert ws.receive_json()["type"] == "hello"
-        snapshot = ws.receive_json()
-        assert snapshot["type"] == "task.list.snapshot"
-        assert snapshot["data"]["items"][0]["task_id"] == record.task_id
+        assert ws.receive_json()["type"] == "task.worker.status"
 
         service._publish_task_list_patch_event(
             session_id=record.session_id,
             task_payload={"task_id": record.task_id, "session_id": record.session_id, "brief": "patched"},
         )
 
-        patch_event = _receive_until_type(ws, "task.list.patch")
-        assert patch_event["type"] == "task.list.patch"
+        patch_event = _receive_until_type(ws, "task.summary.patch")
+        assert patch_event["type"] == "task.summary.patch"
         assert patch_event["data"]["task"]["brief"] == "patched"
 
 
@@ -748,11 +742,11 @@ def test_global_tasks_websocket_pushes_worker_status_recovery(tmp_path: Path, mo
     client = TestClient(_build_app())
     with client.websocket_connect("/api/ws/tasks?session_id=all&after_seq=0") as ws:
         assert ws.receive_json()["type"] == "hello"
-        snapshot = ws.receive_json()
-        assert snapshot["type"] == "task.list.snapshot"
-        assert snapshot["data"]["worker_online"] is False
-        assert snapshot["data"]["worker_state"] == "stale"
-        assert float(snapshot["data"]["worker_stale_after_seconds"]) > 0
+        status_event = ws.receive_json()
+        assert status_event["type"] == "task.worker.status"
+        assert status_event["data"]["worker_online"] is False
+        assert status_event["data"]["worker_state"] == "stale"
+        assert float(status_event["data"]["worker_stale_after_seconds"]) > 0
 
         _mark_worker_online(service)
 
@@ -950,7 +944,7 @@ def test_task_control_routes_surface_specific_worker_state_errors(
     assert response.json()["detail"] == detail
 
 
-def test_global_tasks_websocket_does_not_replay_historical_patches_after_snapshot(tmp_path: Path, monkeypatch):
+def test_global_tasks_websocket_does_not_replay_historical_patches_after_hello(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -966,7 +960,7 @@ def test_global_tasks_websocket_does_not_replay_historical_patches_after_snapsho
     service.store.append_task_event(
         task_id=record.task_id,
         session_id=record.session_id,
-        event_type="task.list.patch",
+        event_type="task.summary.patch",
         created_at=now_iso(),
         payload={"task": {"task_id": record.task_id, "brief": "historical"}},
     )
@@ -976,15 +970,14 @@ def test_global_tasks_websocket_does_not_replay_historical_patches_after_snapsho
     client = TestClient(_build_app())
     with client.websocket_connect("/api/ws/tasks?session_id=all&after_seq=0") as ws:
         assert ws.receive_json()["type"] == "hello"
-        snapshot = ws.receive_json()
-        assert snapshot["type"] == "task.list.snapshot"
+        assert ws.receive_json()["type"] == "task.worker.status"
 
         service._publish_task_list_patch_event(
             session_id=record.session_id,
             task_payload={"task_id": record.task_id, "session_id": record.session_id, "brief": "fresh"},
         )
 
-        patch_event = _receive_until_type(ws, "task.list.patch")
+        patch_event = _receive_until_type(ws, "task.summary.patch")
         assert patch_event["data"]["task"]["brief"] == "fresh"
 
 
@@ -1009,22 +1002,18 @@ def test_task_detail_websocket_streams_runtime_updates(tmp_path: Path, monkeypat
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq={after_seq}") as ws:
         assert ws.receive_json()["type"] == "hello"
-        snapshot = ws.receive_json()
-        assert snapshot["type"] == "task.snapshot"
-        assert snapshot["data"]["task"]["task_id"] == record.task_id
 
         service.log_service.update_runtime_state(
             record.task_id,
             active_node_ids=[record.root_node_id],
             runnable_node_ids=[],
             waiting_node_ids=[],
-            frames=[],
         )
-        _publish_task_snapshot(service, record.task_id)
+        _publish_task_live_patch(service, record.task_id)
 
-        runtime_event = _receive_until_type(ws, "task.snapshot")
-        assert runtime_event["type"] == "task.snapshot"
-        assert runtime_event["data"]["progress"]["live_state"]["active_node_ids"] == [record.root_node_id]
+        runtime_event = _receive_until_type(ws, "task.live.patch")
+        assert runtime_event["type"] == "task.live.patch"
+        assert runtime_event["data"]["runtime_summary"]["active_node_ids"] == [record.root_node_id]
 
 
 def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_snapshot(tmp_path: Path, monkeypatch):
@@ -1043,7 +1032,7 @@ def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_
     service.store.append_task_event(
         task_id=record.task_id,
         session_id=record.session_id,
-        event_type="task.runtime.updated",
+        event_type="task.live.patch",
         created_at=now_iso(),
         payload={"task_id": record.task_id, "runtime_summary": {"active_node_ids": ["historical"], "runnable_node_ids": [], "waiting_node_ids": [], "frames": []}},
     )
@@ -1053,20 +1042,17 @@ def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
         assert ws.receive_json()["type"] == "hello"
-        snapshot = ws.receive_json()
-        assert snapshot["type"] == "task.snapshot"
 
         service.log_service.update_runtime_state(
             record.task_id,
             active_node_ids=[record.root_node_id],
             runnable_node_ids=[],
             waiting_node_ids=[],
-            frames=[],
         )
-        _publish_task_snapshot(service, record.task_id)
+        _publish_task_live_patch(service, record.task_id)
 
-        runtime_event = _receive_until_type(ws, "task.snapshot")
-        assert runtime_event["data"]["progress"]["live_state"]["active_node_ids"] == [record.root_node_id]
+        runtime_event = _receive_until_type(ws, "task.live.patch")
+        assert runtime_event["data"]["runtime_summary"]["active_node_ids"] == [record.root_node_id]
 
 
 def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: Path, monkeypatch):
@@ -1082,10 +1068,9 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
     import asyncio
 
     record = asyncio.run(_create_web_task(service))
-    service.store.append_task_event(
+    service.store.append_task_model_call(
         task_id=record.task_id,
-        session_id=record.session_id,
-        event_type="task.model.call",
+        node_id=record.root_node_id,
         created_at=now_iso(),
         payload={
             "task_id": record.task_id,
@@ -1117,14 +1102,10 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
         assert ws.receive_json()["type"] == "hello"
-        snapshot = ws.receive_json()
-        assert snapshot["type"] == "task.snapshot"
-        assert snapshot["data"]["progress"]["model_calls"][0]["call_index"] == 3
 
-        service.store.append_task_event(
+        service.store.append_task_model_call(
             task_id=record.task_id,
-            session_id=record.session_id,
-            event_type="task.model.call",
+            node_id=record.root_node_id,
             created_at=now_iso(),
             payload={
                 "task_id": record.task_id,
@@ -1146,10 +1127,32 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
                 "delta_usage_by_model": [],
             },
         )
-        _publish_task_snapshot(service, record.task_id)
+        service.log_service._dispatch_live_event_locked(
+            task=service.get_task(record.task_id),
+            event_type="task.model.call",
+            data={
+                "task_id": record.task_id,
+                "node_id": record.root_node_id,
+                "call_index": 4,
+                "prepared_message_count": 10,
+                "prepared_message_chars": 1400,
+                "response_tool_call_count": 0,
+                "delta_usage": {
+                    "tracked": True,
+                    "input_tokens": 50,
+                    "output_tokens": 5,
+                    "cache_hit_tokens": 25,
+                    "call_count": 1,
+                    "calls_with_usage": 1,
+                    "calls_without_usage": 0,
+                    "is_partial": False,
+                },
+                "delta_usage_by_model": [],
+            },
+        )
 
-        event = _receive_until_type(ws, "task.snapshot")
-        assert event["data"]["progress"]["model_calls"][-1]["call_index"] == 4
+        event = _receive_until_type(ws, "task.model.call")
+        assert event["data"]["call_index"] == 4
 
 
 def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> None:

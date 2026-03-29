@@ -252,25 +252,29 @@ class TaskQueryService:
         parent = self._store.get_task_node(node_id)
         if parent is None or str(parent.task_id or '').strip() != task.task_id:
             return None
-        child_ids: list[str] = []
         rounds = [item for item in self._store.list_task_node_rounds(task.task_id) if str(item.parent_node_id or '').strip() == str(node_id or '').strip()]
         normalized_round_id = str(round_id or '').strip()
-        if normalized_round_id:
-            selected = next((item for item in rounds if str(item.round_id or '').strip() == normalized_round_id), None)
-            child_ids = [str(item or '').strip() for item in list(selected.child_node_ids or [])] if selected is not None else []
-        else:
-            explicit_ids = {
-                str(child_id or '').strip()
-                for round_item in rounds
-                for child_id in list(round_item.child_node_ids or [])
-                if str(child_id or '').strip()
-            }
-            direct_children = [item for item in self._store.list_task_nodes(task.task_id) if str(item.parent_node_id or '').strip() == str(node_id or '').strip()]
-            child_ids = [
-                str(item.node_id or '').strip()
-                for item in direct_children
-                if str(item.node_id or '').strip() and str(item.node_id or '').strip() not in explicit_ids
-            ]
+        default_round_id = ''
+        if rounds:
+            default_round_id = str(next((item.round_id for item in rounds if bool(item.is_latest)), rounds[-1].round_id) or '').strip()
+        selected_round_id = normalized_round_id or default_round_id
+        explicit_ids = {
+            str(child_id or '').strip()
+            for round_item in rounds
+            for child_id in list(round_item.child_node_ids or [])
+            if str(child_id or '').strip()
+        }
+        direct_children = [item for item in self._store.list_task_nodes(task.task_id) if str(item.parent_node_id or '').strip() == str(node_id or '').strip()]
+        auxiliary_child_ids = [
+            str(item.node_id or '').strip()
+            for item in direct_children
+            if str(item.node_id or '').strip() and str(item.node_id or '').strip() not in explicit_ids
+        ]
+        child_ids: list[str] = list(auxiliary_child_ids)
+        if selected_round_id:
+            selected = next((item for item in rounds if str(item.round_id or '').strip() == selected_round_id), None)
+            if selected is not None:
+                child_ids.extend(str(item or '').strip() for item in list(selected.child_node_ids or []) if str(item or '').strip())
         child_ids = child_ids[max(0, int(offset or 0)) : max(0, int(offset or 0)) + max(1, int(limit or 50))]
         details = []
         for child_id in child_ids:
@@ -280,7 +284,24 @@ class TaskQueryService:
         return {
             'task_id': task.task_id,
             'parent_node_id': str(node_id or '').strip(),
-            'round_id': normalized_round_id,
+            'round_id': selected_round_id,
+            'default_round_id': default_round_id,
+            'rounds': [
+                {
+                    'round_id': str(item.round_id or ''),
+                    'round_index': int(item.round_index or 0),
+                    'label': str(item.label or ''),
+                    'is_latest': bool(item.is_latest),
+                    'created_at': str(item.created_at or ''),
+                    'child_node_ids': [str(child_id or '').strip() for child_id in list(item.child_node_ids or []) if str(child_id or '').strip()],
+                    'source': str(item.source or 'explicit'),
+                    'total_children': int(item.total_children or 0),
+                    'completed_children': int(item.completed_children or 0),
+                    'running_children': int(item.running_children or 0),
+                    'failed_children': int(item.failed_children or 0),
+                }
+                for item in rounds
+            ],
             'items': details,
             'offset': max(0, int(offset or 0)),
             'limit': max(1, int(limit or 50)),

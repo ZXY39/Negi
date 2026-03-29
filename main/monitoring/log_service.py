@@ -326,6 +326,7 @@ class TaskLogService:
                         payload=model_call_payload,
                     )
                     self._append_task_event(task=task, event_type='task.model.call', data=model_call_payload)
+                    self._dispatch_live_event_locked(task=task, event_type='task.model.call', data=model_call_payload)
                 self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
             self.refresh_task_view(task_id, mark_unread=True)
             return updated
@@ -1567,6 +1568,19 @@ class TaskLogService:
                         data=dict(data or {}),
                     ),
                 )
+        if event_type == 'task.model.call':
+            self._registry.publish_global_task(
+                task.task_id,
+                build_envelope(
+                    channel='task',
+                    session_id=session_id,
+                    task_id=task.task_id,
+                    seq=self._registry.next_global_task_seq(task.task_id),
+                    type=event_type,
+                    data=dict(data or {}),
+                ),
+            )
+            return
         self._registry.publish_global_task(
             task.task_id,
             build_envelope(

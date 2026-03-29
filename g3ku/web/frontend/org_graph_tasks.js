@@ -612,6 +612,8 @@ function resetTaskView() {
     S.currentNodeDetail = null;
     S.taskNodeDetails = {};
     S.taskNodeDetailRequests = {};
+    S.taskNodeChildrenCache = {};
+    S.taskNodeChildrenRequests = {};
     S.taskNodeBusy = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
@@ -851,10 +853,6 @@ async function openTask(taskId) {
 }
 
 function handleTaskEvent(payload) {
-    if (payload.type === "snapshot.task" || payload.type === "task.snapshot") {
-        applyTaskPayload(payload.data || {});
-        return;
-    }
     if (payload.type === "task.summary.patch" && payload.data?.task) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
         patchTaskListItem(payload.data.task);
@@ -1040,10 +1038,6 @@ function initTasksWs() {
     };
     socket.onmessage = (event) => {
         const payload = JSON.parse(event.data || "{}");
-        if (payload.type === "task.list.snapshot") {
-            applyTaskListResponse(payload.data || {});
-            return;
-        }
         if (payload.type === "task.worker.status") {
             applyTaskWorkerStatus(payload.data || {});
             return;

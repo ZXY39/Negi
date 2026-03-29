@@ -116,6 +116,8 @@ const S = {
     taskDetailRenderToken: 0,
     taskNodeDetails: {},
     taskNodeDetailRequests: {},
+    taskNodeChildrenCache: {},
+    taskNodeChildrenRequests: {},
     taskDetailViewStates: {},
     pendingTaskDetailRestore: null,
     taskNodeBusy: false,

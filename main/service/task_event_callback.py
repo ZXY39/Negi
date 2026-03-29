@@ -13,10 +13,10 @@ from main.service.task_terminal_callback import (
 
 TASK_EVENT_CALLBACK_PATH = "/api/internal/task-event"
 _ALLOWED_TASK_EVENT_TYPES = {
-    "task.snapshot",
     "task.summary.patch",
     "task.node.patch",
     "task.live.patch",
+    "task.model.call",
     "task.terminal",
     "task.worker.status",
 }
@@ -72,18 +72,6 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
     session_id = str(source.get("session_id") or source.get("sessionId") or "").strip()
     task_id = _normalize_task_id(source.get("task_id") or source.get("taskId") or "")
 
-    if event_type == "task.snapshot":
-        if not task_id:
-            return {}
-        if not session_id:
-            session_id = str((data.get("task") or {}).get("session_id") or "web:shared").strip() or "web:shared"
-        return {
-            "event_type": event_type,
-            "session_id": session_id,
-            "task_id": task_id,
-            "data": data,
-        }
-
     if event_type == "task.summary.patch":
         task_payload = dict(data.get("task") or {}) if isinstance(data.get("task"), dict) else {}
         task_id = _normalize_task_id(task_payload.get("task_id") or task_payload.get("taskId") or task_id)
@@ -98,7 +86,7 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
             "data": {"task": task_payload},
         }
 
-    if event_type in {"task.node.patch", "task.live.patch", "task.terminal"}:
+    if event_type in {"task.node.patch", "task.live.patch", "task.model.call", "task.terminal"}:
         if not task_id:
             return {}
         if not session_id:
