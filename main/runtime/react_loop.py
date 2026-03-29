@@ -507,11 +507,8 @@ class ReActToolLoop:
         return resumed_history
 
     def _runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any] | None:
-        state = self._log_service.read_runtime_state(task_id) or {}
-        for frame in list(state.get('frames') or []):
-            if str(frame.get('node_id') or '').strip() == str(node_id or '').strip():
-                return dict(frame)
-        return None
+        frame = self._log_service.read_runtime_frame(task_id, node_id)
+        return dict(frame or {}) if frame is not None else None
 
     def _pending_tool_turn_content(self, *, node, pending_tool_calls: list[dict[str, Any]]) -> str:
         pending_ids = [str(item.get('id') or '').strip() for item in list(pending_tool_calls or []) if str(item.get('id') or '').strip()]
@@ -970,11 +967,8 @@ class ReActToolLoop:
         self._check_pause_or_cancel(task_id)
 
     def _snapshot_supplier(self, runtime_context: dict[str, Any]):
-        task_id = str(runtime_context.get('task_id') or '').strip()
-        builder = getattr(self._log_service, '_snapshot_payload_builder', None)
-        if not task_id or not callable(builder):
-            return None
-        return lambda: builder(task_id)
+        supplier = runtime_context.get('tool_snapshot_supplier')
+        return supplier if callable(supplier) else None
 
     def _check_pause_or_cancel(self, task_id: str) -> None:
         task = self._log_service._store.get_task(task_id)

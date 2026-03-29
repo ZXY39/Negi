@@ -34,10 +34,8 @@ from main.monitoring.models import (
     TaskProjectionRoundRecord,
     TaskProjectionRuntimeFrameRecord,
 )
-from main.monitoring.projection_service import TaskProjectionService
 from main.protocol import build_envelope, now_iso
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
-from main.monitoring.tree_builder import TaskTreeBuilder
 
 
 def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
@@ -66,25 +64,16 @@ _NON_BUDGET_EXECUTION_TOOLS = {
 }
 
 class TaskLogService:
-    def __init__(self, *, store, file_store: TaskFileStore, tree_builder: TaskTreeBuilder, registry=None, content_store: ContentNavigationService | None = None):
+    def __init__(self, *, store, file_store: TaskFileStore, registry=None, content_store: ContentNavigationService | None = None):
         self._store = store
         self._file_store = file_store
-        self._tree_builder = tree_builder
         self._registry = registry
         self._content_store = content_store
-        self._snapshot_payload_builder = None
         self._live_snapshot_publishers: list[Callable[[TaskRecord, dict[str, Any], bool], None]] = []
         self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
         self._task_visible_output_listeners: list[Callable[[str, str], None]] = []
         self._task_locks: dict[str, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
-        self._projection_service = TaskProjectionService(store=store, tree_builder=tree_builder)
-
-    def set_snapshot_payload_builder(self, builder) -> None:
-        self._snapshot_payload_builder = builder
-
-    def ensure_task_projection(self, task_id: str) -> None:
-        self._projection_service.ensure_task_projection(task_id)
 
     def add_live_snapshot_publisher(self, publisher: Callable[[TaskRecord, dict[str, Any], bool], None]) -> None:
         if callable(publisher):
@@ -183,13 +172,18 @@ class TaskLogService:
         state['frames'] = []
         return cls._sanitize_runtime_state(state)
 
+    @staticmethod
+    def _default_runtime_meta(*, last_visible_output_at: str = '') -> dict[str, Any]:
+        return {
+            'updated_at': now_iso(),
+            'last_visible_output_at': str(last_visible_output_at or '').strip(),
+            'last_stall_notice_bucket_minutes': 0,
+        }
+
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
         with self._task_lock(task.task_id):
             task = task.model_copy(
                 update={
-                    'runtime_state_path': '',
-                    'tree_snapshot_path': '',
-                    'tree_text_path': '',
                     'is_unread': True,
                     'brief_text': _single_line_text(task.user_request),
                     'updated_at': now_iso(),
@@ -199,10 +193,8 @@ class TaskLogService:
             self._store.upsert_task(task)
             self._store.upsert_node(root)
             self._sync_node_read_models_locked(root)
-            self.update_runtime_state(
+            self.update_task_runtime_meta(
                 task.task_id,
-                root_node_id=task.root_node_id,
-                paused=False,
                 last_visible_output_at=_precise_now_iso(),
                 last_stall_notice_bucket_minutes=0,
             )
@@ -546,12 +538,6 @@ class TaskLogService:
             updated = self._store.update_task(task_id, _mutate)
             if updated is None:
                 return None
-            self.update_runtime_state(
-                task_id,
-                paused=bool(updated.is_paused),
-                pause_requested=bool(updated.pause_requested),
-                cancel_requested=bool(updated.cancel_requested),
-            )
             return self.refresh_task_view(task_id, mark_unread=False) or updated
 
     def update_task_metadata(self, task_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]], *, mark_unread: bool = True) -> TaskRecord | None:
@@ -1084,123 +1070,129 @@ class TaskLogService:
             )
             if updated is None:
                 return None
-            self.update_runtime_state(
-                task_id,
-                paused=bool(updated.is_paused),
-                pause_requested=bool(updated.pause_requested),
-                cancel_requested=bool(updated.cancel_requested),
-            )
+            self.replace_runtime_frames(task_id, frames=[], active_node_ids=[], runnable_node_ids=[], waiting_node_ids=[])
             self._notify_task_terminal(updated, previous_status=str(task.status or ''))
             return updated
 
-    def update_runtime_state(self, task_id: str, *, publish_snapshot: bool = False, **payload: Any) -> dict[str, Any]:
+    def update_task_runtime_meta(self, task_id: str, **payload: Any) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
-            current = self._store.get_runtime_state(task.task_id) or {
-                'task_id': task.task_id,
-                'root_node_id': task.root_node_id,
-                'updated_at': now_iso(),
-                'paused': bool(task.is_paused),
-                'pause_requested': bool(task.pause_requested),
-                'cancel_requested': bool(task.cancel_requested),
-                'last_visible_output_at': _precise_now_iso(),
-                'last_stall_notice_bucket_minutes': 0,
-            }
-            for key, value in payload.items():
-                if key in {'active_node_ids', 'runnable_node_ids', 'waiting_node_ids', 'frames'}:
-                    continue
-                current[key] = copy.deepcopy(value)
-            if 'frames' in payload:
-                current['frames'] = [dict(item) for item in list(payload.get('frames') or []) if isinstance(item, dict)]
-            if 'active_node_ids' in payload:
-                current['active_node_ids'] = [str(item) for item in list(payload.get('active_node_ids') or []) if str(item or '').strip()]
-            if 'runnable_node_ids' in payload:
-                current['runnable_node_ids'] = [str(item) for item in list(payload.get('runnable_node_ids') or []) if str(item or '').strip()]
-            if 'waiting_node_ids' in payload:
-                current['waiting_node_ids'] = [str(item) for item in list(payload.get('waiting_node_ids') or []) if str(item or '').strip()]
-            current['task_id'] = task.task_id
-            current['root_node_id'] = task.root_node_id
+            current = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+            if 'last_visible_output_at' in payload:
+                current['last_visible_output_at'] = str(payload.get('last_visible_output_at') or '').strip()
+            if 'last_stall_notice_bucket_minutes' in payload:
+                try:
+                    current['last_stall_notice_bucket_minutes'] = max(0, int(payload.get('last_stall_notice_bucket_minutes') or 0))
+                except (TypeError, ValueError):
+                    current['last_stall_notice_bucket_minutes'] = 0
             current['updated_at'] = now_iso()
-            current['paused'] = bool(current.get('paused', task.is_paused))
-            current['pause_requested'] = bool(current.get('pause_requested', task.pause_requested))
-            current['cancel_requested'] = bool(current.get('cancel_requested', task.cancel_requested))
-            current = self._sanitize_runtime_state(current)
-            if self._is_terminal_status(task.status):
-                current = self._coerce_terminal_runtime_state(current)
-                for record in list(self._store.list_task_runtime_frames(task.task_id) or []):
-                    self._store.delete_task_runtime_frame(task.task_id, record.node_id)
-            else:
-                should_sync_frames = any(key in payload for key in {'active_node_ids', 'runnable_node_ids', 'waiting_node_ids', 'frames'})
-                if should_sync_frames:
-                    provided_frames = {
-                        str(item.get('node_id') or '').strip(): self._sanitize_runtime_frame(item)
-                        for item in list(current.get('frames') or [])
-                        if isinstance(item, dict) and str(item.get('node_id') or '').strip()
-                    }
-                    active_node_ids = {
-                        str(item or '').strip()
-                        for item in list(current.get('active_node_ids') or [])
-                        if str(item or '').strip()
-                    }
-                    runnable_node_ids = {
-                        str(item or '').strip()
-                        for item in list(current.get('runnable_node_ids') or [])
-                        if str(item or '').strip()
-                    }
-                    waiting_node_ids = {
-                        str(item or '').strip()
-                        for item in list(current.get('waiting_node_ids') or [])
-                        if str(item or '').strip()
-                    }
-                    frame_records: list[TaskProjectionRuntimeFrameRecord] = []
-                    for node_id in sorted(set(provided_frames) | active_node_ids | runnable_node_ids | waiting_node_ids):
-                        frame_payload = provided_frames.get(node_id) or self._default_frame(node_id=node_id)
-                        record = self._runtime_frame_record(task=task, frame=frame_payload)
-                        frame_records.append(
-                            record.model_copy(
-                                update={
-                                    'active': node_id in active_node_ids if 'active_node_ids' in payload else bool(record.active),
-                                    'runnable': node_id in runnable_node_ids if 'runnable_node_ids' in payload else bool(record.runnable),
-                                    'waiting': node_id in waiting_node_ids if 'waiting_node_ids' in payload else bool(record.waiting),
-                                    'updated_at': str(current.get('updated_at') or now_iso()),
-                                }
-                            )
-                        )
-                    self._store.replace_task_runtime_frames(task.task_id, frame_records)
-            self._store.upsert_runtime_state(
+            self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
-                session_id=task.session_id,
-                updated_at=str(current['updated_at'] or now_iso()),
+                updated_at=str(current.get('updated_at') or now_iso()),
                 payload=current,
             )
+            return self.read_task_runtime_meta(task.task_id) or current
+
+    def read_task_runtime_meta(self, task_id: str) -> dict[str, Any] | None:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        current = dict(self._store.get_task_runtime_meta(task_id) or self._default_runtime_meta())
+        current['task_id'] = task.task_id
+        current.setdefault('updated_at', now_iso())
+        current.setdefault('last_visible_output_at', '')
+        try:
+            current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
+        except (TypeError, ValueError):
+            current['last_stall_notice_bucket_minutes'] = 0
+        return current
+
+    def replace_runtime_frames(
+        self,
+        task_id: str,
+        *,
+        frames: list[dict[str, Any]],
+        active_node_ids: list[str] | set[str] | tuple[str, ...] | None = None,
+        runnable_node_ids: list[str] | set[str] | tuple[str, ...] | None = None,
+        waiting_node_ids: list[str] | set[str] | tuple[str, ...] | None = None,
+        publish_snapshot: bool = False,
+    ) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            if self._is_terminal_status(task.status):
+                self._store.replace_task_runtime_frames(task.task_id, [])
+                return self.read_runtime_state(task_id) or {}
+            provided_frames = {
+                str(item.get('node_id') or '').strip(): self._sanitize_runtime_frame(item)
+                for item in list(frames or [])
+                if isinstance(item, dict) and str(item.get('node_id') or '').strip()
+            }
+            active_ids = {
+                str(item or '').strip()
+                for item in list(active_node_ids or [])
+                if str(item or '').strip()
+            }
+            runnable_ids = {
+                str(item or '').strip()
+                for item in list(runnable_node_ids or [])
+                if str(item or '').strip()
+            }
+            waiting_ids = {
+                str(item or '').strip()
+                for item in list(waiting_node_ids or [])
+                if str(item or '').strip()
+            }
+            frame_records: list[TaskProjectionRuntimeFrameRecord] = []
+            for node_id in sorted(set(provided_frames) | active_ids | runnable_ids | waiting_ids):
+                frame_payload = provided_frames.get(node_id) or self._default_frame(node_id=node_id)
+                record = self._runtime_frame_record(task=task, frame=frame_payload)
+                frame_records.append(
+                    record.model_copy(
+                        update={
+                            'active': node_id in active_ids,
+                            'runnable': node_id in runnable_ids,
+                            'waiting': node_id in waiting_ids,
+                            'updated_at': now_iso(),
+                        }
+                    )
+                )
+            self._store.replace_task_runtime_frames(task.task_id, frame_records)
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task)
-            return current
+            return self.read_runtime_state(task_id) or {}
 
     def read_runtime_state(self, task_id: str) -> dict[str, Any] | None:
         task = self._store.get_task(task_id)
         if task is None:
             return None
-        current = dict(self._store.get_runtime_state(task_id) or {})
-        current.setdefault('task_id', task.task_id)
-        current.setdefault('root_node_id', task.root_node_id)
-        current.setdefault('updated_at', now_iso())
-        current.setdefault('paused', bool(task.is_paused))
-        current.setdefault('pause_requested', bool(task.pause_requested))
-        current.setdefault('cancel_requested', bool(task.cancel_requested))
-        current.setdefault('last_visible_output_at', '')
-        current.setdefault('last_stall_notice_bucket_minutes', 0)
+        meta = self.read_task_runtime_meta(task_id) or self._default_runtime_meta()
         frame_records = list(self._store.list_task_runtime_frames(task_id) or [])
         frames = [self._hydrate_runtime_frame_record(record) for record in frame_records]
-        current['frames'] = frames
-        current['active_node_ids'] = [record.node_id for record in frame_records if bool(record.active)]
-        current['runnable_node_ids'] = [record.node_id for record in frame_records if bool(record.runnable)]
-        current['waiting_node_ids'] = [record.node_id for record in frame_records if bool(record.waiting)]
-        return current
+        return {
+            'task_id': task.task_id,
+            'root_node_id': task.root_node_id,
+            'updated_at': str(meta.get('updated_at') or now_iso()),
+            'paused': bool(task.is_paused),
+            'pause_requested': bool(task.pause_requested),
+            'cancel_requested': bool(task.cancel_requested),
+            'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
+            'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
+            'frames': frames,
+            'active_node_ids': [record.node_id for record in frame_records if bool(record.active)],
+            'runnable_node_ids': [record.node_id for record in frame_records if bool(record.runnable)],
+            'waiting_node_ids': [record.node_id for record in frame_records if bool(record.waiting)],
+        }
+
+    def read_runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        record = self._store.get_task_runtime_frame(task_id, node_id)
+        return self._hydrate_runtime_frame_record(record) if record is not None else None
 
     def upsert_frame(self, task_id: str, frame: dict[str, Any], *, publish_snapshot: bool = False) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
+            if self._is_terminal_status(task.status):
+                self._store.replace_task_runtime_frames(task.task_id, [])
+                return self.read_runtime_state(task_id) or {}
             sanitized = self._sanitize_runtime_frame(frame)
             record = self._runtime_frame_record(task=task, frame=sanitized)
             self._store.upsert_task_runtime_frame(record)
@@ -1218,6 +1210,9 @@ class TaskLogService:
     ) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
+            if self._is_terminal_status(task.status):
+                self._store.replace_task_runtime_frames(task.task_id, [])
+                return self.read_runtime_state(task_id) or {}
             current = self._store.get_task_runtime_frame(task_id, node_id)
             target = self._hydrate_runtime_frame_record(current) if current is not None else self._default_frame(node_id=node_id)
             mutated = frame_mutator(copy.deepcopy(target))
@@ -1270,35 +1265,19 @@ class TaskLogService:
                     'final_output_ref': str(output_fields.get('final_output_ref') or ''),
                     'failure_reason': str(output_fields.get('failure_reason') or ''),
                     'finished_at': now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at,
-                    'runtime_state_path': '',
-                    'tree_snapshot_path': '',
-                    'tree_text_path': '',
                 }
             )
             self._store.upsert_task(updated)
             if self._is_terminal_status(next_status):
                 self._store.replace_task_runtime_frames(updated.task_id, [])
-            runtime_state = self.read_runtime_state(task_id)
-            if runtime_state is not None:
-                runtime_state['updated_at'] = now_iso()
-                runtime_state['paused'] = bool(updated.is_paused)
-                runtime_state['pause_requested'] = bool(updated.pause_requested)
-                runtime_state['cancel_requested'] = bool(updated.cancel_requested)
-                if self._is_terminal_status(next_status):
-                    runtime_state = self._coerce_terminal_runtime_state(runtime_state)
-                self._store.upsert_runtime_state(
-                    task_id=updated.task_id,
-                    session_id=updated.session_id,
-                    updated_at=str(runtime_state['updated_at'] or now_iso()),
-                    payload=runtime_state,
-                )
+                self.update_task_runtime_meta(updated.task_id)
             self._publish_task_summary_patch_locked(task=updated)
             if terminal_transition:
                 self._publish_task_terminal_locked(task=updated)
             self._notify_task_terminal(updated, previous_status=previous_status)
             return updated
 
-    def bootstrap_missing_files(self, task_id: str) -> TaskRecord | None:
+    def sync_task_read_models(self, task_id: str) -> TaskRecord | None:
         with self._task_lock(task_id):
             task = self._store.get_task(task_id)
             if task is None:
@@ -1307,8 +1286,8 @@ class TaskLogService:
                 self._sync_node_read_models_locked(node)
                 self._sync_task_node_rounds_locked(node)
             self.refresh_task_view(task_id, mark_unread=False)
-            if self._store.get_runtime_state(task.task_id) is None:
-                self.update_runtime_state(task.task_id, paused=bool(task.is_paused))
+            if self._store.get_task_runtime_meta(task.task_id) is None:
+                self.update_task_runtime_meta(task.task_id, last_stall_notice_bucket_minutes=0)
             return self._store.get_task(task_id)
 
     def _sync_node_read_models_locked(self, node: NodeRecord) -> None:
@@ -1785,19 +1764,6 @@ class TaskLogService:
             raise ValueError(f'task not found: {task_id}')
         return task
 
-    def _publish_snapshot(
-        self,
-        task_id: str,
-        *,
-        task: TaskRecord | None = None,
-        nodes: list[NodeRecord] | None = None,
-        root=None,
-        tree_text: str | None = None,
-        publish_summary: bool = False,
-        emit_terminal_event: bool = False,
-    ) -> None:
-        return
-
     def _append_task_event(self, *, task: TaskRecord, event_type: str, data: dict[str, Any]) -> None:
         self._store.append_task_event(
             task_id=task.task_id,
@@ -1839,39 +1805,6 @@ class TaskLogService:
             'runnable_node_ids': [str(item) for item in list(state.get('runnable_node_ids') or []) if str(item or '').strip()],
             'waiting_node_ids': [str(item) for item in list(state.get('waiting_node_ids') or []) if str(item or '').strip()],
             'frames': [self._public_runtime_frame(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
-        }
-
-    def _compact_tree_payload(self, root) -> dict[str, Any] | None:
-        if root is None:
-            return None
-        return {
-            'node_id': root.node_id,
-            'parent_node_id': root.parent_node_id,
-            'depth': int(root.depth or 0),
-            'node_kind': str(getattr(root, 'node_kind', 'execution') or 'execution'),
-            'status': root.status,
-            'title': root.title,
-            'updated_at': root.updated_at,
-            'spawn_rounds': [
-                {
-                    'round_id': round_item.round_id,
-                    'round_index': int(round_item.round_index or 0),
-                    'label': round_item.label,
-                    'is_latest': bool(round_item.is_latest),
-                    'created_at': round_item.created_at,
-                    'child_node_ids': list(round_item.child_node_ids or []),
-                    'source': round_item.source,
-                    'total_children': int(round_item.total_children or 0),
-                    'completed_children': int(round_item.completed_children or 0),
-                    'running_children': int(round_item.running_children or 0),
-                    'failed_children': int(round_item.failed_children or 0),
-                    'children': [self._compact_tree_payload(child) for child in list(round_item.children or [])],
-                }
-                for round_item in list(root.spawn_rounds or [])
-            ],
-            'default_round_id': str(root.default_round_id or ''),
-            'auxiliary_children': [self._compact_tree_payload(child) for child in list(getattr(root, 'auxiliary_children', []) or [])],
-            'children': [self._compact_tree_payload(child) for child in list(root.children or [])],
         }
 
     @classmethod

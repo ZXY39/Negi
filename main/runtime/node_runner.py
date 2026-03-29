@@ -162,14 +162,11 @@ class NodeRunner:
             return self._mark_failed(task_id, node.node_id, reason=str(exc))
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
-        state = self._log_service.read_runtime_state(task.task_id) or {}
-        for frame in list(state.get('frames') or []):
-            if str(frame.get('node_id') or '') != node.node_id:
-                continue
-            if isinstance(frame.get('messages'), list) and frame.get('messages'):
-                return {
-                    'messages': list(frame.get('messages') or []),
-                }
+        frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
+        if isinstance(frame.get('messages'), list) and frame.get('messages'):
+            return {
+                'messages': list(frame.get('messages') or []),
+            }
         return {
             'messages': await self._build_messages(task=task, node=node),
         }
@@ -249,14 +246,10 @@ class NodeRunner:
         return str(text or '')
 
     def _runtime_frame_messages(self, *, task_id: str, node_id: str) -> list[dict[str, Any]]:
-        state = self._log_service.read_runtime_state(task_id) or {}
-        for frame in list(state.get('frames') or []):
-            if str(frame.get('node_id') or '') != str(node_id or ''):
-                continue
-            messages = frame.get('messages')
-            if isinstance(messages, list):
-                return [item for item in messages if isinstance(item, dict)]
-            return []
+        frame = self._log_service.read_runtime_frame(task_id, node_id) or {}
+        messages = frame.get('messages')
+        if isinstance(messages, list):
+            return [item for item in messages if isinstance(item, dict)]
         return []
 
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
@@ -383,6 +376,11 @@ class NodeRunner:
             'project_path_entries': list(project_environment.get('project_path_entries') or []),
             'project_virtual_env': str(project_environment.get('project_virtual_env') or ''),
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
+            'tool_snapshot_supplier': (
+                (lambda current_task_id=task.task_id: self._tool_snapshot_supplier(current_task_id))
+                if callable(getattr(self, '_tool_snapshot_supplier', None))
+                else None
+            ),
         }
 
     @staticmethod
@@ -838,8 +836,7 @@ class NodeRunner:
         if parent is None:
             return
         child_pipelines, pending_specs, partial_results, has_active = self._parent_spawn_frame_state(parent)
-        state = self._log_service.read_runtime_state(task_id) or {}
-        frame_exists = any(str(item.get('node_id') or '') == parent_node_id for item in list(state.get('frames') or []))
+        frame_exists = self._log_service.read_runtime_frame(task_id, parent_node_id) is not None
         if not frame_exists and not child_pipelines:
             return
 

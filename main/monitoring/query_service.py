@@ -32,7 +32,6 @@ class TaskQueryService:
         self._store = store
         self._file_store = file_store
         self._log_service = log_service
-        self._tree_builder = getattr(log_service, '_tree_builder', None)
 
     def summary(self, session_id: str | None = None) -> TaskSummaryResult:
         tasks = self._store.list_tasks(session_id)
@@ -288,39 +287,6 @@ class TaskQueryService:
             'limit': max(1, int(limit or 50)),
         }
 
-    def _compact_tree_payload(self, root) -> dict[str, Any] | None:
-        if root is None:
-            return None
-        return {
-            'node_id': root.node_id,
-            'parent_node_id': root.parent_node_id,
-            'depth': int(root.depth or 0),
-            'node_kind': str(getattr(root, 'node_kind', 'execution') or 'execution'),
-            'status': root.status,
-            'title': root.title,
-            'updated_at': root.updated_at,
-            'spawn_rounds': [
-                {
-                    'round_id': round_item.round_id,
-                    'round_index': int(round_item.round_index or 0),
-                    'label': round_item.label,
-                    'is_latest': bool(round_item.is_latest),
-                    'created_at': round_item.created_at,
-                    'child_node_ids': list(round_item.child_node_ids or []),
-                    'source': round_item.source,
-                    'total_children': int(round_item.total_children or 0),
-                    'completed_children': int(round_item.completed_children or 0),
-                    'running_children': int(round_item.running_children or 0),
-                    'failed_children': int(round_item.failed_children or 0),
-                    'children': [self._compact_tree_payload(child) for child in list(round_item.children or [])],
-                }
-                for round_item in list(root.spawn_rounds or [])
-            ],
-            'default_round_id': str(root.default_round_id or ''),
-            'auxiliary_children': [self._compact_tree_payload(child) for child in list(getattr(root, 'auxiliary_children', []) or [])],
-            'children': [self._compact_tree_payload(child) for child in list(root.children or [])],
-        }
-
     def _projection_root(self, task) -> TaskTreeNodeSummary | None:
         nodes = self._store.list_task_nodes(task.task_id)
         if not nodes:
@@ -495,10 +461,6 @@ class TaskQueryService:
         return items
 
     def _projection_live_state(self, task_id: str) -> TaskLiveState | None:
-        runtime_state = self._log_service.read_runtime_state(task_id)
-        runtime_live_state = self._live_state(runtime_state or {})
-        if runtime_live_state is not None:
-            return runtime_live_state
         frames = self._store.list_task_runtime_frames(task_id)
         if not frames:
             return None

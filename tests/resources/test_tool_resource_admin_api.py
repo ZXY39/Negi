@@ -26,6 +26,10 @@ from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+async def _noop_enqueue_task(_task_id: str) -> None:
+    return None
+
+
 def _mock_ceo_catalog_config(monkeypatch) -> None:
     monkeypatch.setattr(
         web_ceo_sessions,
@@ -582,17 +586,11 @@ def test_main_runtime_service_normalizes_short_task_id_for_failed_node_lookup():
             captured['failed_task_id'] = task_id
             return ['node:1', 'node:2']
 
-    class _LogService:
-        def ensure_task_projection(self, task_id: str) -> None:
-            captured['projection_task_id'] = task_id
-
     service = object.__new__(MainRuntimeService)
     service.query_service = _QueryService()
-    service.log_service = _LogService()
 
     result = service.failed_node_ids('demo')
 
-    assert captured['projection_task_id'] == 'task:demo'
     assert captured['failed_task_id'] == 'task:demo'
     assert result == '- node:1\n- node:2'
 
@@ -845,7 +843,7 @@ async def test_create_async_task_tool_creates_continuation_task_with_metadata_wh
         governance_store_path=tmp_path / 'governance.sqlite3',
         execution_mode='embedded',
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         tool = CreateAsyncTaskTool(service)
@@ -878,7 +876,7 @@ async def test_create_async_task_tool_keeps_session_task_count_when_reusing_exis
         governance_store_path=tmp_path / 'governance.sqlite3',
         execution_mode='embedded',
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         original = await service.create_task(
@@ -932,7 +930,7 @@ async def test_main_runtime_service_prefers_latest_reusable_continuation_task(tm
         governance_store_path=tmp_path / 'governance.sqlite3',
         execution_mode='embedded',
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         original = await service.create_task(
@@ -985,7 +983,7 @@ async def test_main_runtime_service_falls_back_core_requirement_to_task_prompt(t
         governance_store_path=tmp_path / 'governance.sqlite3',
         execution_mode='embedded',
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         record = await service.create_task('整理需求', session_id='web:shared', metadata={})

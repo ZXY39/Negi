@@ -127,7 +127,18 @@ def _mark_worker_at(
 def _publish_task_live_patch(service: MainRuntimeService, task_id: str) -> None:
     task = service.get_task(task_id)
     assert task is not None
-    service.log_service.update_runtime_state(task_id, publish_snapshot=True)
+    service.log_service._publish_task_live_patch_locked(task=task)
+
+
+async def _noop_enqueue_task(_task_id: str) -> None:
+    return None
+
+
+def _record_enqueue_calls(target: list[str]):
+    async def _enqueue(task_id: str) -> None:
+        target.append(str(task_id))
+
+    return _enqueue
 
 
 def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp_path: Path, monkeypatch):
@@ -674,7 +685,7 @@ def test_web_mode_create_task_enqueues_command_without_running(tmp_path: Path):
         execution_mode="web",
     )
     started: list[str] = []
-    service.task_runner.start_background = lambda task_id: started.append(str(task_id))
+    service.global_scheduler.enqueue_task = _record_enqueue_calls(started)
 
     import asyncio
 
@@ -1002,8 +1013,9 @@ def test_task_detail_websocket_streams_runtime_updates(tmp_path: Path, monkeypat
     with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq={after_seq}") as ws:
         assert ws.receive_json()["type"] == "hello"
 
-        service.log_service.update_runtime_state(
+        service.log_service.replace_runtime_frames(
             record.task_id,
+            frames=[],
             active_node_ids=[record.root_node_id],
             runnable_node_ids=[],
             waiting_node_ids=[],
@@ -1042,8 +1054,9 @@ def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_
     with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
         assert ws.receive_json()["type"] == "hello"
 
-        service.log_service.update_runtime_state(
+        service.log_service.replace_runtime_frames(
             record.task_id,
+            frames=[],
             active_node_ids=[record.root_node_id],
             runnable_node_ids=[],
             waiting_node_ids=[],
@@ -1452,7 +1465,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="embedded",
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         record = await service.create_task(
@@ -1514,7 +1527,7 @@ async def test_execution_policy_coverage_is_provided_via_payload_without_prompt_
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="embedded",
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         record = await service.create_task(
@@ -1551,7 +1564,7 @@ async def test_spawn_children_rejects_execution_policy_mode_mismatch(tmp_path: P
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="embedded",
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         record = await service.create_task(
@@ -2136,7 +2149,7 @@ def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tm
         stage_goal="鏃ч樁娈电洰鏍?",
         tool_round_budget=1,
     )
-    service.log_service.update_runtime_state(
+    service.log_service.replace_runtime_frames(
         record.task_id,
         active_node_ids=[root.node_id],
         runnable_node_ids=[],
@@ -2250,8 +2263,8 @@ async def test_worker_commands_call_pause_and_cancel_handlers(tmp_path: Path):
     async def _cancel(task_id: str) -> None:
         cancelled.append(task_id)
 
-    service.task_runner.pause = _pause
-    service.task_runner.cancel = _cancel
+    service.pause_task = _pause
+    service.cancel_task = _cancel
 
     await service._process_worker_command({"command_type": "pause_task", "task_id": "demo"})
     await service._process_worker_command({"command_type": "cancel_task", "task_id": "demo"})
@@ -2292,7 +2305,7 @@ async def test_pause_task_cancels_active_background_run_without_marking_failed(t
         assert paused.status == "in_progress"
         assert paused.is_paused is True
         assert paused.pause_requested is True
-        assert service.task_runner.is_active(record.task_id) is False
+        assert service.global_scheduler.is_active(record.task_id) is False
 
         root = service.get_node(paused.root_node_id)
         assert root is not None
@@ -2365,7 +2378,7 @@ async def test_pause_during_model_call_keeps_task_resumable_and_resume_finishes_
         assert paused.pause_requested is True
         assert backend.call_count == 1
         assert backend.cancelled.is_set() is True
-        assert service.task_runner.is_active(record.task_id) is False
+        assert service.global_scheduler.is_active(record.task_id) is False
 
         root = service.get_node(record.root_node_id)
         assert root is not None
@@ -2422,7 +2435,7 @@ async def test_pause_requested_after_valid_result_flushes_node_output_before_tas
 
         for _ in range(100):
             current = service.get_task(record.task_id)
-            if current is not None and current.is_paused and not service.task_runner.is_active(record.task_id):
+            if current is not None and current.is_paused and not service.global_scheduler.is_active(record.task_id):
                 break
             await asyncio.sleep(0.01)
 
@@ -2456,7 +2469,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         governance_store_path=governance_path,
         execution_mode="embedded",
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         record = await service.create_task("recover me", session_id="web:shared")
@@ -2500,12 +2513,13 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
             status="success",
             final_output="nested done",
         )
-        service.log_service.update_runtime_state(
+        service.log_service.update_task_runtime_meta(
             record.task_id,
-            root_node_id=root.node_id,
-            paused=False,
-            pause_requested=False,
-            cancel_requested=False,
+            last_visible_output_at=now_iso(),
+            last_stall_notice_bucket_minutes=0,
+        )
+        service.log_service.replace_runtime_frames(
+            record.task_id,
             active_node_ids=[root.node_id, in_progress_child.node_id],
             runnable_node_ids=[root.node_id, in_progress_child.node_id],
             waiting_node_ids=[],
@@ -2532,7 +2546,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         execution_mode="embedded",
     )
     started: list[str] = []
-    restarted.task_runner.start_background = lambda task_id: started.append(str(task_id))
+    restarted.global_scheduler.enqueue_task = _record_enqueue_calls(started)
 
     try:
         await restarted.startup()
@@ -2606,7 +2620,7 @@ def test_terminal_task_clears_runtime_frames_and_rejects_late_runtime_updates(tm
         parent=root,
         spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
-    service.log_service.update_runtime_state(
+    service.log_service.replace_runtime_frames(
         record.task_id,
         active_node_ids=[root.node_id, child.node_id],
         runnable_node_ids=[root.node_id, child.node_id],
@@ -2635,7 +2649,7 @@ def test_terminal_task_clears_runtime_frames_and_rejects_late_runtime_updates(tm
     assert runtime_state["waiting_node_ids"] == []
     assert runtime_state["frames"] == []
 
-    service.log_service.update_runtime_state(
+    service.log_service.replace_runtime_frames(
         record.task_id,
         active_node_ids=[child.node_id],
         runnable_node_ids=[child.node_id],

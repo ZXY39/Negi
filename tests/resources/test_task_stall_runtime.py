@@ -33,6 +33,10 @@ class _TaskStallRecorder:
         return True
 
 
+async def _noop_enqueue_task(_task_id: str) -> None:
+    return None
+
+
 class _RuntimeManager:
     def __init__(self, session) -> None:
         self._session = session
@@ -147,9 +151,9 @@ async def test_task_stall_heartbeat_prompt_includes_diagnostics_and_actions(tmp_
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="embedded",
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
     task = await service.create_task("stall heartbeat", session_id=session_id)
-    service.log_service.update_runtime_state(
+    service.log_service.update_task_runtime_meta(
         task.task_id,
         last_visible_output_at="2026-03-24T00:00:00+00:00",
         last_stall_notice_bucket_minutes=10,
@@ -198,7 +202,7 @@ async def test_task_stall_heartbeat_discards_stale_event_after_new_output(tmp_pa
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="embedded",
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
     task = await service.create_task("stale stall heartbeat", session_id=session_id)
     heartbeat = WebSessionHeartbeatService(
         workspace=tmp_path,
@@ -213,7 +217,7 @@ async def test_task_stall_heartbeat_discards_stale_event_after_new_output(tmp_pa
         last_visible_output_at="2026-03-24T00:00:00+00:00",
     )
     heartbeat.enqueue_task_stall_payload(payload)
-    service.log_service.update_runtime_state(
+    service.log_service.update_task_runtime_meta(
         task.task_id,
         last_visible_output_at=now_iso(),
         last_stall_notice_bucket_minutes=0,
@@ -243,7 +247,7 @@ async def test_web_mode_build_task_stall_payload_skips_when_worker_offline(tmp_p
     try:
         task = await service.create_task("worker offline should not look stalled", session_id="web:stall-worker-offline")
         stale_at = "2000-01-01T00:00:00+00:00"
-        service.log_service.update_runtime_state(
+        service.log_service.update_task_runtime_meta(
             task.task_id,
             last_visible_output_at=stale_at,
             last_stall_notice_bucket_minutes=0,

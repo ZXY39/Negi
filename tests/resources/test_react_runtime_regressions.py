@@ -25,7 +25,6 @@ class _FakeLogService:
     def __init__(self) -> None:
         self._store = _FakeTaskStore()
         self._content_store = None
-        self._snapshot_payload_builder = None
 
     def set_pause_state(self, task_id: str, pause_requested: bool, is_paused: bool) -> None:
         _ = task_id, pause_requested, is_paused
@@ -44,6 +43,10 @@ class _FakeLogService:
 
     def remove_frame(self, *args, **kwargs) -> None:
         _ = args, kwargs
+
+    def read_runtime_frame(self, *args, **kwargs):
+        _ = args, kwargs
+        return None
 
 
 def test_prepare_messages_passthrough_keeps_original_messages_even_with_content_store() -> None:

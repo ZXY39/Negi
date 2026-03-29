@@ -51,11 +51,11 @@ from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.query_service import TaskQueryService
 from main.protocol import build_envelope, now_iso
-from main.monitoring.tree_builder import TaskTreeBuilder
 from main.runtime.chat_backend import ChatBackend
+from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.task_runner import TaskRunner
+from main.runtime.task_actor_service import TaskActorService
 from main.service.event_registry import TaskEventRegistry
 from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
@@ -237,11 +237,9 @@ class MainRuntimeService:
             artifact_lookup=self.store,
         )
         self.registry = TaskEventRegistry()
-        self.tree_builder = TaskTreeBuilder()
         self.log_service = TaskLogService(
             store=self.store,
             file_store=self.file_store,
-            tree_builder=self.tree_builder,
             registry=self.registry,
             content_store=self.content_store,
         )
@@ -250,7 +248,6 @@ class MainRuntimeService:
         self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
         self.query_service = TaskQueryService(store=self.store, file_store=self.file_store, log_service=self.log_service)
-        self.log_service.set_snapshot_payload_builder(lambda task_id: self.get_task_detail_payload(task_id, mark_read=False))
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
         self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
         self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
@@ -287,11 +284,21 @@ class MainRuntimeService:
             acceptance_max_concurrency=acceptance_max_concurrency,
             context_enricher=self._enrich_node_messages,
         )
-        self.task_runner = TaskRunner(
+        self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
+        self.task_actor_service = TaskActorService(
             store=self.store,
             log_service=self.log_service,
             node_runner=self.node_runner,
             stall_notifier=self.task_stall_notifier,
+        )
+        scheduler_concurrency = max(
+            1,
+            int(execution_max_concurrency or acceptance_max_concurrency or 4),
+        )
+        self.global_scheduler = GlobalScheduler(
+            runner=self.task_actor_service,
+            max_concurrent_tasks=scheduler_concurrency,
+            per_task_limit=1,
         )
         self._started = False
         self._runtime_loop = None
@@ -318,18 +325,13 @@ class MainRuntimeService:
                 pass
         if self.execution_mode in {'embedded', 'worker'}:
             for task in self.store.list_tasks():
-                self.log_service.bootstrap_missing_files(task.task_id)
-                self.log_service.ensure_task_projection(task.task_id)
+                self.log_service.sync_task_read_models(task.task_id)
                 if task.status != 'in_progress':
                     continue
-                runtime_state = self.log_service.read_runtime_state(task.task_id)
-                if runtime_state is None:
-                    self.log_service.mark_task_failed(task.task_id, reason='runtime_state_corrupt')
-                    continue
-                if bool(task.is_paused) or bool(runtime_state.get('paused')):
+                if bool(task.is_paused) or bool(task.pause_requested):
                     continue
                 self._recover_interrupted_task(task.task_id)
-                self.task_runner.start_background(task.task_id)
+                await self.global_scheduler.enqueue_task(task.task_id)
             self.task_stall_notifier.bootstrap_running_tasks()
         if self.execution_mode == 'worker':
             self._start_worker_loops()
@@ -388,16 +390,17 @@ class MainRuntimeService:
             ),
         )
 
-        self.log_service.update_runtime_state(
+        self.log_service.update_task_runtime_meta(
             task.task_id,
-            root_node_id=task.root_node_id,
-            paused=False,
-            pause_requested=False,
-            cancel_requested=bool(task.cancel_requested),
+            last_visible_output_at=self._stall_now_iso(),
+            last_stall_notice_bucket_minutes=0,
+        )
+        self.log_service.replace_runtime_frames(
+            task.task_id,
+            frames=[self.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')],
             active_node_ids=[root.node_id],
             runnable_node_ids=[root.node_id],
             waiting_node_ids=[],
-            frames=[self.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')],
             publish_snapshot=False,
         )
         self.log_service.refresh_task_view(task.task_id, mark_unread=True)
@@ -503,12 +506,7 @@ class MainRuntimeService:
     async def _worker_heartbeat_loop(self) -> None:
         while True:
             try:
-                active_task_count = sum(
-                    1
-                    for task in self.store.list_tasks()
-                    if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
-                    and not bool(getattr(task, 'is_paused', False))
-                )
+                active_task_count = self.global_scheduler.active_task_count() + self.global_scheduler.queued_task_count()
                 updated_at = now_iso()
                 payload = {
                     'execution_mode': self.execution_mode,
@@ -546,19 +544,19 @@ class MainRuntimeService:
             if command_type == 'create_task':
                 task = self.get_task(task_id)
                 if task is not None and not bool(task.is_paused):
-                    self.task_runner.start_background(task.task_id)
+                    await self.global_scheduler.enqueue_task(task.task_id)
                 success = True
             elif command_type == 'resume_task':
                 if task_id:
-                    await self.task_runner.resume(task_id)
+                    await self.resume_task(task_id)
                 success = True
             elif command_type == 'pause_task':
                 if task_id:
-                    await self.task_runner.pause(task_id)
+                    await self.pause_task(task_id)
                 success = True
             elif command_type == 'cancel_task':
                 if task_id:
-                    await self.task_runner.cancel(task_id)
+                    await self.cancel_task(task_id)
                 success = True
             else:
                 error_text = f'unsupported_command:{command_type}'
@@ -680,7 +678,7 @@ class MainRuntimeService:
         )
         record, root = self.log_service.initialize_task(record, root)
         if self.execution_mode in {'embedded', 'worker'}:
-            self.task_runner.start_background(record.task_id)
+            await self.global_scheduler.enqueue_task(record.task_id)
         else:
             self._enqueue_task_command(
                 command_type='create_task',
@@ -696,7 +694,11 @@ class MainRuntimeService:
     async def cancel_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
-            await self.task_runner.cancel(task_id)
+            self.task_actor_service.request_cancel(task_id)
+            await self.global_scheduler.cancel_task(task_id)
+            current = self.get_task(task_id)
+            if current is not None and current.status == 'in_progress' and not bool(current.is_paused):
+                self.log_service.mark_task_failed(task_id, reason='canceled')
         else:
             self._assert_worker_available()
             self.log_service.request_cancel(task_id)
@@ -713,7 +715,8 @@ class MainRuntimeService:
     async def pause_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
-            await self.task_runner.pause(task_id)
+            self.task_actor_service.request_pause(task_id)
+            await self.global_scheduler.cancel_task(task_id)
         else:
             self._assert_worker_available()
             self.log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
@@ -730,7 +733,11 @@ class MainRuntimeService:
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
-            await self.task_runner.resume(task_id)
+            task = self.get_task(task_id)
+            if task is None:
+                return None
+            self.task_actor_service.clear_pause(task_id)
+            await self.global_scheduler.enqueue_task(task_id)
         else:
             self._assert_worker_available()
             task = self.get_task(task_id)
@@ -772,12 +779,12 @@ class MainRuntimeService:
             return None
         if not (bool(task.is_paused) or task.status in {'success', 'failed'}):
             raise ValueError('task_not_paused')
-        if self.task_runner.is_active(task_id):
+        if self.global_scheduler.is_active(task_id):
             try:
-                await asyncio.wait_for(self.task_runner.wait(task_id), timeout=2.0)
+                await asyncio.wait_for(self.global_scheduler.wait(task_id), timeout=2.0)
             except asyncio.TimeoutError as exc:
                 raise ValueError('task_still_stopping') from exc
-        if self.task_runner.is_active(task_id):
+        if self.global_scheduler.is_active(task_id) or self.global_scheduler.is_queued(task_id):
             raise ValueError('task_still_stopping')
         artifacts = self.list_artifacts(task_id)
         self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
@@ -796,7 +803,7 @@ class MainRuntimeService:
 
     async def wait_for_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
-        await self.task_runner.wait(task_id)
+        await self.global_scheduler.wait(task_id)
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> TaskRecord | None:
@@ -3053,7 +3060,6 @@ class MainRuntimeService:
 
     def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False) -> dict[str, Any] | None:
         task_id = self.normalize_task_id(task_id)
-        self.log_service.ensure_task_projection(task_id)
         payload = self.query_service.get_task_snapshot(task_id, mark_read=mark_read)
         if payload is None:
             return None
@@ -3061,7 +3067,6 @@ class MainRuntimeService:
 
     def get_node_detail_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         normalized_task_id = self.normalize_task_id(task_id)
-        self.log_service.ensure_task_projection(normalized_task_id)
         detail = self.query_service.get_node_detail(normalized_task_id, node_id)
         if detail is None:
             return None
@@ -3398,7 +3403,6 @@ class MainRuntimeService:
 
     def failed_node_ids(self, task_id: str) -> str:
         task_id = self.normalize_task_id(task_id)
-        self.log_service.ensure_task_projection(task_id)
         failed_node_ids = self.query_service.failed_node_ids(task_id)
         if failed_node_ids is None:
             return f'Error: Task not found: {task_id}'
@@ -3463,7 +3467,7 @@ class MainRuntimeService:
                 payload=dict(stopped_item['payload']),
             )
             self.publish_worker_status_event(item=stopped_item)
-        await self.task_runner.close()
+        await self.global_scheduler.close()
         await self.registry.close()
         self.governance_store.close()
         self.store.close()

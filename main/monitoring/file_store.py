@@ -20,14 +20,6 @@ class TaskFileStore:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def paths_for_task(self, task_id: str) -> dict[str, str]:
-        root = self.task_dir(task_id)
-        return {
-            'runtime_state_path': str(root / 'runtime_state.json'),
-            'tree_snapshot_path': str(root / 'tree_snapshot.json'),
-            'tree_text_path': str(root / 'tree.txt'),
-        }
-
     def write_json(self, path: str | Path, payload: dict[str, Any]) -> None:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)

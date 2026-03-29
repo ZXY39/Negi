@@ -186,9 +186,6 @@ class TaskRecord(Model):
     final_output: str = ''
     final_output_ref: str = ''
     failure_reason: str = ''
-    runtime_state_path: str = ''
-    tree_snapshot_path: str = ''
-    tree_text_path: str = ''
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

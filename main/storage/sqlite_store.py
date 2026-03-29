@@ -69,9 +69,8 @@ class SQLiteTaskStore:
             )
             ''',
             '''
-            CREATE TABLE IF NOT EXISTS runtime_states (
+            CREATE TABLE IF NOT EXISTS task_runtime_meta (
                 task_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             )
@@ -245,7 +244,6 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_node_id ON artifacts(node_id)',
-            'CREATE INDEX IF NOT EXISTS idx_runtime_states_session_id ON runtime_states(session_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_events_task_id_seq ON task_events(task_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_task_events_session_id_seq ON task_events(session_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_task_commands_status_created_at ON task_commands(status, created_at)',
@@ -254,6 +252,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_parent_node_id ON task_nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_details_task_id ON task_node_details(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_runtime_frames_task_id ON task_runtime_frames(task_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_runtime_meta_updated_at ON task_runtime_meta(updated_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_rounds_task_parent ON task_node_rounds(task_id, parent_node_id, round_index)',
             'CREATE INDEX IF NOT EXISTS idx_task_model_calls_task_id_seq ON task_model_calls(task_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_task_terminal_outbox_state_created_at ON task_terminal_outbox(delivery_state, created_at)',
@@ -388,7 +387,7 @@ class SQLiteTaskStore:
             self._conn.execute('DELETE FROM task_node_details WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_model_calls WHERE task_id = ?', (task_id,))
-            self._conn.execute('DELETE FROM runtime_states WHERE task_id = ?', (task_id,))
+            self._conn.execute('DELETE FROM task_runtime_meta WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM task_stall_outbox WHERE task_id = ?', (task_id,))
@@ -396,17 +395,17 @@ class SQLiteTaskStore:
             self._conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
             self._conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
 
-    def upsert_runtime_state(self, *, task_id: str, session_id: str, updated_at: str, payload: dict[str, object]) -> None:
+    def upsert_task_runtime_meta(self, *, task_id: str, updated_at: str, payload: dict[str, object]) -> None:
         payload_json = json.dumps(payload)
         self._upsert(
-            'runtime_states',
-            ['task_id', 'session_id', 'updated_at', 'payload_json'],
-            [task_id, session_id, updated_at, payload_json],
+            'task_runtime_meta',
+            ['task_id', 'updated_at', 'payload_json'],
+            [task_id, updated_at, payload_json],
             'task_id',
         )
 
-    def get_runtime_state(self, task_id: str) -> dict[str, object] | None:
-        row = self._fetchone('SELECT payload_json FROM runtime_states WHERE task_id = ?', (task_id,))
+    def get_task_runtime_meta(self, task_id: str) -> dict[str, object] | None:
+        row = self._fetchone('SELECT payload_json FROM task_runtime_meta WHERE task_id = ?', (task_id,))
         if row is None:
             return None
         payload = json.loads(row['payload_json'])
