@@ -715,11 +715,7 @@ function resetTaskView() {
     S.taskNodeChildrenCache = {};
     S.taskNodeChildrenRequests = {};
     S.taskTreeHasFullSnapshot = false;
-    S.taskTreeBranchRefreshQueue = {};
-    if (S.taskTreeBranchRefreshTimerId) {
-        window.clearTimeout(S.taskTreeBranchRefreshTimerId);
-        S.taskTreeBranchRefreshTimerId = null;
-    }
+    if (typeof resetTaskTreeBranchSyncState === "function") resetTaskTreeBranchSyncState();
     S.taskNodeBusy = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
@@ -1022,14 +1018,18 @@ function handleTaskEvent(payload) {
             if (S.tree) {
                 const existingTreeNode = findRawTaskTreeNode(S.tree, nodeId);
                 if (existingTreeNode) {
+                    const previousFingerprint = String(existingTreeNode?.children_fingerprint || "").trim();
+                    const nextFingerprint = String(nextNode?.children_fingerprint || "").trim();
                     updateTaskTreeNode(S.tree, nodeId, (node) => {
                         const patchNode = buildTaskTreeNodeFromDetail(nextNode, node);
                         Object.assign(node, patchNode);
                     });
                     renderTree();
+                    if (previousFingerprint !== nextFingerprint) {
+                        scheduleTaskTreeBranchSync(nodeId);
+                    }
                 } else if (parentNodeId) {
-                    // Only refresh the affected parent branch when a new node appears.
-                    scheduleTaskTreeBranchRefresh(parentNodeId);
+                    scheduleTaskTreeBranchSync(parentNodeId);
                 }
             }
             if (String(S.selectedNodeId || "") === nodeId) {

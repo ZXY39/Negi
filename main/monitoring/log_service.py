@@ -235,6 +235,13 @@ class TaskLogService:
             task = self._store.get_task(task_id)
             if task is not None:
                 self._publish_task_node_patch_locked(task=task, node=node)
+                parent_node_id = str(node.parent_node_id or '').strip()
+                if parent_node_id:
+                    parent = self._store.get_node(parent_node_id)
+                    if parent is not None and str(parent.task_id or '').strip() == str(task.task_id or '').strip():
+                        self._sync_node_read_models_locked(parent)
+                        self._sync_task_node_rounds_locked(parent)
+                        self._publish_task_node_patch_locked(task=task, node=parent)
             self.refresh_task_view(task_id, mark_unread=True)
             return node
 
@@ -1354,9 +1361,49 @@ class TaskLogService:
             self._task_projection_round_records(node),
         )
 
+    def _task_projection_node_children_fingerprint(
+        self,
+        node: NodeRecord,
+        *,
+        rounds: list[TaskProjectionRoundRecord] | None = None,
+    ) -> str:
+        round_records = list(rounds or self._task_projection_round_records(node))
+        default_round_id = str(round_records[-1].round_id or '') if round_records else ''
+        direct_children = list(self._store.list_children(node.node_id) or [])
+        direct_child_ids = [
+            str(child.node_id or '').strip()
+            for child in direct_children
+            if str(child.node_id or '').strip()
+        ]
+        round_child_ids = {
+            str(child_id or '').strip()
+            for round_record in round_records
+            for child_id in list(round_record.child_node_ids or [])
+            if str(child_id or '').strip()
+        }
+        auxiliary_child_ids = [child_id for child_id in direct_child_ids if child_id not in round_child_ids]
+        payload = {
+            'default_round_id': default_round_id,
+            'auxiliary_child_ids': auxiliary_child_ids,
+            'rounds': [
+                {
+                    'round_id': str(round_record.round_id or ''),
+                    'round_index': int(round_record.round_index or 0),
+                    'child_node_ids': [
+                        str(child_id or '').strip()
+                        for child_id in list(round_record.child_node_ids or [])
+                        if str(child_id or '').strip()
+                    ],
+                }
+                for round_record in round_records
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
     def _task_projection_node_record(self, node: NodeRecord) -> TaskProjectionNodeRecord:
         rounds = self._task_projection_round_records(node)
         default_round_id = str(rounds[-1].round_id or '') if rounds else ''
+        children_fingerprint = self._task_projection_node_children_fingerprint(node, rounds=rounds)
         return TaskProjectionNodeRecord(
             node_id=node.node_id,
             task_id=node.task_id,
@@ -1370,6 +1417,7 @@ class TaskLogService:
             default_round_id=default_round_id,
             selected_round_id=default_round_id,
             round_options_count=len(rounds),
+            children_fingerprint=children_fingerprint,
             sort_key=f'{str(node.created_at or "")}:{str(node.node_id or "")}',
             payload={
                 'node_id': node.node_id,
@@ -1382,6 +1430,7 @@ class TaskLogService:
                 'default_round_id': default_round_id,
                 'selected_round_id': default_round_id,
                 'round_options_count': len(rounds),
+                'children_fingerprint': children_fingerprint,
             },
         )
 
@@ -1578,6 +1627,7 @@ class TaskLogService:
         self._dispatch_live_event_locked(task=task, event_type='task.summary.patch', data=payload)
 
     def _publish_task_node_patch_locked(self, *, task: TaskRecord, node: NodeRecord) -> None:
+        projected = self._store.get_task_node(node.node_id)
         payload = {
             'node': {
                 'node_id': node.node_id,
@@ -1587,6 +1637,11 @@ class TaskLogService:
                 'status': str(node.status or 'in_progress'),
                 'title': str(node.goal or node.node_id),
                 'updated_at': str(node.updated_at or ''),
+                'children_fingerprint': str(
+                    getattr(projected, 'children_fingerprint', '')
+                    or ((getattr(projected, 'payload', None) or {}).get('children_fingerprint') if projected is not None else '')
+                    or ''
+                ),
             }
         }
         self._append_task_event(task=task, event_type='task.node.patch', data=payload)

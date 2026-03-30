@@ -1695,6 +1695,95 @@ def test_task_detail_websocket_streams_children_snapshot_for_parent(tmp_path: Pa
         assert [item["node_id"] for item in children_event["data"]["items"]] == [child.node_id]
 
 
+def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    detail_before = service.get_node_detail_payload(record.task_id, root.node_id)
+    fingerprint_before = str(detail_before["item"].get("children_fingerprint") or "")
+    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
+    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
+    )
+
+    patch_events = [
+        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
+        if item.get("event_type") == "task.node.patch"
+    ]
+    parent_patches = [
+        item["payload"]["node"]
+        for item in patch_events
+        if str(((item.get("payload") or {}).get("node") or {}).get("node_id") or "").strip() == root.node_id
+    ]
+
+    assert child is not None
+    assert parent_patches
+    assert str(parent_patches[-1].get("children_fingerprint") or "").strip()
+    assert str(parent_patches[-1].get("children_fingerprint") or "") != fingerprint_before
+
+
+def test_child_status_updates_do_not_emit_parent_structure_patch(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
+    )
+    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
+    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+
+    service.log_service.update_node_status(
+        record.task_id,
+        child.node_id,
+        status="success",
+        final_output="child done",
+    )
+
+    parent_patches = [
+        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
+        if item.get("event_type") == "task.node.patch"
+        and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+    ]
+
+    assert parent_patches == []
+
+
 def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

@@ -200,16 +200,20 @@ class TaskQueryService:
     def get_node_detail(self, task_id: str, node_id: str) -> TaskNodeDetail | None:
         task = self._store.get_task(task_id)
         detail_record = self._store.get_task_node_detail(node_id)
+        node_record = self._store.get_task_node(node_id)
         if task is None or detail_record is None or detail_record.task_id != task.task_id:
             return None
+        if node_record is not None and str(node_record.task_id or '').strip() != task.task_id:
+            node_record = None
         payload = dict(detail_record.payload or {})
+        node_payload = dict(getattr(node_record, 'payload', None) or {}) if node_record is not None else {}
         detail = TaskNodeDetail(
             node_id=str(payload.get('node_id') or detail_record.node_id),
             task_id=str(payload.get('task_id') or detail_record.task_id),
-            parent_node_id=payload.get('parent_node_id'),
-            depth=int(payload.get('depth') or 0),
-            node_kind=str(payload.get('node_kind') or 'execution'),
-            status=str(payload.get('status') or 'in_progress'),
+            parent_node_id=payload.get('parent_node_id', node_payload.get('parent_node_id')),
+            depth=int(payload.get('depth') or node_payload.get('depth') or 0),
+            node_kind=str(payload.get('node_kind') or node_payload.get('node_kind') or 'execution'),
+            status=str(payload.get('status') or node_payload.get('status') or 'in_progress'),
             goal=str(payload.get('goal') or ''),
             prompt=str(payload.get('prompt_summary') or detail_record.prompt_summary or ''),
             input=str(payload.get('input_text') or detail_record.input_text or ''),
@@ -221,7 +225,8 @@ class TaskQueryService:
             final_output=str(payload.get('final_output') or detail_record.final_output or ''),
             final_output_ref=str(payload.get('final_output_ref') or detail_record.final_output_ref or ''),
             failure_reason=str(payload.get('failure_reason') or detail_record.failure_reason or ''),
-            updated_at=str(payload.get('updated_at') or detail_record.updated_at or ''),
+            updated_at=str(payload.get('updated_at') or node_payload.get('updated_at') or detail_record.updated_at or ''),
+            children_fingerprint=str(payload.get('children_fingerprint') or node_payload.get('children_fingerprint') or ''),
             execution_trace=dict(payload.get('execution_trace') or {}),
             token_usage=TokenUsageSummary.model_validate(payload.get('token_usage') or {}),
             token_usage_by_model=[
@@ -416,6 +421,7 @@ class TaskQueryService:
                 status=record.status,
                 title=str(record.title or record.node_id),
                 updated_at=str(record.updated_at or ''),
+                children_fingerprint=str(getattr(record, 'children_fingerprint', '') or ''),
                 spawn_rounds=spawn_rounds,
                 default_round_id=str(record.default_round_id or ''),
                 auxiliary_children=auxiliary_children,

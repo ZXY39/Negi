@@ -37,6 +37,7 @@ class TaskTreeNode(Model):
     check_result: str = ''
     check_result_ref: str = ''
     updated_at: str = ''
+    children_fingerprint: str = ''
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
     spawn_rounds: list[TaskSpawnRound] = Field(default_factory=list)
@@ -126,6 +127,7 @@ class TaskTreeNodeSummary(Model):
     status: NodeStatus = 'in_progress'
     title: str = ''
     updated_at: str = ''
+    children_fingerprint: str = ''
     spawn_rounds: list[TaskSpawnRound] = Field(default_factory=list)
     default_round_id: str = ''
     auxiliary_children: list['TaskTreeNodeSummary'] = Field(default_factory=list)
@@ -158,6 +160,7 @@ class TaskNodeDetail(Model):
     final_output_ref: str = ''
     failure_reason: str = ''
     updated_at: str = ''
+    children_fingerprint: str = ''
     execution_trace: dict[str, Any] = Field(default_factory=dict)
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
@@ -190,6 +193,7 @@ class TaskProjectionNodeRecord(Model):
     default_round_id: str = ''
     selected_round_id: str = ''
     round_options_count: int = 0
+    children_fingerprint: str = ''
     sort_key: str = ''
     payload: dict[str, Any] = Field(default_factory=dict)
 
