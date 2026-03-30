@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,10 +29,11 @@ _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
 
 
 class TaskQueryService:
-    def __init__(self, *, store, file_store, log_service):
+    def __init__(self, *, store, file_store, log_service, debug_recorder=None):
         self._store = store
         self._file_store = file_store
         self._log_service = log_service
+        self._debug_recorder = debug_recorder
 
     def summary(self, session_id: str | None = None) -> TaskSummaryResult:
         tasks = self._store.list_tasks(session_id)
@@ -143,6 +145,8 @@ class TaskQueryService:
         mark_read: bool = True,
         include_tree: bool = False,
     ) -> dict[str, Any] | None:
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        started_mono = time.perf_counter()
         task = self._store.get_task(task_id)
         if task is None:
             return None
@@ -190,6 +194,7 @@ class TaskQueryService:
         }
         if include_tree:
             payload['tree_root'] = tree_root.model_dump(mode='json') if tree_root is not None else None
+        self._record_debug('query_service.get_task_snapshot', started_at=started_at, started_mono=started_mono)
         return payload
 
     def get_node_detail(self, task_id: str, node_id: str) -> TaskNodeDetail | None:
@@ -236,6 +241,8 @@ class TaskQueryService:
         offset: int = 0,
         limit: int = 50,
     ) -> dict[str, Any] | None:
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        started_mono = time.perf_counter()
         task = self._store.get_task(task_id)
         if task is None:
             return None
@@ -271,7 +278,7 @@ class TaskQueryService:
             detail = self.get_node_detail(task.task_id, child_id)
             if detail is not None:
                 details.append(detail.model_dump(mode='json'))
-        return {
+        payload = {
             'task_id': task.task_id,
             'parent_node_id': str(node_id or '').strip(),
             'round_id': selected_round_id,
@@ -296,6 +303,21 @@ class TaskQueryService:
             'offset': max(0, int(offset or 0)),
             'limit': max(1, int(limit or 50)),
         }
+        self._record_debug('query_service.get_node_children', started_at=started_at, started_mono=started_mono)
+        return payload
+
+    def _record_debug(self, section: str, *, started_at: str, started_mono: float) -> None:
+        recorder = self._debug_recorder
+        if recorder is None or not hasattr(recorder, 'record'):
+            return
+        try:
+            recorder.record(
+                section=section,
+                elapsed_ms=(time.perf_counter() - started_mono) * 1000.0,
+                started_at=started_at,
+            )
+        except Exception:
+            return
 
     def _projection_root(self, task) -> TaskTreeNodeSummary | None:
         nodes = self._store.list_task_nodes(task.task_id)

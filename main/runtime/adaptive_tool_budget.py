@@ -40,13 +40,23 @@ class AdaptiveToolBudgetController:
     def __init__(
         self,
         *,
-        normal_limit: int = 4,
-        safe_limit: int = 1,
+        normal_limit: int = 6,
+        throttled_limit: int | None = None,
+        critical_limit: int | None = None,
+        safe_limit: int | None = None,
         step_up: int = 1,
     ) -> None:
         self._lock = threading.RLock()
         self._normal_limit = max(1, int(normal_limit or 1))
-        self._safe_limit = max(1, min(int(safe_limit or 1), self._normal_limit))
+        safe_limit_explicit = safe_limit is not None and critical_limit is None and throttled_limit is None
+        resolved_critical_limit = critical_limit if critical_limit is not None else safe_limit
+        self._critical_limit = max(1, min(int(resolved_critical_limit or 1), self._normal_limit))
+        resolved_throttled_limit = (
+            throttled_limit
+            if throttled_limit is not None
+            else (self._critical_limit if safe_limit_explicit else max(self._critical_limit, min(2, self._normal_limit)))
+        )
+        self._throttled_limit = max(self._critical_limit, min(int(resolved_throttled_limit or self._critical_limit), self._normal_limit))
         self._step_up = max(1, int(step_up or 1))
         self._target_running_tools_limit = self._normal_limit
         self._running_tools_count = 0
@@ -56,15 +66,34 @@ class AdaptiveToolBudgetController:
         self._pressure_state = 'normal'
         self._last_transition_at = ''
         self._throttled_since = ''
+        self._critical_since = ''
 
-    def configure(self, *, normal_limit: int, safe_limit: int, step_up: int) -> None:
+    def configure(
+        self,
+        *,
+        normal_limit: int,
+        throttled_limit: int | None = None,
+        critical_limit: int | None = None,
+        safe_limit: int | None = None,
+        step_up: int,
+    ) -> None:
         ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]] = []
         with self._lock:
             self._normal_limit = max(1, int(normal_limit or 1))
-            self._safe_limit = max(1, min(int(safe_limit or 1), self._normal_limit))
+            safe_limit_explicit = safe_limit is not None and critical_limit is None and throttled_limit is None
+            resolved_critical_limit = critical_limit if critical_limit is not None else safe_limit
+            self._critical_limit = max(1, min(int(resolved_critical_limit or 1), self._normal_limit))
+            resolved_throttled_limit = (
+                throttled_limit
+                if throttled_limit is not None
+                else (self._critical_limit if safe_limit_explicit else max(self._critical_limit, min(2, self._normal_limit)))
+            )
+            self._throttled_limit = max(self._critical_limit, min(int(resolved_throttled_limit or self._critical_limit), self._normal_limit))
             self._step_up = max(1, int(step_up or 1))
-            if self._pressure_state == 'throttled':
-                self._target_running_tools_limit = min(self._target_running_tools_limit, self._safe_limit)
+            if self._pressure_state == 'critical':
+                self._target_running_tools_limit = min(self._target_running_tools_limit, self._critical_limit)
+            elif self._pressure_state == 'throttled':
+                self._target_running_tools_limit = min(self._target_running_tools_limit, self._throttled_limit)
             else:
                 self._target_running_tools_limit = min(self._target_running_tools_limit, self._normal_limit)
                 if self._target_running_tools_limit <= 0:
@@ -142,20 +171,45 @@ class AdaptiveToolBudgetController:
         self._resolve_waiters(ready)
 
     def throttle(self, *, at: str | None = None) -> None:
+        self.set_budget_state('throttled', at=at)
+
+    def critical(self, *, at: str | None = None) -> None:
+        self.set_budget_state('critical', at=at)
+
+    def set_budget_state(self, state: str, *, at: str | None = None, target_limit: int | None = None) -> None:
         timestamp = str(at or _now_iso()).strip() or _now_iso()
         with self._lock:
-            self._pressure_state = 'throttled'
-            self._target_running_tools_limit = self._safe_limit
+            normalized_state = str(state or 'normal').strip().lower() or 'normal'
+            if normalized_state not in {'normal', 'recovering', 'throttled', 'critical'}:
+                normalized_state = 'normal'
+            self._pressure_state = normalized_state
+            if target_limit is None:
+                if normalized_state == 'critical':
+                    next_limit = self._critical_limit
+                elif normalized_state == 'throttled':
+                    next_limit = self._throttled_limit
+                else:
+                    next_limit = self._normal_limit if normalized_state == 'normal' else max(self._target_running_tools_limit, self._critical_limit)
+            else:
+                next_limit = max(1, min(int(target_limit or 1), self._normal_limit))
+            self._target_running_tools_limit = next_limit
             self._last_transition_at = timestamp
-            if not self._throttled_since:
+            if normalized_state in {'throttled', 'critical'} and not self._throttled_since:
                 self._throttled_since = timestamp
+            if normalized_state == 'critical' and not self._critical_since:
+                self._critical_since = timestamp
+            if normalized_state == 'normal':
+                self._throttled_since = ''
+                self._critical_since = ''
+            elif normalized_state == 'throttled':
+                self._critical_since = ''
 
     def begin_recovery(self, *, at: str | None = None) -> None:
         timestamp = str(at or _now_iso()).strip() or _now_iso()
         with self._lock:
             self._pressure_state = 'recovering'
             if self._target_running_tools_limit <= 0:
-                self._target_running_tools_limit = self._safe_limit
+                self._target_running_tools_limit = self._critical_limit
             self._last_transition_at = timestamp
 
     def step_recovery(self, *, at: str | None = None) -> bool:
@@ -170,6 +224,7 @@ class AdaptiveToolBudgetController:
             if self._target_running_tools_limit >= self._normal_limit:
                 self._pressure_state = 'normal'
                 self._throttled_since = ''
+                self._critical_since = ''
             else:
                 self._pressure_state = 'recovering'
             self._last_transition_at = timestamp
@@ -189,6 +244,7 @@ class AdaptiveToolBudgetController:
                 'tool_pressure_waiting_count': int(len(self._waiting_queue)),
                 'tool_pressure_last_transition_at': self._last_transition_at,
                 'tool_pressure_throttled_since': self._throttled_since,
+                'tool_pressure_critical_since': self._critical_since,
                 'worker_execution_state': self._pressure_state,
                 'worker_execution_target_limit': int(self._target_running_tools_limit),
                 'worker_execution_running_count': int(self._running_tools_count),

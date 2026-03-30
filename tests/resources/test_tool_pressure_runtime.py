@@ -100,29 +100,36 @@ async def test_adaptive_tool_budget_controller_does_not_preempt_running_tools_wh
 
 def test_worker_pressure_monitor_throttles_and_recovers_stepwise() -> None:
     store = _FakeStore()
-    controller = AdaptiveToolBudgetController(normal_limit=4, safe_limit=1, step_up=1)
+    controller = AdaptiveToolBudgetController(normal_limit=6, throttled_limit=2, critical_limit=1, step_up=1)
     monitor = WorkerPressureMonitor(
         controller=controller,
         store=store,
         sample_seconds=1.0,
-        recover_window_seconds=10.0,
+        recover_window_seconds=5.0,
         warn_consecutive_samples=3,
         safe_consecutive_samples=5,
         pressure_snapshot_stale_after_seconds=3.0,
         event_loop_warn_ms=250.0,
         event_loop_safe_ms=100.0,
+        event_loop_critical_ms=1500.0,
         writer_queue_warn=50,
         writer_queue_safe=10,
+        writer_queue_critical=100,
         sqlite_write_wait_warn_ms=200.0,
         sqlite_write_wait_safe_ms=50.0,
+        sqlite_write_wait_critical_ms=250.0,
         sqlite_query_warn_ms=150.0,
         sqlite_query_safe_ms=30.0,
+        sqlite_query_critical_ms=250.0,
         machine_cpu_warn_percent=85.0,
         machine_cpu_safe_percent=55.0,
+        machine_cpu_critical_percent=95.0,
         machine_memory_warn_percent=88.0,
         machine_memory_safe_percent=75.0,
+        machine_memory_critical_percent=94.0,
         machine_disk_busy_warn_percent=70.0,
         machine_disk_busy_safe_percent=35.0,
+        machine_disk_busy_critical_percent=90.0,
         process_cpu_warn_ratio=0.85,
         process_cpu_safe_ratio=0.50,
     )
@@ -142,7 +149,7 @@ def test_worker_pressure_monitor_throttles_and_recovers_stepwise() -> None:
             now_iso=f'2026-03-30T00:00:0{index}+08:00',
         )
     assert controller.snapshot()['tool_pressure_state'] == 'throttled'
-    assert controller.snapshot()['tool_pressure_target_limit'] == 1
+    assert controller.snapshot()['tool_pressure_target_limit'] == 2
 
     for index in range(3, 8):
         monitor.observe_sample(
@@ -159,7 +166,7 @@ def test_worker_pressure_monitor_throttles_and_recovers_stepwise() -> None:
             now_iso=f'2026-03-30T00:00:1{index - 3}+08:00',
         )
     assert controller.snapshot()['tool_pressure_state'] == 'recovering'
-    assert controller.snapshot()['tool_pressure_target_limit'] == 1
+    assert controller.snapshot()['tool_pressure_target_limit'] == 2
 
     monitor.observe_sample(
         machine_cpu_percent=20.0,
@@ -171,10 +178,10 @@ def test_worker_pressure_monitor_throttles_and_recovers_stepwise() -> None:
         sqlite_write_wait_ms=0.0,
         sqlite_query_latency_ms=0.0,
         process_cpu_ratio=0.10,
-        now_mono=18.0,
-        now_iso='2026-03-30T00:00:18+08:00',
+        now_mono=8.0,
+        now_iso='2026-03-30T00:00:08+08:00',
     )
-    assert controller.snapshot()['tool_pressure_target_limit'] == 2
+    assert controller.snapshot()['tool_pressure_target_limit'] == 3
     assert controller.snapshot()['tool_pressure_state'] == 'recovering'
 
     monitor.observe_sample(
@@ -187,8 +194,8 @@ def test_worker_pressure_monitor_throttles_and_recovers_stepwise() -> None:
         sqlite_write_wait_ms=0.0,
         sqlite_query_latency_ms=0.0,
         process_cpu_ratio=0.10,
-        now_mono=19.0,
-        now_iso='2026-03-30T00:00:19+08:00',
+        now_mono=9.0,
+        now_iso='2026-03-30T00:00:09+08:00',
     )
     monitor.observe_sample(
         machine_cpu_percent=92.0,
@@ -200,8 +207,8 @@ def test_worker_pressure_monitor_throttles_and_recovers_stepwise() -> None:
         sqlite_write_wait_ms=0.0,
         sqlite_query_latency_ms=0.0,
         process_cpu_ratio=0.10,
-        now_mono=20.0,
-        now_iso='2026-03-30T00:00:20+08:00',
+        now_mono=10.0,
+        now_iso='2026-03-30T00:00:10+08:00',
     )
     monitor.observe_sample(
         machine_cpu_percent=92.0,
@@ -213,16 +220,16 @@ def test_worker_pressure_monitor_throttles_and_recovers_stepwise() -> None:
         sqlite_write_wait_ms=0.0,
         sqlite_query_latency_ms=0.0,
         process_cpu_ratio=0.10,
-        now_mono=21.0,
-        now_iso='2026-03-30T00:00:21+08:00',
+        now_mono=11.0,
+        now_iso='2026-03-30T00:00:11+08:00',
     )
     assert controller.snapshot()['tool_pressure_state'] == 'throttled'
-    assert controller.snapshot()['tool_pressure_target_limit'] == 1
+    assert controller.snapshot()['tool_pressure_target_limit'] == 2
 
 
 def test_worker_pressure_monitor_marks_snapshot_unfresh_when_machine_metrics_are_missing() -> None:
     store = _FakeStore()
-    controller = AdaptiveToolBudgetController(normal_limit=4, safe_limit=1, step_up=1)
+    controller = AdaptiveToolBudgetController(normal_limit=6, throttled_limit=2, critical_limit=1, step_up=1)
     monitor = WorkerPressureMonitor(controller=controller, store=store)
 
     for index in range(3):
@@ -242,9 +249,35 @@ def test_worker_pressure_monitor_marks_snapshot_unfresh_when_machine_metrics_are
         )
 
     snapshot = monitor.snapshot()
-    assert controller.snapshot()['tool_pressure_state'] == 'throttled'
+    assert controller.snapshot()['tool_pressure_state'] == 'normal'
     assert snapshot['pressure_snapshot_fresh'] is False
     assert snapshot['machine_pressure_available'] is False
+
+
+def test_worker_pressure_monitor_does_not_throttle_on_lag_alone_when_machine_is_healthy() -> None:
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, throttled_limit=2, critical_limit=1, step_up=1)
+    monitor = WorkerPressureMonitor(controller=controller, store=store)
+
+    for index in range(3):
+        monitor.observe_sample(
+            machine_cpu_percent=18.0,
+            machine_memory_percent=42.0,
+            machine_disk_busy_percent=5.0,
+            machine_available=True,
+            event_loop_lag_ms=900.0,
+            writer_queue_depth=0,
+            sqlite_write_wait_ms=0.0,
+            sqlite_query_latency_ms=0.0,
+            process_cpu_ratio=0.1,
+            now_mono=float(index),
+            now_iso=f'2026-03-30T00:02:0{index}+08:00',
+        )
+
+    snapshot = monitor.snapshot()
+    assert snapshot['local_pressure_state'] == 'degraded'
+    assert controller.snapshot()['tool_pressure_state'] == 'normal'
+    assert controller.snapshot()['tool_pressure_target_limit'] == 6
 
 
 def test_worker_pressure_monitor_falls_back_to_read_write_times_for_disk_busy(monkeypatch) -> None:

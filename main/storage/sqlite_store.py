@@ -5,6 +5,7 @@ import queue
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -24,12 +25,13 @@ R = TypeVar('R')
 
 
 class SQLiteTaskStore:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, debug_recorder=None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._read_lock = threading.RLock()
         self._closed = False
+        self._debug_recorder = debug_recorder
         self._writer_queue: queue.Queue[tuple[Callable[[sqlite3.Connection], Any] | None, threading.Event | None, dict[str, Any] | None]] = queue.Queue()
         self._writer_thread: threading.Thread | None = None
         self._metrics_lock = threading.RLock()
@@ -336,16 +338,24 @@ class SQLiteTaskStore:
                 raise RuntimeError('sqlite_task_store_closed')
         outcome: dict[str, Any] = {}
         done = threading.Event()
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
         queued_mono = time.perf_counter()
         self._writer_queue.put((operation, done, outcome))
         done.wait()
         completed_mono = time.perf_counter()
         started_mono = float(outcome.get('started_mono') or completed_mono)
         finished_mono = float(outcome.get('finished_mono') or completed_mono)
+        total_wait_ms = max(0.0, (finished_mono - queued_mono) * 1000.0)
         self._update_runtime_metrics(
-            sqlite_write_wait_ms=max(0.0, (finished_mono - queued_mono) * 1000.0),
+            sqlite_write_wait_ms=total_wait_ms,
             sqlite_write_exec_ms=max(0.0, (finished_mono - started_mono) * 1000.0),
         )
+        recorder = self._debug_recorder
+        if recorder is not None and hasattr(recorder, 'record'):
+            try:
+                recorder.record(section='sqlite.write', elapsed_ms=total_wait_ms, started_at=started_at)
+            except Exception:
+                pass
         error = outcome.get('error')
         if error is not None:
             raise error
@@ -1288,20 +1298,32 @@ class SQLiteTaskStore:
 
     def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
         started_mono = time.perf_counter()
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
         with self._read_lock:
             row = self._read_conn.execute(sql, params).fetchone()
-        self._update_runtime_metrics(
-            sqlite_query_latency_ms=max(0.0, (time.perf_counter() - started_mono) * 1000.0),
-        )
+        elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
+        self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
+        recorder = self._debug_recorder
+        if recorder is not None and hasattr(recorder, 'record'):
+            try:
+                recorder.record(section='sqlite.query.fetchone', elapsed_ms=elapsed_ms, started_at=started_at)
+            except Exception:
+                pass
         return row
 
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
         started_mono = time.perf_counter()
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
         with self._read_lock:
             rows = list(self._read_conn.execute(sql, params).fetchall())
-        self._update_runtime_metrics(
-            sqlite_query_latency_ms=max(0.0, (time.perf_counter() - started_mono) * 1000.0),
-        )
+        elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
+        self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
+        recorder = self._debug_recorder
+        if recorder is not None and hasattr(recorder, 'record'):
+            try:
+                recorder.record(section='sqlite.query.fetchall', elapsed_ms=elapsed_ms, started_at=started_at)
+            except Exception:
+                pass
         return rows
 
     def _update_runtime_metrics(self, **values: float) -> None:

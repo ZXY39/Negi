@@ -6155,7 +6155,13 @@ textarea {
     background: color-mix(in srgb, #f59e0b 12%, var(--bg-panel));
 }
 
+.task-performance-item--state[data-state="critical"] {
+    border-color: color-mix(in srgb, var(--status-failed-text) 24%, var(--border-color));
+    background: color-mix(in srgb, var(--status-failed-bg) 18%, var(--bg-panel));
+}
+
 .task-performance-item--state[data-state="unfresh"],
+.task-performance-item--state[data-state="stale"],
 .task-performance-item--state[data-state="starting"],
 .task-performance-item--state[data-state="offline"] {
     border-color: color-mix(in srgb, var(--status-failed-text) 18%, var(--border-color));

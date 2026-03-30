@@ -274,10 +274,11 @@ function applyTaskNodeChildrenSnapshot(payload, { render = true } = {}) {
     const items = Array.isArray(payload?.items) ? payload.items : [];
     const rounds = Array.isArray(payload?.rounds) ? payload.rounds : [];
     const defaultRoundId = String(payload?.default_round_id || "").trim();
-    const treeItems = items.map((item) => buildTaskTreeNodeFromDetail(item)).filter((item) => String(item?.node_id || "").trim());
     S.taskNodeChildrenCache = { ...(S.taskNodeChildrenCache || {}), [cacheKey]: payload };
     if (S.tree) {
         updateTaskTreeNode(S.tree, normalizedNodeId, (node) => {
+            const existingDirectChildren = rawTreeDirectChildren(node);
+            const treeItems = normalizeTaskTreeChildren(items, existingDirectChildren);
             node.default_round_id = defaultRoundId || node.default_round_id || "";
             const currentRounds = Array.isArray(node.spawn_rounds) ? node.spawn_rounds : [];
             const roundMap = new Map(currentRounds.map((round) => [String(round?.round_id || "").trim(), round]));

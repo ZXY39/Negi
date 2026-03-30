@@ -169,6 +169,7 @@ function taskWorkerPressureSampleAgeMs(metrics = taskWorkerStatusMetrics()) {
 }
 
 function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
+    if (metrics?.pressure_snapshot_fresh != null) return !!metrics.pressure_snapshot_fresh;
     const ageMs = taskWorkerPressureSampleAgeMs(metrics);
     if (ageMs == null) return false;
     return ageMs <= 3000 && metrics?.machine_pressure_available !== false;
@@ -196,8 +197,10 @@ function taskWorkerPressureStateMeta(metrics = taskWorkerStatusMetrics()) {
     const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
     if (workerState === "offline" || workerState === "stopped") return { key: "offline", label: "离线" };
     if (workerState === "starting") return { key: "starting", label: "启动中" };
+    if (workerState === "stale") return { key: "stale", label: "连接过期" };
     if (!taskWorkerPressureSnapshotFresh(metrics)) return { key: "unfresh", label: "监控过期" };
-    const state = String(metrics?.tool_pressure_state || metrics?.worker_execution_state || "normal").trim().toLowerCase();
+    const state = String(metrics?.budget_state || metrics?.tool_pressure_state || metrics?.worker_execution_state || "normal").trim().toLowerCase();
+    if (state === "critical") return { key: "critical", label: "强收紧" };
     if (state === "throttled") return { key: "throttled", label: "收紧中" };
     if (state === "recovering") return { key: "recovering", label: "恢复中" };
     return { key: "normal", label: "正常" };

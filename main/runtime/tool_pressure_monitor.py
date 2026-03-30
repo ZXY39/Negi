@@ -64,18 +64,25 @@ class WorkerPressureMonitor:
         pressure_snapshot_stale_after_seconds: float = 3.0,
         event_loop_warn_ms: float = 250.0,
         event_loop_safe_ms: float = 100.0,
+        event_loop_critical_ms: float = 1500.0,
         writer_queue_warn: int = 50,
         writer_queue_safe: int = 10,
+        writer_queue_critical: int = 100,
         sqlite_write_wait_warn_ms: float = 200.0,
         sqlite_write_wait_safe_ms: float = 50.0,
+        sqlite_write_wait_critical_ms: float = 250.0,
         sqlite_query_warn_ms: float = 150.0,
         sqlite_query_safe_ms: float = 30.0,
+        sqlite_query_critical_ms: float = 250.0,
         machine_cpu_warn_percent: float = 85.0,
         machine_cpu_safe_percent: float = 55.0,
+        machine_cpu_critical_percent: float = 95.0,
         machine_memory_warn_percent: float = 88.0,
         machine_memory_safe_percent: float = 75.0,
+        machine_memory_critical_percent: float = 94.0,
         machine_disk_busy_warn_percent: float = 70.0,
         machine_disk_busy_safe_percent: float = 35.0,
+        machine_disk_busy_critical_percent: float = 90.0,
         process_cpu_warn_ratio: float = 0.85,
         process_cpu_safe_ratio: float = 0.50,
         system_metrics_sampler: Callable[[], dict[str, Any]] | None = None,
@@ -91,18 +98,25 @@ class WorkerPressureMonitor:
         self._pressure_snapshot_stale_after_seconds = max(0.1, float(pressure_snapshot_stale_after_seconds or 3.0))
         self._event_loop_warn_ms = max(0.0, float(event_loop_warn_ms or 0.0))
         self._event_loop_safe_ms = max(0.0, float(event_loop_safe_ms or 0.0))
+        self._event_loop_critical_ms = max(0.0, float(event_loop_critical_ms or 0.0))
         self._writer_queue_warn = max(0, int(writer_queue_warn or 0))
         self._writer_queue_safe = max(0, int(writer_queue_safe or 0))
+        self._writer_queue_critical = max(1, int(writer_queue_critical or 1))
         self._sqlite_write_wait_warn_ms = max(0.0, float(sqlite_write_wait_warn_ms or 0.0))
         self._sqlite_write_wait_safe_ms = max(0.0, float(sqlite_write_wait_safe_ms or 0.0))
+        self._sqlite_write_wait_critical_ms = max(0.0, float(sqlite_write_wait_critical_ms or 0.0))
         self._sqlite_query_warn_ms = max(0.0, float(sqlite_query_warn_ms or 0.0))
         self._sqlite_query_safe_ms = max(0.0, float(sqlite_query_safe_ms or 0.0))
+        self._sqlite_query_critical_ms = max(0.0, float(sqlite_query_critical_ms or 0.0))
         self._machine_cpu_warn_percent = max(0.0, float(machine_cpu_warn_percent or 0.0))
         self._machine_cpu_safe_percent = max(0.0, float(machine_cpu_safe_percent or 0.0))
+        self._machine_cpu_critical_percent = max(0.0, float(machine_cpu_critical_percent or 0.0))
         self._machine_memory_warn_percent = max(0.0, float(machine_memory_warn_percent or 0.0))
         self._machine_memory_safe_percent = max(0.0, float(machine_memory_safe_percent or 0.0))
+        self._machine_memory_critical_percent = max(0.0, float(machine_memory_critical_percent or 0.0))
         self._machine_disk_busy_warn_percent = max(0.0, float(machine_disk_busy_warn_percent or 0.0))
         self._machine_disk_busy_safe_percent = max(0.0, float(machine_disk_busy_safe_percent or 0.0))
+        self._machine_disk_busy_critical_percent = max(0.0, float(machine_disk_busy_critical_percent or 0.0))
         self._process_cpu_warn_ratio = max(0.0, float(process_cpu_warn_ratio or 0.0))
         self._process_cpu_safe_ratio = max(0.0, float(process_cpu_safe_ratio or 0.0))
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -111,6 +125,10 @@ class WorkerPressureMonitor:
         self._stop_event = threading.Event()
         self._consecutive_warn = 0
         self._consecutive_safe = 0
+        self._consecutive_machine_warn = 0
+        self._consecutive_machine_safe = 0
+        self._consecutive_local_critical = 0
+        self._last_waiting_count = 0
         self._last_recovery_step_at = 0.0
         self._sample_mono = 0.0
         self._last_disk_sample: Any = None
@@ -128,6 +146,9 @@ class WorkerPressureMonitor:
             'tool_pressure_process_cpu_ratio': 0.0,
             'sqlite_write_wait_ms': 0.0,
             'sqlite_query_latency_ms': 0.0,
+            'machine_pressure_state': 'unknown',
+            'local_pressure_state': 'unknown',
+            'budget_state': 'normal',
             'pressure_sample_at': '',
             'tool_pressure_sample_at': '',
         }
@@ -142,18 +163,25 @@ class WorkerPressureMonitor:
         pressure_snapshot_stale_after_seconds: float,
         event_loop_warn_ms: float,
         event_loop_safe_ms: float,
+        event_loop_critical_ms: float,
         writer_queue_warn: int,
         writer_queue_safe: int,
+        writer_queue_critical: int,
         sqlite_write_wait_warn_ms: float,
         sqlite_write_wait_safe_ms: float,
+        sqlite_write_wait_critical_ms: float,
         sqlite_query_warn_ms: float,
         sqlite_query_safe_ms: float,
+        sqlite_query_critical_ms: float,
         machine_cpu_warn_percent: float,
         machine_cpu_safe_percent: float,
+        machine_cpu_critical_percent: float,
         machine_memory_warn_percent: float,
         machine_memory_safe_percent: float,
+        machine_memory_critical_percent: float,
         machine_disk_busy_warn_percent: float,
         machine_disk_busy_safe_percent: float,
+        machine_disk_busy_critical_percent: float,
         process_cpu_warn_ratio: float,
         process_cpu_safe_ratio: float,
     ) -> None:
@@ -165,18 +193,25 @@ class WorkerPressureMonitor:
             self._pressure_snapshot_stale_after_seconds = max(0.1, float(pressure_snapshot_stale_after_seconds or 3.0))
             self._event_loop_warn_ms = max(0.0, float(event_loop_warn_ms or 0.0))
             self._event_loop_safe_ms = max(0.0, float(event_loop_safe_ms or 0.0))
+            self._event_loop_critical_ms = max(0.0, float(event_loop_critical_ms or 0.0))
             self._writer_queue_warn = max(0, int(writer_queue_warn or 0))
             self._writer_queue_safe = max(0, int(writer_queue_safe or 0))
+            self._writer_queue_critical = max(1, int(writer_queue_critical or 1))
             self._sqlite_write_wait_warn_ms = max(0.0, float(sqlite_write_wait_warn_ms or 0.0))
             self._sqlite_write_wait_safe_ms = max(0.0, float(sqlite_write_wait_safe_ms or 0.0))
+            self._sqlite_write_wait_critical_ms = max(0.0, float(sqlite_write_wait_critical_ms or 0.0))
             self._sqlite_query_warn_ms = max(0.0, float(sqlite_query_warn_ms or 0.0))
             self._sqlite_query_safe_ms = max(0.0, float(sqlite_query_safe_ms or 0.0))
+            self._sqlite_query_critical_ms = max(0.0, float(sqlite_query_critical_ms or 0.0))
             self._machine_cpu_warn_percent = max(0.0, float(machine_cpu_warn_percent or 0.0))
             self._machine_cpu_safe_percent = max(0.0, float(machine_cpu_safe_percent or 0.0))
+            self._machine_cpu_critical_percent = max(0.0, float(machine_cpu_critical_percent or 0.0))
             self._machine_memory_warn_percent = max(0.0, float(machine_memory_warn_percent or 0.0))
             self._machine_memory_safe_percent = max(0.0, float(machine_memory_safe_percent or 0.0))
+            self._machine_memory_critical_percent = max(0.0, float(machine_memory_critical_percent or 0.0))
             self._machine_disk_busy_warn_percent = max(0.0, float(machine_disk_busy_warn_percent or 0.0))
             self._machine_disk_busy_safe_percent = max(0.0, float(machine_disk_busy_safe_percent or 0.0))
+            self._machine_disk_busy_critical_percent = max(0.0, float(machine_disk_busy_critical_percent or 0.0))
             self._process_cpu_warn_ratio = max(0.0, float(process_cpu_warn_ratio or 0.0))
             self._process_cpu_safe_ratio = max(0.0, float(process_cpu_safe_ratio or 0.0))
 
@@ -217,11 +252,23 @@ class WorkerPressureMonitor:
     ) -> dict[str, Any]:
         current_mono = float(now_mono if now_mono is not None else time.perf_counter())
         timestamp = str(now_iso or _now_iso()).strip() or _now_iso()
-        machine_missing = not bool(machine_available)
+        waiting_count = int(self._controller.snapshot().get('worker_execution_waiting_count') or 0)
+        machine_available_bool = bool(machine_available)
         machine_warn = (
-            float(machine_cpu_percent or 0.0) >= self._machine_cpu_warn_percent
-            or float(machine_memory_percent or 0.0) >= self._machine_memory_warn_percent
-            or (bool(disk_busy_available) and float(machine_disk_busy_percent or 0.0) >= self._machine_disk_busy_warn_percent)
+            machine_available_bool
+            and (
+                float(machine_cpu_percent or 0.0) >= self._machine_cpu_warn_percent
+                or float(machine_memory_percent or 0.0) >= self._machine_memory_warn_percent
+                or (bool(disk_busy_available) and float(machine_disk_busy_percent or 0.0) >= self._machine_disk_busy_warn_percent)
+            )
+        )
+        machine_critical = (
+            machine_available_bool
+            and (
+                float(machine_cpu_percent or 0.0) >= self._machine_cpu_critical_percent
+                or float(machine_memory_percent or 0.0) >= self._machine_memory_critical_percent
+                or (bool(disk_busy_available) and float(machine_disk_busy_percent or 0.0) >= self._machine_disk_busy_critical_percent)
+            )
         )
         machine_safe = (
             bool(machine_available)
@@ -232,12 +279,22 @@ class WorkerPressureMonitor:
                 or float(machine_disk_busy_percent or 0.0) <= self._machine_disk_busy_safe_percent
             )
         )
-        local_warn = (
+        local_degraded = (
             float(event_loop_lag_ms or 0.0) >= self._event_loop_warn_ms
             or int(writer_queue_depth or 0) >= self._writer_queue_warn
             or float(sqlite_write_wait_ms or 0.0) >= self._sqlite_write_wait_warn_ms
             or float(sqlite_query_latency_ms or 0.0) >= self._sqlite_query_warn_ms
             or float(process_cpu_ratio or 0.0) >= self._process_cpu_warn_ratio
+        )
+        local_critical = (
+            (
+                float(event_loop_lag_ms or 0.0) >= self._event_loop_critical_ms
+                and waiting_count > 0
+                and waiting_count > self._last_waiting_count
+            )
+            or int(writer_queue_depth or 0) >= self._writer_queue_critical
+            or float(sqlite_write_wait_ms or 0.0) >= self._sqlite_write_wait_critical_ms
+            or float(sqlite_query_latency_ms or 0.0) >= self._sqlite_query_critical_ms
         )
         local_safe = (
             float(event_loop_lag_ms or 0.0) <= self._event_loop_safe_ms
@@ -246,8 +303,14 @@ class WorkerPressureMonitor:
             and float(sqlite_query_latency_ms or 0.0) <= self._sqlite_query_safe_ms
             and float(process_cpu_ratio or 0.0) <= self._process_cpu_safe_ratio
         )
-        warn = machine_missing or machine_warn or local_warn
-        safe = machine_safe and local_safe
+        machine_state = 'unknown'
+        if machine_critical:
+            machine_state = 'critical'
+        elif machine_warn:
+            machine_state = 'warn'
+        elif machine_safe:
+            machine_state = 'normal'
+        local_state = 'critical' if local_critical else ('degraded' if local_degraded else ('normal' if local_safe else 'elevated'))
         with self._lock:
             self._sample_mono = current_mono
             self._snapshot = {
@@ -263,30 +326,75 @@ class WorkerPressureMonitor:
                 'tool_pressure_process_cpu_ratio': round(max(0.0, float(process_cpu_ratio or 0.0)), 4),
                 'sqlite_write_wait_ms': round(max(0.0, float(sqlite_write_wait_ms or 0.0)), 3),
                 'sqlite_query_latency_ms': round(max(0.0, float(sqlite_query_latency_ms or 0.0)), 3),
+                'machine_pressure_state': machine_state,
+                'local_pressure_state': local_state,
                 'pressure_sample_at': timestamp,
                 'tool_pressure_sample_at': timestamp,
             }
-            if warn:
-                self._consecutive_warn += 1
-                self._consecutive_safe = 0
-            elif safe:
-                self._consecutive_safe += 1
-                self._consecutive_warn = 0
+            if machine_state in {'warn', 'critical'}:
+                self._consecutive_machine_warn += 1
+                self._consecutive_machine_safe = 0
+            elif machine_safe:
+                self._consecutive_machine_safe += 1
+                self._consecutive_machine_warn = 0
             else:
-                self._consecutive_warn = 0
-                self._consecutive_safe = 0
+                self._consecutive_machine_warn = 0
+                self._consecutive_machine_safe = 0
+            if local_critical:
+                self._consecutive_local_critical += 1
+            else:
+                self._consecutive_local_critical = 0
 
             current_state = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
-            if self._consecutive_warn >= self._warn_consecutive_samples:
+            should_critical = (
+                (machine_critical and self._consecutive_machine_warn >= self._warn_consecutive_samples)
+                or (self._consecutive_local_critical >= self._warn_consecutive_samples and waiting_count > 0)
+            )
+            should_throttle = machine_warn and self._consecutive_machine_warn >= self._warn_consecutive_samples
+
+            next_state = current_state
+            if current_state == 'critical':
+                if should_critical:
+                    next_state = 'critical'
+                elif machine_safe and self._consecutive_machine_safe >= self._safe_consecutive_samples:
+                    self._controller.begin_recovery(at=timestamp)
+                    if current_mono - self._last_recovery_step_at >= self._recover_window_seconds or self._last_recovery_step_at <= 0.0:
+                        self._controller.step_recovery(at=timestamp)
+                        self._last_recovery_step_at = current_mono
+                    next_state = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
+                else:
+                    next_state = 'critical'
+            elif current_state in {'throttled', 'recovering'}:
+                if should_critical:
+                    next_state = 'critical'
+                elif should_throttle:
+                    next_state = 'throttled'
+                elif machine_safe and self._consecutive_machine_safe >= self._safe_consecutive_samples:
+                    self._controller.begin_recovery(at=timestamp)
+                    if current_mono - self._last_recovery_step_at >= self._recover_window_seconds or self._last_recovery_step_at <= 0.0:
+                        self._controller.step_recovery(at=timestamp)
+                        self._last_recovery_step_at = current_mono
+                    next_state = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
+                else:
+                    next_state = current_state
+            else:
+                if should_critical:
+                    next_state = 'critical'
+                elif should_throttle:
+                    next_state = 'throttled'
+                else:
+                    next_state = 'normal'
+
+            if next_state == 'critical':
+                self._controller.critical(at=timestamp)
+                self._last_recovery_step_at = current_mono
+            elif next_state == 'throttled':
                 self._controller.throttle(at=timestamp)
                 self._last_recovery_step_at = current_mono
-            elif current_state == 'throttled' and self._consecutive_safe >= self._safe_consecutive_samples:
-                self._controller.begin_recovery(at=timestamp)
-                self._last_recovery_step_at = current_mono
-            elif current_state == 'recovering':
-                if current_mono - self._last_recovery_step_at >= self._recover_window_seconds and self._consecutive_safe >= self._safe_consecutive_samples:
-                    if self._controller.step_recovery(at=timestamp):
-                        self._last_recovery_step_at = current_mono
+            elif next_state == 'normal' and current_state != 'normal' and machine_safe:
+                self._controller.set_budget_state('normal', at=timestamp)
+            self._snapshot['budget_state'] = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
+            self._last_waiting_count = waiting_count
         return self.snapshot()
 
     def start(self) -> None:

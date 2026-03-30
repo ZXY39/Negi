@@ -408,28 +408,36 @@ class NodeParallelismConfig(Base):
     max_parallel_tool_calls_per_node: int | None = None
     max_parallel_child_pipelines_per_node: int | None = None
     adaptive_total_tool_budget_enabled: bool = True
-    adaptive_total_tool_budget_normal_limit: int = 4
-    adaptive_total_tool_budget_safe_limit: int = 1
+    adaptive_total_tool_budget_normal_limit: int = 6
+    adaptive_total_tool_budget_throttled_limit: int = 2
+    adaptive_total_tool_budget_critical_limit: int = 1
     adaptive_total_tool_budget_step_up: int = 1
     adaptive_total_tool_budget_sample_seconds: float = 1.0
-    adaptive_total_tool_budget_recover_window_seconds: float = 10.0
+    adaptive_total_tool_budget_recover_window_seconds: float = 5.0
     adaptive_total_tool_budget_warn_consecutive_samples: int = 3
     adaptive_total_tool_budget_safe_consecutive_samples: int = 5
     adaptive_event_loop_warn_ms: float = 250.0
     adaptive_event_loop_safe_ms: float = 100.0
+    adaptive_event_loop_critical_ms: float = 1500.0
     adaptive_writer_queue_warn: int = 50
     adaptive_writer_queue_safe: int = 10
+    adaptive_writer_queue_critical: int = 100
     adaptive_pressure_snapshot_stale_after_seconds: float = 3.0
     adaptive_machine_cpu_warn_percent: float = 85.0
     adaptive_machine_cpu_safe_percent: float = 55.0
+    adaptive_machine_cpu_critical_percent: float = 95.0
     adaptive_machine_memory_warn_percent: float = 88.0
     adaptive_machine_memory_safe_percent: float = 75.0
+    adaptive_machine_memory_critical_percent: float = 94.0
     adaptive_machine_disk_busy_warn_percent: float = 70.0
     adaptive_machine_disk_busy_safe_percent: float = 35.0
+    adaptive_machine_disk_busy_critical_percent: float = 90.0
     adaptive_sqlite_write_wait_warn_ms: float = 200.0
     adaptive_sqlite_write_wait_safe_ms: float = 50.0
+    adaptive_sqlite_write_wait_critical_ms: float = 250.0
     adaptive_sqlite_query_warn_ms: float = 150.0
     adaptive_sqlite_query_safe_ms: float = 30.0
+    adaptive_sqlite_query_critical_ms: float = 250.0
     adaptive_process_cpu_warn_ratio: float = 0.85
     adaptive_process_cpu_safe_ratio: float = 0.50
 
@@ -445,12 +453,14 @@ class NodeParallelismConfig(Base):
 
     @field_validator(
         "adaptive_total_tool_budget_normal_limit",
-        "adaptive_total_tool_budget_safe_limit",
+        "adaptive_total_tool_budget_throttled_limit",
+        "adaptive_total_tool_budget_critical_limit",
         "adaptive_total_tool_budget_step_up",
         "adaptive_total_tool_budget_warn_consecutive_samples",
         "adaptive_total_tool_budget_safe_consecutive_samples",
         "adaptive_writer_queue_warn",
         "adaptive_writer_queue_safe",
+        "adaptive_writer_queue_critical",
     )
     @classmethod
     def _clamp_positive_int(cls, value: int) -> int:
@@ -462,16 +472,22 @@ class NodeParallelismConfig(Base):
         "adaptive_pressure_snapshot_stale_after_seconds",
         "adaptive_event_loop_warn_ms",
         "adaptive_event_loop_safe_ms",
+        "adaptive_event_loop_critical_ms",
         "adaptive_machine_cpu_warn_percent",
         "adaptive_machine_cpu_safe_percent",
+        "adaptive_machine_cpu_critical_percent",
         "adaptive_machine_memory_warn_percent",
         "adaptive_machine_memory_safe_percent",
+        "adaptive_machine_memory_critical_percent",
         "adaptive_machine_disk_busy_warn_percent",
         "adaptive_machine_disk_busy_safe_percent",
+        "adaptive_machine_disk_busy_critical_percent",
         "adaptive_sqlite_write_wait_warn_ms",
         "adaptive_sqlite_write_wait_safe_ms",
+        "adaptive_sqlite_write_wait_critical_ms",
         "adaptive_sqlite_query_warn_ms",
         "adaptive_sqlite_query_safe_ms",
+        "adaptive_sqlite_query_critical_ms",
         "adaptive_process_cpu_warn_ratio",
         "adaptive_process_cpu_safe_ratio",
     )
