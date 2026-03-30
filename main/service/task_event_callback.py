@@ -12,6 +12,7 @@ from main.service.task_terminal_callback import (
 
 
 TASK_EVENT_CALLBACK_PATH = "/api/internal/task-event"
+TASK_EVENT_BATCH_CALLBACK_PATH = "/api/internal/task-event-batch"
 _ALLOWED_TASK_EVENT_TYPES = {
     "task.summary.patch",
     "task.node.patch",
@@ -44,6 +45,15 @@ def resolve_task_event_callback_url(*, workspace: Path | str | None = None) -> s
         terminal_url,
         expected_path=TASK_TERMINAL_CALLBACK_PATH,
         target_path=TASK_EVENT_CALLBACK_PATH,
+    )
+
+
+def resolve_task_event_batch_callback_url(*, workspace: Path | str | None = None) -> str:
+    terminal_url = resolve_task_terminal_callback_url(workspace=workspace)
+    return _replace_callback_path(
+        terminal_url,
+        expected_path=TASK_TERMINAL_CALLBACK_PATH,
+        target_path=TASK_EVENT_BATCH_CALLBACK_PATH,
     )
 
 

@@ -37,6 +37,39 @@ async def post_task_event_callback(
     return {'ok': True, 'accepted': accepted, 'event_type': normalized.get('event_type')}
 
 
+@router.post('/internal/task-event-batch')
+async def post_task_event_batch_callback(
+    payload: dict,
+    x_g3ku_internal_token: str | None = Header(default=None, alias='x-g3ku-internal-token'),
+):
+    expected_token = resolve_task_terminal_callback_token()
+    if expected_token and str(x_g3ku_internal_token or '').strip() != expected_token:
+        raise HTTPException(status_code=403, detail='internal_callback_forbidden')
+
+    raw_items = list(payload.get('items') or []) if isinstance(payload, dict) else []
+    if not raw_items:
+        raise HTTPException(status_code=400, detail='task_event_batch_payload_invalid')
+
+    normalized_items: list[dict[str, object]] = []
+    for item in raw_items:
+        normalized = normalize_task_event_payload(item if isinstance(item, dict) else None)
+        if not normalized or str(normalized.get('event_type') or '').strip() != 'task.summary.patch':
+            raise HTTPException(status_code=400, detail='task_event_batch_payload_invalid')
+        normalized_items.append(normalized)
+
+    agent = get_agent()
+    service = getattr(agent, 'main_task_service', None)
+    if service is None:
+        raise HTTPException(status_code=503, detail='main_task_service_unavailable')
+
+    await ensure_web_runtime_services(agent)
+    accepted = 0
+    for normalized in normalized_items:
+        if bool(getattr(service, 'forward_live_task_event', lambda _payload: False)(normalized)):
+            accepted += 1
+    return {'ok': True, 'accepted': accepted, 'items': len(normalized_items)}
+
+
 @router.post('/internal/task-terminal')
 async def post_task_terminal_callback(
     payload: dict,

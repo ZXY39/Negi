@@ -85,6 +85,7 @@ from main.service.task_stall_callback import (
 )
 from main.service.task_event_callback import (
     normalize_task_event_payload,
+    resolve_task_event_batch_callback_url,
     resolve_task_event_callback_token,
     resolve_task_event_callback_url,
 )
@@ -103,6 +104,12 @@ _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
 _WORKER_STATUS_STARTING_GRACE_SECONDS = 10.0
 _WORKER_STATUS_CALLBACK_RETRY_DELAYS = [0.0, 0.5, 2.0, 5.0]
 _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS = 2.0
+_TASK_SUMMARY_DEBOUNCE_SECONDS = 0.5
+_TASK_SUMMARY_MAX_WAIT_SECONDS = 1.0
+_TASK_SUMMARY_BATCH_WINDOW_SECONDS = 0.25
+_TASK_SUMMARY_BATCH_MAX_ITEMS = 128
+_TASK_SUMMARY_BATCH_MAX_BYTES = 64 * 1024
+_TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
 _WORKER_STATE_STARTING = 'starting'
 _WORKER_STATE_ONLINE = 'online'
 _WORKER_STATE_STALE = 'stale'
@@ -251,6 +258,7 @@ class MainRuntimeService:
             debug_recorder=self.runtime_debug_recorder,
         )
         self.log_service.add_live_snapshot_publisher(self._publish_live_snapshot)
+        self.log_service.add_summary_metric_reporter(self._increment_summary_stat)
         self.task_stall_notifier = TaskStallNotifier(service=self)
         self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
@@ -365,8 +373,20 @@ class MainRuntimeService:
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_worker_status_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
-        self._task_summary_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_summary_delivery_task: asyncio.Task[Any] | None = None
         self._task_event_dispatch_tasks: set[asyncio.Task[Any]] = set()
+        self._callback_client: httpx.AsyncClient | None = None
+        self._pending_task_summaries: dict[str, dict[str, Any]] = {}
+        self._task_summary_flush_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._last_summary_payloads: dict[str, dict[str, Any]] = {}
+        self._task_summary_stats: dict[str, float] = {
+            'task_summary_dirty_count': 0.0,
+            'task_summary_flush_count': 0.0,
+            'task_summary_skip_unchanged_count': 0.0,
+            'task_summary_outbox_write_count': 0.0,
+            'task_summary_batch_request_count': 0.0,
+            'task_summary_batch_item_count': 0.0,
+        }
         if self.execution_mode == 'worker':
             self.log_service.add_task_terminal_listener(self._enqueue_task_terminal_callback)
 
@@ -1014,6 +1034,31 @@ class MainRuntimeService:
         self.registry.publish_task_list(target_session_id, payload)
         return payload
 
+    def _callback_headers(self, *, token: str) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        normalized_token = str(token or '').strip()
+        if normalized_token:
+            headers['x-g3ku-internal-token'] = normalized_token
+        return headers
+
+    def _get_callback_client(self) -> httpx.AsyncClient:
+        client = self._callback_client
+        if client is None:
+            client = httpx.AsyncClient()
+            self._callback_client = client
+        return client
+
+    async def _post_internal_callback(
+        self,
+        url: str,
+        *,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+    ) -> httpx.Response:
+        client = self._get_callback_client()
+        return await client.post(url, json=payload, headers=headers, timeout=float(timeout or _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS))
+
     def _schedule_task_event_callback(self, payload: dict[str, Any] | None) -> None:
         if self.execution_mode != 'worker':
             return
@@ -1039,13 +1084,15 @@ class MainRuntimeService:
         callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
         if not callback_url:
             return
-        headers: dict[str, str] = {}
         callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
-        if callback_token:
-            headers['x-g3ku-internal-token'] = callback_token
+        headers = self._callback_headers(token=callback_token)
         try:
-            async with httpx.AsyncClient(timeout=1.5) as client:
-                await client.post(callback_url, json=payload, headers=headers)
+            await self._post_internal_callback(
+                callback_url,
+                payload=payload,
+                headers=headers,
+                timeout=1.5,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1185,6 +1232,18 @@ class MainRuntimeService:
         event_type = str(payload.get('event_type') or '').strip()
         data = dict(payload.get('data') or {})
         if event_type == 'task.summary.patch':
+            if self.execution_mode == 'worker':
+                self._enqueue_task_summary_callback(
+                    {
+                        'event_type': event_type,
+                        'session_id': task.session_id,
+                        'task_id': task.task_id,
+                        'data': data,
+                    },
+                    immediate=bool(payload.get('dispatch_immediate')),
+                )
+                self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+                return
             self._publish_task_list_envelope(
                 target_session_id=task.session_id,
                 session_id=task.session_id,
@@ -1208,15 +1267,6 @@ class MainRuntimeService:
                 data=data,
             )
             self.registry.publish_global_task(task.task_id, detail_payload)
-            if self.execution_mode == 'worker':
-                self._schedule_task_event_callback(
-                    {
-                        'event_type': event_type,
-                        'session_id': task.session_id,
-                        'task_id': task.task_id,
-                        'data': data,
-                    }
-                )
             self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
             return
         if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'}:
@@ -1668,30 +1718,81 @@ class MainRuntimeService:
             return
         self._schedule_task_worker_status_delivery(worker_id)
 
-    def _enqueue_task_summary_callback(self, payload: dict[str, Any] | None) -> None:
+    def _summary_stats_snapshot(self) -> dict[str, float]:
+        snapshot = {key: float(value or 0.0) for key, value in dict(self._task_summary_stats or {}).items()}
+        snapshot['task_summary_pending_count'] = float(len(self._pending_task_summaries))
+        return snapshot
+
+    def _increment_summary_stat(self, key: str, amount: float = 1.0) -> None:
+        normalized_key = str(key or '').strip()
+        if not normalized_key:
+            return
+        current = float(self._task_summary_stats.get(normalized_key, 0.0) or 0.0)
+        self._task_summary_stats[normalized_key] = current + float(amount or 0.0)
+
+    @staticmethod
+    def _summary_payload_task_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+        data = dict((payload or {}).get('data') or {})
+        return dict(data.get('task') or {}) if isinstance(data.get('task'), dict) else {}
+
+    def _summary_payload_requires_immediate(self, task_id: str, task_payload: dict[str, Any]) -> bool:
+        previous = dict(self._last_summary_payloads.get(task_id) or {})
+        if not previous:
+            return True
+        for key in ('status', 'is_paused', 'is_unread'):
+            if previous.get(key) != task_payload.get(key):
+                return True
+        return False
+
+    def _ensure_task_summary_flush_task(self, task_id: str) -> None:
+        key = self.normalize_task_id(str(task_id or '').strip())
+        if self.execution_mode != 'worker' or not key:
+            return
+        current = self._task_summary_flush_tasks.get(key)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._flush_task_summary_to_outbox(key)
+            return
+        task = loop.create_task(self._run_task_summary_flush(key), name=f'main-runtime-task-summary-flush:{key}')
+        self._task_summary_flush_tasks[key] = task
+        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_summary_flush_task(stored_key, done_task))
+
+    def _clear_task_summary_flush_task(self, task_id: str, done_task: asyncio.Task[Any]) -> None:
+        current = self._task_summary_flush_tasks.get(task_id)
+        if current is done_task:
+            self._task_summary_flush_tasks.pop(task_id, None)
+
+    def _enqueue_task_summary_callback(self, payload: dict[str, Any] | None, *, immediate: bool = False) -> None:
         if self.execution_mode != 'worker':
             return
         normalized = normalize_task_event_payload(payload)
         if not normalized or str(normalized.get('event_type') or '').strip() != 'task.summary.patch':
             return
-        task_id = str(normalized.get('task_id') or '').strip()
+        task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip())
         if not task_id:
             return
-        session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
-        data = dict(normalized.get('data') or {})
-        task_payload = dict(data.get('task') or {}) if isinstance(data.get('task'), dict) else {}
-        created_at = str(task_payload.get('updated_at') or now_iso()).strip() or now_iso()
-        try:
-            self.store.put_task_summary_outbox(
-                task_id=task_id,
-                session_id=session_id,
-                created_at=created_at,
-                payload=normalized,
-            )
-        except Exception:
-            logger.exception('failed to persist task summary outbox for {}', task_id)
+        task_payload = self._summary_payload_task_payload(normalized)
+        if not task_payload:
             return
-        self._schedule_task_summary_delivery(task_id)
+        self._increment_summary_stat('task_summary_dirty_count')
+        if immediate or self._summary_payload_requires_immediate(task_id, task_payload):
+            self._flush_task_summary_to_outbox(task_id, normalized)
+            return
+        now_mono = time.monotonic()
+        current = self._pending_task_summaries.get(task_id)
+        if current is None:
+            self._pending_task_summaries[task_id] = {
+                'payload': normalized,
+                'first_dirty_mono': now_mono,
+                'last_dirty_mono': now_mono,
+            }
+        else:
+            current['payload'] = normalized
+            current['last_dirty_mono'] = now_mono
+        self._ensure_task_summary_flush_task(task_id)
 
     def _schedule_pending_task_worker_status_callbacks(self) -> None:
         if self.execution_mode != 'worker':
@@ -1709,81 +1810,153 @@ class MainRuntimeService:
             if task_id:
                 self._schedule_task_summary_delivery(task_id)
 
-    def _schedule_task_summary_delivery(self, task_id: str) -> None:
+    async def _run_task_summary_flush(self, task_id: str) -> None:
+        key = self.normalize_task_id(str(task_id or '').strip())
+        if not key:
+            return
+        while True:
+            current = dict(self._pending_task_summaries.get(key) or {})
+            if not current:
+                return
+            first_dirty_mono = float(current.get('first_dirty_mono') or time.monotonic())
+            last_dirty_mono = float(current.get('last_dirty_mono') or first_dirty_mono)
+            due_mono = min(
+                last_dirty_mono + _TASK_SUMMARY_DEBOUNCE_SECONDS,
+                first_dirty_mono + _TASK_SUMMARY_MAX_WAIT_SECONDS,
+            )
+            delay_seconds = max(0.0, due_mono - time.monotonic())
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+                continue
+            self._flush_task_summary_to_outbox(key)
+
+    def _flush_task_summary_to_outbox(self, task_id: str, payload: dict[str, Any] | None = None) -> None:
         key = self.normalize_task_id(str(task_id or '').strip())
         if self.execution_mode != 'worker' or not key:
             return
-        current = self._task_summary_delivery_tasks.get(key)
+        pending_entry = self._pending_task_summaries.pop(key, None)
+        normalized = normalize_task_event_payload(payload) if payload is not None else dict(
+            (pending_entry or {}).get('payload') or {}
+        )
+        if not normalized or str(normalized.get('event_type') or '').strip() != 'task.summary.patch':
+            return
+        session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
+        task_payload = self._summary_payload_task_payload(normalized)
+        created_at = str(task_payload.get('updated_at') or now_iso()).strip() or now_iso()
+        try:
+            self.store.put_task_summary_outbox(
+                task_id=key,
+                session_id=session_id,
+                created_at=created_at,
+                payload=normalized,
+            )
+        except Exception:
+            logger.exception('failed to persist task summary outbox for {}', key)
+            return
+        self._last_summary_payloads[key] = dict(task_payload)
+        self._increment_summary_stat('task_summary_flush_count')
+        self._increment_summary_stat('task_summary_outbox_write_count')
+        self._schedule_task_summary_delivery(key)
+
+    def _schedule_task_summary_delivery(self, _task_id: str | None = None) -> None:
+        if self.execution_mode != 'worker':
+            return
+        current = self._task_summary_delivery_task
         if current is not None and not current.done():
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = loop.create_task(self._deliver_task_summary_outbox(key), name=f'main-runtime-task-summary:{key}')
-        self._task_summary_delivery_tasks[key] = task
-        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_summary_delivery_task(stored_key, done_task))
+        self._task_summary_delivery_task = loop.create_task(
+            self._deliver_task_summary_batches(),
+            name=f'main-runtime-task-summary-batch:{self.worker_id or "worker"}',
+        )
 
-    def _clear_task_summary_delivery_task(self, task_id: str, done_task: asyncio.Task[Any]) -> None:
-        current = self._task_summary_delivery_tasks.get(task_id)
-        if current is done_task:
-            self._task_summary_delivery_tasks.pop(task_id, None)
-
-    async def _deliver_task_summary_outbox(self, task_id: str) -> None:
+    async def _deliver_task_summary_batches(self) -> None:
         retry_delays = list(_WORKER_STATUS_CALLBACK_RETRY_DELAYS or [0.0, 0.5, 2.0, 5.0])
         if not retry_delays:
             retry_delays = [0.0]
         attempt_index = 0
         while True:
-            delay_seconds = float(retry_delays[min(attempt_index, len(retry_delays) - 1)] or 0.0)
+            delay_seconds = _TASK_SUMMARY_BATCH_WINDOW_SECONDS if attempt_index == 0 else float(
+                retry_delays[min(attempt_index, len(retry_delays) - 1)] or 0.0
+            )
             if delay_seconds > 0:
                 await asyncio.sleep(delay_seconds)
-            entry = self.store.get_task_summary_outbox(task_id)
-            if not entry:
+            entries = list(self.store.list_pending_task_summary_outbox(limit=max(_TASK_SUMMARY_BATCH_MAX_ITEMS * 2, 256)) or [])
+            if not entries:
                 return
-            if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+            batch_entries: list[dict[str, Any]] = []
+            batch_items: list[dict[str, Any]] = []
+            bytes_total = 0
+            for entry in entries:
+                payload = dict(entry.get('payload') or {})
+                encoded_size = len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+                if batch_entries and (
+                    len(batch_entries) >= _TASK_SUMMARY_BATCH_MAX_ITEMS
+                    or bytes_total + encoded_size > _TASK_SUMMARY_BATCH_MAX_BYTES
+                ):
+                    break
+                batch_entries.append(entry)
+                batch_items.append(payload)
+                bytes_total += encoded_size
+            if not batch_entries:
                 return
-            payload = dict(entry.get('payload') or {})
-            version = max(1, int(entry.get('version') or 0))
-            callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
+            callback_url = resolve_task_event_batch_callback_url(workspace=Path.cwd())
             if not callback_url:
-                updated = self.store.mark_task_summary_outbox_attempt(
-                    task_id,
-                    attempted_at=now_iso(),
-                    error_text='task_event_callback_url_unavailable',
-                    expected_version=version,
-                )
-                attempt_index = attempt_index + 1 if updated else 0
+                for entry in batch_entries:
+                    self.store.mark_task_summary_outbox_attempt(
+                        str(entry.get('task_id') or ''),
+                        attempted_at=now_iso(),
+                        error_text='task_event_batch_callback_url_unavailable',
+                        expected_version=int(entry.get('version') or 0),
+                    )
+                attempt_index += 1
                 continue
             headers: dict[str, str] = {}
             callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
             if callback_token:
                 headers['x-g3ku-internal-token'] = callback_token
             try:
-                async with httpx.AsyncClient(timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS) as client:
-                    response = await client.post(callback_url, json=payload, headers=headers)
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload={'items': batch_items},
+                    headers=headers,
+                    timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
+                )
                 if 200 <= int(response.status_code or 0) < 300:
-                    delivered = self.store.mark_task_summary_outbox_delivered(
-                        task_id,
-                        delivered_at=now_iso(),
-                        expected_version=version,
-                    )
-                    if delivered:
-                        return
+                    for entry in batch_entries:
+                        self.store.mark_task_summary_outbox_delivered(
+                            str(entry.get('task_id') or ''),
+                            delivered_at=now_iso(),
+                            expected_version=int(entry.get('version') or 0),
+                        )
+                    self._increment_summary_stat('task_summary_batch_request_count')
+                    self._increment_summary_stat('task_summary_batch_item_count', float(len(batch_entries)))
                     attempt_index = 0
                     continue
-                error_text = f'task_event_callback_http_{int(response.status_code or 0)}'
+                error_text = f'task_event_batch_callback_http_{int(response.status_code or 0)}'
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                error_text = str(exc or 'task_event_callback_failed').strip() or 'task_event_callback_failed'
-            updated = self.store.mark_task_summary_outbox_attempt(
-                task_id,
-                attempted_at=now_iso(),
-                error_text=error_text,
-                expected_version=version,
-            )
-            attempt_index = attempt_index + 1 if updated else 0
+                error_text = str(exc or 'task_event_batch_callback_failed').strip() or 'task_event_batch_callback_failed'
+            for entry in batch_entries:
+                self.store.mark_task_summary_outbox_attempt(
+                    str(entry.get('task_id') or ''),
+                    attempted_at=now_iso(),
+                    error_text=error_text,
+                    expected_version=int(entry.get('version') or 0),
+                )
+            attempt_index += 1
+
+    async def _deliver_task_summary_outbox(self, task_id: str) -> None:
+        key = self.normalize_task_id(str(task_id or '').strip())
+        if not key:
+            return
+        if self.store.get_task_summary_outbox(key) is None:
+            return
+        await self._deliver_task_summary_batches()
 
     def _schedule_task_worker_status_delivery(self, worker_id: str) -> None:
         key = str(worker_id or '').strip()
@@ -1823,13 +1996,15 @@ class MainRuntimeService:
                     error_text='task_event_callback_url_unavailable',
                 )
                 return
-            headers: dict[str, str] = {}
             callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
-            if callback_token:
-                headers['x-g3ku-internal-token'] = callback_token
+            headers = self._callback_headers(token=callback_token)
             try:
-                async with httpx.AsyncClient(timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS) as client:
-                    response = await client.post(callback_url, json=payload, headers=headers)
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
+                )
                 if 200 <= int(response.status_code or 0) < 300:
                     self.store.mark_task_worker_status_outbox_delivered(worker_id, delivered_at=now_iso())
                     return
@@ -1914,13 +2089,15 @@ class MainRuntimeService:
                     error_text='task_stall_callback_url_unavailable',
                 )
                 return
-            headers: dict[str, str] = {}
             callback_token = resolve_task_stall_callback_token(workspace=Path.cwd())
-            if callback_token:
-                headers['x-g3ku-internal-token'] = callback_token
+            headers = self._callback_headers(token=callback_token)
             try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    response = await client.post(callback_url, json=payload, headers=headers)
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=2.0,
+                )
                 if 200 <= int(response.status_code or 0) < 300:
                     self.store.mark_task_stall_outbox_delivered(dedupe_key, delivered_at=now_iso())
                     return
@@ -1982,13 +2159,15 @@ class MainRuntimeService:
                     error_text='task_terminal_callback_url_unavailable',
                 )
                 return
-            headers: dict[str, str] = {}
             callback_token = resolve_task_terminal_callback_token(workspace=Path.cwd())
-            if callback_token:
-                headers['x-g3ku-internal-token'] = callback_token
+            headers = self._callback_headers(token=callback_token)
             try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    response = await client.post(callback_url, json=payload, headers=headers)
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=2.0,
+                )
                 if 200 <= int(response.status_code or 0) < 300:
                     self.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
                     return
@@ -3740,18 +3919,30 @@ class MainRuntimeService:
         if worker_status_delivery_tasks:
             await asyncio.gather(*worker_status_delivery_tasks, return_exceptions=True)
         self._task_worker_status_delivery_tasks.clear()
-        task_summary_delivery_tasks = [task for task in self._task_summary_delivery_tasks.values() if task is not None and not task.done()]
-        for task in task_summary_delivery_tasks:
+        task_summary_flush_tasks = [task for task in self._task_summary_flush_tasks.values() if task is not None and not task.done()]
+        for task in task_summary_flush_tasks:
             task.cancel()
-        if task_summary_delivery_tasks:
-            await asyncio.gather(*task_summary_delivery_tasks, return_exceptions=True)
-        self._task_summary_delivery_tasks.clear()
+        if task_summary_flush_tasks:
+            await asyncio.gather(*task_summary_flush_tasks, return_exceptions=True)
+        self._task_summary_flush_tasks.clear()
+        if self._pending_task_summaries:
+            for task_id in list(self._pending_task_summaries.keys()):
+                self._flush_task_summary_to_outbox(task_id)
+        task_summary_delivery_task = self._task_summary_delivery_task
+        if task_summary_delivery_task is not None and not task_summary_delivery_task.done():
+            task_summary_delivery_task.cancel()
+            await asyncio.gather(task_summary_delivery_task, return_exceptions=True)
+        self._task_summary_delivery_task = None
         callback_tasks = [task for task in list(self._task_event_dispatch_tasks) if task is not None and not task.done()]
         for task in callback_tasks:
             task.cancel()
         if callback_tasks:
             await asyncio.gather(*callback_tasks, return_exceptions=True)
         self._task_event_dispatch_tasks.clear()
+        callback_client = self._callback_client
+        self._callback_client = None
+        if callback_client is not None:
+            await callback_client.aclose()
         if self.tool_pressure_monitor is not None:
             await self.tool_pressure_monitor.close()
         await self.worker_heartbeat_service.close()
@@ -3778,16 +3969,24 @@ class MainRuntimeService:
         self.store.close()
 
     def _tool_pressure_snapshot(self) -> dict[str, Any]:
+        summary_stats = self._summary_stats_snapshot()
         if self.tool_pressure_monitor is not None:
-            return dict(self.tool_pressure_monitor.snapshot() or {})
+            return {**dict(self.tool_pressure_monitor.snapshot() or {}), **summary_stats}
         if self.adaptive_tool_budget_controller is not None:
-            return dict(self.adaptive_tool_budget_controller.snapshot() or {})
-        return {}
+            return {**dict(self.adaptive_tool_budget_controller.snapshot() or {}), **summary_stats}
+        return summary_stats
 
     def _tool_pressure_status_payload(self, item: dict[str, Any] | None) -> dict[str, Any]:
         current_payload = dict(item.get('payload') or {}) if isinstance(item, dict) else {}
         live_snapshot = self._tool_pressure_snapshot() if self.execution_mode == 'worker' else {}
         merged = {**current_payload, **live_snapshot}
+        summary_stats = self._summary_stats_snapshot()
+        for key in list(summary_stats.keys()):
+            if key in merged:
+                try:
+                    summary_stats[key] = float(merged.get(key) or 0.0)
+                except Exception:
+                    summary_stats[key] = 0.0
         sample_at = str(merged.get('pressure_sample_at') or merged.get('tool_pressure_sample_at') or '')
         sample_age_ms: float | None
         sample_dt = self._parse_worker_timestamp(sample_at)
@@ -3847,6 +4046,7 @@ class MainRuntimeService:
             'worker_heartbeat_at': heartbeat_at,
             'worker_heartbeat_age_ms': round(heartbeat_age_ms, 3) if heartbeat_age_ms is not None else None,
             'worker_heartbeat_fresh': heartbeat_fresh,
+            **summary_stats,
             'debug': dict(merged.get('debug') or {}) if isinstance(merged.get('debug'), dict) else {},
         }
 

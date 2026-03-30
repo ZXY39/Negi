@@ -292,6 +292,65 @@ def test_internal_task_event_callback_forwards_live_patch(tmp_path: Path, monkey
         assert pushed["data"]["task_id"] == record.task_id
 
 
+def test_internal_task_event_batch_callback_forwards_summary_patches(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+
+    client = TestClient(_build_app())
+    first = asyncio.run(_create_web_task(service))
+    second = asyncio.run(_create_web_task(service))
+    with client.websocket_connect("/api/ws/tasks?session_id=all&after_seq=0") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "task.worker.status"
+
+        payload = {
+            "items": [
+                {
+                    "event_type": "task.summary.patch",
+                    "session_id": first.session_id,
+                    "task_id": first.task_id,
+                    "data": {"task": {"task_id": first.task_id, "session_id": first.session_id, "title": first.title, "brief": "patched-one"}},
+                },
+                {
+                    "event_type": "task.summary.patch",
+                    "session_id": second.session_id,
+                    "task_id": second.task_id,
+                    "data": {"task": {"task_id": second.task_id, "session_id": second.session_id, "title": second.title, "brief": "patched-two"}},
+                },
+            ]
+        }
+        response = client.post(
+            "/api/internal/task-event-batch",
+            json=payload,
+            headers={"x-g3ku-internal-token": "secret-token"},
+        )
+        assert response.status_code == 200
+        assert response.json()["accepted"] == 2
+
+        first_event = _receive_until_type(ws, "task.summary.patch")
+        second_event = _receive_until_type(ws, "task.summary.patch")
+        briefs = {
+            str(first_event["data"]["task"]["task_id"]): str(first_event["data"]["task"]["brief"]),
+            str(second_event["data"]["task"]["task_id"]): str(second_event["data"]["task"]["brief"]),
+        }
+        assert briefs[first.task_id] == "patched-one"
+        assert briefs[second.task_id] == "patched-two"
+
+
 @pytest.mark.asyncio
 async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
@@ -586,7 +645,7 @@ def test_worker_task_summary_persists_outbox_and_schedules_delivery(tmp_path: Pa
         execution_mode="worker",
     )
     scheduled: list[str] = []
-    service._schedule_task_summary_delivery = lambda task_id: scheduled.append(str(task_id))
+    service._schedule_task_summary_delivery = lambda task_id=None: scheduled.append(str(task_id or ""))
 
     updated_at = now_iso()
     service._schedule_task_event_callback(
@@ -623,7 +682,7 @@ def test_worker_task_summary_outbox_keeps_latest_payload(tmp_path: Path):
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="worker",
     )
-    service._schedule_task_summary_delivery = lambda _task_id: None
+    service._schedule_task_summary_delivery = lambda _task_id=None: None
 
     first_updated_at = now_iso()
     second_updated_at = (datetime.now(timezone.utc) + timedelta(seconds=3)).isoformat()
@@ -677,7 +736,7 @@ async def test_worker_task_summary_outbox_retries_and_marks_delivered(tmp_path: 
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="worker",
     )
-    service._schedule_task_summary_delivery = lambda _task_id: None
+    service._schedule_task_summary_delivery = lambda _task_id=None: None
     service._schedule_task_event_callback(
         {
             "event_type": "task.summary.patch",
@@ -700,18 +759,16 @@ async def test_worker_task_summary_outbox_retries_and_marks_delivered(tmp_path: 
     attempts: list[str] = []
 
     class _AsyncClient:
-        def __init__(self, timeout: float):
-            assert float(timeout) == 2.0
+        def __init__(self, *args, **kwargs):
+            return None
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url: str, json: dict | None = None, headers: dict | None = None):
+        async def post(self, url: str, json: dict | None = None, headers: dict | None = None, timeout: float | None = None):
             attempts.append(str(url))
+            assert float(timeout or 0.0) == 2.0
             assert str(headers.get("x-g3ku-internal-token") or "") == "secret-token"
+            assert str(url).endswith("/api/internal/task-event-batch")
+            assert isinstance(json, dict)
+            assert len(list(json.get("items") or [])) == 1
             if len(attempts) == 1:
                 return httpx.Response(500, json={"error": "retry"})
             return httpx.Response(200, json={"ok": True})
@@ -729,6 +786,66 @@ async def test_worker_task_summary_outbox_retries_and_marks_delivered(tmp_path: 
     assert entry["delivery_state"] == "delivered"
     assert entry["attempts"] == 1
     assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_task_summary_batch_delivery_groups_multiple_items(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    service.store.put_task_summary_outbox(
+        task_id="task:one",
+        session_id="web:shared",
+        created_at=now_iso(),
+        payload={
+            "event_type": "task.summary.patch",
+            "session_id": "web:shared",
+            "task_id": "task:one",
+            "data": {"task": {"task_id": "task:one", "title": "one", "updated_at": now_iso()}},
+        },
+    )
+    service.store.put_task_summary_outbox(
+        task_id="task:two",
+        session_id="web:shared",
+        created_at=now_iso(),
+        payload={
+            "event_type": "task.summary.patch",
+            "session_id": "web:shared",
+            "task_id": "task:two",
+            "data": {"task": {"task_id": "task:two", "title": "two", "updated_at": now_iso()}},
+        },
+    )
+    monkeypatch.setenv("G3KU_INTERNAL_CALLBACK_URL", "http://127.0.0.1:18790/api/internal/task-terminal")
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+
+    posted: list[dict[str, object]] = []
+
+    class _AsyncClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def post(self, url: str, json: dict | None = None, headers: dict | None = None, timeout: float | None = None):
+            posted.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+            return httpx.Response(200, json={"ok": True})
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("main.service.runtime_service.httpx.AsyncClient", _AsyncClient)
+    monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
+
+    await service._deliver_task_summary_batches()
+
+    assert len(posted) == 1
+    assert str(posted[0]["url"]).endswith("/api/internal/task-event-batch")
+    assert len(list((posted[0]["json"] or {}).get("items") or [])) == 2
+    assert service.store.get_task_summary_outbox("task:one")["delivery_state"] == "delivered"
+    assert service.store.get_task_summary_outbox("task:two")["delivery_state"] == "delivered"
 
 
 @pytest.mark.asyncio
@@ -757,17 +874,12 @@ async def test_worker_task_status_outbox_retries_and_marks_delivered(tmp_path: P
     attempts: list[str] = []
 
     class _AsyncClient:
-        def __init__(self, timeout: float):
-            assert float(timeout) == 2.0
+        def __init__(self, *args, **kwargs):
+            return None
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url: str, json: dict | None = None, headers: dict | None = None):
+        async def post(self, url: str, json: dict | None = None, headers: dict | None = None, timeout: float | None = None):
             attempts.append(str(url))
+            assert float(timeout or 0.0) == 2.0
             assert str(headers.get("x-g3ku-internal-token") or "") == "secret-token"
             if len(attempts) == 1:
                 return httpx.Response(500, json={"error": "retry"})
@@ -842,7 +954,7 @@ async def test_worker_startup_replays_pending_task_summary_outbox(tmp_path: Path
     )
     scheduled: list[str] = []
     service._start_worker_loops = lambda: None
-    service._schedule_task_summary_delivery = lambda task_id: scheduled.append(str(task_id))
+    service._schedule_task_summary_delivery = lambda task_id=None: scheduled.append(str(task_id or ""))
     service.store.put_task_summary_outbox(
         task_id="task:pending-summary",
         session_id="web:shared",

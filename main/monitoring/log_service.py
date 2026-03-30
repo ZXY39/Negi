@@ -78,6 +78,7 @@ class TaskLogService:
         self._live_snapshot_publishers: list[Callable[[TaskRecord, dict[str, Any], bool], None]] = []
         self._task_terminal_listeners: list[Callable[[TaskRecord], None]] = []
         self._task_visible_output_listeners: list[Callable[[str, str], None]] = []
+        self._summary_metric_reporters: list[Callable[[str, float], None]] = []
         self._task_locks: dict[str, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
 
@@ -92,6 +93,10 @@ class TaskLogService:
     def add_task_visible_output_listener(self, listener: Callable[[str, str], None]) -> None:
         if callable(listener):
             self._task_visible_output_listeners.append(listener)
+
+    def add_summary_metric_reporter(self, reporter: Callable[[str, float], None]) -> None:
+        if callable(reporter):
+            self._summary_metric_reporters.append(reporter)
 
     def append_task_event(
         self,
@@ -199,6 +204,8 @@ class TaskLogService:
             'updated_at': now_iso(),
             'last_visible_output_at': str(last_visible_output_at or '').strip(),
             'last_stall_notice_bucket_minutes': 0,
+            'summary_fingerprint': '',
+            'summary_last_published_at': '',
         }
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
@@ -348,7 +355,11 @@ class TaskLogService:
                     self._append_task_event(task=task, event_type='task.model.call', data=model_call_payload)
                     self._dispatch_live_event_locked(task=task, event_type='task.model.call', data=model_call_payload)
                 self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
-            self.refresh_task_view(task_id, mark_unread=True)
+            root_node_id = str(getattr(task, 'root_node_id', '') or '').strip() if task is not None else ''
+            if updated is not None and task is not None and delta_usage is not None and root_node_id and node_id != root_node_id:
+                self._touch_task_summary_locked(task=task, mark_unread=True, updated_at=changed_at)
+            else:
+                self.refresh_task_view(task_id, mark_unread=True)
             return updated
 
     def update_node_check_result(self, task_id: str, node_id: str, check_result: str) -> NodeRecord | None:
@@ -533,12 +544,13 @@ class TaskLogService:
 
     def mark_task_read(self, task_id: str) -> TaskRecord | None:
         with self._task_lock(task_id):
+            previous = self._store.get_task(task_id)
             updated = self._store.update_task(
                 task_id,
                 lambda task: task.model_copy(update={'is_unread': False, 'updated_at': now_iso()}),
             )
             if updated is not None:
-                self._publish_task_summary_patch_locked(task=updated)
+                self._publish_task_summary_patch_locked(task=updated, previous_task=previous)
             return updated
 
     def request_cancel(self, task_id: str) -> TaskRecord | None:
@@ -1129,6 +1141,8 @@ class TaskLogService:
         current['task_id'] = task.task_id
         current.setdefault('updated_at', now_iso())
         current.setdefault('last_visible_output_at', '')
+        current.setdefault('summary_fingerprint', '')
+        current.setdefault('summary_last_published_at', '')
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
         except (TypeError, ValueError):
@@ -1313,7 +1327,7 @@ class TaskLogService:
             if self._is_terminal_status(next_status):
                 self._store.replace_task_runtime_frames(updated.task_id, [])
                 self.update_task_runtime_meta(updated.task_id)
-            self._publish_task_summary_patch_locked(task=updated)
+            self._publish_task_summary_patch_locked(task=updated, previous_task=task)
             if terminal_transition:
                 self._publish_task_terminal_locked(task=updated)
             self._notify_task_terminal(updated, previous_status=previous_status)
@@ -1332,6 +1346,13 @@ class TaskLogService:
             )
         except Exception:
             return
+
+    def _report_summary_metric(self, key: str, amount: float = 1.0) -> None:
+        for reporter in list(self._summary_metric_reporters):
+            try:
+                reporter(str(key or '').strip(), float(amount or 0.0))
+            except Exception:
+                continue
 
     def sync_task_read_models(self, task_id: str) -> TaskRecord | None:
         with self._task_lock(task_id):
@@ -1621,10 +1642,75 @@ class TaskLogService:
             return ''
         return str(text or '')
 
-    def _publish_task_summary_patch_locked(self, *, task: TaskRecord) -> None:
-        payload = {'task': self._task_summary_payload(task)}
+    @classmethod
+    def _task_summary_fingerprint(cls, task: TaskRecord) -> str:
+        payload = cls._task_summary_payload(task)
+        visible = {
+            'title': str(payload.get('title') or ''),
+            'brief': str(payload.get('brief') or ''),
+            'status': str(payload.get('status') or ''),
+            'is_unread': bool(payload.get('is_unread')),
+            'is_paused': bool(payload.get('is_paused')),
+            'max_depth': int(payload.get('max_depth') or 0),
+            'token_usage': {
+                'input_tokens': int(((payload.get('token_usage') or {}).get('input_tokens') or 0)),
+                'output_tokens': int(((payload.get('token_usage') or {}).get('output_tokens') or 0)),
+                'cache_hit_tokens': int(((payload.get('token_usage') or {}).get('cache_hit_tokens') or 0)),
+            },
+        }
+        return json.dumps(visible, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _summary_dispatch_immediate(*, task: TaskRecord, previous_task: TaskRecord | None = None) -> bool:
+        if previous_task is None:
+            return True
+        for key in ('status', 'is_unread', 'is_paused'):
+            if getattr(previous_task, key, None) != getattr(task, key, None):
+                return True
+        return False
+
+    def _touch_task_summary_locked(
+        self,
+        *,
+        task: TaskRecord,
+        mark_unread: bool,
+        updated_at: str,
+    ) -> TaskRecord:
+        next_task = task.model_copy(
+            update={
+                'is_unread': True if mark_unread else task.is_unread,
+                'updated_at': str(updated_at or now_iso()),
+            }
+        )
+        self._store.upsert_task(next_task)
+        self._publish_task_summary_patch_locked(task=next_task, previous_task=task)
+        return next_task
+
+    def _publish_task_summary_patch_locked(self, *, task: TaskRecord, previous_task: TaskRecord | None = None) -> bool:
+        payload_task = self._task_summary_payload(task)
+        fingerprint = self._task_summary_fingerprint(task)
+        runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+        previous_fingerprint = str(runtime_meta.get('summary_fingerprint') or '').strip()
+        if previous_fingerprint and previous_fingerprint == fingerprint:
+            self._report_summary_metric('task_summary_skip_unchanged_count')
+            return False
+        runtime_meta['summary_fingerprint'] = fingerprint
+        runtime_meta['summary_last_published_at'] = now_iso()
+        runtime_meta['updated_at'] = now_iso()
+        self._store.upsert_task_runtime_meta(
+            task_id=task.task_id,
+            updated_at=str(runtime_meta.get('updated_at') or now_iso()),
+            payload=runtime_meta,
+        )
+        payload = {'task': payload_task}
         self._append_task_event(task=task, event_type='task.summary.patch', data=payload)
-        self._dispatch_live_event_locked(task=task, event_type='task.summary.patch', data=payload)
+        self._dispatch_live_event_locked(
+            task=task,
+            event_type='task.summary.patch',
+            data=payload,
+            dispatch_immediate=self._summary_dispatch_immediate(task=task, previous_task=previous_task),
+        )
+        return True
 
     def _publish_task_node_patch_locked(self, *, task: TaskRecord, node: NodeRecord) -> None:
         projected = self._store.get_task_node(node.node_id)
@@ -1668,7 +1754,14 @@ class TaskLogService:
         self._append_task_event(task=task, event_type='task.terminal', data=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.terminal', data=payload)
 
-    def _dispatch_live_event_locked(self, *, task: TaskRecord, event_type: str, data: dict[str, Any]) -> None:
+    def _dispatch_live_event_locked(
+        self,
+        *,
+        task: TaskRecord,
+        event_type: str,
+        data: dict[str, Any],
+        dispatch_immediate: bool = False,
+    ) -> None:
         if self._live_snapshot_publishers:
             for publisher in list(self._live_snapshot_publishers):
                 try:
@@ -1679,6 +1772,7 @@ class TaskLogService:
                             'session_id': str(task.session_id or 'web:shared').strip() or 'web:shared',
                             'task_id': task.task_id,
                             'data': dict(data or {}),
+                            'dispatch_immediate': bool(dispatch_immediate),
                         },
                         False,
                     )

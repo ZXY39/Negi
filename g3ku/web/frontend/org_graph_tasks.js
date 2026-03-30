@@ -1,6 +1,8 @@
 // Task list, task detail loading, and task event orchestration extracted from org_graph_app.js.
 // Loaded after org_graph_app.js and before org_graph_llm.js.
 
+const TASK_SUMMARY_IDLE_RECONCILE_MS = 15_000;
+
 
 function taskStatusLabel(task) {
     return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
@@ -124,6 +126,223 @@ function handleDeletedTasks(taskIds = []) {
 
 function taskSessionQueryValue() {
     return "all";
+}
+
+function compareTaskListOrder(left, right) {
+    const timeDiff = taskCreatedSortValue(right) - taskCreatedSortValue(left);
+    if (timeDiff !== 0) return timeDiff;
+    const rightCreatedAt = String(right?.created_at || "");
+    const leftCreatedAt = String(left?.created_at || "");
+    if (rightCreatedAt !== leftCreatedAt) return rightCreatedAt.localeCompare(leftCreatedAt);
+    return String(left?.task_id || "").localeCompare(String(right?.task_id || ""));
+}
+
+function syncTaskNormalizedState(items = []) {
+    const normalized = [...(Array.isArray(items) ? items : [])]
+        .filter((item) => item && typeof item === "object" && String(item.task_id || "").trim())
+        .sort(compareTaskListOrder);
+    const tasksById = {};
+    const orderedTaskIds = [];
+    normalized.forEach((item) => {
+        const taskId = String(item.task_id || "").trim();
+        if (!taskId) return;
+        tasksById[taskId] = item;
+        orderedTaskIds.push(taskId);
+    });
+    S.tasksById = tasksById;
+    S.orderedTaskIds = orderedTaskIds;
+    S.tasks = normalized;
+    return normalized;
+}
+
+function syncTaskArrayFromState() {
+    const items = (Array.isArray(S.orderedTaskIds) ? S.orderedTaskIds : [])
+        .map((taskId) => S.tasksById?.[taskId] || null)
+        .filter(Boolean);
+    S.tasks = items;
+    return items;
+}
+
+function upsertTaskState(task) {
+    const taskId = String(task?.task_id || "").trim();
+    if (!taskId) return null;
+    const previousTask = S.tasksById?.[taskId] || null;
+    const nextTask = previousTask ? { ...previousTask, ...task } : { ...task };
+    const tasksById = { ...(S.tasksById || {}), [taskId]: nextTask };
+    let orderedTaskIds = Array.isArray(S.orderedTaskIds) ? [...S.orderedTaskIds] : [];
+    let added = false;
+    let orderChanged = false;
+    if (!previousTask) {
+        added = true;
+        let insertAt = orderedTaskIds.length;
+        for (let index = 0; index < orderedTaskIds.length; index += 1) {
+            const existing = tasksById[orderedTaskIds[index]];
+            if (compareTaskListOrder(nextTask, existing) < 0) {
+                insertAt = index;
+                break;
+            }
+        }
+        orderedTaskIds.splice(insertAt, 0, taskId);
+        orderChanged = true;
+    } else if (String(previousTask.created_at || "") !== String(nextTask.created_at || "")) {
+        orderedTaskIds = orderedTaskIds
+            .filter((item) => item !== taskId)
+            .concat(taskId)
+            .sort((leftId, rightId) => compareTaskListOrder(tasksById[leftId], tasksById[rightId]));
+        orderChanged = true;
+    }
+    S.tasksById = tasksById;
+    S.orderedTaskIds = orderedTaskIds;
+    syncTaskArrayFromState();
+    return { taskId, previousTask, nextTask, added, orderChanged };
+}
+
+function removeTaskState(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key || !S.tasksById?.[key]) return false;
+    const tasksById = { ...(S.tasksById || {}) };
+    delete tasksById[key];
+    S.tasksById = tasksById;
+    S.orderedTaskIds = (Array.isArray(S.orderedTaskIds) ? S.orderedTaskIds : []).filter((item) => item !== key);
+    syncTaskArrayFromState();
+    return true;
+}
+
+function taskListViewVisible() {
+    return !!U.viewTasks?.classList.contains("active") && document.visibilityState !== "hidden";
+}
+
+function noteTaskHallHiddenDefer() {
+    S.taskListDirtyWhileHidden = true;
+    const next = { ...(S.taskHallStats || {}) };
+    next.task_hall_hidden_defer_count = Number(next.task_hall_hidden_defer_count || 0) + 1;
+    S.taskHallStats = next;
+}
+
+function trackTaskCardPatchQueueAge(taskId) {
+    const queuedAt = Number(S.taskCardPatchQueuedAt?.[taskId] || 0);
+    if (!Number.isFinite(queuedAt) || queuedAt <= 0) return;
+    const ageMs = Math.max(0, Date.now() - queuedAt);
+    const next = { ...(S.taskHallStats || {}) };
+    next.task_hall_max_patch_queue_age_ms = Math.max(Number(next.task_hall_max_patch_queue_age_ms || 0), ageMs);
+    S.taskHallStats = next;
+}
+
+function taskMetricSnapshotValue(task) {
+    const tokenUsage = taskTokenUsage(task);
+    return tokenUsage.tracked ? {
+        input_tokens: Number(tokenUsage.input_tokens || 0),
+        output_tokens: Number(tokenUsage.output_tokens || 0),
+        cache_hit_tokens: Number(tokenUsage.cache_hit_tokens || 0),
+    } : null;
+}
+
+function taskCardPatchEligible(previousTask, nextTask) {
+    if (!previousTask || !nextTask) return false;
+    return String(previousTask.status || "") === String(nextTask.status || "")
+        && !!previousTask.is_paused === !!nextTask.is_paused
+        && !!previousTask.is_unread === !!nextTask.is_unread
+        && String(previousTask.title || "") === String(nextTask.title || "")
+        && String(previousTask.brief || "") === String(nextTask.brief || "")
+        && Number(previousTask.max_depth || 0) === Number(nextTask.max_depth || 0);
+}
+
+function patchTaskCardElement(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return false;
+    const task = S.tasksById?.[key];
+    if (!task) return false;
+    const card = U.taskGrid?.querySelector?.(`.project-card[data-task-id="${CSS.escape(key)}"]`);
+    if (!(card instanceof HTMLElement)) return false;
+    const titleEl = card.querySelector("[data-task-title]");
+    if (titleEl) {
+        const title = String(task.title || key);
+        titleEl.textContent = title;
+        titleEl.setAttribute("title", title);
+    }
+    const tokenUsage = taskTokenUsage(task);
+    const previousMetrics = S.taskMetricSnapshot?.[key] || null;
+    const nextMetrics = taskMetricSnapshotValue(task);
+    ["input_tokens", "output_tokens", "cache_hit_tokens"].forEach((metricKey) => {
+        const valueEl = card.querySelector(`[data-task-metric-value="${metricKey}"]`);
+        const wrapEl = card.querySelector(`[data-task-metric="${metricKey}"]`);
+        if (!valueEl || !wrapEl) return;
+        const metricValue = tokenUsage.tracked ? Number(tokenUsage[metricKey] || 0) : null;
+        const previousValue = previousMetrics && Number.isFinite(previousMetrics[metricKey]) ? previousMetrics[metricKey] : null;
+        const isIncreasing = previousValue !== null && Number.isFinite(metricValue) && metricValue > previousValue;
+        valueEl.textContent = Number.isFinite(metricValue) ? formatTokenCount(metricValue) : "--";
+        wrapEl.classList.toggle("is-increasing", !!isIncreasing);
+        valueEl.classList.toggle("is-increasing", !!isIncreasing);
+    });
+    S.taskMetricSnapshot = {
+        ...(S.taskMetricSnapshot || {}),
+        [key]: nextMetrics,
+    };
+    const nextStats = { ...(S.taskHallStats || {}) };
+    nextStats.task_hall_card_patch_count = Number(nextStats.task_hall_card_patch_count || 0) + 1;
+    S.taskHallStats = nextStats;
+    trackTaskCardPatchQueueAge(key);
+    const nextQueued = { ...(S.taskCardPatchQueuedAt || {}) };
+    delete nextQueued[key];
+    S.taskCardPatchQueuedAt = nextQueued;
+    return true;
+}
+
+function flushQueuedTaskCardPatches() {
+    if (S.taskCardPatchFlushId) {
+        window.clearTimeout(S.taskCardPatchFlushId);
+        S.taskCardPatchFlushId = null;
+    }
+    if (!taskListViewVisible()) {
+        noteTaskHallHiddenDefer();
+        return;
+    }
+    const pendingIds = [...(S.pendingTaskCardPatchIds || new Set())];
+    if (!pendingIds.length) return;
+    const nextPending = new Set();
+    pendingIds.forEach((taskId) => {
+        if (!patchTaskCardElement(taskId)) nextPending.add(taskId);
+    });
+    S.pendingTaskCardPatchIds = nextPending;
+    if (nextPending.size) {
+        renderTasks();
+        return;
+    }
+    const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
+    S.taskGridSignature = taskGridRenderSignature(meta);
+}
+
+function queueTaskCardPatch(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return;
+    const nextPending = new Set(S.pendingTaskCardPatchIds || []);
+    nextPending.add(key);
+    S.pendingTaskCardPatchIds = nextPending;
+    S.taskCardPatchQueuedAt = {
+        ...(S.taskCardPatchQueuedAt || {}),
+        [key]: S.taskCardPatchQueuedAt?.[key] || Date.now(),
+    };
+    if (!taskListViewVisible()) {
+        noteTaskHallHiddenDefer();
+        return;
+    }
+    if (!S.taskCardPatchFlushId) {
+        S.taskCardPatchFlushId = window.setTimeout(() => {
+            flushQueuedTaskCardPatches();
+        }, 200);
+    }
+}
+
+function ensureTaskListVisibleReconcile() {
+    if (!S.taskListDirtyWhileHidden || !taskListViewVisible()) return;
+    S.taskListDirtyWhileHidden = false;
+    S.taskGridSignature = "";
+    renderTasks();
+}
+
+function renderTasksIfVisible() {
+    if (taskListViewVisible()) renderTasks();
+    else noteTaskHallHiddenDefer();
 }
 
 function normalizeTaskWorkerState(value) {
@@ -329,6 +548,7 @@ function taskGridRenderSignature(meta) {
 function renderTasks() {
     const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
     S.taskPage = meta.currentPage;
+    S.visibleTaskIds = meta.items.map((task) => String(task?.task_id || "").trim()).filter(Boolean);
     syncTaskPagination(meta);
     renderTaskPerformanceBar();
     const signature = taskGridRenderSignature(meta);
@@ -338,6 +558,10 @@ function renderTasks() {
         return;
     }
     S.taskGridSignature = signature;
+    S.taskHallStats = {
+        ...(S.taskHallStats || {}),
+        task_hall_full_render_count: Number(S.taskHallStats?.task_hall_full_render_count || 0) + 1,
+    };
     U.taskGrid.innerHTML = "";
     const metricAnimationTaskIds = S.taskMetricAnimationTaskIds || new Set();
     const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
@@ -382,17 +606,18 @@ function renderTasks() {
             const hasValue = Number.isFinite(item.value);
             const previousValue = previousMetrics && Number.isFinite(previousMetrics[item.key]) ? previousMetrics[item.key] : null;
             const isIncreasing = metricAnimationTaskIds.has(taskId) && previousValue !== null && hasValue && item.value > previousValue;
-            return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
+            return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}" data-task-metric="${item.key}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}" data-task-metric-value="${item.key}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
         }).join("");
         const cardActions = taskCardActions(task);
         const el = document.createElement("div");
         el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
+        el.dataset.taskId = taskId;
         el.innerHTML = `
             <div class="pc-topbar">
                 <div class="pc-topbar-left">
                     <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
                     <div class="pc-topbar-meta">
-                        <span class="status-badge" data-status="${esc(statusKey)}">${esc(taskStatusLabel(task))}</span>
+                        <span class="status-badge" data-status="${esc(statusKey)}" data-task-status>${esc(taskStatusLabel(task))}</span>
                         <span class="pc-task-id-chip">
                             <span class="pc-task-id-label">Task</span>
                             <span class="pc-task-id-value">${esc(taskId)}</span>
@@ -413,7 +638,7 @@ function renderTasks() {
                     </div>
                 ` : ""}
             </div>
-            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
+            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
             <div class="pc-created-at"><span class="pc-field-label">创建时间</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
             <div class="pc-metrics">${metricsMarkup}</div>
         `;
@@ -452,12 +677,18 @@ function renderTasks() {
         U.taskGrid.appendChild(el);
     });
     S.taskMetricSnapshot = nextTaskMetricSnapshot;
+    S.pendingTaskCardPatchIds = new Set([...(S.pendingTaskCardPatchIds || new Set())].filter((taskId) => !S.visibleTaskIds.includes(taskId)));
+    const nextQueuedAt = { ...(S.taskCardPatchQueuedAt || {}) };
+    S.visibleTaskIds.forEach((taskId) => { delete nextQueuedAt[taskId]; });
+    S.taskCardPatchQueuedAt = nextQueuedAt;
     S.taskMetricAnimationTaskIds?.clear?.();
     updateTaskToolbar();
     icons();
 }
 
 async function loadTasks() {
+    if (S.taskListReconcileBusy) return;
+    S.taskListReconcileBusy = true;
     if (!(S.tasks || []).length) {
         S.taskGridSignature = "";
         U.taskGrid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">Loading tasks...</div>';
@@ -472,6 +703,8 @@ async function loadTasks() {
             U.taskGrid.innerHTML = `<div class="empty-state error" style="grid-column: 1/-1;">任务加载失败：${esc(ApiClient.friendlyErrorMessage(e, e.message || "未知错误"))}</div>`;
         }
         showToast({ title: "加载失败", text: ApiClient.friendlyErrorMessage(e, e.message || "未知错误"), kind: "error" });
+    } finally {
+        S.taskListReconcileBusy = false;
     }
 }
 
@@ -587,7 +820,7 @@ async function performTaskAction(taskId, action) {
         return;
     }
     S.taskBusy = true;
-    renderTasks();
+    renderTasksIfVisible();
     try {
         const result = await requestTaskAction(taskId, action);
         const successText = action === "retry" ? (result?.task_id || taskId) : taskId;
@@ -604,7 +837,7 @@ async function performTaskAction(taskId, action) {
         showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, e), kind: "error" });
     } finally {
         S.taskBusy = false;
-        renderTasks();
+        renderTasksIfVisible();
     }
 }
 
@@ -643,7 +876,7 @@ async function performTaskBatchAction(action, eligible) {
         return;
     }
     S.taskBusy = true;
-    renderTasks();
+    renderTasksIfVisible();
     try {
         const results = await Promise.allSettled(eligible.map((task) => requestTaskAction(task.task_id, action)));
         const succeeded = results
@@ -693,7 +926,7 @@ async function performTaskBatchAction(action, eligible) {
         }
     } finally {
         S.taskBusy = false;
-        renderTasks();
+        renderTasksIfVisible();
     }
 }
 
@@ -1071,11 +1304,15 @@ function isAbortLike(error) {
 
 function applyTaskListResponse(payload = {}) {
     const items = Array.isArray(payload?.items) ? payload.items : [];
-    S.tasks = items;
+    syncTaskNormalizedState(items);
+    S.lastTaskSummaryPatchAt = new Date().toISOString();
+    S.taskListDirtyWhileHidden = false;
+    S.taskListReconnectNeedsReconcile = false;
     applyTaskWorkerStatus(payload || {}, { render: false });
     syncTaskSelection();
     renderTaskSessionScope();
-    renderTasks();
+    if (taskListViewVisible()) renderTasks();
+    else noteTaskHallHiddenDefer();
 }
 
 function resolveTaskWorkerState({
@@ -1146,24 +1383,34 @@ async function refreshTaskWorkerStatus({ render = true } = {}) {
 }
 
 function patchTaskListItem(task) {
-    const taskId = String(task?.task_id || "").trim();
+    const change = upsertTaskState(task);
+    const taskId = String(change?.taskId || "").trim();
     if (!taskId) return;
-    const next = [...(S.tasks || [])];
-    const index = next.findIndex((item) => String(item?.task_id || "").trim() === taskId);
-    if (index >= 0) next[index] = { ...next[index], ...task };
-    else next.unshift(task);
-    S.tasks = next;
+    S.lastTaskSummaryPatchAt = new Date().toISOString();
     S.taskMetricAnimationTaskIds = new Set([taskId]);
     syncTaskSelection();
-    renderTasks();
+    if (!taskListViewVisible()) {
+        noteTaskHallHiddenDefer();
+        return;
+    }
+    const visibleIds = new Set(Array.isArray(S.visibleTaskIds) ? S.visibleTaskIds : []);
+    if (change.added || change.orderChanged || !visibleIds.has(taskId) || !taskCardPatchEligible(change.previousTask, change.nextTask)) {
+        renderTasks();
+        return;
+    }
+    queueTaskCardPatch(taskId);
 }
 
 function removeTaskListItem(taskId) {
     const key = String(taskId || "").trim();
     if (!key) return;
-    S.tasks = (S.tasks || []).filter((item) => String(item?.task_id || "").trim() !== key);
+    if (!removeTaskState(key)) return;
     handleDeletedTasks([key]);
     syncTaskSelection();
+    if (!taskListViewVisible()) {
+        noteTaskHallHiddenDefer();
+        return;
+    }
     renderTasks();
 }
 
@@ -1177,16 +1424,26 @@ function closeTasksWs() {
 
 function startTaskWorkerStatusPolling() {
     if (!S.taskWorkerStatusPollId) {
-        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
         S.taskWorkerStatusPollId = window.setInterval(() => {
-            void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+            void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
+            const lastPatchMs = S.lastTaskSummaryPatchAt ? Date.parse(S.lastTaskSummaryPatchAt) : Number.NaN;
+            const hasRunningTasks = (S.tasks || []).some((task) => taskStatusKey(task) === "in_progress");
+            if (
+                taskListViewVisible()
+                && hasRunningTasks
+                && (!Number.isFinite(lastPatchMs) || (Date.now() - lastPatchMs) > TASK_SUMMARY_IDLE_RECONCILE_MS)
+            ) {
+                void loadTasks();
+            }
         }, 5000);
     }
     if (!S.taskPerformanceRefreshId) {
         renderTaskPerformanceBar();
         S.taskPerformanceRefreshId = window.setInterval(() => {
             renderTaskPerformanceBar();
-            refreshTaskWorkerState({ render: S.view === "tasks" });
+            refreshTaskWorkerState({ render: !!U.viewTasks?.classList.contains("active") });
+            ensureTaskListVisibleReconcile();
         }, 1000);
     }
 }
@@ -1208,7 +1465,11 @@ function initTasksWs() {
     const socket = new WebSocket(ApiClient.getTasksWsUrl(taskSessionQueryValue()));
     S.tasksWs = socket;
     socket.onopen = () => {
-        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
+        if (S.taskListReconnectNeedsReconcile) {
+            S.taskListReconnectNeedsReconcile = false;
+            void loadTasks();
+        }
     };
     socket.onmessage = (event) => {
         const payload = JSON.parse(event.data || "{}");
@@ -1225,10 +1486,11 @@ function initTasksWs() {
         }
     };
     socket.onclose = () => {
-        if (S.view !== "tasks") return;
-        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        if (!U.viewTasks?.classList.contains("active")) return;
+        S.taskListReconnectNeedsReconcile = true;
+        void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
         window.setTimeout(() => {
-            if (S.view === "tasks") initTasksWs();
+            if (U.viewTasks?.classList.contains("active")) initTasksWs();
         }, 1000);
     };
 }

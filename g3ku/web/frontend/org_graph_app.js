@@ -150,9 +150,25 @@ const S = {
     taskBusy: false,
     taskPage: 1,
     taskPageSize: RESOURCE_PAGE_SIZES[0],
+    tasksById: {},
+    orderedTaskIds: [],
+    visibleTaskIds: [],
+    pendingTaskCardPatchIds: new Set(),
+    taskCardPatchQueuedAt: {},
+    taskCardPatchFlushId: null,
+    taskListDirtyWhileHidden: false,
+    taskListReconcileBusy: false,
+    lastTaskSummaryPatchAt: "",
+    taskListReconnectNeedsReconcile: false,
     taskGridSignature: "",
     taskMetricSnapshot: {},
     taskMetricAnimationTaskIds: new Set(),
+    taskHallStats: {
+        task_hall_full_render_count: 0,
+        task_hall_card_patch_count: 0,
+        task_hall_hidden_defer_count: 0,
+        task_hall_max_patch_queue_age_ms: 0,
+    },
     confirmState: null,
     toastState: { timeoutId: null, intervalId: null, remaining: 0 },
     openResourceSelectId: "",
@@ -1787,6 +1803,17 @@ function taskCreatedSortValue(task) {
 }
 
 function orderedTasks(tasks = S.tasks) {
+    if (
+        (tasks === S.tasks || tasks == null)
+        && S.tasksById
+        && typeof S.tasksById === "object"
+        && Array.isArray(S.orderedTaskIds)
+        && S.orderedTaskIds.length
+    ) {
+        return S.orderedTaskIds
+            .map((taskId) => S.tasksById?.[taskId] || null)
+            .filter(Boolean);
+    }
     return [...(Array.isArray(tasks) ? tasks : [])].sort((left, right) => {
         const timeDiff = taskCreatedSortValue(right) - taskCreatedSortValue(left);
         if (timeDiff !== 0) return timeDiff;
@@ -6120,6 +6147,7 @@ function switchView(view) {
     if (view === "tasks") {
         void loadTasks();
         initTasksWs();
+        if (typeof ensureTaskListVisibleReconcile === "function") ensureTaskListVisibleReconcile();
     } else {
         closeTasksWs();
     }
@@ -6475,6 +6503,9 @@ function bind() {
         closeTaskMenus();
         renderTasks();
     }));
+    document.addEventListener("visibilitychange", () => {
+        if (typeof ensureTaskListVisibleReconcile === "function") ensureTaskListVisibleReconcile();
+    });
     U.taskBatchMenu?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
         await runTaskBatchAction(button.dataset.batchAction, { returnFocus: button });
     }));
