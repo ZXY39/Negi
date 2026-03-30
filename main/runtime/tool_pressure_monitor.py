@@ -361,6 +361,28 @@ class WorkerPressureMonitor:
                 payload['writer_queue_depth'] = 0
         return payload
 
+    @staticmethod
+    def _disk_busy_percent_from_samples(current_disk: Any, previous_disk: Any, wall_delta: float) -> tuple[bool, float]:
+        current_busy_time = getattr(current_disk, 'busy_time', None)
+        previous_busy_time = getattr(previous_disk, 'busy_time', None)
+        if current_busy_time is not None and previous_busy_time is not None:
+            busy_delta = max(0.0, float(current_busy_time - previous_busy_time))
+            return True, min(100.0, busy_delta / (wall_delta * 1000.0) * 100.0)
+
+        fallback_deltas: list[float] = []
+        current_read_time = getattr(current_disk, 'read_time', None)
+        previous_read_time = getattr(previous_disk, 'read_time', None)
+        if current_read_time is not None and previous_read_time is not None:
+            fallback_deltas.append(max(0.0, float(current_read_time - previous_read_time)))
+        current_write_time = getattr(current_disk, 'write_time', None)
+        previous_write_time = getattr(previous_disk, 'write_time', None)
+        if current_write_time is not None and previous_write_time is not None:
+            fallback_deltas.append(max(0.0, float(current_write_time - previous_write_time)))
+        if not fallback_deltas:
+            return False, 0.0
+        busy_delta = max(fallback_deltas)
+        return True, min(100.0, busy_delta / (wall_delta * 1000.0) * 100.0)
+
     def _sample_machine_metrics(self, now_mono: float) -> dict[str, Any]:
         sampler = self._system_metrics_sampler
         if callable(sampler):
@@ -404,14 +426,11 @@ class WorkerPressureMonitor:
             except Exception:
                 disk_read_bytes_per_sec = 0.0
                 disk_write_bytes_per_sec = 0.0
-            current_busy_time = getattr(disk, 'busy_time', None)
-            previous_busy_time = getattr(self._last_disk_sample, 'busy_time', None)
-            if current_busy_time is not None and previous_busy_time is not None:
-                disk_busy_available = True
-                disk_busy_percent = min(
-                    100.0,
-                    max(0.0, float(current_busy_time - previous_busy_time) / (wall_delta * 1000.0) * 100.0),
-                )
+            disk_busy_available, disk_busy_percent = self._disk_busy_percent_from_samples(
+                disk,
+                self._last_disk_sample,
+                wall_delta,
+            )
         self._last_disk_sample = disk
         self._last_disk_sample_mono = now_mono
         return {

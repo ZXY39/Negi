@@ -1240,6 +1240,43 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
         assert event["data"]["call_index"] == 4
 
 
+def test_task_detail_payload_can_include_full_tree_snapshot(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
+    )
+    service.log_service.update_node_status(
+        record.task_id,
+        child.node_id,
+        status="success",
+        final_output="child done",
+    )
+
+    payload = service.get_task_detail_payload(record.task_id, mark_read=False, include_tree=True)
+
+    assert payload is not None
+    assert payload["root_node"]["node_id"] == root.node_id
+    assert payload["tree_root"]["node_id"] == root.node_id
+    assert [item["node_id"] for item in payload["tree_root"]["children"]] == [child.node_id]
+
+
 def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

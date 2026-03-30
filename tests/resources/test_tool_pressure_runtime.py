@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -244,3 +245,37 @@ def test_worker_pressure_monitor_marks_snapshot_unfresh_when_machine_metrics_are
     assert controller.snapshot()['tool_pressure_state'] == 'throttled'
     assert snapshot['pressure_snapshot_fresh'] is False
     assert snapshot['machine_pressure_available'] is False
+
+
+def test_worker_pressure_monitor_falls_back_to_read_write_times_for_disk_busy(monkeypatch) -> None:
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=4, safe_limit=1, step_up=1)
+    monitor = WorkerPressureMonitor(controller=controller, store=store)
+    samples = [
+        SimpleNamespace(read_bytes=1_000, write_bytes=2_000, read_time=100, write_time=50),
+        SimpleNamespace(read_bytes=4_000, write_bytes=5_000, read_time=140, write_time=90),
+    ]
+
+    class _FakePsutil:
+        @staticmethod
+        def cpu_percent(interval=None):
+            return 12.0
+
+        @staticmethod
+        def virtual_memory():
+            return SimpleNamespace(percent=34.0)
+
+        @staticmethod
+        def disk_io_counters():
+            return samples.pop(0)
+
+    monkeypatch.setattr("main.runtime.tool_pressure_monitor.psutil", _FakePsutil)
+
+    first = monitor._sample_machine_metrics(1.0)
+    second = monitor._sample_machine_metrics(2.0)
+
+    assert first["disk_busy_available"] is False
+    assert second["disk_busy_available"] is True
+    assert second["disk_busy_percent"] == pytest.approx(4.0)
+    assert second["disk_read_bytes_per_sec"] == pytest.approx(3_000.0)
+    assert second["disk_write_bytes_per_sec"] == pytest.approx(3_000.0)

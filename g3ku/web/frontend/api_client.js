@@ -391,10 +391,13 @@ class ApiClient {
         return data || {};
     }
 
-    static async getTask(taskId, markRead = false) {
+    static async getTask(taskId, markRead = false, { includeTree = false } = {}) {
         return this._request("GET", `/api/tasks/${taskId}`, {
-            params: { mark_read: markRead },
-            requestKey: `tasks:detail:${taskId}`,
+            params: {
+                mark_read: markRead,
+                include_tree: includeTree || undefined,
+            },
+            requestKey: `tasks:detail:${taskId}:${includeTree ? "tree" : "summary"}`,
         });
     }
 

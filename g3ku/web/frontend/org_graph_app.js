@@ -120,6 +120,7 @@ const S = {
     taskNodeDetailRequests: {},
     taskNodeChildrenCache: {},
     taskNodeChildrenRequests: {},
+    taskTreeHasFullSnapshot: false,
     taskDetailViewStates: {},
     pendingTaskDetailRestore: null,
     taskNodeBusy: false,

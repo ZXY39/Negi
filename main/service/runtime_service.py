@@ -3187,9 +3187,19 @@ class MainRuntimeService:
         items = await manager.read_trace_file(trace_kind=trace_kind, limit=max(1, int(limit)))
         return {'ok': True, 'items': items, 'trace_kind': trace_kind, 'limit': max(1, int(limit))}
 
-    def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False) -> dict[str, Any] | None:
+    def get_task_detail_payload(
+        self,
+        task_id: str,
+        *,
+        mark_read: bool = False,
+        include_tree: bool = False,
+    ) -> dict[str, Any] | None:
         task_id = self.normalize_task_id(task_id)
-        payload = self.query_service.get_task_snapshot(task_id, mark_read=mark_read)
+        payload = self.query_service.get_task_snapshot(
+            task_id,
+            mark_read=mark_read,
+            include_tree=include_tree,
+        )
         if payload is None:
             return None
         return payload

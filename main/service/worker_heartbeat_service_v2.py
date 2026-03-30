@@ -51,7 +51,7 @@ class WorkerHeartbeatServiceV2:
                         'payload': payload,
                     }
                 )
-                await asyncio.sleep(1.0 if active_task_count > 0 else 5.0)
+                await asyncio.sleep(1.0 if active_task_count > 0 else 2.0)
             except asyncio.CancelledError:
                 raise
             except Exception:

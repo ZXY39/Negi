@@ -56,12 +56,19 @@ async def get_task_worker_status():
 
 
 @router.get('/tasks/{task_id}')
-async def get_task(task_id: str, mark_read: bool = Query(False)):
+async def get_task(
+    task_id: str,
+    mark_read: bool = Query(False),
+    include_tree: bool = Query(False),
+):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_task_detail_payload(task_id, mark_read=bool(mark_read))
+    if include_tree:
+        payload = service.get_task_detail_payload(task_id, mark_read=bool(mark_read), include_tree=True)
+    else:
+        payload = service.get_task_detail_payload(task_id, mark_read=bool(mark_read))
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, **payload}

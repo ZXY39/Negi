@@ -88,6 +88,42 @@ function findRawTaskTreeNode(node, nodeId, seen = new Set()) {
     return null;
 }
 
+function normalizeTaskTreeChildren(items, existingItems = []) {
+    const priorById = new Map(
+        (Array.isArray(existingItems) ? existingItems : [])
+            .map((item) => [String(item?.node_id || "").trim(), item]),
+    );
+    return dedupeTreeNodes(items)
+        .map((item) => {
+            const nodeId = String(item?.node_id || "").trim();
+            return buildTaskTreeNodeFromDetail(item, nodeId ? priorById.get(nodeId) || null : null);
+        })
+        .filter((item) => String(item?.node_id || "").trim());
+}
+
+function normalizeTaskSpawnRounds(rounds, existingRounds = []) {
+    const priorById = new Map(
+        (Array.isArray(existingRounds) ? existingRounds : [])
+            .map((round) => [String(round?.round_id || "").trim(), round]),
+    );
+    return (Array.isArray(rounds) ? rounds : [])
+        .map((round) => {
+            const roundId = String(round?.round_id || "").trim();
+            if (!roundId) return null;
+            const prior = priorById.get(roundId) || {};
+            return {
+                ...prior,
+                ...round,
+                round_id: roundId,
+                label: String(round?.label || prior?.label || "").trim(),
+                children: Array.isArray(round?.children)
+                    ? normalizeTaskTreeChildren(round.children, Array.isArray(prior?.children) ? prior.children : [])
+                    : (Array.isArray(prior?.children) ? prior.children : []),
+            };
+        })
+        .filter(Boolean);
+}
+
 function buildTaskTreeNodeFromDetail(detail = {}, existing = null) {
     const prior = existing && typeof existing === "object" ? existing : {};
     return {
@@ -99,10 +135,16 @@ function buildTaskTreeNodeFromDetail(detail = {}, existing = null) {
         status: String(detail?.status || prior?.status || "in_progress").trim() || "in_progress",
         title: String(detail?.goal || detail?.title || prior?.title || detail?.node_id || "").trim(),
         updated_at: String(detail?.updated_at || prior?.updated_at || "").trim(),
-        default_round_id: String(prior?.default_round_id || "").trim(),
-        spawn_rounds: Array.isArray(prior?.spawn_rounds) ? prior.spawn_rounds : [],
-        auxiliary_children: Array.isArray(prior?.auxiliary_children) ? prior.auxiliary_children : [],
-        children: Array.isArray(prior?.children) ? prior.children : [],
+        default_round_id: String(detail?.default_round_id || prior?.default_round_id || "").trim(),
+        spawn_rounds: Array.isArray(detail?.spawn_rounds)
+            ? normalizeTaskSpawnRounds(detail.spawn_rounds, Array.isArray(prior?.spawn_rounds) ? prior.spawn_rounds : [])
+            : (Array.isArray(prior?.spawn_rounds) ? prior.spawn_rounds : []),
+        auxiliary_children: Array.isArray(detail?.auxiliary_children)
+            ? normalizeTaskTreeChildren(detail.auxiliary_children, Array.isArray(prior?.auxiliary_children) ? prior.auxiliary_children : [])
+            : (Array.isArray(prior?.auxiliary_children) ? prior.auxiliary_children : []),
+        children: Array.isArray(detail?.children)
+            ? normalizeTaskTreeChildren(detail.children, Array.isArray(prior?.children) ? prior.children : [])
+            : (Array.isArray(prior?.children) ? prior.children : []),
     };
 }
 
@@ -122,6 +164,13 @@ async function ensureTaskNodeChildren(nodeId, { roundId = "", force = false } = 
     if (!taskId || !normalizedNodeId) return null;
     const cacheKey = `${normalizedNodeId}::${normalizedRoundId || "default"}`;
     if (!force && S.taskNodeChildrenCache?.[cacheKey]) return S.taskNodeChildrenCache[cacheKey];
+    if (!force && S.taskTreeHasFullSnapshot && S.tree) {
+        const snapshot = taskNodeChildrenSnapshotFromTree(normalizedNodeId, { roundId: normalizedRoundId });
+        if (snapshot) {
+            S.taskNodeChildrenCache = { ...(S.taskNodeChildrenCache || {}), [cacheKey]: snapshot };
+            return snapshot;
+        }
+    }
     if (!force && S.taskNodeChildrenRequests?.[cacheKey]) return S.taskNodeChildrenRequests[cacheKey];
     const request = (async () => {
         try {
@@ -142,6 +191,38 @@ async function ensureTaskNodeChildren(nodeId, { roundId = "", force = false } = 
     })();
     S.taskNodeChildrenRequests = { ...(S.taskNodeChildrenRequests || {}), [cacheKey]: request };
     return request;
+}
+
+function taskNodeChildrenSnapshotFromTree(nodeId, { roundId = "" } = {}) {
+    const taskId = String(S.currentTaskId || "").trim();
+    const normalizedNodeId = String(nodeId || "").trim();
+    const normalizedRoundId = String(roundId || "").trim();
+    if (!taskId || !normalizedNodeId || !S.tree) return null;
+    const rawNode = findRawTaskTreeNode(S.tree, normalizedNodeId);
+    if (!rawNode) return null;
+    const rounds = rawNodeRounds(rawNode);
+    const defaultRoundId = resolveDefaultRoundId(rawNode);
+    const selectedRoundId = rounds.length
+        ? (rounds.some((round) => round.round_id === normalizedRoundId) ? normalizedRoundId : defaultRoundId)
+        : "";
+    const auxiliaryChildren = normalizeTaskTreeChildren(rawAuxiliaryChildren(rawNode));
+    const selectedRound = rounds.find((round) => round.round_id === selectedRoundId) || null;
+    const treeItems = rounds.length
+        ? [...auxiliaryChildren, ...normalizeTaskTreeChildren(selectedRound?.children)]
+        : normalizeTaskTreeChildren(dedupeTreeNodes(rawNode?.children));
+    return {
+        task_id: taskId,
+        parent_node_id: normalizedNodeId,
+        round_id: selectedRoundId,
+        default_round_id: defaultRoundId,
+        rounds: rounds.map((round) => ({
+            ...round,
+            children: normalizeTaskTreeChildren(round.children),
+        })),
+        items: treeItems,
+        offset: 0,
+        limit: treeItems.length || 200,
+    };
 }
 
 function applyTaskNodeChildrenSnapshot(payload, { render = true } = {}) {
@@ -1556,7 +1637,10 @@ function applyTaskPayload(payload) {
     const previousTaskId = String(S.currentTask?.task_id || "").trim();
     const nextTaskId = String(payload.task?.task_id || "").trim();
     const rootNode = payload.root_node || null;
-    const treeRoot = rootNode ? buildTaskTreeNodeFromDetail(rootNode) : null;
+    const treeSnapshot = payload.tree_root && typeof payload.tree_root === "object" ? payload.tree_root : null;
+    const treeRoot = treeSnapshot
+        ? buildTaskTreeNodeFromDetail(treeSnapshot)
+        : (rootNode ? buildTaskTreeNodeFromDetail(rootNode) : null);
     const frontier = Array.isArray(payload.frontier) ? payload.frontier : [];
     const recentModelCalls = Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [];
     S.currentTask = payload.task;
@@ -1569,13 +1653,16 @@ function applyTaskPayload(payload) {
         S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [String(rootNode.node_id || "").trim()]: rootNode };
     }
     S.tree = treeRoot;
+    S.taskTreeHasFullSnapshot = !!treeSnapshot;
     S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
     renderTaskDetailHeader({ resetPromptDisclosure: previousTaskId !== nextTaskId });
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
     if (S.tree) {
         renderTree();
-        void ensureTaskNodeChildren(String(S.tree?.node_id || "").trim());
+        if (!treeSnapshot) {
+            void ensureTaskNodeChildren(String(S.tree?.node_id || "").trim());
+        }
     }
     else {
         syncTaskTreeHeaderState(null);

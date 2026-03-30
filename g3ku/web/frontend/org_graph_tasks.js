@@ -711,6 +711,7 @@ function resetTaskView() {
     S.taskNodeDetailRequests = {};
     S.taskNodeChildrenCache = {};
     S.taskNodeChildrenRequests = {};
+    S.taskTreeHasFullSnapshot = false;
     S.taskNodeBusy = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
@@ -902,7 +903,7 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
         switchView("task-details");
         resetTaskView();
     }
-    const payload = await ApiClient.getTask(taskId, true);
+    const payload = await ApiClient.getTask(taskId, true, { includeTree: true });
     applyTaskPayload(payload);
     if (reopenSocket) {
         if (S.taskWs) {
@@ -1155,7 +1156,7 @@ function startTaskWorkerStatusPolling() {
         void refreshTaskWorkerStatus({ render: S.view === "tasks" });
         S.taskWorkerStatusPollId = window.setInterval(() => {
             void refreshTaskWorkerStatus({ render: S.view === "tasks" });
-        }, 10000);
+        }, 5000);
     }
     if (!S.taskPerformanceRefreshId) {
         renderTaskPerformanceBar();

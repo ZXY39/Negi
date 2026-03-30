@@ -136,7 +136,13 @@ class TaskQueryService:
         _walk(root)
         return failed_node_ids
 
-    def get_task_snapshot(self, task_id: str, *, mark_read: bool = True) -> dict[str, Any] | None:
+    def get_task_snapshot(
+        self,
+        task_id: str,
+        *,
+        mark_read: bool = True,
+        include_tree: bool = False,
+    ) -> dict[str, Any] | None:
         task = self._store.get_task(task_id)
         if task is None:
             return None
@@ -145,6 +151,7 @@ class TaskQueryService:
             task = self._store.get_task(task_id) or task
         live_state = self._projection_live_state(task.task_id)
         root_node = self.get_node_detail(task.task_id, task.root_node_id)
+        tree_root = self._projection_root(task) if include_tree else None
         runtime_summary = live_state.model_dump(mode='json') if live_state is not None else {
             'active_node_ids': [],
             'runnable_node_ids': [],
@@ -166,7 +173,7 @@ class TaskQueryService:
             item.model_dump(mode='json')
             for item in self._projection_token_usage_by_model(task.task_id)
         ]
-        return {
+        payload = {
             'task': task.model_dump(mode='json'),
             'summary': {
                 'task_id': task.task_id,
@@ -181,6 +188,9 @@ class TaskQueryService:
             'counts': counts,
             'recent_model_calls': [item.model_dump(mode='json') for item in self._recent_model_calls(task.task_id)],
         }
+        if include_tree:
+            payload['tree_root'] = tree_root.model_dump(mode='json') if tree_root is not None else None
+        return payload
 
     def get_node_detail(self, task_id: str, node_id: str) -> TaskNodeDetail | None:
         task = self._store.get_task(task_id)
