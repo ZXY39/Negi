@@ -10,6 +10,10 @@ from typing import Any, Callable
 
 from g3ku.china_bridge.session_keys import build_session_key, parse_china_session_key
 from g3ku.config.loader import load_config
+from g3ku.runtime.frontdoor.interaction_trace import (
+    CEO_STAGE_STATUS_ACTIVE,
+    normalize_interaction_trace,
+)
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
@@ -19,18 +23,8 @@ WEB_CEO_UPLOAD_ROOT = Path(".g3ku") / "web-ceo-uploads"
 WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
-DEFAULT_FRONTDOOR_RAW_TAIL_TURNS = 4
-FRONTDOOR_CONTEXT_VERSION = 1
-FRONTDOOR_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
+DEFAULT_LIVE_RAW_TAIL_TURNS = 4
 TASK_MEMORY_VERSION = 2
-TASK_MEMORY_PREFIX = '[[G3KU_TASK_MEMORY_V1]]'
-ACTIVE_TASKS_PREFIX = '[[G3KU_ACTIVE_TASKS_V1]]'
-TASK_META_PREFIX = '[[G3KU_TASK_META_V1]]'
-TOOL_TRACE_PREFIX = '[[G3KU_TOOL_TRACE_V1]]'
-STAGE_TRACE_PREFIX = '[[G3KU_STAGE_TRACE_V1]]'
-_FRONTDOOR_ROUTE_KINDS = {"direct_reply", "self_execute", "task_dispatch", "stage_only"}
-_FRONTDOOR_SUMMARY_MAX_CHARS = 2_400
-_FRONTDOOR_TURN_SUMMARY_MAX_CHARS = 240
 _TASK_MEMORY_MAX_IDS = 3
 _TASK_ID_PATTERN = re.compile(r'task:[A-Za-z0-9][\w:-]*')
 _RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
@@ -38,32 +32,6 @@ _RECENT_HISTORY_TOOL_TEXT_MAX_CHARS = 96
 _RECENT_HISTORY_STAGE_GOAL_MAX_CHARS = 120
 _TASK_RESULT_OUTPUT_MAX_CHARS = 480
 _TASK_RESULT_REASON_MAX_CHARS = 180
-
-
-def _normalize_frontdoor_route_kind(value: Any) -> str:
-    route_kind = str(value or "").strip().lower()
-    return route_kind if route_kind in _FRONTDOOR_ROUTE_KINDS else ""
-
-
-def normalize_frontdoor_context(payload: Any, *, raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS) -> dict[str, Any]:
-    source = dict(payload or {}) if isinstance(payload, dict) else {}
-    try:
-        summary_turn_count = int(source.get("summary_turn_count", 0) or 0)
-    except (TypeError, ValueError):
-        summary_turn_count = 0
-    try:
-        normalized_tail_turns = int(source.get("raw_tail_turns", raw_tail_turns) or raw_tail_turns)
-    except (TypeError, ValueError):
-        normalized_tail_turns = int(raw_tail_turns)
-    summary_text = str(source.get("summary_text") or "").strip()
-    return {
-        "version": FRONTDOOR_CONTEXT_VERSION,
-        "summary_text": summary_text,
-        "summary_turn_count": max(0, summary_turn_count),
-        "last_route_kind": _normalize_frontdoor_route_kind(source.get("last_route_kind")),
-        "last_updated_at": str(source.get("last_updated_at") or "").strip(),
-        "raw_tail_turns": max(1, normalized_tail_turns),
-    }
 
 
 def _normalize_task_ids(values: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[str]:
@@ -199,58 +167,114 @@ def build_last_task_memory(session: Any) -> dict[str, Any]:
     )
 
 
-def build_task_memory_message(task_memory: Any) -> dict[str, Any] | None:
-    normalized = normalize_task_memory(task_memory)
-    if not normalized['task_ids']:
-        return None
-    payload = {
-        'kind': 'task_memory',
-        'task_ids': list(normalized['task_ids']),
-    }
-    if normalized['source']:
-        payload['source'] = normalized['source']
-    if normalized['reason']:
-        payload['reason'] = normalized['reason']
-    if normalized['task_results']:
-        payload['task_results'] = list(normalized['task_results'])
-    return {
-        'role': 'assistant',
-        'content': f"{TASK_MEMORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}",
-    }
-
-
-def build_active_tasks_message(active_tasks: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> dict[str, Any] | None:
-    items = list(active_tasks or []) if isinstance(active_tasks, (list, tuple)) else [active_tasks]
-    normalized: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for raw in items:
+def build_task_continuity_payload(
+    *,
+    session: Any | None,
+    active_tasks: Any = None,
+    limit: int = _TASK_MEMORY_MAX_IDS,
+) -> dict[str, Any] | None:
+    normalized_active: list[dict[str, str]] = []
+    seen_task_ids: set[str] = set()
+    for raw in list(active_tasks or []):
         if not isinstance(raw, dict):
             continue
         task_id = str(raw.get('task_id') or '').strip()
-        if not task_id or task_id in seen:
+        if not task_id or task_id in seen_task_ids:
             continue
-        seen.add(task_id)
-        item = {
-            'task_id': task_id,
-            'title': summarize_preview_text(raw.get('title') or '', max_chars=96),
-            'core_requirement': summarize_preview_text(raw.get('core_requirement') or '', max_chars=140),
-            'continuation_of_task_id': str(raw.get('continuation_of_task_id') or '').strip(),
-            'status': str(raw.get('status') or '').strip(),
-            'updated_at': str(raw.get('updated_at') or '').strip(),
-        }
-        normalized.append({key: value for key, value in item.items() if value})
-        if len(normalized) >= max(1, int(limit or _TASK_MEMORY_MAX_IDS)):
+        seen_task_ids.add(task_id)
+        normalized_active.append(
+            {
+                key: value
+                for key, value in {
+                    'task_id': task_id,
+                    'title': summarize_preview_text(raw.get('title') or '', max_chars=96),
+                    'core_requirement': summarize_preview_text(raw.get('core_requirement') or '', max_chars=140),
+                    'continuation_of_task_id': str(raw.get('continuation_of_task_id') or '').strip(),
+                    'status': str(raw.get('status') or '').strip(),
+                    'updated_at': str(raw.get('updated_at') or '').strip(),
+                }.items()
+                if value
+            }
+        )
+        if len(normalized_active) >= max(1, int(limit or _TASK_MEMORY_MAX_IDS)):
             break
-    if not normalized:
+
+    last_task_memory = normalize_task_memory(
+        getattr(session, 'metadata', {}).get('last_task_memory') if session is not None else None
+    )
+    if not last_task_memory.get('task_ids') and session is not None:
+        last_task_memory = build_last_task_memory(session)
+
+    if not normalized_active and not last_task_memory.get('task_ids'):
         return None
-    payload = {
-        'kind': 'active_tasks',
-        'tasks': normalized,
-    }
+
+    last_results = list(last_task_memory.get('task_results') or [])
+    for task in normalized_active:
+        task_id = str(task.get('task_id') or '').strip()
+        if not task_id:
+            continue
+        matched = [
+            result
+            for result in last_results
+            if str(result.get('task_id') or '').strip() == task_id
+        ]
+        if matched:
+            task['task_results'] = matched[:1]
     return {
-        'role': 'assistant',
-        'content': f"{ACTIVE_TASKS_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}",
+        'active_tasks': normalized_active,
+        'last_task_memory': last_task_memory,
     }
+
+
+def render_task_continuity_markdown(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ''
+    active_tasks = list(payload.get('active_tasks') or [])
+    memory = normalize_task_memory(payload.get('last_task_memory'))
+    if not active_tasks and not memory.get('task_ids'):
+        return ''
+    lines = ['## Task Continuity']
+    if active_tasks:
+        lines.append('### Active Tasks')
+        for item in active_tasks:
+            task_id = str(item.get('task_id') or '').strip()
+            if not task_id:
+                continue
+            detail_parts = []
+            if item.get('title'):
+                detail_parts.append(f"title={item['title']}")
+            if item.get('core_requirement'):
+                detail_parts.append(f"core_requirement={item['core_requirement']}")
+            if item.get('continuation_of_task_id'):
+                detail_parts.append(f"continuation_of_task_id={item['continuation_of_task_id']}")
+            if item.get('status'):
+                detail_parts.append(f"status={item['status']}")
+            if item.get('updated_at'):
+                detail_parts.append(f"updated_at={item['updated_at']}")
+            lines.append(f"- `{task_id}`: {'; '.join(detail_parts)}")
+            for result in list(item.get('task_results') or [])[:1]:
+                summary = summarize_preview_text(
+                    result.get('output_excerpt') or result.get('failure_reason') or result.get('check_result') or '',
+                    max_chars=_TASK_RESULT_OUTPUT_MAX_CHARS,
+                )
+                if summary:
+                    lines.append(f"  Recent result: {summary}")
+    if memory.get('task_ids'):
+        lines.append('### Last Confirmed Task Memory')
+        lines.append(f"- task_ids: {', '.join(memory['task_ids'])}")
+        if memory.get('reason'):
+            lines.append(f"- reason: {memory['reason']}")
+        if memory.get('source'):
+            lines.append(f"- source: {memory['source']}")
+        for result in list(memory.get('task_results') or [])[:2]:
+            task_id = str(result.get('task_id') or '').strip()
+            excerpt = summarize_preview_text(
+                result.get('output_excerpt') or result.get('failure_reason') or result.get('check_result') or '',
+                max_chars=_TASK_RESULT_OUTPUT_MAX_CHARS,
+            )
+            if task_id and excerpt:
+                lines.append(f"- `{task_id}` result: {excerpt}")
+    return '\n'.join(lines).strip()
 
 
 def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -316,13 +340,41 @@ def _history_content_from_message(message: dict[str, Any]) -> str:
         blocks.append(content)
     task_meta = _compact_task_meta_payload(message)
     if task_meta is not None:
-        blocks.append(f"{TASK_META_PREFIX}\n{json.dumps(task_meta, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}")
+        lines = ['Task metadata:']
+        task_ids = list(task_meta.get('task_ids') or [])
+        if task_ids:
+            lines.append(f"- task_ids: {', '.join(task_ids)}")
+        if task_meta.get('source'):
+            lines.append(f"- source: {task_meta['source']}")
+        if task_meta.get('reason'):
+            lines.append(f"- reason: {task_meta['reason']}")
+        for result in list(task_meta.get('task_results') or [])[:2]:
+            task_id = str(result.get('task_id') or '').strip()
+            excerpt = summarize_preview_text(
+                result.get('output_excerpt') or result.get('failure_reason') or result.get('check_result') or '',
+                max_chars=_TASK_RESULT_REASON_MAX_CHARS,
+            )
+            if task_id and excerpt:
+                lines.append(f"- {task_id}: {excerpt}")
+        blocks.append('\n'.join(lines))
     tool_trace = _compact_tool_trace_payload(message)
     if tool_trace:
-        blocks.append(f"{TOOL_TRACE_PREFIX}\n{json.dumps(tool_trace, ensure_ascii=False, separators=(',', ':'))}")
+        lines = ['Recent tool results:']
+        for item in tool_trace:
+            lines.append(
+                f"- {item.get('tool', 'tool')} ({item.get('status', 'info')}): {item.get('text', '')}"
+            )
+        blocks.append('\n'.join(lines))
     stage_trace = _compact_stage_trace_payload(message)
     if stage_trace is not None:
-        blocks.append(f"{STAGE_TRACE_PREFIX}\n{json.dumps(stage_trace, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}")
+        lines = ['Stage snapshot:']
+        if stage_trace.get('status'):
+            lines.append(f"- status: {stage_trace['status']}")
+        if stage_trace.get('stage_goal'):
+            lines.append(f"- goal: {stage_trace['stage_goal']}")
+        if stage_trace.get('tool_rounds_used') is not None:
+            lines.append(f"- tool_rounds_used: {stage_trace['tool_rounds_used']}")
+        blocks.append('\n'.join(lines))
     return '\n'.join(block for block in blocks if block).strip()
 
 
@@ -335,6 +387,145 @@ def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
         if key in message:
             entry[key] = message[key]
     return entry
+
+
+def transcript_messages(session: Any) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in list(getattr(session, 'messages', []) or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get('role') or '').strip().lower() in {'user', 'assistant'}
+            and not is_internal_ceo_user_message(item)
+        )
+    ]
+
+
+def extract_live_raw_tail(
+    session: Any,
+    *,
+    turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
+) -> list[dict[str, Any]]:
+    messages = transcript_messages(session)
+    normalized_turns = max(1, int(turn_limit or DEFAULT_LIVE_RAW_TAIL_TURNS))
+    if not messages:
+        return []
+    turn_start_indexes: list[int] = []
+    current_user_index: int | None = None
+    for index, message in enumerate(messages):
+        role = str(message.get('role') or '').strip().lower()
+        if role == 'user':
+            current_user_index = index
+            continue
+        if role == 'assistant' and current_user_index is not None:
+            turn_start_indexes.append(current_user_index)
+            current_user_index = None
+    if turn_start_indexes:
+        start_index = (
+            turn_start_indexes[-normalized_turns]
+            if len(turn_start_indexes) >= normalized_turns
+            else turn_start_indexes[0]
+        )
+    else:
+        start_index = max(0, len(messages) - max(1, normalized_turns * 2))
+    return [_history_entry_from_message(message) for message in messages[start_index:]]
+
+
+def extract_active_stage_raw_tail(
+    runtime_session: Any | None,
+    persisted_session: Any | None,
+    *,
+    turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
+) -> list[dict[str, Any]]:
+    if runtime_session is not None:
+        snapshot_supplier = getattr(runtime_session, 'inflight_turn_snapshot', None)
+        snapshot = snapshot_supplier() if callable(snapshot_supplier) else None
+        if isinstance(snapshot, dict):
+            interaction_trace = normalize_interaction_trace(snapshot.get('interaction_trace'))
+            stages = list(interaction_trace.get('stages') or [])
+            has_active_stage = any(
+                str(stage.get('status') or '').strip() == CEO_STAGE_STATUS_ACTIVE for stage in stages
+            )
+            if has_active_stage:
+                messages: list[dict[str, Any]] = []
+                user_message = snapshot.get('user_message')
+                if isinstance(user_message, dict) and str(user_message.get('content') or '').strip():
+                    messages.append({'role': 'user', 'content': str(user_message.get('content') or '').strip()})
+                assistant_text = summarize_preview_text(snapshot.get('assistant_text') or '', max_chars=480)
+                tool_events = snapshot.get('tool_events') if isinstance(snapshot.get('tool_events'), list) else []
+                if assistant_text or tool_events:
+                    assistant_message = {
+                        'role': 'assistant',
+                        'content': assistant_text,
+                        'tool_events': tool_events,
+                        'interaction_trace': interaction_trace,
+                    }
+                    messages.append(_history_entry_from_message(assistant_message))
+                if messages:
+                    return messages
+    if persisted_session is None:
+        return []
+    return extract_live_raw_tail(persisted_session, turn_limit=turn_limit)
+
+
+def latest_interaction_trace(runtime_session: Any | None, persisted_session: Any | None) -> tuple[dict[str, Any], str]:
+    if runtime_session is not None:
+        trace_supplier = getattr(runtime_session, 'interaction_trace_snapshot', None)
+        trace = trace_supplier() if callable(trace_supplier) else None
+        normalized = normalize_interaction_trace(trace)
+        if normalized.get('stages'):
+            return normalized, 'runtime'
+        snapshot_supplier = getattr(runtime_session, 'inflight_turn_snapshot', None)
+        snapshot = snapshot_supplier() if callable(snapshot_supplier) else None
+        normalized = normalize_interaction_trace((snapshot or {}).get('interaction_trace'))
+        if normalized.get('stages'):
+            return normalized, 'inflight'
+    if persisted_session is not None:
+        for raw in reversed(transcript_messages(persisted_session)):
+            normalized = normalize_interaction_trace(raw.get('interaction_trace'))
+            if normalized.get('stages'):
+                return normalized, 'transcript'
+    return normalize_interaction_trace(None), ''
+
+
+def build_completed_stage_abstracts(trace: Any, *, limit: int = 4) -> list[str]:
+    normalized = normalize_interaction_trace(trace)
+    results: list[str] = []
+    for stage in list(normalized.get('stages') or []):
+        if str(stage.get('status') or '').strip() == CEO_STAGE_STATUS_ACTIVE:
+            continue
+        stage_index = int(stage.get('stage_index') or len(results) + 1)
+        stage_goal = summarize_preview_text(stage.get('stage_goal') or '', max_chars=160)
+        status = str(stage.get('status') or '').strip() or 'completed'
+        key_result = ''
+        failure_reason = ''
+        for round_item in reversed(list(stage.get('rounds') or [])):
+            tools = list(round_item.get('tools') or [])
+            for tool in reversed(tools):
+                output_ref = str(tool.get('output_ref') or '').strip()
+                output_text = summarize_preview_text(tool.get('output_text') or '', max_chars=180)
+                tool_status = str(tool.get('status') or '').strip().lower()
+                if tool_status == 'error' and not failure_reason:
+                    failure_reason = output_text or output_ref
+                if not key_result and (output_text or output_ref):
+                    key_result = output_text or output_ref
+                if key_result and failure_reason:
+                    break
+            if key_result and failure_reason:
+                break
+        lines = [
+            f"Stage {stage_index}",
+            f"- Goal: {stage_goal or '(unspecified)'}",
+            f"- Status: {status}",
+        ]
+        if failure_reason:
+            lines.append(f"- Failure reason: {failure_reason}")
+        elif key_result:
+            lines.append(f"- Key result: {key_result}")
+        results.append('\n'.join(lines))
+        if len(results) >= max(1, int(limit or 4)):
+            break
+    return results
 
 
 def _complete_transcript_turns(session: Any) -> list[list[dict[str, Any]]]:
@@ -357,124 +548,6 @@ def _complete_transcript_turns(session: Any) -> list[list[dict[str, Any]]]:
 
 def count_frontdoor_turns(session: Any) -> int:
     return len(_complete_transcript_turns(session))
-
-
-def _render_frontdoor_summary(turns: list[list[dict[str, Any]]]) -> str:
-    if not turns:
-        return ""
-    lines: list[str] = []
-    used_chars = 0
-    for turn_index, turn in enumerate(turns, start=1):
-        user_text = summarize_preview_text(turn[0].get("content") or "", max_chars=_FRONTDOOR_TURN_SUMMARY_MAX_CHARS)
-        assistant_text = summarize_preview_text(turn[1].get("content") or "", max_chars=_FRONTDOOR_TURN_SUMMARY_MAX_CHARS)
-        if user_text and assistant_text:
-            line = f"Earlier turn {turn_index}: user={user_text}; assistant={assistant_text}"
-        elif user_text:
-            line = f"Earlier turn {turn_index}: user={user_text}"
-        elif assistant_text:
-            line = f"Earlier turn {turn_index}: assistant={assistant_text}"
-        else:
-            continue
-        next_chars = used_chars + len(line) + (1 if lines else 0)
-        if next_chars > _FRONTDOOR_SUMMARY_MAX_CHARS:
-            remaining = max(0, len(turns) - turn_index + 1)
-            if remaining > 0:
-                lines.append(f"... plus {remaining} earlier summarized turns.")
-            break
-        lines.append(line)
-        used_chars = next_chars
-    return "\n".join(lines).strip()
-
-
-def build_frontdoor_context(
-    session: Any,
-    *,
-    raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
-    route_kind: str | None = None,
-) -> dict[str, Any]:
-    turns = _complete_transcript_turns(session)
-    normalized_tail_turns = max(1, int(raw_tail_turns or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS))
-    summarized_turns = turns[:-normalized_tail_turns] if len(turns) > normalized_tail_turns else []
-    metadata = dict(getattr(session, "metadata", {}) or {})
-    existing = normalize_frontdoor_context(metadata.get("frontdoor_context"), raw_tail_turns=normalized_tail_turns)
-    updated_at = getattr(session, "updated_at", None)
-    last_updated_at = updated_at.isoformat() if isinstance(updated_at, datetime) else datetime.now().isoformat()
-    return normalize_frontdoor_context(
-        {
-            "summary_text": _render_frontdoor_summary(summarized_turns),
-            "summary_turn_count": len(summarized_turns),
-            "last_route_kind": _normalize_frontdoor_route_kind(route_kind) or existing["last_route_kind"],
-            "last_updated_at": last_updated_at,
-            "raw_tail_turns": normalized_tail_turns,
-        },
-        raw_tail_turns=normalized_tail_turns,
-    )
-
-
-def resolve_frontdoor_context(
-    session: Any,
-    *,
-    raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
-) -> tuple[dict[str, Any], str]:
-    metadata = dict(getattr(session, "metadata", {}) or {})
-    normalized_tail_turns = max(1, int(raw_tail_turns or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS))
-    stored = normalize_frontdoor_context(metadata.get("frontdoor_context"), raw_tail_turns=normalized_tail_turns)
-    total_turns = count_frontdoor_turns(session)
-    covered_turns = int(stored["summary_turn_count"]) + min(int(stored["raw_tail_turns"]), total_turns)
-    if total_turns <= covered_turns:
-        return stored, "metadata"
-    return build_frontdoor_context(
-        session,
-        raw_tail_turns=normalized_tail_turns,
-        route_kind=stored["last_route_kind"],
-    ), "fallback"
-
-
-def extract_frontdoor_recent_history(session: Any, *, raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS) -> list[dict[str, Any]]:
-    messages = [
-        item
-        for item in list(getattr(session, 'messages', []) or [])
-        if (
-            isinstance(item, dict)
-            and str(item.get('role') or '').strip().lower() in {'user', 'assistant'}
-            and not is_internal_ceo_user_message(item)
-        )
-    ]
-    normalized_tail_turns = max(1, int(raw_tail_turns or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS))
-    if not messages:
-        return []
-    turn_start_indexes: list[int] = []
-    current_user_index: int | None = None
-    for index, message in enumerate(messages):
-        role = str(message.get('role') or '').strip().lower()
-        if role == 'user':
-            current_user_index = index
-            continue
-        if role == 'assistant' and current_user_index is not None:
-            turn_start_indexes.append(current_user_index)
-            current_user_index = None
-    if turn_start_indexes:
-        start_index = turn_start_indexes[-normalized_tail_turns] if len(turn_start_indexes) >= normalized_tail_turns else turn_start_indexes[0]
-    else:
-        start_index = max(0, len(messages) - max(1, normalized_tail_turns * 2))
-    return [_history_entry_from_message(message) for message in messages[start_index:]]
-
-
-def build_frontdoor_compact_history_message(frontdoor_context: Any) -> dict[str, Any] | None:
-    normalized = normalize_frontdoor_context(frontdoor_context)
-    if not normalized["summary_text"] or int(normalized["summary_turn_count"]) <= 0:
-        return None
-    payload = {
-        "kind": "frontdoor_context",
-        "summary": normalized["summary_text"],
-        "summary_turn_count": int(normalized["summary_turn_count"]),
-        "last_route_kind": normalized["last_route_kind"],
-        "raw_tail_turns": int(normalized["raw_tail_turns"]),
-    }
-    return {
-        "role": "assistant",
-        "content": f"{FRONTDOOR_COMPACT_HISTORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}",
-    }
 
 
 def workspace_path() -> Path:
@@ -562,9 +635,9 @@ def normalize_task_defaults(
 
 def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]:
     payload = dict(metadata or {}) if isinstance(metadata, dict) else {}
+    payload.pop("frontdoor_context", None)
     title = str(payload.get("title") or "").strip() or DEFAULT_CEO_SESSION_TITLE
     preview_text = summarize_preview_text(payload.get("last_preview_text") or payload.get("preview_text") or "")
-    frontdoor_context = normalize_frontdoor_context(payload.get("frontdoor_context"))
     manual_pause_waiting_reason = bool(payload.get("manual_pause_waiting_reason"))
     depth_limits = main_runtime_depth_limits()
     if str(session_key or "").startswith("web:"):
@@ -585,7 +658,6 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
         **payload,
         "title": title,
         "last_preview_text": preview_text,
-        "frontdoor_context": frontdoor_context,
         "memory_scope": memory_scope,
         "task_defaults": task_defaults,
         "manual_pause_waiting_reason": manual_pause_waiting_reason,
@@ -621,13 +693,8 @@ def update_ceo_session_after_turn(
     if metadata.get("last_preview_text") != next_preview:
         metadata["last_preview_text"] = next_preview
         changed = True
-    next_frontdoor_context = build_frontdoor_context(
-        session,
-        raw_tail_turns=DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
-        route_kind=route_kind,
-    )
-    if metadata.get("frontdoor_context") != next_frontdoor_context:
-        metadata["frontdoor_context"] = next_frontdoor_context
+    if 'frontdoor_context' in metadata:
+        metadata.pop('frontdoor_context', None)
         changed = True
     next_task_memory = build_last_task_memory(session)
     if metadata.get('last_task_memory') != next_task_memory:

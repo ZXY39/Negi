@@ -1060,7 +1060,7 @@ async def test_runtime_agent_session_persists_pending_user_turn_before_cancellat
     assert reloaded_session.messages[0]["metadata"]["_transcript_state"] == "pending"
     assert str(reloaded_session.messages[0]["metadata"]["_transcript_turn_id"]).strip()
 
-    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(reloaded_session, raw_tail_turns=4)
+    recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history == [{"role": "user", "content": "Keep this request after cancellation"}]
 
 
@@ -1150,10 +1150,10 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
     assert [item["status"] for item in reloaded_session.messages[1]["tool_events"]] == ["running"]
     assert reloaded_session.messages[1]["interaction_trace"]["stages"][-1]["stage_goal"] == "Open bilibili"
 
-    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(reloaded_session, raw_tail_turns=4)
+    recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Open bilibili"}
     assert "运行出错：CEO frontdoor exceeded maximum iterations" in recent_history[-1]["content"]
-    assert web_ceo_sessions.STAGE_TRACE_PREFIX in recent_history[-1]["content"]
+    assert "Stage snapshot:" in recent_history[-1]["content"]
 
 
 def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monkeypatch) -> None:

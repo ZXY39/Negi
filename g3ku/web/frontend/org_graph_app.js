@@ -133,6 +133,7 @@ const S = {
     tasksWorkerStatusPayload: null,
     tasksWorkerStaleAfterSeconds: 15,
     taskWorkerStatusPollId: null,
+    taskPerformanceRefreshId: null,
     taskTokenStatsOpen: false,
     taskArtifacts: [],
     selectedArtifactId: "",

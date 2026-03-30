@@ -3,22 +3,20 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import yaml
 
 from .enums import AuthMode, Capability
-from .facade import (
-    LLMConfigFacade,
-    MEMORY_EMBEDDING_CONFIG_ID,
-    MEMORY_RERANK_CONFIG_ID,
-)
 from .models import NormalizedProviderConfig
 
+if TYPE_CHECKING:
+    from .facade import LLMConfigFacade
 
-EMBEDDING_KEY = MEMORY_EMBEDDING_CONFIG_ID
-RERANK_KEY = MEMORY_RERANK_CONFIG_ID
+
+EMBEDDING_KEY = "memory_embedding_default"
+RERANK_KEY = "memory_rerank_default"
 _MEMORY_KEYS = {EMBEDDING_KEY, RERANK_KEY}
 
 
@@ -207,6 +205,8 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
         return raw_data, False
 
     workspace = (workspace or Path.cwd()).resolve()
+    from .facade import LLMConfigFacade
+
     facade = LLMConfigFacade(workspace)
     next_data = deepcopy(raw_data)
     next_catalog: list[dict[str, Any]] = []
@@ -317,7 +317,7 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
         capability=Capability.EMBEDDING,
         provider_model=embedding_provider_model,
         source_config_id=embedding_source_config_id,
-        legacy_fixed_config_id=MEMORY_EMBEDDING_CONFIG_ID,
+        legacy_fixed_config_id=EMBEDDING_KEY,
     )
     rerank_binding_config_id = _resolve_memory_binding_config_id(
         facade,
@@ -325,7 +325,7 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
         capability=Capability.RERANK,
         provider_model=rerank_provider_model,
         source_config_id=rerank_source_config_id,
-        legacy_fixed_config_id=MEMORY_RERANK_CONFIG_ID,
+        legacy_fixed_config_id=RERANK_KEY,
     )
     current_binding = facade.get_memory_binding()
     desired_embedding_binding = embedding_binding_config_id
@@ -362,15 +362,15 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
     retained_config_ids.update(
         {
             config_id
-            for config_id in (
-                desired_embedding_binding,
-                desired_rerank_binding,
-                MEMORY_EMBEDDING_CONFIG_ID,
-                MEMORY_RERANK_CONFIG_ID,
-            )
-            if config_id
-        }
-    )
+                for config_id in (
+                    desired_embedding_binding,
+                    desired_rerank_binding,
+                    EMBEDDING_KEY,
+                    RERANK_KEY,
+                )
+                if config_id
+            }
+        )
     _delete_orphaned_memory_records(
         facade,
         orphaned_config_ids=orphaned_memory_record_ids,

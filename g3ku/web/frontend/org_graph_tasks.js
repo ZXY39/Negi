@@ -227,7 +227,7 @@ function renderTaskPerformanceBar() {
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">CPU/内存/磁盘</span>
-            <strong class="task-performance-value">${esc(`CPU ${cpuText} | 内存 ${memoryText} | 磁盘 ${diskText}`)}</strong>
+            <strong class="task-performance-value">${esc(`${cpuText} / ${memoryText} / ${diskText}`)}</strong>
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">运行中工作项</span>
@@ -1151,17 +1151,30 @@ function closeTasksWs() {
 }
 
 function startTaskWorkerStatusPolling() {
-    if (S.taskWorkerStatusPollId) return;
-    void refreshTaskWorkerStatus({ render: S.view === "tasks" });
-    S.taskWorkerStatusPollId = window.setInterval(() => {
+    if (!S.taskWorkerStatusPollId) {
         void refreshTaskWorkerStatus({ render: S.view === "tasks" });
-    }, 10000);
+        S.taskWorkerStatusPollId = window.setInterval(() => {
+            void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        }, 10000);
+    }
+    if (!S.taskPerformanceRefreshId) {
+        renderTaskPerformanceBar();
+        S.taskPerformanceRefreshId = window.setInterval(() => {
+            renderTaskPerformanceBar();
+            refreshTaskWorkerState({ render: S.view === "tasks" });
+        }, 1000);
+    }
 }
 
 function stopTaskWorkerStatusPolling() {
-    if (!S.taskWorkerStatusPollId) return;
-    window.clearInterval(S.taskWorkerStatusPollId);
-    S.taskWorkerStatusPollId = null;
+    if (S.taskWorkerStatusPollId) {
+        window.clearInterval(S.taskWorkerStatusPollId);
+        S.taskWorkerStatusPollId = null;
+    }
+    if (S.taskPerformanceRefreshId) {
+        window.clearInterval(S.taskPerformanceRefreshId);
+        S.taskPerformanceRefreshId = null;
+    }
 }
 
 function initTasksWs() {

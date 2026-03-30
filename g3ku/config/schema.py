@@ -613,6 +613,14 @@ class MemoryCostConfig(Base):
 class MemoryAssemblyConfig(Base):
     """Prompt/context assembly controls for frontdoor orchestration."""
 
+    max_prompt_tokens: int = 3200
+    live_raw_tail_turns: int = 4
+    task_continuity_max_tokens: int = 320
+    stage_context_max_tokens: int = 640
+    latest_archive_overview_max_tokens: int = 420
+    older_archive_abstracts_top_k: int = 4
+    older_archive_abstracts_max_tokens: int = 320
+    retrieved_context_max_tokens: int = 1200
     recent_messages_limit: int = 24
     archive_summary_top_k: int = 2
     archive_summary_max_tokens: int = 320

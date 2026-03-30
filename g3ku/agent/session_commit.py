@@ -2,6 +2,7 @@
 
 from dataclasses import asdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -75,6 +76,23 @@ class SessionCommitService:
             return None
 
         commit_reason = reason or detected_reason or "turn_trigger"
+        latest_archive_overview = ""
+        if hasattr(session, "archive_segments") and isinstance(session.archive_segments, list):
+            latest_segment = next(
+                (
+                    item
+                    for item in reversed(list(session.archive_segments or []))
+                    if isinstance(item, dict) and str(item.get("overview_uri") or "").strip()
+                ),
+                None,
+            )
+            if isinstance(latest_segment, dict):
+                overview_uri = str(latest_segment.get("overview_uri") or "").strip()
+                if overview_uri:
+                    try:
+                        latest_archive_overview = Path(overview_uri).read_text(encoding="utf-8").strip()
+                    except Exception:
+                        latest_archive_overview = ""
         try:
             artifact = await self.memory_manager.commit_session(
                 session_key=session.key,
@@ -82,6 +100,7 @@ class SessionCommitService:
                 chat_id=chat_id,
                 messages=payload,
                 reason=commit_reason,
+                latest_archive_overview=latest_archive_overview,
             )
         except Exception:
             logger.exception("Session commit failed for {}", session.key)
@@ -113,11 +132,14 @@ class SessionCommitService:
             session.archive_segments.append(
                 {
                     "archive_id": artifact.archive_id,
-                    "summary_uri": artifact.summary_uri,
+                    "archive_uri": artifact.archive_uri,
+                    "overview_uri": artifact.overview_uri,
+                    "abstract_uri": artifact.abstract_uri,
                     "start_idx": start_idx,
                     "end_idx": len(session.messages),
                     "reason": commit_reason,
                     "created_at": now.isoformat(),
+                    "summary_version": artifact.summary_version,
                 }
             )
 

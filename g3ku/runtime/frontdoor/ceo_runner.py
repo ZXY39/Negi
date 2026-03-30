@@ -879,23 +879,32 @@ class CeoFrontDoorRunner:
             message_tool.start_turn()
 
         exposure = await self._resolver.resolve_for_actor(actor_role="ceo", session_id=session.state.session_key)
-        assembly = await self._assembly.build_for_ceo(
-            session=session,
-            query_text=query_text,
-            exposure=exposure,
-            persisted_session=persisted_session,
+        assembly_kwargs = {
+            "session": session,
+            "query_text": query_text,
+            "exposure": exposure,
+            "persisted_session": persisted_session,
+        }
+        build_for_ceo = self._assembly.build_for_ceo
+        try:
+            build_sig = inspect.signature(build_for_ceo)
+        except Exception:
+            build_sig = None
+        if build_sig is None or "user_content" in build_sig.parameters:
+            assembly_kwargs["user_content"] = self._model_content(getattr(user_input, "content", ""))
+        assembly = await build_for_ceo(
+            **assembly_kwargs,
         )
         tool_names = list(assembly.tool_names or list(exposure.get("tool_names") or []))
         if cron_internal:
             tool_names = ["cron"]
         cron_system_message = self._cron_internal_system_message(metadata)
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": assembly.system_prompt},
-        ]
+        messages: list[dict[str, Any]] = list(assembly.model_messages or [])
         if cron_system_message is not None:
-            messages.append(cron_system_message)
-        messages.extend(list(assembly.recent_history or []))
-        messages.append({"role": "user", "content": self._model_content(getattr(user_input, "content", ""))})
+            insert_at = 1 if messages and str(messages[0].get("role") or "").strip().lower() == "system" else 0
+            messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
+        if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
+            messages.append({"role": "user", "content": self._model_content(getattr(user_input, "content", ""))})
         project_environment = current_project_environment(workspace_root=getattr(self._loop, "workspace", None))
         session_task_defaults = self._session_task_defaults(runtime_session)
         model_refs = self._resolve_ceo_model_refs()

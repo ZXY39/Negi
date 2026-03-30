@@ -7,6 +7,7 @@ import pytest
 
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.assembly import ContextAssemblyService
+from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 
 
@@ -29,9 +30,26 @@ class _MemoryManager:
         _ = service, skill_ids, tool_ids
         return {'created': 0, 'updated': 0, 'removed': 0}
 
-    async def retrieve_block(self, **kwargs):
+    async def retrieve_context_bundle(self, **kwargs):
         self.calls.append(dict(kwargs))
-        return self.response
+        return RetrievedContextBundle(
+            query=str(kwargs.get('query') or ''),
+            records=(
+                [
+                    {
+                        'record_id': 'memory-1',
+                        'context_type': 'memory',
+                        'l0': 'remembered fact',
+                        'l1': self.response.replace('# Retrieved Context', '').strip(),
+                        'l2_preview': '',
+                        'source': 'test',
+                        'confidence': 1.0,
+                    }
+                ]
+                if self.response
+                else []
+            ),
+        )
 
 
 class _SemanticMemoryManager(_MemoryManager):
@@ -76,6 +94,14 @@ def _loop(memory_manager: _MemoryManager, *, main_task_service=None) -> SimpleNa
         memory_window=100,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
+                max_prompt_tokens=3200,
+                live_raw_tail_turns=4,
+                task_continuity_max_tokens=320,
+                stage_context_max_tokens=640,
+                latest_archive_overview_max_tokens=420,
+                older_archive_abstracts_top_k=4,
+                older_archive_abstracts_max_tokens=320,
+                retrieved_context_max_tokens=1200,
                 recent_messages_limit=24,
                 archive_summary_top_k=2,
                 archive_summary_max_tokens=320,
@@ -331,8 +357,8 @@ async def test_ceo_context_assembly_includes_active_task_snapshot_message() -> N
 
     assert task_service.calls == [('web:shared', 3)]
     assert result.recent_history[0]['role'] == 'assistant'
-    assert str(result.recent_history[0]['content']).startswith(web_ceo_sessions.ACTIVE_TASKS_PREFIX)
-    assert '"continuation_of_task_id":"task:old-1"' in str(result.recent_history[0]['content'])
+    assert '## Task Continuity' in str(result.recent_history[0]['content'])
+    assert 'continuation_of_task_id=task:old-1' in str(result.recent_history[0]['content'])
     assert result.trace['active_tasks'] == {'count': 1, 'included': True}
 
 
@@ -554,10 +580,11 @@ async def test_ceo_context_assembly_adds_retrieved_memory_resolution_hint_for_me
         persisted_session=None,
     )
 
-    assert 'Retrieved Memory Resolution Hint' in result.system_prompt
-    assert 'Authoritative Retrieved Default' not in result.system_prompt
-    assert 'restate the retrieved default directly' in result.system_prompt
-    assert '用户要求以后所有整理文档类的结果默认放在桌面' in result.system_prompt
+    rendered = "\n\n".join(str(item.get('content') or '') for item in result.model_messages)
+    assert 'Retrieved Memory Resolution Hint' in rendered
+    assert 'Authoritative Retrieved Default' not in rendered
+    assert 'restate the retrieved default directly' in rendered
+    assert '用户要求以后所有整理文档类的结果默认放在桌面' in rendered
     assert 'authoritative_memory_fact' not in result.trace
 
 

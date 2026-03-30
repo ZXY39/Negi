@@ -13,7 +13,7 @@ from uuid import uuid4
 from g3ku.china_bridge.registry import china_channel_attr, china_channel_ids, china_channel_spec
 from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_CONCURRENCY, DEFAULT_ROLE_MAX_ITERATIONS
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
-from g3ku.security import (
+from g3ku.security.bootstrap import (
     apply_config_secret_entries,
     extract_config_secret_entries,
     get_bootstrap_security_service,

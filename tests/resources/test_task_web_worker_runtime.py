@@ -1787,6 +1787,73 @@ async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp
 
 
 @pytest.mark.asyncio
+async def test_spawn_children_materializes_batch_children_before_pipeline_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        observed_child_ids: list[list[str]] = []
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            root_after = service.get_node(root.node_id)
+            assert root_after is not None
+            entries = list(((root_after.metadata or {}).get("spawn_operations") or {}).get("batch-call", {}).get("entries") or [])
+            observed_child_ids.append([
+                str(item.get("child_node_id") or "").strip()
+                for item in entries
+            ])
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node_id} done",
+                    answer=f"{node_id} done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[
+                SpawnChildSpec(goal="child 1", prompt="prompt 1", execution_policy=_execution_policy()),
+                SpawnChildSpec(goal="child 2", prompt="prompt 2", execution_policy=_execution_policy()),
+            ],
+            call_id="batch-call",
+        )
+
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        entries = list(((root_after.metadata or {}).get("spawn_operations") or {}).get("batch-call", {}).get("entries") or [])
+        child_ids = [str(item.get("child_node_id") or "").strip() for item in entries]
+
+        assert len(results) == 2
+        assert len(entries) == 2
+        assert all(child_ids)
+        assert len(service.store.list_children(root.node_id)) == 2
+        assert observed_child_ids
+        assert all(all(item for item in snapshot) for snapshot in observed_child_ids)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_child_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

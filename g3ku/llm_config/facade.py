@@ -18,7 +18,7 @@ from g3ku.llm_config.export import to_generic_runtime_config
 from g3ku.llm_config.repositories import EncryptedConfigRepository
 from g3ku.llm_config.secret_store import EncryptedFileSecretStore
 from g3ku.llm_config.service import ConfigService, TemplateService
-from g3ku.security import get_bootstrap_security_service
+from g3ku.security.bootstrap import get_bootstrap_security_service
 
 
 MASKED_SECRET_VALUE = "********"

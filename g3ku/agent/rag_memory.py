@@ -39,7 +39,9 @@ from g3ku.llm_config.runtime_resolver import (
     resolve_memory_embedding_target,
     resolve_memory_rerank_target,
 )
-from g3ku.security import apply_config_secret_entries, get_bootstrap_security_service
+from g3ku.runtime.context.summarizer import summarize_l0, truncate_by_tokens
+from g3ku.runtime.context.types import RetrievedContextBundle
+from g3ku.security.bootstrap import apply_config_secret_entries, get_bootstrap_security_service
 from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_status
 from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
 
@@ -615,11 +617,157 @@ class CommitArtifact:
     """Artifacts created by one session commit run."""
 
     archive_id: str
-    summary_uri: str
+    archive_uri: str
+    overview_uri: str
+    abstract_uri: str
+    summary_version: int
     extracted_count: int
     merged_count: int
     skipped_count: int
     timestamp: str = field(default_factory=_now_iso)
+
+
+def _response_text(value: Any) -> str:
+    raw = getattr(value, "content", value)
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text_part = item.get("text") or item.get("content") or ""
+                if isinstance(text_part, str):
+                    parts.append(text_part)
+        raw = "\n".join(parts)
+    return str(raw or "").strip()
+
+
+def _format_commit_messages(messages: list[dict[str, Any]], *, max_lines: int = 80) -> str:
+    lines: list[str] = []
+    for msg in list(messages or []):
+        role = str(msg.get("role", "")).strip().lower()
+        content = msg.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            continue
+        text = " ".join(content.split()).strip()
+        if not text or text.startswith("[Runtime Context"):
+            continue
+        lines.append(f"[{role}]: {text}")
+        if len(lines) >= max(1, int(max_lines or 80)):
+            break
+    return "\n".join(lines)
+
+
+def _fallback_archive_overview(messages: list[dict[str, Any]], latest_archive_overview: str = "") -> str:
+    user_lines: list[str] = []
+    assistant_lines: list[str] = []
+    for msg in list(messages or []):
+        role = str(msg.get("role", "")).strip().lower()
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+        text = " ".join(content.split()).strip()
+        if not text or text.startswith("[Runtime Context"):
+            continue
+        if role == "user":
+            user_lines.append(text)
+        elif role == "assistant":
+            assistant_lines.append(text)
+    carried_forward = summarize_l0(latest_archive_overview, limit=120) if latest_archive_overview else "None"
+    new_info = " | ".join(user_lines[-3:] or assistant_lines[-2:])[:360]
+    key_messages = "\n".join(f"- {truncate_by_tokens(item, 48)}" for item in user_lines[-3:])
+    next_step = truncate_by_tokens(assistant_lines[-1] if assistant_lines else new_info, 40)
+    return "\n".join(
+        [
+            "# Session Archive Overview",
+            "",
+            f"**One-line overview**: {summarize_l0(new_info or next_step, limit=160)}",
+            "",
+            "## Historical Context Carried Forward",
+            carried_forward or "None",
+            "",
+            "## New Information In This Archive",
+            new_info or "None",
+            "",
+            "## Key User Messages",
+            key_messages or "- None",
+            "",
+            "## Open Loops",
+            "- None",
+            "",
+            "## Next Step",
+            f"1. {next_step or 'Continue from the latest user intent.'}",
+        ]
+    ).strip()
+
+
+async def _generate_archive_overview_with_llm(
+    messages: list[dict[str, Any]],
+    *,
+    latest_archive_overview: str = "",
+) -> str:
+    transcript = _format_commit_messages(messages)
+    if not transcript:
+        return ""
+    try:
+        from g3ku.config.live_runtime import get_runtime_config
+        from g3ku.providers.chatmodels import build_chat_model
+
+        config, _revision, _changed = get_runtime_config(force=False)
+        model = build_chat_model(config, role="ceo")
+        prompt = (
+            "You are generating a continuity-aware archive overview for an agent session.\n"
+            "Write markdown only.\n"
+            "Use these sections exactly:\n"
+            "# Session Archive Overview\n"
+            "**One-line overview**: ...\n"
+            "## Historical Context Carried Forward\n"
+            "## New Information In This Archive\n"
+            "## Key User Messages\n"
+            "## Open Loops\n"
+            "## Next Step\n"
+            "Do not return JSON.\n"
+        )
+        body = (
+            f"Latest archive overview:\n{truncate_by_tokens(latest_archive_overview, 320)}\n\n"
+            f"Current archive transcript:\n{truncate_by_tokens(transcript, 1200)}"
+        )
+        response = await model.ainvoke(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": body},
+            ]
+        )
+        text = _response_text(response)
+        if text:
+            return text
+    except Exception:
+        pass
+    return _fallback_archive_overview(messages, latest_archive_overview=latest_archive_overview)
+
+
+def _extract_archive_abstract_from_overview(overview: str) -> str:
+    text = str(overview or "").strip()
+    if not text:
+        return ""
+    for line in text.splitlines():
+        normalized = str(line or "").strip()
+        if normalized.lower().startswith("**one-line overview**:"):
+            return normalized.split(":", 1)[1].strip()
+    for line in text.splitlines():
+        normalized = str(line or "").strip()
+        if normalized and not normalized.startswith("#"):
+            return normalized
+    return text[:160].strip()
+
+
+def _session_archive_safe_key(session_key: str, channel: str, chat_id: str) -> str:
+    return (
+        str(session_key or f"{channel}:{chat_id}")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "_")
+    )
 
 
 @dataclass(slots=True)
@@ -2553,70 +2701,6 @@ class _RagMemoryBackend:
             },
         }
 
-    async def _build_layered_context_block(
-        self,
-        *,
-        query: str,
-        records: list[ContextRecordV2],
-        budget_tokens: int,
-    ) -> tuple[str, list[dict[str, Any]], int]:
-        if not records:
-            return "", [], 0
-        default_level = self._default_load_level()
-        lines = ["# Retrieved Context (Layered)"]
-        injected_blocks: list[dict[str, Any]] = []
-        used = self._estimate_tokens(lines[0])
-
-        for idx, record in enumerate(records, start=1):
-            label = record.record_id if record.context_type == "memory" else f"{record.context_type}:{record.record_id}"
-            header = f"- [{label}] {record.l0 or self._l0_summary(record.l1)}"
-            candidate = [header]
-            if default_level in {"l1", "l2"} and record.l1:
-                candidate.append(f"  L1: {record.l1}")
-            include_l2 = default_level == "l2" or idx <= 2
-            if include_l2 and record.l2_ref:
-                l2_text = await self._read_l2_payload(record.l2_ref)
-                snippet = self._window_extract(query, l2_text, max(1, int(self.config.retrieval.sentence_window)))[:500]
-                if snippet:
-                    candidate.append(f"  L2: {snippet}")
-
-            block_text = "\n".join(candidate)
-            block_tokens = self._estimate_tokens(block_text)
-            if used + block_tokens > budget_tokens:
-                header_tokens = self._estimate_tokens(header)
-                if used + header_tokens <= budget_tokens:
-                    lines.append(header)
-                    used += header_tokens
-                    injected_blocks.append(
-                        {
-                            "record_id": record.record_id,
-                            "context_type": record.context_type,
-                            "layer": "l0",
-                            "tokens": header_tokens,
-                            "reason": "fallback_l0_due_budget",
-                        }
-                    )
-                    continue
-                injected_blocks.append(
-                    {
-                        "record_id": record.record_id,
-                        "context_type": record.context_type,
-                        "reason": "token_budget_exceeded",
-                    }
-                )
-                continue
-            lines.extend(candidate)
-            used += block_tokens
-            injected_blocks.append(
-                {
-                    "record_id": record.record_id,
-                    "context_type": record.context_type,
-                    "layer": "l2" if include_l2 and record.l2_ref else default_level,
-                    "tokens": block_tokens,
-                }
-            )
-        return ("\n".join(lines) if len(lines) > 1 else ""), injected_blocks, used
-
     async def _dual_write_legacy(self, text: str) -> None:
         if not self.config.compat.dual_write_legacy_files:
             return
@@ -2643,9 +2727,46 @@ class _RagMemoryBackend:
         allowed_resource_record_ids: Iterable[str] | None = None,
         allowed_skill_record_ids: Iterable[str] | None = None,
     ) -> str:
+        bundle = await self.retrieve_context_bundle(
+            query=query,
+            channel=channel,
+            chat_id=chat_id,
+            session_key=session_key,
+            search_context_types=search_context_types,
+            allowed_context_types=allowed_context_types,
+            allowed_resource_record_ids=allowed_resource_record_ids,
+            allowed_skill_record_ids=allowed_skill_record_ids,
+        )
+        records = list(bundle.records or [])
+        if not records:
+            return ""
+        budget_tokens = max(120, int(self.config.retrieval.max_context_tokens))
+        lines = ["## Retrieved Context"]
+        used_tokens = self._estimate_tokens(lines[0])
+        for record in records:
+            line = f"- [{record.get('record_id')}] {str(record.get('l1') or record.get('l0') or '')[:500]}"
+            line_tokens = self._estimate_tokens(line)
+            if used_tokens + line_tokens > budget_tokens:
+                continue
+            lines.append(line)
+            used_tokens += line_tokens
+        return "\n".join(lines) if len(lines) > 1 else ""
+
+    async def retrieve_context_bundle(
+        self,
+        *,
+        query: str,
+        channel: str | None,
+        chat_id: str | None,
+        session_key: str | None = None,
+        search_context_types: Iterable[str] | None = None,
+        allowed_context_types: Iterable[str] | None = None,
+        allowed_resource_record_ids: Iterable[str] | None = None,
+        allowed_skill_record_ids: Iterable[str] | None = None,
+    ) -> RetrievedContextBundle:
         raw_query = str(query or "").strip()
         if not raw_query:
-            return ""
+            return RetrievedContextBundle(query="")
         namespace = self.namespace_for(channel=channel, chat_id=chat_id)
         limit = max(1, int(self.config.retrieval.context_top_k))
         candidate_limit = max(
@@ -2730,7 +2851,13 @@ class _RagMemoryBackend:
                 token_in=self._estimate_tokens(raw_query),
                 token_out=0,
             )
-            return ""
+            return RetrievedContextBundle(
+                query=raw_query,
+                grouped={"memory": [], "resource": [], "skill": []},
+                plan=plan_trace,
+                meta={"total": 0, "limit": limit},
+                trace={"trace_id": empty_trace.trace_id, "token_budget_used": 0},
+            )
 
         rerank_trace: list[dict[str, Any]] = []
         rerank_triggered = self._reranker is not None and len(fused) > 1
@@ -2766,28 +2893,51 @@ class _RagMemoryBackend:
                 token_in=self._estimate_tokens(raw_query),
                 token_out=0,
             )
-            return ""
-
-        layered_enabled = self._feature_enabled("layered_loading")
-        if layered_enabled:
-            block, injected_blocks, used_tokens = await self._build_layered_context_block(
+            return RetrievedContextBundle(
                 query=raw_query,
-                records=fused[:limit],
-                budget_tokens=budget_tokens,
+                grouped={"memory": [], "resource": [], "skill": []},
+                plan=plan_trace,
+                meta={"total": 0, "limit": limit},
+                trace={"trace_id": empty_trace.trace_id, "token_budget_used": 0},
             )
-        else:
-            lines = ["## Retrieved Memory"]
-            injected_blocks = []
-            used_tokens = self._estimate_tokens(lines[0])
-            for record in fused[:limit]:
-                line = f"- [{record.record_id}] {(record.l1 or record.l0)[:500]}"
-                line_tokens = self._estimate_tokens(line)
-                if used_tokens + line_tokens > budget_tokens:
-                    continue
-                lines.append(line)
-                used_tokens += line_tokens
-                injected_blocks.append({"record_id": record.record_id, "context_type": record.context_type})
-            block = "\n".join(lines) if len(lines) > 1 else ""
+
+        grouped: dict[str, list[dict[str, Any]]] = {"memory": [], "resource": [], "skill": []}
+        unified: list[dict[str, Any]] = []
+        injected_blocks: list[dict[str, Any]] = []
+        default_level = self._default_load_level()
+        for rank, record in enumerate(fused[:limit], start=1):
+            include_l2 = default_level == "l2" or rank <= 2
+            l2_preview = ""
+            if include_l2 and record.l2_ref:
+                l2_text = await self._read_l2_payload(record.l2_ref)
+                l2_preview = self._window_extract(
+                    raw_query,
+                    l2_text,
+                    max(1, int(self.config.retrieval.sentence_window)),
+                )[:500]
+            entry = {
+                "rank": rank,
+                "record_id": record.record_id,
+                "context_type": record.context_type,
+                "uri": record.uri,
+                "source": record.source,
+                "confidence": round(float(record.confidence), 4),
+                "l0": record.l0,
+                "l1": record.l1,
+                "l2_preview": l2_preview,
+                "tags": list(record.tags or []),
+            }
+            grouped.setdefault(record.context_type, []).append(entry)
+            unified.append(entry)
+            injected_blocks.append(
+                {
+                    "record_id": record.record_id,
+                    "context_type": record.context_type,
+                    "layer": "l2" if l2_preview else default_level,
+                }
+            )
+
+        used_tokens = self._estimate_tokens(json.dumps(unified, ensure_ascii=False))
 
         trace = RetrievalTrace(
             plan=plan_trace,
@@ -2819,8 +2969,24 @@ class _RagMemoryBackend:
             token_in=self._estimate_tokens(raw_query),
             token_out=used_tokens,
         )
-
-        return block
+        return RetrievedContextBundle(
+            query=raw_query,
+            records=unified,
+            grouped=grouped,
+            plan=plan_trace,
+            meta={
+                "total": len(unified),
+                "limit": limit,
+                "session_key": str(session_key or ""),
+                "channel": str(channel or ""),
+                "chat_id": str(chat_id or ""),
+            },
+            trace={
+                "trace_id": trace.trace_id,
+                "token_budget_used": used_tokens,
+                "rerank_used": rerank_triggered,
+            },
+        )
 
     @staticmethod
     def _filter_retrieved_records(
@@ -3186,12 +3352,16 @@ class _RagMemoryBackend:
         chat_id: str,
         messages: list[dict[str, Any]],
         reason: str = "turn_trigger",
+        latest_archive_overview: str = "",
     ) -> CommitArtifact:
         archive_id = uuid.uuid4().hex[:12]
         if not messages:
             return CommitArtifact(
                 archive_id=archive_id,
-                summary_uri="",
+                archive_uri="",
+                overview_uri="",
+                abstract_uri="",
+                summary_version=2,
                 extracted_count=0,
                 merged_count=0,
                 skipped_count=0,
@@ -3200,20 +3370,19 @@ class _RagMemoryBackend:
         commit_time = _now_iso()
         channel_safe = str(channel or "unknown")
         chat_safe = str(chat_id or "unknown")
-        session_safe = (
-            str(session_key or f"{channel_safe}:{chat_safe}")
-            .replace("/", "_")
-            .replace("\\", "_")
-            .replace(":", "_")
-        )
+        session_safe = _session_archive_safe_key(session_key, channel_safe, chat_safe)
         archive_path = ensure_dir(self.archive_dir / session_safe) / f"{archive_id}.jsonl"
         lines = [json.dumps(m, ensure_ascii=False) for m in messages]
         await asyncio.to_thread(archive_path.write_text, ("\n".join(lines) + "\n"), "utf-8")
 
+        summary_dir = ensure_dir(self.commit_summary_dir / session_safe)
+        overview_path = summary_dir / f"{archive_id}.overview.md"
+        abstract_path = summary_dir / f"{archive_id}.abstract.md"
+
         user_lines: list[str] = []
         assistant_lines: list[str] = []
         for msg in messages:
-            role = str(msg.get("role", ""))
+            role = str(msg.get("role", "")).strip().lower()
             content = msg.get("content")
             if not isinstance(content, str):
                 continue
@@ -3225,14 +3394,13 @@ class _RagMemoryBackend:
             elif role == "assistant":
                 assistant_lines.append(text)
 
-        summary_parts: list[str] = []
-        if user_lines:
-            summary_parts.append("User focus: " + " | ".join(user_lines[-3:]))
-        if assistant_lines:
-            summary_parts.append("Assistant outputs: " + " | ".join(assistant_lines[-2:]))
-        summary_text = "\n".join(summary_parts)[:1800]
-        summary_path = self.commit_summary_dir / f"{archive_id}.md"
-        await asyncio.to_thread(summary_path.write_text, summary_text, "utf-8")
+        overview_text = await _generate_archive_overview_with_llm(
+            messages,
+            latest_archive_overview=latest_archive_overview,
+        )
+        abstract_text = _extract_archive_abstract_from_overview(overview_text)
+        await asyncio.to_thread(overview_path.write_text, overview_text, "utf-8")
+        await asyncio.to_thread(abstract_path.write_text, abstract_text, "utf-8")
 
         extracted: list[tuple[str, list[str], float]] = []
         category_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -3326,7 +3494,10 @@ class _RagMemoryBackend:
                 trace_id=archive_id,
                 after={
                     "archive_id": archive_id,
-                    "summary_uri": str(summary_path),
+                    "archive_uri": str(archive_path),
+                    "overview_uri": str(overview_path),
+                    "abstract_uri": str(abstract_path),
+                    "summary_version": 2,
                     "extracted_count": len(extracted),
                     "created_count": created,
                     "merged_count": merged,
@@ -3338,11 +3509,14 @@ class _RagMemoryBackend:
         await self._bump_cost_metrics(
             commit_calls=1,
             token_in=self._estimate_tokens("\n".join(user_lines[-20:])),
-            token_out=self._estimate_tokens(summary_text),
+            token_out=self._estimate_tokens(overview_text),
         )
         return CommitArtifact(
             archive_id=archive_id,
-            summary_uri=str(summary_path),
+            archive_uri=str(archive_path),
+            overview_uri=str(overview_path),
+            abstract_uri=str(abstract_path),
+            summary_version=2,
             extracted_count=created,
             merged_count=merged,
             skipped_count=skipped,
@@ -3475,6 +3649,21 @@ class MemoryManager:
     """Facade that keeps memory available across RAG outages with journal replay."""
 
     _RAG_RETRY_BACKOFF_S = 5.0
+
+    @staticmethod
+    def _filter_retrieved_records(
+        records: list[ContextRecordV2],
+        *,
+        allowed_context_types: Iterable[str] | None = None,
+        allowed_resource_record_ids: Iterable[str] | None = None,
+        allowed_skill_record_ids: Iterable[str] | None = None,
+    ) -> list[ContextRecordV2]:
+        return _RagMemoryBackend._filter_retrieved_records(
+            records,
+            allowed_context_types=allowed_context_types,
+            allowed_resource_record_ids=allowed_resource_record_ids,
+            allowed_skill_record_ids=allowed_skill_record_ids,
+        )
 
     def __init__(self, workspace: Path, config: Any):
         self.workspace = Path(workspace).expanduser().resolve()
@@ -4315,10 +4504,56 @@ class MemoryManager:
         allowed_resource_record_ids: Iterable[str] | None = None,
         allowed_skill_record_ids: Iterable[str] | None = None,
     ) -> str:
+        bundle = await self.retrieve_context_bundle(
+            query=query,
+            channel=channel,
+            chat_id=chat_id,
+            session_key=session_key,
+            search_context_types=search_context_types,
+            allowed_context_types=allowed_context_types,
+            allowed_resource_record_ids=allowed_resource_record_ids,
+            allowed_skill_record_ids=allowed_skill_record_ids,
+        )
+        view = list(bundle.records or [])
+        if not view:
+            return ""
+        budget_tokens = max(120, int(getattr(getattr(self.config, "retrieval", None), "max_context_tokens", 1200) or 1200))
+        estimate_tokens = self._estimate_tokens
+        lines = ["# Retrieved Context"]
+        used = estimate_tokens(lines[0])
+        for entry in view:
+            header = f"- [{entry['context_type']}:{entry['record_id']}] {entry.get('l0') or entry.get('l1') or ''}".strip()
+            l1 = str(entry.get("l1") or "").strip()
+            l2 = str(entry.get("l2_preview") or "").strip()
+            candidate = [header]
+            if l1:
+                candidate.append(f"  L1: {l1}")
+            if l2:
+                candidate.append(f"  L2: {l2}")
+            block = "\n".join(candidate)
+            block_tokens = estimate_tokens(block)
+            if used + block_tokens > budget_tokens:
+                break
+            lines.extend(candidate)
+            used += block_tokens
+        return "\n".join(lines) if len(lines) > 1 else ""
+
+    async def retrieve_context_bundle(
+        self,
+        *,
+        query: str,
+        channel: str | None,
+        chat_id: str | None,
+        session_key: str | None = None,
+        search_context_types: Iterable[str] | None = None,
+        allowed_context_types: Iterable[str] | None = None,
+        allowed_resource_record_ids: Iterable[str] | None = None,
+        allowed_skill_record_ids: Iterable[str] | None = None,
+    ) -> RetrievedContextBundle:
         backend = await self._ensure_backend()
         if backend is not None:
             try:
-                return await backend.retrieve_block(
+                return await backend.retrieve_context_bundle(
                     query=query,
                     channel=channel,
                     chat_id=chat_id,
@@ -4339,29 +4574,14 @@ class MemoryManager:
             context_type="memory",
             include_l2=True,
         )
-        view = list(result.get("view") or [])
-        if not view:
-            return ""
-        budget_tokens = max(120, int(getattr(getattr(self.config, "retrieval", None), "max_context_tokens", 1200) or 1200))
-        estimate_tokens = self._estimate_tokens
-        lines = ["# Retrieved Context (Fallback)"]
-        used = estimate_tokens(lines[0])
-        for entry in view:
-            header = f"- [memory:{entry['record_id']}] {entry.get('l0') or entry.get('l1') or ''}".strip()
-            l1 = str(entry.get("l1") or "").strip()
-            l2 = str(entry.get("l2_preview") or "").strip()
-            candidate = [header]
-            if l1:
-                candidate.append(f"  L1: {l1}")
-            if l2:
-                candidate.append(f"  L2: {l2}")
-            block = "\n".join(candidate)
-            block_tokens = estimate_tokens(block)
-            if used + block_tokens > budget_tokens:
-                break
-            lines.extend(candidate)
-            used += block_tokens
-        return "\n".join(lines) if len(lines) > 1 else ""
+        return RetrievedContextBundle(
+            query=str(result.get("query") or query or ""),
+            records=list(result.get("view") or []),
+            grouped=dict(result.get("grouped") or {}),
+            plan=list(result.get("plan") or []),
+            meta=dict(result.get("meta") or {}),
+            trace={},
+        )
 
     async def ingest_turn(
         self,
@@ -4659,12 +4879,16 @@ class MemoryManager:
         chat_id: str,
         messages: list[dict[str, Any]],
         reason: str = "turn_trigger",
+        latest_archive_overview: str = "",
     ) -> CommitArtifact:
         archive_id = uuid.uuid4().hex[:12]
         if not messages:
             return CommitArtifact(
                 archive_id=archive_id,
-                summary_uri="",
+                archive_uri="",
+                overview_uri="",
+                abstract_uri="",
+                summary_version=2,
                 extracted_count=0,
                 merged_count=0,
                 skipped_count=0,
@@ -4672,20 +4896,19 @@ class MemoryManager:
 
         channel_safe, chat_safe = self._safe_channel_chat(session_key, channel, chat_id)
         commit_time = _now_iso()
-        session_safe = (
-            str(session_key or f"{channel_safe}:{chat_safe}")
-            .replace("/", "_")
-            .replace("\\", "_")
-            .replace(":", "_")
-        )
+        session_safe = _session_archive_safe_key(session_key, channel_safe, chat_safe)
         archive_path = ensure_dir(self.archive_dir / session_safe) / f"{archive_id}.jsonl"
         lines = [json.dumps(m, ensure_ascii=False) for m in messages]
         await asyncio.to_thread(archive_path.write_text, ("\n".join(lines) + "\n"), "utf-8")
 
+        summary_dir = ensure_dir(self.commit_summary_dir / session_safe)
+        overview_path = summary_dir / f"{archive_id}.overview.md"
+        abstract_path = summary_dir / f"{archive_id}.abstract.md"
+
         user_lines: list[str] = []
         assistant_lines: list[str] = []
         for msg in messages:
-            role = str(msg.get("role", ""))
+            role = str(msg.get("role", "")).strip().lower()
             content = msg.get("content")
             if not isinstance(content, str):
                 continue
@@ -4697,14 +4920,13 @@ class MemoryManager:
             elif role == "assistant":
                 assistant_lines.append(text)
 
-        summary_parts: list[str] = []
-        if user_lines:
-            summary_parts.append("User focus: " + " | ".join(user_lines[-3:]))
-        if assistant_lines:
-            summary_parts.append("Assistant outputs: " + " | ".join(assistant_lines[-2:]))
-        summary_text = "\n".join(summary_parts)[:1800]
-        summary_path = ensure_dir(self.commit_summary_dir) / f"{archive_id}.md"
-        await asyncio.to_thread(summary_path.write_text, summary_text, "utf-8")
+        overview_text = await _generate_archive_overview_with_llm(
+            messages,
+            latest_archive_overview=latest_archive_overview,
+        )
+        abstract_text = _extract_archive_abstract_from_overview(overview_text)
+        await asyncio.to_thread(overview_path.write_text, overview_text, "utf-8")
+        await asyncio.to_thread(abstract_path.write_text, abstract_text, "utf-8")
 
         category_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
             ("profile", ("my name is", "我是", "我叫", "my role", "我的角色")),
@@ -4754,7 +4976,10 @@ class MemoryManager:
                 trace_id=archive_id,
                 after={
                     "archive_id": archive_id,
-                    "summary_uri": str(summary_path),
+                    "archive_uri": str(archive_path),
+                    "overview_uri": str(overview_path),
+                    "abstract_uri": str(abstract_path),
+                    "summary_version": 2,
                     "extracted_count": len(extracted),
                     "created_count": len(events),
                     "merged_count": 0,
@@ -4765,7 +4990,10 @@ class MemoryManager:
         )
         return CommitArtifact(
             archive_id=archive_id,
-            summary_uri=str(summary_path),
+            archive_uri=str(archive_path),
+            overview_uri=str(overview_path),
+            abstract_uri=str(abstract_path),
+            summary_version=2,
             extracted_count=len(events),
             merged_count=0,
             skipped_count=max(0, len(extracted) - len(events)),

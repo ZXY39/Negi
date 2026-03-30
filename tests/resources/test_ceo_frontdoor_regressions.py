@@ -12,7 +12,7 @@ from g3ku.integrations.langchain_runtime import ProviderChatModelAdapter
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.assembly import ContextAssemblyService
-from g3ku.runtime.context.types import ContextAssemblyResult
+from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.interaction_trace import new_interaction_trace, record_stage_round, submit_next_stage
 from g3ku.runtime.session_agent import RuntimeAgentSession
@@ -31,9 +31,26 @@ class _AssemblyMemoryManager:
         self.response = response
         self.retrieve_calls: list[dict[str, object]] = []
 
-    async def retrieve_block(self, **kwargs):
+    async def retrieve_context_bundle(self, **kwargs):
         self.retrieve_calls.append(dict(kwargs))
-        return self.response
+        return RetrievedContextBundle(
+            query=str(kwargs.get('query') or ''),
+            records=(
+                [
+                    {
+                        'record_id': 'memory-1',
+                        'context_type': 'memory',
+                        'l0': 'remembered fact',
+                        'l1': self.response.strip(),
+                        'l2_preview': '',
+                        'source': 'test',
+                        'confidence': 1.0,
+                    }
+                ]
+                if self.response
+                else []
+            ),
+        )
 
 
 def _assembly_loop(memory_manager: _AssemblyMemoryManager) -> SimpleNamespace:
@@ -43,6 +60,14 @@ def _assembly_loop(memory_manager: _AssemblyMemoryManager) -> SimpleNamespace:
         _use_rag_memory=lambda: True,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
+                max_prompt_tokens=3200,
+                live_raw_tail_turns=4,
+                task_continuity_max_tokens=320,
+                stage_context_max_tokens=640,
+                latest_archive_overview_max_tokens=420,
+                older_archive_abstracts_top_k=4,
+                older_archive_abstracts_max_tokens=320,
+                retrieved_context_max_tokens=1200,
                 archive_summary_top_k=2,
                 archive_summary_max_tokens=320,
                 skill_inventory_top_k=8,
@@ -69,13 +94,10 @@ def _append_turn(session: Session, turn_index: int) -> None:
     session.add_message('assistant', f'assistant turn {turn_index}')
 
 
-def _frontdoor_summary_message(summary: str) -> dict[str, object]:
+def _synthetic_context_message(summary: str) -> dict[str, object]:
     return {
         'role': 'assistant',
-        'content': (
-            f"{web_ceo_sessions.FRONTDOOR_COMPACT_HISTORY_PREFIX}\n"
-            f'{{"kind":"frontdoor_context","summary":"{summary}","summary_turn_count":2,"raw_tail_turns":4}}'
-        ),
+        'content': f'## Synthetic Context\n- {summary}',
     }
 
 
@@ -152,33 +174,18 @@ def _cron_tool() -> _CronTool:
     return _CronTool()
 
 
-def test_frontdoor_context_resolution_falls_back_then_uses_metadata() -> None:
+def test_live_raw_tail_returns_recent_complete_turns_without_compact_history() -> None:
     session = Session(key='web:shared')
     for turn_index in range(1, 7):
         _append_turn(session, turn_index)
 
-    context, source = web_ceo_sessions.resolve_frontdoor_context(session)
-
-    assert source == 'fallback'
-    assert context['summary_turn_count'] == 2
-    assert context['raw_tail_turns'] == 4
-    assert 'user turn 1' in context['summary_text']
-    assert 'assistant turn 2' in context['summary_text']
-    assert 'user turn 5' not in context['summary_text']
-    assert 'assistant turn 6' not in context['summary_text']
-
-    compact_message = web_ceo_sessions.build_frontdoor_compact_history_message(context)
-    assert compact_message is not None
-    assert str(compact_message['content']).startswith(web_ceo_sessions.FRONTDOOR_COMPACT_HISTORY_PREFIX)
-
-    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(session, raw_tail_turns=4)
+    recent_history = web_ceo_sessions.extract_live_raw_tail(session, turn_limit=4)
     assert [item['content'] for item in recent_history[:2]] == ['user turn 3', 'assistant turn 3']
     assert [item['content'] for item in recent_history[-2:]] == ['user turn 6', 'assistant turn 6']
-
-    session.metadata['frontdoor_context'] = context
-    resolved_again, second_source = web_ceo_sessions.resolve_frontdoor_context(session)
-    assert second_source == 'metadata'
-    assert resolved_again == context
+    assert all(
+        not str(item.get('content') or '').startswith('[[G3KU_COMPACT_HISTORY_V1]]')
+        for item in recent_history
+    )
 
 
 def test_update_ceo_session_after_turn_persists_last_task_memory() -> None:
@@ -266,7 +273,7 @@ def test_update_ceo_session_after_turn_persists_last_task_result_handles() -> No
     }
 
 
-def test_extract_frontdoor_recent_history_preserves_heartbeat_and_compact_traces() -> None:
+def test_extract_live_raw_tail_preserves_heartbeat_and_compact_traces() -> None:
     session = Session(key='web:shared')
     _append_turn(session, 1)
     session.add_message('user', 'user turn 2')
@@ -298,28 +305,32 @@ def test_extract_frontdoor_recent_history_preserves_heartbeat_and_compact_traces
         metadata={'source': 'heartbeat', 'reason': 'task_terminal', 'task_ids': ['task:trace-1']},
     )
 
-    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(session, raw_tail_turns=2)
+    recent_history = web_ceo_sessions.extract_live_raw_tail(session, turn_limit=2)
 
     assert [item['content'] for item in recent_history[:3]] == [
         'user turn 2',
         (
             'assistant turn 2\n'
-            f'{web_ceo_sessions.TOOL_TRACE_PREFIX}\n'
-            '[{"tool":"task_progress","status":"success","text":"Task status: in_progress (node:abc,in_progress,working on task:trace-1)"}]\n'
-            f'{web_ceo_sessions.STAGE_TRACE_PREFIX}\n'
-            '{"stage_goal":"Inspect task:trace-1 and summarize the latest runtime state for follow-up.","status":"completed","tool_rounds_used":1}'
+            'Recent tool results:\n'
+            '- task_progress (success): Task status: in_progress (node:abc,in_progress,working on task:trace-1)\n'
+            'Stage snapshot:\n'
+            '- status: completed\n'
+            '- goal: Inspect task:trace-1 and summarize the latest runtime state for follow-up.\n'
+            '- tool_rounds_used: 1'
         ),
         'user turn 3',
     ]
     assert recent_history[-1]['role'] == 'assistant'
     assert recent_history[-1]['content'] == (
         'task:trace-1 failed in heartbeat\n'
-        f'{web_ceo_sessions.TASK_META_PREFIX}\n'
-        '{"reason":"task_terminal","source":"heartbeat","task_ids":["task:trace-1"]}'
+        'Task metadata:\n'
+        '- task_ids: task:trace-1\n'
+        '- source: heartbeat\n'
+        '- reason: task_terminal'
     )
 
 
-def test_extract_frontdoor_recent_history_skips_internal_cron_user_prompts() -> None:
+def test_extract_live_raw_tail_skips_internal_cron_user_prompts() -> None:
     session = Session(key='web:shared')
     _append_turn(session, 1)
     session.add_message(
@@ -334,14 +345,10 @@ def test_extract_frontdoor_recent_history_skips_internal_cron_user_prompts() -> 
     )
     _append_turn(session, 2)
 
-    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(session, raw_tail_turns=2)
-    context = web_ceo_sessions.build_frontdoor_context(session, raw_tail_turns=1, route_kind='direct_reply')
-
+    recent_history = web_ceo_sessions.extract_live_raw_tail(session, turn_limit=2)
     contents = [item['content'] for item in recent_history]
     assert 'internal cron prompt' not in contents
     assert any(str(item).startswith('scheduled progress update') for item in contents)
-    assert 'internal cron prompt' not in context['summary_text']
-    assert context['summary_turn_count'] == 1
 
 
 @pytest.mark.asyncio
@@ -361,27 +368,10 @@ async def test_context_assembly_uses_frontdoor_summary_and_recent_tail() -> None
         persisted_session=persisted_session,
     )
 
-    assert fallback_result.trace['frontdoor_context']['source'] == 'fallback'
-    assert fallback_result.recent_history[0]['role'] == 'assistant'
-    assert str(fallback_result.recent_history[0]['content']).startswith(web_ceo_sessions.FRONTDOOR_COMPACT_HISTORY_PREFIX)
-    assert [item['content'] for item in fallback_result.recent_history[1:3]] == ['user turn 3', 'assistant turn 3']
+    assert 'frontdoor_context' not in fallback_result.trace
+    assert [item['content'] for item in fallback_result.recent_history[:2]] == ['user turn 3', 'assistant turn 3']
     assert [item['content'] for item in fallback_result.recent_history[-2:]] == ['user turn 6', 'assistant turn 6']
-
-    persisted_session.metadata['frontdoor_context'] = web_ceo_sessions.build_frontdoor_context(
-        persisted_session,
-        raw_tail_turns=4,
-        route_kind='direct_reply',
-    )
-    metadata_result = await service.build_for_ceo(
-        session=_session_state(),
-        query_text='recap our earlier discussion',
-        exposure={'skills': [], 'tool_families': [], 'tool_names': []},
-        persisted_session=persisted_session,
-    )
-
-    assert metadata_result.trace['frontdoor_context']['source'] == 'metadata'
-    assert metadata_result.trace['frontdoor_context']['summary_turn_count'] == 2
-    assert metadata_result.trace['recent_history_count'] == 9
+    assert fallback_result.trace['model_messages_count'] == 10
 
 
 @pytest.mark.asyncio
@@ -418,7 +408,7 @@ async def test_context_assembly_includes_compact_task_memory_message() -> None:
     )
 
     assert any(
-        str(item.get('content') or '').startswith(web_ceo_sessions.TASK_MEMORY_PREFIX)
+        '## Task Continuity' in str(item.get('content') or '')
         for item in result.recent_history
     )
 
@@ -489,9 +479,10 @@ async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw(tmp_pat
         {'role': 'assistant', 'content': 'assistant reply'},
     ]
     assert len(persisted_session.messages) == 2
-    assert persisted_session.metadata['frontdoor_context']['last_route_kind'] == 'direct_reply'
+    assert 'frontdoor_context' not in persisted_session.metadata
+    assert persisted_session.metadata['last_preview_text'] == 'assistant reply'
     assert all(
-        not str(message.get('content') or '').startswith(web_ceo_sessions.FRONTDOOR_COMPACT_HISTORY_PREFIX)
+        not str(message.get('content') or '').startswith('[[G3KU_COMPACT_HISTORY_V1]]')
         for message in persisted_session.messages
     )
 
@@ -572,7 +563,7 @@ async def test_ceo_frontdoor_runner_binds_session_stable_prompt_cache_key(monkey
         'result': ContextAssemblyResult(
             system_prompt='SYSTEM PROMPT',
             recent_history=[
-                _frontdoor_summary_message('summary one'),
+                    _synthetic_context_message('summary one'),
                 {'role': 'user', 'content': 'recent user'},
                 {'role': 'assistant', 'content': 'recent assistant'},
             ],
@@ -625,7 +616,7 @@ async def test_ceo_frontdoor_runner_binds_session_stable_prompt_cache_key(monkey
     current_assembly['result'] = ContextAssemblyResult(
         system_prompt='SYSTEM PROMPT',
         recent_history=[
-            _frontdoor_summary_message('summary two changed'),
+            _synthetic_context_message('summary two changed'),
             {'role': 'user', 'content': 'recent user'},
             {'role': 'assistant', 'content': 'recent assistant'},
         ],
@@ -639,7 +630,7 @@ async def test_ceo_frontdoor_runner_binds_session_stable_prompt_cache_key(monkey
     current_assembly['result'] = ContextAssemblyResult(
         system_prompt='SYSTEM PROMPT',
         recent_history=[
-            _frontdoor_summary_message('summary one'),
+            _synthetic_context_message('summary one'),
             {'role': 'user', 'content': 'recent user'},
             {'role': 'assistant', 'content': 'recent assistant'},
         ],
@@ -931,8 +922,9 @@ async def test_ceo_frontdoor_runner_reuses_existing_continuation_task_when_user_
                 {
                     'role': 'assistant',
                     'content': (
-                        f'{web_ceo_sessions.ACTIVE_TASKS_PREFIX}\n'
-                        '{"kind":"active_tasks","tasks":[{"task_id":"task:cont-1","continuation_of_task_id":"task:old-1","status":"in_progress","updated_at":"2026-03-28T10:00:00+08:00"}]}'
+                        '## Task Continuity\n'
+                        '### Active Tasks\n'
+                        '- `task:cont-1`: continuation_of_task_id=task:old-1; status=in_progress; updated_at=2026-03-28T10:00:00+08:00'
                     ),
                 }
             ],
@@ -1522,7 +1514,7 @@ async def test_ceo_frontdoor_runner_uses_stable_prompt_cache_key_without_langcha
         'result': ContextAssemblyResult(
             system_prompt='SYSTEM PROMPT',
             recent_history=[
-                _frontdoor_summary_message('summary one'),
+                    _synthetic_context_message('summary one'),
                 {'role': 'user', 'content': 'recent user'},
                 {'role': 'assistant', 'content': 'recent assistant'},
             ],
@@ -1893,13 +1885,28 @@ async def test_provider_chat_model_adapter_forwards_prompt_cache_key() -> None:
     assert provider.calls[0]['prompt_cache_key'] == 'stable-frontdoor-key'
 
 
-def test_build_frontdoor_context_preserves_stage_only_route_kind() -> None:
+def test_build_completed_stage_abstracts_keeps_stage_goal_and_status() -> None:
     session = Session(key='web:shared')
     _append_turn(session, 1)
 
-    context = web_ceo_sessions.build_frontdoor_context(session, raw_tail_turns=1, route_kind='stage_only')
+    trace = {
+        'stages': [
+            {
+                'stage_id': 'ceo-stage-1',
+                'stage_index': 1,
+                'status': 'completed',
+                'stage_goal': 'stage only handoff',
+                'tool_round_budget': 1,
+                'tool_rounds_used': 0,
+                'rounds': [],
+            }
+        ]
+    }
+    abstracts = web_ceo_sessions.build_completed_stage_abstracts(trace)
 
-    assert context['last_route_kind'] == 'stage_only'
+    assert abstracts[0].startswith('Stage 1')
+    assert 'Goal: stage only handoff' in abstracts[0]
+    assert 'Status: completed' in abstracts[0]
 
 
 @pytest.mark.asyncio

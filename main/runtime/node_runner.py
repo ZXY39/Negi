@@ -499,10 +499,31 @@ class NodeRunner:
         cached_payload['completed'] = False
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
 
-        results: list[SpawnChildResult] = []
-        for index, spec in enumerate(specs):
-            results.append(
-                await self._run_child_pipeline(
+        await self._admit_spawn_batch(
+            task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            cache_key=cache_key,
+            spec_count=len(specs),
+        )
+        self._materialize_spawn_batch_children(
+            task=task,
+            parent=parent,
+            specs=specs,
+            cache_key=cache_key,
+            cached_payload=cached_payload,
+        )
+
+        semaphore = asyncio.Semaphore(
+            self._parallel_slot_count(
+                self._max_parallel_child_pipelines_for(parent),
+                len(specs),
+                enabled=self._parallel_child_pipelines_enabled,
+            )
+        )
+
+        async def _run_spec(index: int, spec: SpawnChildSpec) -> SpawnChildResult:
+            async with semaphore:
+                return await self._run_child_pipeline(
                     task=task,
                     parent=parent,
                     spec=spec,
@@ -510,7 +531,8 @@ class NodeRunner:
                     cached_payload=cached_payload,
                     index=index,
                 )
-            )
+
+        results = await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
         cached_payload['results'] = [item.model_dump(mode='json', exclude_none=True) for item in results]
         cached_payload['completed'] = True
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
@@ -558,13 +580,6 @@ class NodeRunner:
         if stop_reason:
             return self._spawn_abort_result(spec.goal, stop_reason)
 
-        await self._admit_spawn_expansion(
-            task_id=task.task_id,
-            parent_node_id=parent.node_id,
-            cache_key=cache_key,
-            index=index,
-            phase='child',
-        )
         requires_acceptance = bool(entry.get('requires_acceptance'))
         started_at = str(entry.get('started_at') or _now())
         self._update_spawn_entry(
@@ -911,6 +926,67 @@ class NodeRunner:
             item.pop('_sort_key', None)
         has_active = any(str(item.get('status') or '').strip().lower() in {'queued', 'running'} for item in child_pipelines)
         return child_pipelines, pending_specs, partial_results, has_active
+
+    async def _admit_spawn_batch(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        spec_count: int,
+    ) -> None:
+        controller = self._adaptive_tool_budget_controller
+        if controller is None:
+            return
+        lease = await controller.acquire_work_slot(
+            task_id=task_id,
+            node_id=parent_node_id,
+            work_kind='spawn_child_nodes',
+            work_id=f'{cache_key}:batch:{max(0, int(spec_count))}',
+        )
+        controller.release_work_slot(lease)
+
+    def _materialize_spawn_batch_children(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        cache_key: str,
+        cached_payload: dict[str, Any],
+    ) -> None:
+        stop_reason = self._task_terminal_reason(task.task_id, task=task) or self._node_terminal_reason(
+            self._store.get_node(parent.node_id) or parent,
+            default_failed='parent node failed',
+            default_success='parent node already completed',
+        )
+        if stop_reason:
+            return
+        entries = list(cached_payload.get('entries') or [])
+        for index, spec in enumerate(list(specs or [])):
+            if index >= len(entries):
+                break
+            entry = dict(entries[index] or {})
+            child_id = str(entry.get('child_node_id') or '').strip()
+            if child_id:
+                continue
+            child = self._find_reusable_execution_child(
+                task=task,
+                parent=parent,
+                spec=spec,
+                exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='child_node_id', skip_index=index),
+            )
+            if child is None:
+                child = self._create_execution_child(task=task, parent=parent, spec=spec)
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                child_node_id=child.node_id,
+            )
+            entries = list(cached_payload.get('entries') or [])
 
     async def _admit_spawn_expansion(
         self,
