@@ -130,6 +130,7 @@ const S = {
     tasksWorkerLastSeenAt: "",
     tasksWorkerControlAvailable: true,
     tasksWorker: null,
+    tasksWorkerStatusPayload: null,
     tasksWorkerStaleAfterSeconds: 15,
     taskWorkerStatusPollId: null,
     taskTokenStatsOpen: false,
@@ -256,6 +257,7 @@ const U = {
     modelBackdrop: document.getElementById("model-detail-backdrop"),
     modelDrawer: document.querySelector(".model-detail-dialog"),
     taskGrid: document.getElementById("task-card-grid"),
+    taskPerformanceBar: document.getElementById("task-performance-bar"),
     taskToolbar: document.getElementById("task-toolbar"),
     taskDepthSelect: document.getElementById("task-depth-select"),
     taskDepthCustomWrap: document.getElementById("task-depth-custom-wrap"),
@@ -1710,19 +1712,10 @@ function renderTaskDepthControl() {
     U.taskDepthCustomSave.disabled = disabled;
     U.taskDepthCustomInput.value = customDraft;
 
-    if (S.taskDefaults.loading) {
-        U.taskDepthHint.textContent = "正在加载全局任务树深度设置...";
-        return;
+    if (U.taskDepthHint) {
+        U.taskDepthHint.textContent = "";
+        U.taskDepthHint.hidden = true;
     }
-    if (S.taskDefaults.saving) {
-        U.taskDepthHint.textContent = `正在保存，全局后续新任务将使用 ${currentMaxDepth} 层深度。`;
-        return;
-    }
-    if (editingCustomValue) {
-        U.taskDepthHint.textContent = `全局后续新任务会自动使用 ${currentMaxDepth} 层深度。自定义值需为非负整数。`;
-        return;
-    }
-    U.taskDepthHint.textContent = `全局后续新任务会自动使用该深度，支持固定值 1-${TASK_DEPTH_PRESET_MAX}，也可填写自定义非负整数。`;
 }
 
 async function loadTaskDefaults() {

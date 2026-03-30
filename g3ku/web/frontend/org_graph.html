@@ -149,9 +149,9 @@
                 <header class="content-header task-list-header">
                     <div class="task-header-main">
                         <h1>任务大厅</h1>
-                        <p class="subtitle">查看当前会话中的任务摘要、批量操作与运行状态。</p>
                     </div>
                     <div class="task-header-actions">
+                        <div id="task-performance-bar" class="task-performance-bar" aria-live="polite"></div>
                         <button id="task-multi-toggle" class="toolbar-btn" type="button"
                             aria-pressed="false">多选</button>
                         <div class="task-toolbar-preferences">
@@ -173,7 +173,7 @@
                                         type="button">应用</button>
                                 </div>
                             </div>
-                            <span id="task-depth-hint" class="task-depth-hint">全局后续新任务会自动使用该深度，支持固定值 1-5，也可填写自定义非负整数。</span>
+                            <span id="task-depth-hint" class="task-depth-hint" hidden></span>
                         </div>
                     </div>
                 </header>

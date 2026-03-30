@@ -150,6 +150,100 @@ function taskSessionEmptyText() {
     return "No tasks yet.";
 }
 
+function taskWorkerStatusMetrics() {
+    const topLevel = S.tasksWorkerStatusPayload && typeof S.tasksWorkerStatusPayload === "object"
+        ? S.tasksWorkerStatusPayload
+        : {};
+    const workerPayload = S.tasksWorker?.payload && typeof S.tasksWorker.payload === "object"
+        ? S.tasksWorker.payload
+        : {};
+    return { ...workerPayload, ...topLevel };
+}
+
+function taskWorkerPressureSampleAgeMs(metrics = taskWorkerStatusMetrics()) {
+    const sampleAt = String(metrics?.pressure_sample_at || metrics?.tool_pressure_sample_at || "").trim();
+    const parsedMs = sampleAt ? Date.parse(sampleAt) : Number.NaN;
+    if (Number.isFinite(parsedMs)) return Math.max(0, Date.now() - parsedMs);
+    const rawAge = Number(metrics?.pressure_sample_age_ms);
+    return Number.isFinite(rawAge) && rawAge >= 0 ? rawAge : null;
+}
+
+function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
+    const ageMs = taskWorkerPressureSampleAgeMs(metrics);
+    if (ageMs == null) return false;
+    return ageMs <= 3000 && metrics?.machine_pressure_available !== false;
+}
+
+function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
+    const ageMs = taskWorkerPressureSampleAgeMs(metrics);
+    if (ageMs == null) return "未采样";
+    if (!taskWorkerPressureSnapshotFresh(metrics)) return "监控过期";
+    if (ageMs < 1000) return "刚刚更新";
+    if (ageMs < 60_000) {
+        const seconds = ageMs / 1000;
+        return seconds < 10 ? `${seconds.toFixed(1)}s 前` : `${Math.round(seconds)}s 前`;
+    }
+    const minutes = ageMs / 60_000;
+    return `${minutes < 10 ? minutes.toFixed(1) : Math.round(minutes)}m 前`;
+}
+
+function formatTaskWorkerPercent(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? `${Math.round(numeric)}%` : "--";
+}
+
+function taskWorkerPressureStateMeta(metrics = taskWorkerStatusMetrics()) {
+    const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
+    if (workerState === "offline" || workerState === "stopped") return { key: "offline", label: "离线" };
+    if (workerState === "starting") return { key: "starting", label: "启动中" };
+    if (!taskWorkerPressureSnapshotFresh(metrics)) return { key: "unfresh", label: "监控过期" };
+    const state = String(metrics?.tool_pressure_state || metrics?.worker_execution_state || "normal").trim().toLowerCase();
+    if (state === "throttled") return { key: "throttled", label: "收紧中" };
+    if (state === "recovering") return { key: "recovering", label: "恢复中" };
+    return { key: "normal", label: "正常" };
+}
+
+function renderTaskPerformanceBar() {
+    if (!U.taskPerformanceBar) return;
+    const metrics = taskWorkerStatusMetrics();
+    const pressureState = taskWorkerPressureStateMeta(metrics);
+    const cpuText = formatTaskWorkerPercent(metrics?.machine_pressure_cpu_percent);
+    const memoryText = formatTaskWorkerPercent(metrics?.machine_pressure_memory_percent);
+    const diskText = metrics?.machine_pressure_disk_busy_available === false
+        ? "--"
+        : formatTaskWorkerPercent(metrics?.machine_pressure_disk_busy_percent);
+    const runningCount = Number(metrics?.worker_execution_running_count);
+    const targetLimit = Number(metrics?.worker_execution_target_limit);
+    const waitingCount = Number(metrics?.worker_execution_waiting_count);
+    const runningText = Number.isFinite(runningCount) && Number.isFinite(targetLimit) && targetLimit > 0
+        ? `${Math.max(0, Math.trunc(runningCount))} / ${Math.max(0, Math.trunc(targetLimit))}`
+        : (Number.isFinite(runningCount) ? String(Math.max(0, Math.trunc(runningCount))) : "--");
+    const waitingText = Number.isFinite(waitingCount) ? String(Math.max(0, Math.trunc(waitingCount))) : "--";
+    U.taskPerformanceBar.hidden = false;
+    U.taskPerformanceBar.innerHTML = `
+        <div class="task-performance-item task-performance-item--state" data-state="${esc(pressureState.key)}">
+            <span class="task-performance-label">压力状态</span>
+            <strong class="task-performance-value">${esc(pressureState.label)}</strong>
+        </div>
+        <div class="task-performance-item">
+            <span class="task-performance-label">CPU/内存/磁盘</span>
+            <strong class="task-performance-value">${esc(`CPU ${cpuText} | 内存 ${memoryText} | 磁盘 ${diskText}`)}</strong>
+        </div>
+        <div class="task-performance-item">
+            <span class="task-performance-label">运行中工作项</span>
+            <strong class="task-performance-value">${esc(runningText)}</strong>
+        </div>
+        <div class="task-performance-item">
+            <span class="task-performance-label">等待中工作项</span>
+            <strong class="task-performance-value">${esc(waitingText)}</strong>
+        </div>
+        <div class="task-performance-item">
+            <span class="task-performance-label">监控新鲜度</span>
+            <strong class="task-performance-value">${esc(formatTaskWorkerSampleFreshness(metrics))}</strong>
+        </div>
+    `;
+}
+
 function renderTaskSessionScope() {
     return;
 }
@@ -233,6 +327,7 @@ function renderTasks() {
     const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
     S.taskPage = meta.currentPage;
     syncTaskPagination(meta);
+    renderTaskPerformanceBar();
     const signature = taskGridRenderSignature(meta);
     if (signature === S.taskGridSignature) {
         S.taskMetricAnimationTaskIds?.clear?.();
@@ -273,7 +368,7 @@ function renderTasks() {
         const metricItems = [
             { key: "input_tokens", label: "输入Token", value: tokenUsage.tracked ? tokenUsage.input_tokens : null },
             { key: "output_tokens", label: "输出Token", value: tokenUsage.tracked ? tokenUsage.output_tokens : null },
-            { key: "cache_hit_tokens", label: "缓存命中Token", value: tokenUsage.tracked ? tokenUsage.cache_hit_tokens : null },
+            { key: "cache_hit_tokens", label: "缓存命中", value: tokenUsage.tracked ? tokenUsage.cache_hit_tokens : null },
         ];
         nextTaskMetricSnapshot[taskId] = tokenUsage.tracked ? {
             input_tokens: Number(tokenUsage.input_tokens || 0),
@@ -1000,6 +1095,7 @@ function refreshTaskWorkerOnlineState(options = {}) {
 function applyTaskWorkerStatus(payload = {}, { render = true } = {}) {
     S.tasksWorkerReportedOnline = payload?.worker_online !== false;
     S.tasksWorker = payload?.worker || null;
+    S.tasksWorkerStatusPayload = payload && typeof payload === "object" ? payload : null;
     S.tasksWorkerReportedState = normalizeTaskWorkerState(
         payload?.worker_state
         || S.tasksWorker?.worker_state
@@ -1011,6 +1107,7 @@ function applyTaskWorkerStatus(payload = {}, { render = true } = {}) {
     if (Number.isFinite(staleAfterSeconds) && staleAfterSeconds > 0) {
         S.tasksWorkerStaleAfterSeconds = staleAfterSeconds;
     }
+    renderTaskPerformanceBar();
     refreshTaskWorkerState({ render, force: true });
 }
 

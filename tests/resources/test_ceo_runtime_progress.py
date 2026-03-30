@@ -786,6 +786,72 @@ async def test_runtime_agent_session_manual_pause_freezes_heartbeat_and_persists
     assert normalized_metadata["manual_pause_waiting_reason"] is True
 
 
+@pytest.mark.asyncio
+async def test_runtime_agent_session_manual_pause_dedupes_pending_transcript(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    started = asyncio.Event()
+    turn_task_ref: dict[str, asyncio.Task[object] | None] = {"task": None}
+    heartbeat = _HeartbeatController()
+
+    class _BlockingRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session, on_progress
+            started.set()
+            await asyncio.Future()
+
+    async def _cancel_session_tasks(_session_key: str) -> int:
+        task = turn_task_ref.get("task")
+        if task is None:
+            return 0
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return 1
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_BlockingRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        web_session_heartbeat=heartbeat,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session_id = "web:pause-manual-dedupe"
+    session = RuntimeAgentSession(loop, session_key=session_id, channel="web", chat_id="pause-manual-dedupe")
+    turn_task = asyncio.create_task(session.prompt(UserInputMessage(content="Pause without duplicate transcript")))
+    turn_task_ref["task"] = turn_task
+
+    await started.wait()
+    await session.pause(manual=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn_task
+
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in reloaded.messages] == ["user"]
+    assert reloaded.messages[0]["content"] == "Pause without duplicate transcript"
+    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "pending"
+
+
 def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     session = RuntimeAgentSession(
@@ -936,6 +1002,66 @@ async def test_runtime_agent_session_persists_tool_events_into_session_transcrip
     assert reloaded_session.messages[1]["content"] == "The weather skill has been installed."
     assert [item["status"] for item in reloaded_session.messages[1]["tool_events"]] == ["running", "success"]
     assert reloaded_session.messages[1]["tool_events"][0]["tool_name"] == "skill-installer"
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_persists_pending_user_turn_before_cancellation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    started = asyncio.Event()
+
+    class _BlockingRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session, on_progress
+            started.set()
+            await asyncio.Future()
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_BlockingRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session_id = "web:ceo-persist-pending-turn"
+    session = RuntimeAgentSession(loop, session_key=session_id, channel="web", chat_id="ceo-persist-pending-turn")
+
+    turn_task = asyncio.create_task(session.prompt("Keep this request after cancellation"))
+    await started.wait()
+    turn_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn_task
+
+    reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in reloaded_session.messages] == ["user"]
+    assert reloaded_session.messages[0]["content"] == "Keep this request after cancellation"
+    assert reloaded_session.messages[0]["metadata"]["_transcript_state"] == "pending"
+    assert str(reloaded_session.messages[0]["metadata"]["_transcript_turn_id"]).strip()
+
+    recent_history = web_ceo_sessions.extract_frontdoor_recent_history(reloaded_session, raw_tail_turns=4)
+    assert recent_history == [{"role": "user", "content": "Keep this request after cancellation"}]
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import uuid
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -17,6 +18,10 @@ from g3ku.core.state import AgentState, StructuredError
 from g3ku.runtime.cancellation import ToolCancellationToken
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
+_TRANSCRIPT_TURN_ID_KEY = "_transcript_turn_id"
+_TRANSCRIPT_STATE_KEY = "_transcript_state"
+_TRANSCRIPT_STATE_PENDING = "pending"
+_TRANSCRIPT_STATE_COMPLETED = "completed"
 
 
 class RuntimeAgentSession:
@@ -54,6 +59,7 @@ class RuntimeAgentSession:
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._interaction_trace: dict[str, Any] | None = None
         self._current_stage: dict[str, Any] | None = None
+        self._active_turn_id: str | None = None
         self._turn_lock = asyncio.Lock()
 
     @property
@@ -145,6 +151,118 @@ class RuntimeAgentSession:
                     parts.append(text.strip())
             return "\n".join(parts).strip()
         return str(content or "")
+
+    @staticmethod
+    def _turn_metadata_value(message: dict[str, Any], key: str) -> str:
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        return str(metadata.get(key) or "").strip()
+
+    @classmethod
+    def _message_turn_id(cls, message: dict[str, Any]) -> str:
+        return cls._turn_metadata_value(message, _TRANSCRIPT_TURN_ID_KEY)
+
+    @classmethod
+    def _message_transcript_state(cls, message: dict[str, Any]) -> str:
+        return cls._turn_metadata_value(message, _TRANSCRIPT_STATE_KEY)
+
+    @staticmethod
+    def _build_turn_metadata(metadata: dict[str, Any] | None, *, turn_id: str, transcript_state: str) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        payload[_TRANSCRIPT_TURN_ID_KEY] = str(turn_id or "").strip()
+        payload[_TRANSCRIPT_STATE_KEY] = str(transcript_state or "").strip()
+        return payload
+
+    @staticmethod
+    def _new_turn_id() -> str:
+        return uuid.uuid4().hex[:16]
+
+    def _ensure_user_turn_id(self, user_input: UserInputMessage) -> str:
+        metadata = dict(user_input.metadata or {})
+        turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or self._active_turn_id or "").strip()
+        if not turn_id:
+            turn_id = self._new_turn_id()
+        if metadata.get(_TRANSCRIPT_TURN_ID_KEY) != turn_id:
+            metadata[_TRANSCRIPT_TURN_ID_KEY] = turn_id
+            user_input.metadata = metadata
+        self._active_turn_id = turn_id
+        return turn_id
+
+    @classmethod
+    def _find_transcript_user_index(cls, persisted_session: Any, *, turn_id: str) -> int | None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return None
+        messages = list(getattr(persisted_session, "messages", []) or [])
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").strip().lower() != "user":
+                continue
+            if cls._message_turn_id(message) != normalized_turn_id:
+                continue
+            return index
+        return None
+
+    def _upsert_transcript_user_message(
+        self,
+        *,
+        persisted_session: Any,
+        user_input: UserInputMessage,
+        user_text: str,
+        transcript_state: str,
+    ) -> None:
+        turn_id = self._ensure_user_turn_id(user_input)
+        metadata = self._build_turn_metadata(
+            dict(user_input.metadata or {}),
+            turn_id=turn_id,
+            transcript_state=transcript_state,
+        )
+        user_input.metadata = metadata
+        existing_index = self._find_transcript_user_index(persisted_session, turn_id=turn_id)
+        if existing_index is None:
+            persisted_session.add_message(
+                "user",
+                user_text,
+                attachments=list(user_input.attachments or []),
+                metadata=metadata,
+            )
+            return
+        existing = dict(persisted_session.messages[existing_index])
+        existing["content"] = user_text
+        existing["attachments"] = list(user_input.attachments or [])
+        existing["metadata"] = metadata
+        if not str(existing.get("timestamp") or "").strip():
+            existing["timestamp"] = self._now()
+        persisted_session.messages[existing_index] = existing
+        if hasattr(persisted_session, "updated_at"):
+            persisted_session.updated_at = datetime.now()
+
+    async def _persist_pending_user_message(self, *, user_input: UserInputMessage, user_text: str) -> Any | None:
+        if not user_text.strip() and not user_input.attachments:
+            return None
+        persisted_session = None
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            self._upsert_transcript_user_message(
+                persisted_session=persisted_session,
+                user_input=user_input,
+                user_text=user_text,
+                transcript_state=_TRANSCRIPT_STATE_PENDING,
+            )
+            if self._state.session_key.startswith("web:"):
+                from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
+
+                update_ceo_session_after_turn(
+                    persisted_session,
+                    user_text=user_text,
+                    assistant_text="",
+                    route_kind="",
+                )
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            logger.debug("Pending transcript persistence skipped for {}", self._state.session_key)
+        return persisted_session
 
     @staticmethod
     def _normalize_web_uploads(uploads: Any) -> list[dict[str, Any]]:
@@ -430,11 +548,11 @@ class RuntimeAgentSession:
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
             if internal_source is None:
-                persisted_session.add_message(
-                    "user",
-                    user_text,
-                    attachments=list(user_input.attachments or []),
-                    metadata=dict(user_input.metadata or {}),
+                self._upsert_transcript_user_message(
+                    persisted_session=persisted_session,
+                    user_input=user_input,
+                    user_text=user_text,
+                    transcript_state=_TRANSCRIPT_STATE_COMPLETED,
                 )
             assistant_payload: dict[str, Any] = {}
             if interaction_flow:
@@ -478,11 +596,11 @@ class RuntimeAgentSession:
             return
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-            persisted_session.add_message(
-                "user",
-                user_text,
-                attachments=list(user_input.attachments or []),
-                metadata=dict(user_input.metadata or {}),
+            self._upsert_transcript_user_message(
+                persisted_session=persisted_session,
+                user_input=user_input,
+                user_text=user_text,
+                transcript_state=_TRANSCRIPT_STATE_PENDING,
             )
             if self._state.session_key.startswith("web:"):
                 from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
@@ -744,6 +862,7 @@ class RuntimeAgentSession:
             cancel_token = self._loop.create_session_cancellation_token(self._state.session_key)
             self._active_cancel_token = cancel_token
             try:
+                self._ensure_user_turn_id(user_input)
                 self._last_prompt = user_input
                 self._event_log = []
                 self._pending_tool_names.clear()
@@ -755,6 +874,11 @@ class RuntimeAgentSession:
                 self._state.pending_tool_calls.clear()
                 if not heartbeat_internal:
                     self.clear_interaction_trace()
+                if persist_transcript and internal_source is None:
+                    await self._persist_pending_user_message(
+                        user_input=user_input,
+                        user_text=self._history_text(user_input.content),
+                    )
 
                 await self._emit("agent_start", session_key=self._state.session_key, trigger="prompt")
                 await self._emit("turn_start", session_key=self._state.session_key)
@@ -893,6 +1017,7 @@ class RuntimeAgentSession:
             finally:
                 if self._active_cancel_token is cancel_token:
                     self._active_cancel_token = None
+                self._active_turn_id = None
                 self._loop.release_session_cancellation_token(self._state.session_key, cancel_token)
 
     async def continue_(self, *, live_context: dict[str, str] | None = None) -> RunResult:
