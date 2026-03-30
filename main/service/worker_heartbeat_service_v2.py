@@ -15,21 +15,25 @@ class WorkerHeartbeatServiceV2:
         execution_mode: str,
         worker_id: str,
         publish_status: Callable[[dict[str, Any]], None],
+        pressure_snapshot_supplier: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._store = store
         self._scheduler = scheduler
         self._execution_mode = str(execution_mode or '').strip()
         self._worker_id = str(worker_id or '').strip() or 'worker'
         self._publish_status = publish_status
+        self._pressure_snapshot_supplier = pressure_snapshot_supplier if callable(pressure_snapshot_supplier) else None
 
     async def run_forever(self) -> None:
         while True:
             try:
                 active_task_count = self._scheduler.active_task_count() + self._scheduler.queued_task_count()
                 updated_at = now_iso()
+                pressure_snapshot = dict(self._pressure_snapshot_supplier() or {}) if self._pressure_snapshot_supplier is not None else {}
                 payload = {
                     'execution_mode': self._execution_mode,
                     'active_task_count': active_task_count,
+                    **pressure_snapshot,
                 }
                 self._store.upsert_worker_status(
                     worker_id=self._worker_id,

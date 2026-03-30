@@ -407,13 +407,55 @@ class NodeParallelismConfig(Base):
     enabled: bool = True
     max_parallel_tool_calls_per_node: int | None = None
     max_parallel_child_pipelines_per_node: int | None = None
+    adaptive_total_tool_budget_enabled: bool = True
+    adaptive_total_tool_budget_normal_limit: int = 4
+    adaptive_total_tool_budget_safe_limit: int = 1
+    adaptive_total_tool_budget_step_up: int = 1
+    adaptive_total_tool_budget_sample_seconds: float = 1.0
+    adaptive_total_tool_budget_recover_window_seconds: float = 10.0
+    adaptive_total_tool_budget_warn_consecutive_samples: int = 3
+    adaptive_total_tool_budget_safe_consecutive_samples: int = 5
+    adaptive_event_loop_warn_ms: float = 250.0
+    adaptive_event_loop_safe_ms: float = 100.0
+    adaptive_writer_queue_warn: int = 50
+    adaptive_writer_queue_safe: int = 10
+    adaptive_process_cpu_warn_ratio: float = 0.85
+    adaptive_process_cpu_safe_ratio: float = 0.50
 
-    @field_validator("max_parallel_tool_calls_per_node", "max_parallel_child_pipelines_per_node")
+    @field_validator(
+        "max_parallel_tool_calls_per_node",
+        "max_parallel_child_pipelines_per_node",
+    )
     @classmethod
     def _clamp_parallel_limit(cls, value: int | None) -> int | None:
         if value is None:
             return None
         return max(0, int(value))
+
+    @field_validator(
+        "adaptive_total_tool_budget_normal_limit",
+        "adaptive_total_tool_budget_safe_limit",
+        "adaptive_total_tool_budget_step_up",
+        "adaptive_total_tool_budget_warn_consecutive_samples",
+        "adaptive_total_tool_budget_safe_consecutive_samples",
+        "adaptive_writer_queue_warn",
+        "adaptive_writer_queue_safe",
+    )
+    @classmethod
+    def _clamp_positive_int(cls, value: int) -> int:
+        return max(1, int(value))
+
+    @field_validator(
+        "adaptive_total_tool_budget_sample_seconds",
+        "adaptive_total_tool_budget_recover_window_seconds",
+        "adaptive_event_loop_warn_ms",
+        "adaptive_event_loop_safe_ms",
+        "adaptive_process_cpu_warn_ratio",
+        "adaptive_process_cpu_safe_ratio",
+    )
+    @classmethod
+    def _clamp_positive_float(cls, value: float) -> float:
+        return max(0.0, float(value))
 
 
 class AgentsConfig(Base):

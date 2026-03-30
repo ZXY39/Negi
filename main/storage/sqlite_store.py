@@ -328,6 +328,12 @@ class SQLiteTaskStore:
     def _execute_write(self, sql: str, params: tuple[object, ...] = ()) -> None:
         self._run_write(lambda conn: conn.execute(sql, params))
 
+    def writer_queue_depth(self) -> int:
+        try:
+            return max(0, int(self._writer_queue.qsize()))
+        except Exception:
+            return 0
+
     def upsert_task(self, record: TaskRecord) -> TaskRecord:
         self._upsert(
             'tasks',

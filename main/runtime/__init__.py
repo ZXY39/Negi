@@ -1,7 +1,18 @@
+from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend, ConfigChatBackend
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
+from main.runtime.tool_pressure_monitor import ToolPressureMonitor
 
-__all__ = ['ChatBackend', 'ConfigChatBackend', 'NodeRunner', 'ReActToolLoop', 'TaskActorService', 'GlobalScheduler']
+__all__ = [
+    'AdaptiveToolBudgetController',
+    'ChatBackend',
+    'ConfigChatBackend',
+    'GlobalScheduler',
+    'NodeRunner',
+    'ReActToolLoop',
+    'TaskActorService',
+    'ToolPressureMonitor',
+]

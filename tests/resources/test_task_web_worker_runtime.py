@@ -823,6 +823,49 @@ def test_task_worker_status_rest_endpoint_returns_worker_metadata(tmp_path: Path
     assert payload["worker_last_seen_at"]
 
 
+def test_worker_status_payload_surfaces_tool_pressure_diagnostics(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    service.store.upsert_worker_status(
+        worker_id="worker:test",
+        role="task_worker",
+        status="running",
+        updated_at=now_iso(),
+        payload={
+            "execution_mode": "worker",
+            "active_task_count": 1,
+            "tool_pressure_state": "throttled",
+            "tool_pressure_target_limit": 1,
+            "tool_pressure_running_count": 1,
+            "tool_pressure_waiting_count": 3,
+            "tool_pressure_event_loop_lag_ms": 321.5,
+            "tool_pressure_writer_queue_depth": 77,
+            "tool_pressure_process_cpu_ratio": 0.92,
+            "tool_pressure_last_transition_at": "2026-03-30T00:00:00+08:00",
+            "tool_pressure_throttled_since": "2026-03-30T00:00:00+08:00",
+        },
+    )
+
+    payload = service.worker_status_payload()
+
+    assert payload["tool_pressure_state"] == "throttled"
+    assert payload["tool_pressure_target_limit"] == 1
+    assert payload["tool_pressure_running_count"] == 1
+    assert payload["tool_pressure_waiting_count"] == 3
+    assert float(payload["tool_pressure_event_loop_lag_ms"]) == 321.5
+    assert int(payload["tool_pressure_writer_queue_depth"]) == 77
+    assert float(payload["tool_pressure_process_cpu_ratio"]) == 0.92
+    assert payload["tool_pressure_last_transition_at"] == "2026-03-30T00:00:00+08:00"
+    assert payload["tool_pressure_throttled_since"] == "2026-03-30T00:00:00+08:00"
+
+
 def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

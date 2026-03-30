@@ -53,6 +53,7 @@ def test_sqlite_task_store_uses_separate_query_connection(tmp_path: Path) -> Non
         assert store._read_conn is not store._conn
         query_only = store._read_conn.execute("PRAGMA query_only").fetchone()
         assert int(query_only[0]) == 1
+        assert store.writer_queue_depth() >= 0
     finally:
         store.close()
 

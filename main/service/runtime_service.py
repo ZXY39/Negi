@@ -51,11 +51,13 @@ from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.query_service_v2 import TaskQueryServiceV2
 from main.protocol import build_envelope, now_iso
+from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
+from main.runtime.tool_pressure_monitor import ToolPressureMonitor
 from main.service.event_registry import TaskEventRegistry
 from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
@@ -260,6 +262,7 @@ class MainRuntimeService:
         self.tool_execution_manager = ToolExecutionManager()
         self._builtin_tool_cache: dict[str, Tool] | None = None
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
+        adaptive_budget_settings = self._adaptive_tool_budget_settings(app_config)
         execution_max_concurrency = app_config.get_role_max_concurrency('execution') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
         acceptance_max_concurrency = app_config.get_role_max_concurrency('inspection') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
         react_loop = ReActToolLoop(
@@ -270,6 +273,13 @@ class MainRuntimeService:
             max_parallel_tool_calls=max_parallel_tool_calls,
         )
         react_loop._tool_execution_manager = None
+        adaptive_budget_enabled = bool(adaptive_budget_settings.get('enabled')) and self.execution_mode == 'worker'
+        self.adaptive_tool_budget_controller = AdaptiveToolBudgetController(
+            normal_limit=int(adaptive_budget_settings['normal_limit']),
+            safe_limit=int(adaptive_budget_settings['safe_limit']),
+            step_up=int(adaptive_budget_settings['step_up']),
+        ) if adaptive_budget_enabled else None
+        react_loop._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
         self._react_loop = react_loop
         self.node_runner = NodeRunner(
             store=self.store,
@@ -301,12 +311,27 @@ class MainRuntimeService:
             max_concurrent_tasks=scheduler_concurrency,
             per_task_limit=1,
         )
+        self.tool_pressure_monitor = ToolPressureMonitor(
+            controller=self.adaptive_tool_budget_controller,
+            store=self.store,
+            sample_seconds=float(adaptive_budget_settings['sample_seconds']),
+            recover_window_seconds=float(adaptive_budget_settings['recover_window_seconds']),
+            warn_consecutive_samples=int(adaptive_budget_settings['warn_consecutive_samples']),
+            safe_consecutive_samples=int(adaptive_budget_settings['safe_consecutive_samples']),
+            event_loop_warn_ms=float(adaptive_budget_settings['event_loop_warn_ms']),
+            event_loop_safe_ms=float(adaptive_budget_settings['event_loop_safe_ms']),
+            writer_queue_warn=int(adaptive_budget_settings['writer_queue_warn']),
+            writer_queue_safe=int(adaptive_budget_settings['writer_queue_safe']),
+            process_cpu_warn_ratio=float(adaptive_budget_settings['process_cpu_warn_ratio']),
+            process_cpu_safe_ratio=float(adaptive_budget_settings['process_cpu_safe_ratio']),
+        ) if self.adaptive_tool_budget_controller is not None else None
         self.worker_heartbeat_service = WorkerHeartbeatServiceV2(
             store=self.store,
             scheduler=self.global_scheduler,
             execution_mode=self.execution_mode,
             worker_id=self.worker_id or 'worker',
             publish_status=self.publish_worker_status_event,
+            pressure_snapshot_supplier=self._tool_pressure_snapshot,
         )
         self._started = False
         self._runtime_loop = None
@@ -342,6 +367,8 @@ class MainRuntimeService:
                 await self.global_scheduler.enqueue_task(task.task_id)
             self.task_stall_notifier.bootstrap_running_tasks()
         if self.execution_mode == 'worker':
+            if self.tool_pressure_monitor is not None:
+                self.tool_pressure_monitor.start()
             self._start_worker_loops()
             self._schedule_pending_task_worker_status_callbacks()
             self._schedule_pending_task_terminal_callbacks()
@@ -927,6 +954,7 @@ class MainRuntimeService:
             'worker_last_seen_at': last_seen_at,
             'worker_control_available': state == _WORKER_STATE_ONLINE,
             'worker_stale_after_seconds': window_seconds,
+            **self._tool_pressure_status_payload(current if current else None),
         }
 
     def _publish_task_list_envelope(
@@ -1837,6 +1865,27 @@ class MainRuntimeService:
         return True, max_parallel_tool_calls, max_parallel_child_pipelines
 
     @staticmethod
+    def _adaptive_tool_budget_settings(config: Any | None) -> dict[str, Any]:
+        agents = getattr(config, 'agents', None) if config is not None else None
+        parallelism = getattr(agents, 'node_parallelism', None) if agents is not None else None
+        return {
+            'enabled': bool(getattr(parallelism, 'adaptive_total_tool_budget_enabled', True)) if parallelism is not None else True,
+            'normal_limit': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_normal_limit', 4) or 4)),
+            'safe_limit': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_safe_limit', 1) or 1)),
+            'step_up': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_step_up', 1) or 1)),
+            'sample_seconds': max(0.1, float(getattr(parallelism, 'adaptive_total_tool_budget_sample_seconds', 1.0) or 1.0)),
+            'recover_window_seconds': max(0.1, float(getattr(parallelism, 'adaptive_total_tool_budget_recover_window_seconds', 10.0) or 10.0)),
+            'warn_consecutive_samples': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_warn_consecutive_samples', 3) or 3)),
+            'safe_consecutive_samples': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_safe_consecutive_samples', 5) or 5)),
+            'event_loop_warn_ms': max(0.0, float(getattr(parallelism, 'adaptive_event_loop_warn_ms', 250.0) or 250.0)),
+            'event_loop_safe_ms': max(0.0, float(getattr(parallelism, 'adaptive_event_loop_safe_ms', 100.0) or 100.0)),
+            'writer_queue_warn': max(1, int(getattr(parallelism, 'adaptive_writer_queue_warn', 50) or 50)),
+            'writer_queue_safe': max(1, int(getattr(parallelism, 'adaptive_writer_queue_safe', 10) or 10)),
+            'process_cpu_warn_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_warn_ratio', 0.85) or 0.85)),
+            'process_cpu_safe_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_safe_ratio', 0.50) or 0.50)),
+        }
+
+    @staticmethod
     def _normalize_optional_parallel_limit(value: Any) -> int | None:
         if value is None:
             return None
@@ -1874,6 +1923,26 @@ class MainRuntimeService:
         self._react_loop._max_parallel_tool_calls = max_parallel_tool_calls
         self.node_runner._max_parallel_child_pipelines = max_parallel_child_pipelines
         self.node_runner._parallel_child_pipelines_enabled = parallel_enabled
+        adaptive_budget_settings = self._adaptive_tool_budget_settings(config)
+        if self.adaptive_tool_budget_controller is not None:
+            self.adaptive_tool_budget_controller.configure(
+                normal_limit=int(adaptive_budget_settings['normal_limit']),
+                safe_limit=int(adaptive_budget_settings['safe_limit']),
+                step_up=int(adaptive_budget_settings['step_up']),
+            )
+        if self.tool_pressure_monitor is not None:
+            self.tool_pressure_monitor.configure(
+                sample_seconds=float(adaptive_budget_settings['sample_seconds']),
+                recover_window_seconds=float(adaptive_budget_settings['recover_window_seconds']),
+                warn_consecutive_samples=int(adaptive_budget_settings['warn_consecutive_samples']),
+                safe_consecutive_samples=int(adaptive_budget_settings['safe_consecutive_samples']),
+                event_loop_warn_ms=float(adaptive_budget_settings['event_loop_warn_ms']),
+                event_loop_safe_ms=float(adaptive_budget_settings['event_loop_safe_ms']),
+                writer_queue_warn=int(adaptive_budget_settings['writer_queue_warn']),
+                writer_queue_safe=int(adaptive_budget_settings['writer_queue_safe']),
+                process_cpu_warn_ratio=float(adaptive_budget_settings['process_cpu_warn_ratio']),
+                process_cpu_safe_ratio=float(adaptive_budget_settings['process_cpu_safe_ratio']),
+            )
         # Resource manager config binding and reload are handled by refresh_loop_runtime_config().
         # Rebinding here clears dynamic tool instances before CEO exposure is assembled.
         self.resource_registry.refresh_from_current_resources()
@@ -3475,6 +3544,8 @@ class MainRuntimeService:
         if callback_tasks:
             await asyncio.gather(*callback_tasks, return_exceptions=True)
         self._task_event_dispatch_tasks.clear()
+        if self.tool_pressure_monitor is not None:
+            await self.tool_pressure_monitor.close()
         await self.task_stall_notifier.close()
         if self.execution_mode == 'worker' and self.worker_id:
             stopped_item = {
@@ -3482,7 +3553,7 @@ class MainRuntimeService:
                 'role': 'task_worker',
                 'status': 'stopped',
                 'updated_at': now_iso(),
-                'payload': {'execution_mode': self.execution_mode},
+                'payload': {'execution_mode': self.execution_mode, **self._tool_pressure_snapshot()},
             }
             self.store.upsert_worker_status(
                 worker_id=str(stopped_item['worker_id']),
@@ -3496,6 +3567,29 @@ class MainRuntimeService:
         await self.registry.close()
         self.governance_store.close()
         self.store.close()
+
+    def _tool_pressure_snapshot(self) -> dict[str, Any]:
+        if self.tool_pressure_monitor is not None:
+            return dict(self.tool_pressure_monitor.snapshot() or {})
+        if self.adaptive_tool_budget_controller is not None:
+            return dict(self.adaptive_tool_budget_controller.snapshot() or {})
+        return {}
+
+    def _tool_pressure_status_payload(self, item: dict[str, Any] | None) -> dict[str, Any]:
+        current_payload = dict(item.get('payload') or {}) if isinstance(item, dict) else {}
+        live_snapshot = self._tool_pressure_snapshot() if self.execution_mode == 'worker' else {}
+        merged = {**current_payload, **live_snapshot}
+        return {
+            'tool_pressure_state': str(merged.get('tool_pressure_state') or 'normal'),
+            'tool_pressure_target_limit': int(merged.get('tool_pressure_target_limit') or 0),
+            'tool_pressure_running_count': int(merged.get('tool_pressure_running_count') or 0),
+            'tool_pressure_waiting_count': int(merged.get('tool_pressure_waiting_count') or 0),
+            'tool_pressure_event_loop_lag_ms': float(merged.get('tool_pressure_event_loop_lag_ms') or 0.0),
+            'tool_pressure_writer_queue_depth': int(merged.get('tool_pressure_writer_queue_depth') or 0),
+            'tool_pressure_process_cpu_ratio': float(merged.get('tool_pressure_process_cpu_ratio') or 0.0),
+            'tool_pressure_last_transition_at': str(merged.get('tool_pressure_last_transition_at') or ''),
+            'tool_pressure_throttled_since': str(merged.get('tool_pressure_throttled_since') or ''),
+        }
 
     def _clamp_depth(self, requested: int | None) -> int:
         if requested is None:

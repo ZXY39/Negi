@@ -697,6 +697,15 @@ class ReActToolLoop:
                 self._check_pause_or_cancel(task.task_id)
                 started_at = now_iso()
                 started_monotonic = time.monotonic()
+                slot_lease = None
+                controller = getattr(self, '_adaptive_tool_budget_controller', None)
+                if controller is not None:
+                    slot_lease = await controller.acquire_tool_slot(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        tool_name=str(call.name or 'tool'),
+                        tool_call_id=str(call.id or ''),
+                    )
                 self._update_tool_live_state(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -725,6 +734,9 @@ class ReActToolLoop:
                     raise
                 except Exception as exc:  # pragma: no cover - defensive fallback
                     tool_content = f'Error executing {call.name}: {exc}'
+                finally:
+                    if controller is not None:
+                        controller.release_tool_slot(slot_lease)
                 finished_at = now_iso()
                 elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
                 status = self._tool_message_status(tool_content)

@@ -17,10 +17,12 @@ from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
+from g3ku.resources.tool_settings import FilesystemToolSettings
 from main.models import TaskArtifactRecord
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
 from main.storage.artifact_store import TaskArtifactStore
+from tools.filesystem.main.tool import FilesystemTool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -563,6 +565,46 @@ async def test_filesystem_search_overflow_requires_refine(tmp_path: Path):
         assert dir_payload['scope_type'] == 'directory'
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_search_refines_when_directory_scan_budget_is_exceeded(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    target_dir = workspace / 'src'
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(5):
+        (target_dir / f'module_{index}.txt').write_text('needle\n', encoding='utf-8')
+    tool = FilesystemTool(
+        workspace=workspace,
+        settings=FilesystemToolSettings(
+            search_max_files=2,
+            search_timeout_seconds=10.0,
+        ),
+    )
+    monkeypatch.setattr(shutil, 'which', lambda _name: None)
+
+    payload = json.loads(await tool.execute(action='search', path=str(target_dir), query='needle', limit=10))
+
+    assert payload['ok'] is True
+    assert payload['requires_refine'] is True
+    assert payload['timed_out'] is False
+    assert int(payload['scanned_files']) >= 3
+    assert payload['scope_type'] == 'directory'
+    assert 'too many files' in str(payload['message']).lower()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_search_file_includes_search_diagnostics(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('needle\n', encoding='utf-8')
+    tool = FilesystemTool(workspace=workspace, settings=FilesystemToolSettings())
+    payload = json.loads(await tool.execute(action='search', path=str(target_file), query='needle', limit=5))
+    assert payload['ok'] is True
+    assert payload['timed_out'] is False
+    assert int(payload['scanned_files']) == 1
+    assert int(payload['scanned_bytes']) >= len('needle\n'.encode('utf-8'))
 
 
 @pytest.mark.asyncio
@@ -1595,7 +1637,10 @@ def test_resource_loader_injects_tool_secrets(tmp_path: Path):
     loader = ResourceLoader(workspace, app_config=SimpleNamespace(tool_secrets={'filesystem': {'token': 'demo-secret'}}))
     runtime = loader.build_runtime_context(descriptor)
 
-    assert runtime.tool_settings == {'restrict_to_workspace': False}
+    assert runtime.tool_settings['restrict_to_workspace'] is False
+    assert 'search_timeout_seconds' in runtime.tool_settings
+    assert 'search_max_files' in runtime.tool_settings
+    assert 'search_max_bytes' in runtime.tool_settings
     assert runtime.tool_secrets == {'token': 'demo-secret'}
 
 

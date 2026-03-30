@@ -6,7 +6,9 @@ import difflib
 import json
 import os
 import re
+import shutil
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -116,7 +118,7 @@ class FilesystemTool:
             if operation == 'describe':
                 return self._describe(path)
             if operation == 'search':
-                return self._search(path, kwargs.get('query'), kwargs.get('limit'), kwargs.get('before'), kwargs.get('after'))
+                return await self._search(path, kwargs.get('query'), kwargs.get('limit'), kwargs.get('before'), kwargs.get('after'))
             if operation == 'open':
                 return self._open(path, kwargs.get('start_line'), kwargs.get('end_line'), kwargs.get('around_line'), kwargs.get('window'))
             if operation == 'head':
@@ -308,7 +310,7 @@ class FilesystemTool:
         _raise_if_content_ref_path(path)
         return json.dumps(self._navigator().describe(path=path), ensure_ascii=False)
 
-    def _search(self, path: str, query: Any, limit: Any, before: Any, after: Any) -> str:
+    async def _search(self, path: str, query: Any, limit: Any, before: Any, after: Any) -> str:
         resolved = _resolve_path(path, self._workspace, self._allowed_dir)
         needle = str(query or '').strip()
         if not needle:
@@ -320,37 +322,14 @@ class FilesystemTool:
             missing_kind = 'Directory' if str(path).endswith(('\\', '/')) or not Path(path).suffix else 'File'
             raise FileNotFoundError(f'{missing_kind} not found: {path}')
         if resolved.is_dir():
-            hits, overflow = self._search_directory(resolved, query=needle, limit=max_hits)
-            if overflow:
-                return json.dumps(
-                    self._search_refine_payload(
-                        query=needle,
-                        cap=max_hits,
-                        scope_type='directory',
-                        path=str(resolved),
-                    ),
-                    ensure_ascii=False,
-                )
-            return json.dumps(
-                {
-                    'ok': True,
-                    'path': str(resolved),
-                    'query': needle,
-                    'scope_type': 'directory',
-                    'hits': hits,
-                    'count': len(hits),
-                    'overflow': False,
-                    'requires_refine': False,
-                    'cap': max_hits,
-                    'overflow_lower_bound': None,
-                    'message': '',
-                    'suggestions': [],
-                },
-                ensure_ascii=False,
-            )
+            result = await self._search_directory_async(resolved, query=needle, limit=max_hits)
+            result['path'] = str(resolved)
+            result['query'] = needle
+            return json.dumps(result, ensure_ascii=False)
         if not resolved.is_file():
             raise ValueError(f'path is neither a file nor a directory: {path}')
-        result = self._navigator().search(
+        result = await asyncio.to_thread(
+            self._navigator().search,
             path=str(resolved),
             query=needle,
             limit=max_hits,
@@ -359,6 +338,12 @@ class FilesystemTool:
         )
         result['scope_type'] = 'file'
         result['path'] = str(resolved)
+        result.setdefault('timed_out', False)
+        result.setdefault('scanned_files', 1)
+        try:
+            result.setdefault('scanned_bytes', max(0, int(resolved.stat().st_size)))
+        except OSError:
+            result.setdefault('scanned_bytes', 0)
         for hit in list(result.get('hits') or []):
             if isinstance(hit, dict):
                 hit.setdefault('path', str(resolved))
@@ -636,28 +621,232 @@ class FilesystemTool:
             artifact_lookup=self._main_task_service or artifact_store,
         )
 
+    async def _search_directory_async(self, path: Path, *, query: str, limit: int) -> dict[str, Any]:
+        rg_executable = shutil.which('rg')
+        if rg_executable:
+            result = await self._search_directory_with_rg(
+                path=path,
+                query=query,
+                limit=limit,
+                rg_executable=rg_executable,
+            )
+            if result is not None:
+                return result
+        return await self._search_directory_with_fallback(path=path, query=query, limit=limit)
+
+    async def _search_directory_with_rg(
+        self,
+        *,
+        path: Path,
+        query: str,
+        limit: int,
+        rg_executable: str,
+    ) -> dict[str, Any] | None:
+        timeout_seconds = max(0.1, float(self._settings.search_timeout_seconds or 3.0))
+        try:
+            re.compile(query, re.IGNORECASE)
+            use_fixed_string = False
+        except re.error:
+            use_fixed_string = True
+        args = [rg_executable, '--json', '-n', '--hidden', '--no-messages', '--color', 'never']
+        if use_fixed_string:
+            args.append('-F')
+        else:
+            args.append('-i')
+        args.extend([query, str(path)])
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        hits: list[dict[str, Any]] = []
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        try:
+            while True:
+                remaining = max(0.05, deadline - asyncio.get_running_loop().time())
+                line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
+                if not line:
+                    break
+                try:
+                    payload = json.loads(line.decode('utf-8', errors='replace'))
+                except json.JSONDecodeError:
+                    continue
+                if str(payload.get('type') or '') != 'match':
+                    continue
+                data = dict(payload.get('data') or {})
+                path_payload = data.get('path') if isinstance(data.get('path'), dict) else {}
+                line_number = data.get('line_number')
+                lines_payload = data.get('lines') if isinstance(data.get('lines'), dict) else {}
+                hits.append(
+                    {
+                        'path': str(path_payload.get('text') or ''),
+                        'line': int(line_number or 0),
+                        'preview': str(lines_payload.get('text') or '').strip()[:240],
+                    }
+                )
+                if len(hits) > limit:
+                    process.kill()
+                    await process.wait()
+                    return self._search_refine_payload(
+                        query=query,
+                        cap=limit,
+                        scope_type='directory',
+                        path=str(path),
+                        reason='overflow',
+                        timed_out=False,
+                        scanned_files=None,
+                        scanned_bytes=None,
+                    )
+            await asyncio.wait_for(process.wait(), timeout=max(0.05, deadline - asyncio.get_running_loop().time()))
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return self._search_refine_payload(
+                query=query,
+                cap=limit,
+                scope_type='directory',
+                path=str(path),
+                reason='timed_out',
+                timed_out=True,
+                scanned_files=None,
+                scanned_bytes=None,
+            )
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        return {
+            'ok': True,
+            'path': str(path),
+            'query': query,
+            'scope_type': 'directory',
+            'hits': hits,
+            'count': len(hits),
+            'overflow': False,
+            'requires_refine': False,
+            'cap': limit,
+            'overflow_lower_bound': None,
+            'message': '',
+            'suggestions': [],
+            'timed_out': False,
+            'scanned_files': None,
+            'scanned_bytes': None,
+        }
+
+    async def _search_directory_with_fallback(self, *, path: Path, query: str, limit: int) -> dict[str, Any]:
+        timeout_seconds = max(0.1, float(self._settings.search_timeout_seconds or 3.0))
+        stop_event = threading.Event()
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._search_directory_fallback_sync,
+                    path,
+                    query,
+                    limit,
+                    stop_event,
+                    max(1, int(self._settings.search_max_files or 1)),
+                    max(1, int(self._settings.search_max_bytes or 1)),
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            stop_event.set()
+            return self._search_refine_payload(
+                query=query,
+                cap=limit,
+                scope_type='directory',
+                path=str(path),
+                reason='timed_out',
+                timed_out=True,
+                scanned_files=None,
+                scanned_bytes=None,
+            )
+
     @staticmethod
-    def _search_directory(path: Path, *, query: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
+    def _search_directory_fallback_sync(
+        path: Path,
+        query: str,
+        limit: int,
+        stop_event: threading.Event,
+        max_files: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:
         try:
             pattern = re.compile(query, re.IGNORECASE)
         except re.error:
             pattern = re.compile(re.escape(query), re.IGNORECASE)
-
         hits: list[dict[str, Any]] = []
         total_matches = 0
+        scanned_files = 0
+        scanned_bytes = 0
         for file_path in sorted(path.rglob('*')):
+            if stop_event.is_set():
+                return FilesystemTool._search_refine_payload(
+                    query=query,
+                    cap=limit,
+                    scope_type='directory',
+                    path=str(path),
+                    reason='timed_out',
+                    timed_out=True,
+                    scanned_files=scanned_files,
+                    scanned_bytes=scanned_bytes,
+                )
             if not file_path.is_file():
                 continue
+            scanned_files += 1
+            if scanned_files > max_files:
+                return FilesystemTool._search_refine_payload(
+                    query=query,
+                    cap=limit,
+                    scope_type='directory',
+                    path=str(path),
+                    reason='too_many_files',
+                    timed_out=False,
+                    scanned_files=scanned_files,
+                    scanned_bytes=scanned_bytes,
+                )
             try:
+                scanned_bytes += max(0, int(file_path.stat().st_size))
+                if scanned_bytes > max_bytes:
+                    return FilesystemTool._search_refine_payload(
+                        query=query,
+                        cap=limit,
+                        scope_type='directory',
+                        path=str(path),
+                        reason='too_many_files',
+                        timed_out=False,
+                        scanned_files=scanned_files,
+                        scanned_bytes=scanned_bytes,
+                    )
                 with file_path.open('r', encoding='utf-8') as handle:
                     for line_number, line in enumerate(handle, start=1):
+                        if stop_event.is_set():
+                            return FilesystemTool._search_refine_payload(
+                                query=query,
+                                cap=limit,
+                                scope_type='directory',
+                                path=str(path),
+                                reason='timed_out',
+                                timed_out=True,
+                                scanned_files=scanned_files,
+                                scanned_bytes=scanned_bytes,
+                            )
                         if '\x00' in line:
                             raise UnicodeDecodeError('utf-8', b'\x00', 0, 1, 'binary content')
                         if not pattern.search(line):
                             continue
                         total_matches += 1
                         if total_matches > limit:
-                            return hits, True
+                            return FilesystemTool._search_refine_payload(
+                                query=query,
+                                cap=limit,
+                                scope_type='directory',
+                                path=str(path),
+                                reason='overflow',
+                                timed_out=False,
+                                scanned_files=scanned_files,
+                                scanned_bytes=scanned_bytes,
+                            )
                         hits.append(
                             {
                                 'path': str(file_path.resolve()),
@@ -667,9 +856,36 @@ class FilesystemTool:
                         )
             except (OSError, UnicodeDecodeError):
                 continue
-        return hits, False
+        return {
+            'ok': True,
+            'path': str(path),
+            'query': query,
+            'scope_type': 'directory',
+            'hits': hits,
+            'count': len(hits),
+            'overflow': False,
+            'requires_refine': False,
+            'cap': cap,
+            'overflow_lower_bound': None,
+            'message': '',
+            'suggestions': [],
+            'timed_out': False,
+            'scanned_files': scanned_files,
+            'scanned_bytes': scanned_bytes,
+        }
 
-    def _search_refine_payload(self, *, query: str, cap: int, scope_type: str, path: str) -> dict[str, Any]:
+    @staticmethod
+    def _search_refine_payload(
+        *,
+        query: str,
+        cap: int,
+        scope_type: str,
+        path: str,
+        reason: str = 'overflow',
+        timed_out: bool = False,
+        scanned_files: int | None = None,
+        scanned_bytes: int | None = None,
+    ) -> dict[str, Any]:
         suggestions = [
             'Use a more specific symbol, function name, or field name.',
             'Narrow the path to a smaller file or directory before searching again.',
@@ -679,6 +895,12 @@ class FilesystemTool:
         else:
             suggestions.append('List the directory first, then search a smaller subtree.')
             suggestions.append('Limit the query to a filename pattern or extension before retrying.')
+        if reason == 'timed_out':
+            message = 'Search timed out. Too many files may match this scope; refine the query before retrying.'
+        elif reason == 'too_many_files':
+            message = 'Search scanned too many files. Refine the query before retrying.'
+        else:
+            message = f'Search matched more than {cap} results. Refine the query before retrying.'
         return {
             'ok': True,
             'path': path,
@@ -686,12 +908,15 @@ class FilesystemTool:
             'scope_type': scope_type,
             'hits': [],
             'count': 0,
-            'overflow': True,
+            'overflow': reason == 'overflow',
             'requires_refine': True,
             'cap': cap,
-            'overflow_lower_bound': cap + 1,
-            'message': f'Search matched more than {cap} results. Refine the query before retrying.',
+            'overflow_lower_bound': cap + 1 if reason == 'overflow' else None,
+            'message': message,
             'suggestions': suggestions,
+            'timed_out': bool(timed_out),
+            'scanned_files': scanned_files,
+            'scanned_bytes': scanned_bytes,
         }
 
     async def _validate_file(
