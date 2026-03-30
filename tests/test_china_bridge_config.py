@@ -97,6 +97,7 @@ def test_load_config_rejects_legacy_channels_config(tmp_path, monkeypatch):
                     "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
                     "defaultMaxDepth": 1,
                     "hardMaxDepth": 4,
+                    "nodeDispatchConcurrency": {"execution": 8, "inspection": 4},
                 },
                 "chinaBridge": {"enabled": False},
             }
@@ -163,6 +164,7 @@ def test_load_config_migrates_legacy_gateway_bind_config(tmp_path, monkeypatch):
                     "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
                     "defaultMaxDepth": 1,
                     "hardMaxDepth": 4,
+                    "nodeDispatchConcurrency": {"execution": 8, "inspection": 4},
                 },
                 "chinaBridge": {"enabled": False},
             }

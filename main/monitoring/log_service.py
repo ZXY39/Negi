@@ -204,6 +204,9 @@ class TaskLogService:
             'updated_at': now_iso(),
             'last_visible_output_at': str(last_visible_output_at or '').strip(),
             'last_stall_notice_bucket_minutes': 0,
+            'dispatch_limits': {'execution': 0, 'inspection': 0},
+            'dispatch_running': {'execution': 0, 'inspection': 0},
+            'dispatch_queued': {'execution': 0, 'inspection': 0},
             'summary_fingerprint': '',
             'summary_last_published_at': '',
         }
@@ -1125,6 +1128,12 @@ class TaskLogService:
                     current['last_stall_notice_bucket_minutes'] = max(0, int(payload.get('last_stall_notice_bucket_minutes') or 0))
                 except (TypeError, ValueError):
                     current['last_stall_notice_bucket_minutes'] = 0
+            if 'dispatch_limits' in payload:
+                current['dispatch_limits'] = self._sanitize_dispatch_counters(payload.get('dispatch_limits'))
+            if 'dispatch_running' in payload:
+                current['dispatch_running'] = self._sanitize_dispatch_counters(payload.get('dispatch_running'))
+            if 'dispatch_queued' in payload:
+                current['dispatch_queued'] = self._sanitize_dispatch_counters(payload.get('dispatch_queued'))
             current['updated_at'] = now_iso()
             self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
@@ -1141,13 +1150,16 @@ class TaskLogService:
         current['task_id'] = task.task_id
         current.setdefault('updated_at', now_iso())
         current.setdefault('last_visible_output_at', '')
+        current.setdefault('dispatch_limits', {'execution': 0, 'inspection': 0})
+        current.setdefault('dispatch_running', {'execution': 0, 'inspection': 0})
+        current.setdefault('dispatch_queued', {'execution': 0, 'inspection': 0})
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
         except (TypeError, ValueError):
             current['last_stall_notice_bucket_minutes'] = 0
-        return current
+        return self._sanitize_runtime_state(current)
 
     def replace_runtime_frames(
         self,
@@ -1993,16 +2005,23 @@ class TaskLogService:
             state = runtime_state
         else:
             frame_records = list(self._store.list_task_runtime_frames(task_id) or [])
+            runtime_meta = self.read_task_runtime_meta(task_id) or self._default_runtime_meta()
             state = {
                 'active_node_ids': [record.node_id for record in frame_records if bool(record.active)],
                 'runnable_node_ids': [record.node_id for record in frame_records if bool(record.runnable)],
                 'waiting_node_ids': [record.node_id for record in frame_records if bool(record.waiting)],
+                'dispatch_limits': dict(runtime_meta.get('dispatch_limits') or {}),
+                'dispatch_running': dict(runtime_meta.get('dispatch_running') or {}),
+                'dispatch_queued': dict(runtime_meta.get('dispatch_queued') or {}),
                 'frames': [dict(record.payload or {}) for record in frame_records],
             }
         return {
             'active_node_ids': [str(item) for item in list(state.get('active_node_ids') or []) if str(item or '').strip()],
             'runnable_node_ids': [str(item) for item in list(state.get('runnable_node_ids') or []) if str(item or '').strip()],
             'waiting_node_ids': [str(item) for item in list(state.get('waiting_node_ids') or []) if str(item or '').strip()],
+            'dispatch_limits': self._sanitize_dispatch_counters(state.get('dispatch_limits')),
+            'dispatch_running': self._sanitize_dispatch_counters(state.get('dispatch_running')),
+            'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
             'frames': [self._public_runtime_frame(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
         }
 
@@ -2014,8 +2033,19 @@ class TaskLogService:
             state['last_stall_notice_bucket_minutes'] = max(0, int(state.get('last_stall_notice_bucket_minutes') or 0))
         except (TypeError, ValueError):
             state['last_stall_notice_bucket_minutes'] = 0
+        state['dispatch_limits'] = cls._sanitize_dispatch_counters(state.get('dispatch_limits'))
+        state['dispatch_running'] = cls._sanitize_dispatch_counters(state.get('dispatch_running'))
+        state['dispatch_queued'] = cls._sanitize_dispatch_counters(state.get('dispatch_queued'))
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
+
+    @staticmethod
+    def _sanitize_dispatch_counters(payload: Any) -> dict[str, int]:
+        counters = dict(payload or {}) if isinstance(payload, dict) else {}
+        return {
+            'execution': max(0, int(counters.get('execution') or 0)),
+            'inspection': max(0, int(counters.get('inspection') or 0)),
+        }
 
     @staticmethod
     def _sanitize_runtime_frame(frame: dict[str, Any]) -> dict[str, Any]:

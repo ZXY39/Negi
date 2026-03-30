@@ -455,6 +455,10 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "governanceStorePath": cfg.main_runtime.governance_store_path,
             "defaultMaxDepth": cfg.main_runtime.default_max_depth,
             "hardMaxDepth": cfg.main_runtime.hard_max_depth,
+            "nodeDispatchConcurrency": {
+                "execution": cfg.get_node_dispatch_concurrency("execution"),
+                "inspection": cfg.get_node_dispatch_concurrency("inspection"),
+            },
         },
         "chinaBridge": {
             "enabled": cfg.china_bridge.enabled,

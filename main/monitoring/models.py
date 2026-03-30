@@ -77,6 +77,11 @@ class TaskLiveChildPipeline(Model):
     finished_at: str = ''
 
 
+class TaskDispatchCounters(Model):
+    execution: int = 0
+    inspection: int = 0
+
+
 class TaskLiveFrame(Model):
     node_id: str = ''
     depth: int = 0
@@ -94,6 +99,9 @@ class TaskLiveState(Model):
     active_node_ids: list[str] = Field(default_factory=list)
     runnable_node_ids: list[str] = Field(default_factory=list)
     waiting_node_ids: list[str] = Field(default_factory=list)
+    dispatch_limits: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
+    dispatch_running: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
+    dispatch_queued: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     frames: list[TaskLiveFrame] = Field(default_factory=list)
 
 
@@ -138,6 +146,9 @@ class TaskRuntimeSummary(Model):
     active_node_ids: list[str] = Field(default_factory=list)
     runnable_node_ids: list[str] = Field(default_factory=list)
     waiting_node_ids: list[str] = Field(default_factory=list)
+    dispatch_limits: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
+    dispatch_running: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
+    dispatch_queued: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     frames: list[TaskLiveFrame] = Field(default_factory=list)
 
 

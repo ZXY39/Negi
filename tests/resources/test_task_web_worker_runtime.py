@@ -1485,7 +1485,9 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
     assert payload["recent_model_calls"][0]["call_index"] == 3
     assert "progress" not in payload
     assert "tree_root" not in payload
-    assert "runtime_summary" not in payload
+    assert payload["runtime_summary"]["dispatch_limits"] == {"execution": 0, "inspection": 0}
+    assert payload["runtime_summary"]["dispatch_running"] == {"execution": 0, "inspection": 0}
+    assert payload["runtime_summary"]["dispatch_queued"] == {"execution": 0, "inspection": 0}
     monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
     monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
 

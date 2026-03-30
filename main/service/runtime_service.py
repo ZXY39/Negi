@@ -275,6 +275,7 @@ class MainRuntimeService:
         self._builtin_tool_cache: dict[str, Tool] | None = None
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
         adaptive_budget_settings = self._adaptive_tool_budget_settings(app_config)
+        node_dispatch_limits = self._node_dispatch_concurrency_settings(app_config)
         execution_max_concurrency = app_config.get_role_max_concurrency('execution') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
         acceptance_max_concurrency = app_config.get_role_max_concurrency('inspection') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
         react_loop = ReActToolLoop(
@@ -314,6 +315,8 @@ class MainRuntimeService:
             log_service=self.log_service,
             node_runner=self.node_runner,
             stall_notifier=self.task_stall_notifier,
+            node_dispatch_execution_limit=int(node_dispatch_limits['execution']),
+            node_dispatch_inspection_limit=int(node_dispatch_limits['inspection']),
         )
         scheduler_concurrency = max(
             1,
@@ -394,7 +397,8 @@ class MainRuntimeService:
         if self._started:
             return
         self._started = True
-        self._runtime_loop = asyncio.get_running_loop()
+        if self._runtime_loop is None:
+            self._runtime_loop = asyncio.get_running_loop()
         self.resource_registry.refresh_from_current_resources()
         self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
@@ -2198,6 +2202,27 @@ class MainRuntimeService:
         return True, max_parallel_tool_calls, max_parallel_child_pipelines
 
     @staticmethod
+    def _node_dispatch_concurrency_settings(config: Any | None) -> dict[str, int]:
+        if config is not None and hasattr(config, 'get_node_dispatch_concurrency'):
+            try:
+                execution = int(config.get_node_dispatch_concurrency('execution'))
+                inspection = int(config.get_node_dispatch_concurrency('inspection'))
+                return {
+                    'execution': max(1, execution),
+                    'inspection': max(1, inspection),
+                }
+            except Exception:
+                pass
+        main_runtime = getattr(config, 'main_runtime', None) if config is not None else None
+        dispatch_config = getattr(main_runtime, 'node_dispatch_concurrency', None) if main_runtime is not None else None
+        execution = getattr(dispatch_config, 'execution', 8) if dispatch_config is not None else 8
+        inspection = getattr(dispatch_config, 'inspection', 4) if dispatch_config is not None else 4
+        return {
+            'execution': max(1, int(execution or 8)),
+            'inspection': max(1, int(inspection or 4)),
+        }
+
+    @staticmethod
     def _adaptive_tool_budget_settings(config: Any | None) -> dict[str, Any]:
         agents = getattr(config, 'agents', None) if config is not None else None
         parallelism = getattr(agents, 'node_parallelism', None) if agents is not None else None
@@ -2270,6 +2295,11 @@ class MainRuntimeService:
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
         self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
         self.node_runner._acceptance_max_concurrency = config.get_role_max_concurrency('inspection')
+        node_dispatch_limits = self._node_dispatch_concurrency_settings(config)
+        self.task_actor_service.configure_node_dispatch_limits(
+            execution=int(node_dispatch_limits['execution']),
+            inspection=int(node_dispatch_limits['inspection']),
+        )
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(config)
         self._react_loop._parallel_tool_calls_enabled = parallel_enabled
         self._react_loop._max_parallel_tool_calls = max_parallel_tool_calls

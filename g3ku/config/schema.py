@@ -27,6 +27,10 @@ DEFAULT_ROLE_MAX_CONCURRENCY = {
     "execution": None,
     "inspection": None,
 }
+DEFAULT_NODE_DISPATCH_CONCURRENCY = {
+    "execution": 8,
+    "inspection": 4,
+}
 
 
 def normalize_role_scope(value: str) -> str:
@@ -722,6 +726,21 @@ class MainRuntimeConfig(Base):
     governance_store_path: str = '.g3ku/main-runtime/governance.sqlite3'
     default_max_depth: int = 1
     hard_max_depth: int = 4
+    node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())
+
+
+class NodeDispatchConcurrencyConfig(Base):
+    execution: int = Field(default=DEFAULT_NODE_DISPATCH_CONCURRENCY["execution"], ge=1)
+    inspection: int = Field(default=DEFAULT_NODE_DISPATCH_CONCURRENCY["inspection"], ge=1)
+
+    @field_validator("execution", "inspection", mode="before")
+    @classmethod
+    def _normalize_dispatch_concurrency(cls, value: Any, info: ValidationInfo) -> int:
+        if value is None:
+            return DEFAULT_NODE_DISPATCH_CONCURRENCY[info.field_name]
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_NODE_DISPATCH_CONCURRENCY[info.field_name]
+        return int(value)
 
 
 class ChinaBridgeConfig(Base):
@@ -854,6 +873,17 @@ class Config(BaseSettings):
         if value is None:
             return None
         return max(0, int(value))
+
+    def get_node_dispatch_concurrency(self, role: str) -> int:
+        normalized = normalize_role_scope(role)
+        if normalized not in DEFAULT_NODE_DISPATCH_CONCURRENCY:
+            raise ValueError(f"Invalid node dispatch scope: {role}")
+        value = getattr(
+            self.main_runtime.node_dispatch_concurrency,
+            normalized,
+            DEFAULT_NODE_DISPATCH_CONCURRENCY[normalized],
+        )
+        return max(1, int(value or DEFAULT_NODE_DISPATCH_CONCURRENCY[normalized]))
 
     def resolve_role_model_key(self, role: str) -> str:
         refs = self.get_role_model_keys(role)

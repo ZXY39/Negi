@@ -74,6 +74,7 @@ class NodeRunner:
         self._parallel_child_pipelines_enabled = True
         self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
+        self.nested_node_executor = None
 
     @staticmethod
     def _normalized_status(value: Any) -> str:
@@ -161,6 +162,12 @@ class NodeRunner:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
             return self._mark_failed(task_id, node.node_id, reason=str(exc))
+
+    async def _run_nested_node(self, task_id: str, node_id: str) -> NodeFinalResult:
+        executor = self.nested_node_executor
+        if callable(executor):
+            return await executor(task_id, node_id)
+        return await self.run_node(task_id, node_id)
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
@@ -615,7 +622,7 @@ class NodeRunner:
                     child_node_id=child.node_id,
                 )
 
-            child_result = await self.run_node(task.task_id, child.node_id)
+            child_result = await self._run_nested_node(task.task_id, child.node_id)
             child = self._store.get_node(child.node_id) or child
             child_handoff = self._child_handoff_payload(
                 task_id=task.task_id,
@@ -721,7 +728,7 @@ class NodeRunner:
                     check_status='running',
                 )
 
-            acceptance_result = await self.run_node(task.task_id, acceptance.node_id)
+            acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
             acceptance = self._store.get_node(acceptance.node_id) or acceptance
             check_result = str(acceptance_result.summary or acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
             self._log_service.update_node_check_result(task.task_id, child.node_id, check_result)

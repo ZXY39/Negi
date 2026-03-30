@@ -160,6 +160,9 @@ class TaskQueryService:
             'active_node_ids': [],
             'runnable_node_ids': [],
             'waiting_node_ids': [],
+            'dispatch_limits': {'execution': 0, 'inspection': 0},
+            'dispatch_running': {'execution': 0, 'inspection': 0},
+            'dispatch_queued': {'execution': 0, 'inspection': 0},
             'frames': [],
         }
         counts = {
@@ -187,6 +190,7 @@ class TaskQueryService:
                 'token_usage_by_model': token_usage_by_model,
                 **counts,
             },
+            'runtime_summary': runtime_summary,
             'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
             'frontier': frontier,
             'counts': counts,
@@ -500,7 +504,21 @@ class TaskQueryService:
 
     def _projection_live_state(self, task_id: str) -> TaskLiveState | None:
         frames = self._store.list_task_runtime_frames(task_id)
+        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
+        dispatch_limits = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_limits'))
+        dispatch_running = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_running'))
+        dispatch_queued = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_queued'))
         if not frames:
+            if any(dispatch_limits.values()) or any(dispatch_running.values()) or any(dispatch_queued.values()):
+                return TaskLiveState(
+                    active_node_ids=[],
+                    runnable_node_ids=[],
+                    waiting_node_ids=[],
+                    dispatch_limits=dispatch_limits,
+                    dispatch_running=dispatch_running,
+                    dispatch_queued=dispatch_queued,
+                    frames=[],
+                )
             return None
         live_frames: list[TaskLiveFrame] = []
         active_node_ids: list[str] = []
@@ -556,8 +574,19 @@ class TaskQueryService:
             active_node_ids=sorted(active_node_ids),
             runnable_node_ids=sorted(runnable_node_ids),
             waiting_node_ids=sorted(waiting_node_ids),
+            dispatch_limits=dispatch_limits,
+            dispatch_running=dispatch_running,
+            dispatch_queued=dispatch_queued,
             frames=live_frames,
         )
+
+    @staticmethod
+    def _sanitize_dispatch_counters(payload: Any) -> dict[str, int]:
+        counters = dict(payload or {}) if isinstance(payload, dict) else {}
+        return {
+            'execution': max(0, int(counters.get('execution') or 0)),
+            'inspection': max(0, int(counters.get('inspection') or 0)),
+        }
 
     def _latest_projection_node(self, task_id: str) -> LatestTaskNodeOutput | None:
         details = self._store.list_task_node_details(task_id)
