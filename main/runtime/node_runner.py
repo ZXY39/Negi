@@ -72,6 +72,7 @@ class NodeRunner:
             default=self._execution_max_concurrency,
         )
         self._parallel_child_pipelines_enabled = True
+        self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
 
     @staticmethod
@@ -498,17 +499,10 @@ class NodeRunner:
         cached_payload['completed'] = False
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
 
-        semaphore = asyncio.Semaphore(
-            self._parallel_slot_count(
-                self._max_parallel_child_pipelines_for(parent),
-                len(specs),
-                enabled=self._parallel_child_pipelines_enabled,
-            )
-        )
-
-        async def _run_spec(index: int, spec: SpawnChildSpec) -> SpawnChildResult:
-            async with semaphore:
-                return await self._run_child_pipeline(
+        results: list[SpawnChildResult] = []
+        for index, spec in enumerate(specs):
+            results.append(
+                await self._run_child_pipeline(
                     task=task,
                     parent=parent,
                     spec=spec,
@@ -516,8 +510,7 @@ class NodeRunner:
                     cached_payload=cached_payload,
                     index=index,
                 )
-
-        results = await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
+            )
         cached_payload['results'] = [item.model_dump(mode='json', exclude_none=True) for item in results]
         cached_payload['completed'] = True
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
@@ -565,6 +558,13 @@ class NodeRunner:
         if stop_reason:
             return self._spawn_abort_result(spec.goal, stop_reason)
 
+        await self._admit_spawn_expansion(
+            task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            cache_key=cache_key,
+            index=index,
+            phase='child',
+        )
         requires_acceptance = bool(entry.get('requires_acceptance'))
         started_at = str(entry.get('started_at') or _now())
         self._update_spawn_entry(
@@ -671,6 +671,13 @@ class NodeRunner:
             acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
             acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
             if acceptance is None:
+                await self._admit_spawn_expansion(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    index=index,
+                    phase='acceptance',
+                )
                 acceptance_goal = f'accept:{spec.goal}'
                 acceptance_prompt = str(spec.acceptance_prompt or '')
                 acceptance = self._find_reusable_acceptance_node(
@@ -904,6 +911,26 @@ class NodeRunner:
             item.pop('_sort_key', None)
         has_active = any(str(item.get('status') or '').strip().lower() in {'queued', 'running'} for item in child_pipelines)
         return child_pipelines, pending_specs, partial_results, has_active
+
+    async def _admit_spawn_expansion(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        index: int,
+        phase: str,
+    ) -> None:
+        controller = self._adaptive_tool_budget_controller
+        if controller is None:
+            return
+        lease = await controller.acquire_work_slot(
+            task_id=task_id,
+            node_id=parent_node_id,
+            work_kind='spawn_child_nodes',
+            work_id=f'{cache_key}:{phase}:{int(index)}',
+        )
+        controller.release_work_slot(lease)
 
     def _requires_acceptance(self, spec: SpawnChildSpec) -> bool:
         if spec.requires_acceptance is True:

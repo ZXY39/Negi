@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +33,7 @@ class _QueuedToolRequest:
     tool_name: str
     tool_call_id: str
     queued_at: str
+    queued_mono: float
 
 
 class AdaptiveToolBudgetController:
@@ -78,6 +80,21 @@ class AdaptiveToolBudgetController:
         tool_name: str,
         tool_call_id: str,
     ) -> ToolSlotLease:
+        return await self.acquire_work_slot(
+            task_id=task_id,
+            node_id=node_id,
+            work_kind=tool_name,
+            work_id=tool_call_id,
+        )
+
+    async def acquire_work_slot(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        work_kind: str,
+        work_id: str,
+    ) -> ToolSlotLease:
         future: asyncio.Future[ToolSlotLease] | None = None
         with self._lock:
             if not self._waiting_queue and self._running_tools_count < self._target_running_tools_limit:
@@ -85,8 +102,8 @@ class AdaptiveToolBudgetController:
                 return self._build_lease(
                     task_id=task_id,
                     node_id=node_id,
-                    tool_name=tool_name,
-                    tool_call_id=tool_call_id,
+                    tool_name=work_kind,
+                    tool_call_id=work_id,
                     queued_at='',
                 )
             loop = asyncio.get_running_loop()
@@ -98,9 +115,10 @@ class AdaptiveToolBudgetController:
                     future=future,
                     task_id=str(task_id or '').strip(),
                     node_id=str(node_id or '').strip(),
-                    tool_name=str(tool_name or '').strip() or 'tool',
-                    tool_call_id=str(tool_call_id or '').strip(),
+                    tool_name=str(work_kind or '').strip() or 'work',
+                    tool_call_id=str(work_id or '').strip(),
                     queued_at=_now_iso(),
+                    queued_mono=time.perf_counter(),
                 )
             )
         try:
@@ -111,6 +129,9 @@ class AdaptiveToolBudgetController:
             raise
 
     def release_tool_slot(self, lease: ToolSlotLease | None) -> None:
+        self.release_work_slot(lease)
+
+    def release_work_slot(self, lease: ToolSlotLease | None) -> None:
         if lease is None:
             return
         ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]] = []
@@ -158,6 +179,9 @@ class AdaptiveToolBudgetController:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            oldest_wait_ms = 0.0
+            if self._waiting_queue:
+                oldest_wait_ms = max(0.0, (time.perf_counter() - float(self._waiting_queue[0].queued_mono or 0.0)) * 1000.0)
             return {
                 'tool_pressure_state': self._pressure_state,
                 'tool_pressure_target_limit': int(self._target_running_tools_limit),
@@ -165,6 +189,11 @@ class AdaptiveToolBudgetController:
                 'tool_pressure_waiting_count': int(len(self._waiting_queue)),
                 'tool_pressure_last_transition_at': self._last_transition_at,
                 'tool_pressure_throttled_since': self._throttled_since,
+                'worker_execution_state': self._pressure_state,
+                'worker_execution_target_limit': int(self._target_running_tools_limit),
+                'worker_execution_running_count': int(self._running_tools_count),
+                'worker_execution_waiting_count': int(len(self._waiting_queue)),
+                'worker_execution_oldest_wait_ms': round(oldest_wait_ms, 3),
             }
 
     def _build_lease(
@@ -211,5 +240,18 @@ class AdaptiveToolBudgetController:
     @staticmethod
     def _resolve_waiters(ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]]) -> None:
         for future, lease in ready:
-            if not future.done():
-                future.set_result(lease)
+            if future.done():
+                continue
+            try:
+                loop = future.get_loop()
+            except Exception:
+                loop = None
+            if loop is not None:
+                loop.call_soon_threadsafe(_set_future_result_if_pending, future, lease)
+            else:
+                _set_future_result_if_pending(future, lease)
+
+
+def _set_future_result_if_pending(future: asyncio.Future[ToolSlotLease], lease: ToolSlotLease) -> None:
+    if not future.done():
+        future.set_result(lease)

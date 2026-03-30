@@ -64,7 +64,7 @@ class SpawnChildNodesTool(Tool):
 
     @property
     def description(self) -> str:
-        return 'Create multiple child nodes and run them in parallel.'
+        return 'Create child nodes and run them with runtime-controlled concurrency.'
 
     @property
     def parameters(self) -> dict[str, Any]:

@@ -4,7 +4,7 @@ from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
-from main.runtime.tool_pressure_monitor import ToolPressureMonitor
+from main.runtime.tool_pressure_monitor import ToolPressureMonitor, WorkerPressureMonitor
 
 __all__ = [
     'AdaptiveToolBudgetController',
@@ -15,4 +15,5 @@ __all__ = [
     'ReActToolLoop',
     'TaskActorService',
     'ToolPressureMonitor',
+    'WorkerPressureMonitor',
 ]

@@ -68,6 +68,7 @@ class RepeatedActionCircuitBreaker:
 
 class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
+    _BUDGET_BYPASS_TOOL_NAMES = _CONTROL_TOOL_NAMES | {STAGE_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME}
 
     def __init__(
         self,
@@ -699,7 +700,7 @@ class ReActToolLoop:
                 started_monotonic = time.monotonic()
                 slot_lease = None
                 controller = getattr(self, '_adaptive_tool_budget_controller', None)
-                if controller is not None:
+                if controller is not None and not self._should_bypass_execution_budget(call=call):
                     slot_lease = await controller.acquire_tool_slot(
                         task_id=task.task_id,
                         node_id=node.node_id,
@@ -773,6 +774,11 @@ class ReActToolLoop:
 
         gathered = await asyncio.gather(*[_run_call(index, call) for index, call in enumerate(response_tool_calls)])
         return [item for item in sorted(gathered, key=lambda value: int(value['index']))]
+
+    @classmethod
+    def _should_bypass_execution_budget(cls, *, call: Any) -> bool:
+        tool_name = str(getattr(call, 'name', '') or '').strip()
+        return tool_name in cls._BUDGET_BYPASS_TOOL_NAMES
 
     @staticmethod
     def _normalize_optional_limit(value: int | None | object, *, default: int | None) -> int | None:

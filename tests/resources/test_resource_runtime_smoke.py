@@ -557,18 +557,23 @@ async def test_filesystem_search_overflow_requires_refine(tmp_path: Path):
 
         dir_payload = json.loads(await tool.execute(action='search', path=str(target_dir), query='needle', limit=5))
         assert dir_payload['ok'] is True
-        assert dir_payload['overflow'] is True
-        assert dir_payload['requires_refine'] is True
-        assert dir_payload['hits'] == []
-        assert dir_payload['count'] == 0
-        assert dir_payload['overflow_lower_bound'] == 6
         assert dir_payload['scope_type'] == 'directory'
+        if shutil.which('rg'):
+            assert dir_payload['overflow'] is True
+            assert dir_payload['requires_refine'] is True
+            assert dir_payload['hits'] == []
+            assert dir_payload['count'] == 0
+            assert dir_payload['overflow_lower_bound'] == 6
+            assert dir_payload['backend'] == 'rg'
+        else:
+            assert dir_payload['requires_refine'] is True
+            assert dir_payload['backend'] == 'unavailable'
     finally:
         manager.close()
 
 
 @pytest.mark.asyncio
-async def test_filesystem_search_refines_when_directory_scan_budget_is_exceeded(tmp_path: Path, monkeypatch):
+async def test_filesystem_search_refines_when_directory_backend_is_unavailable(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     target_dir = workspace / 'src'
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -588,9 +593,9 @@ async def test_filesystem_search_refines_when_directory_scan_budget_is_exceeded(
     assert payload['ok'] is True
     assert payload['requires_refine'] is True
     assert payload['timed_out'] is False
-    assert int(payload['scanned_files']) >= 3
     assert payload['scope_type'] == 'directory'
-    assert 'too many files' in str(payload['message']).lower()
+    assert payload['backend'] == 'unavailable'
+    assert 'backend is unavailable' in str(payload['message']).lower()
 
 
 @pytest.mark.asyncio
@@ -602,6 +607,7 @@ async def test_filesystem_search_file_includes_search_diagnostics(tmp_path: Path
     tool = FilesystemTool(workspace=workspace, settings=FilesystemToolSettings())
     payload = json.loads(await tool.execute(action='search', path=str(target_file), query='needle', limit=5))
     assert payload['ok'] is True
+    assert payload['backend'] == 'file'
     assert payload['timed_out'] is False
     assert int(payload['scanned_files']) == 1
     assert int(payload['scanned_bytes']) >= len('needle\n'.encode('utf-8'))

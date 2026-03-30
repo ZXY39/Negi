@@ -824,6 +824,7 @@ def test_task_worker_status_rest_endpoint_returns_worker_metadata(tmp_path: Path
 
 
 def test_worker_status_payload_surfaces_tool_pressure_diagnostics(tmp_path: Path):
+    sample_at = now_iso()
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -850,6 +851,18 @@ def test_worker_status_payload_surfaces_tool_pressure_diagnostics(tmp_path: Path
             "tool_pressure_process_cpu_ratio": 0.92,
             "tool_pressure_last_transition_at": "2026-03-30T00:00:00+08:00",
             "tool_pressure_throttled_since": "2026-03-30T00:00:00+08:00",
+            "worker_execution_state": "throttled",
+            "worker_execution_target_limit": 1,
+            "worker_execution_running_count": 1,
+            "worker_execution_waiting_count": 3,
+            "worker_execution_oldest_wait_ms": 1250.0,
+            "machine_pressure_available": True,
+            "machine_pressure_cpu_percent": 91.0,
+            "machine_pressure_memory_percent": 72.0,
+            "machine_pressure_disk_busy_percent": 55.0,
+            "pressure_sample_at": sample_at,
+            "sqlite_write_wait_ms": 42.0,
+            "sqlite_query_latency_ms": 18.0,
         },
     )
 
@@ -864,6 +877,20 @@ def test_worker_status_payload_surfaces_tool_pressure_diagnostics(tmp_path: Path
     assert float(payload["tool_pressure_process_cpu_ratio"]) == 0.92
     assert payload["tool_pressure_last_transition_at"] == "2026-03-30T00:00:00+08:00"
     assert payload["tool_pressure_throttled_since"] == "2026-03-30T00:00:00+08:00"
+    assert payload["worker_execution_state"] == "throttled"
+    assert payload["worker_execution_target_limit"] == 1
+    assert payload["worker_execution_running_count"] == 1
+    assert payload["worker_execution_waiting_count"] == 3
+    assert float(payload["worker_execution_oldest_wait_ms"]) == 1250.0
+    assert payload["machine_pressure_available"] is True
+    assert float(payload["machine_pressure_cpu_percent"]) == 91.0
+    assert float(payload["machine_pressure_memory_percent"]) == 72.0
+    assert float(payload["machine_pressure_disk_busy_percent"]) == 55.0
+    assert payload["pressure_sample_at"] == sample_at
+    assert float(payload["pressure_sample_age_ms"]) >= 0.0
+    assert payload["pressure_snapshot_fresh"] is True
+    assert float(payload["sqlite_write_wait_ms"]) == 42.0
+    assert float(payload["sqlite_query_latency_ms"]) == 18.0
 
 
 def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):

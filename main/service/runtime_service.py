@@ -57,7 +57,7 @@ from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
-from main.runtime.tool_pressure_monitor import ToolPressureMonitor
+from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.event_registry import TaskEventRegistry
 from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
@@ -311,20 +311,32 @@ class MainRuntimeService:
             max_concurrent_tasks=scheduler_concurrency,
             per_task_limit=1,
         )
-        self.tool_pressure_monitor = ToolPressureMonitor(
+        self.tool_pressure_monitor = WorkerPressureMonitor(
             controller=self.adaptive_tool_budget_controller,
             store=self.store,
             sample_seconds=float(adaptive_budget_settings['sample_seconds']),
             recover_window_seconds=float(adaptive_budget_settings['recover_window_seconds']),
             warn_consecutive_samples=int(adaptive_budget_settings['warn_consecutive_samples']),
             safe_consecutive_samples=int(adaptive_budget_settings['safe_consecutive_samples']),
+            pressure_snapshot_stale_after_seconds=float(adaptive_budget_settings['pressure_snapshot_stale_after_seconds']),
             event_loop_warn_ms=float(adaptive_budget_settings['event_loop_warn_ms']),
             event_loop_safe_ms=float(adaptive_budget_settings['event_loop_safe_ms']),
             writer_queue_warn=int(adaptive_budget_settings['writer_queue_warn']),
             writer_queue_safe=int(adaptive_budget_settings['writer_queue_safe']),
+            sqlite_write_wait_warn_ms=float(adaptive_budget_settings['sqlite_write_wait_warn_ms']),
+            sqlite_write_wait_safe_ms=float(adaptive_budget_settings['sqlite_write_wait_safe_ms']),
+            sqlite_query_warn_ms=float(adaptive_budget_settings['sqlite_query_warn_ms']),
+            sqlite_query_safe_ms=float(adaptive_budget_settings['sqlite_query_safe_ms']),
+            machine_cpu_warn_percent=float(adaptive_budget_settings['machine_cpu_warn_percent']),
+            machine_cpu_safe_percent=float(adaptive_budget_settings['machine_cpu_safe_percent']),
+            machine_memory_warn_percent=float(adaptive_budget_settings['machine_memory_warn_percent']),
+            machine_memory_safe_percent=float(adaptive_budget_settings['machine_memory_safe_percent']),
+            machine_disk_busy_warn_percent=float(adaptive_budget_settings['machine_disk_busy_warn_percent']),
+            machine_disk_busy_safe_percent=float(adaptive_budget_settings['machine_disk_busy_safe_percent']),
             process_cpu_warn_ratio=float(adaptive_budget_settings['process_cpu_warn_ratio']),
             process_cpu_safe_ratio=float(adaptive_budget_settings['process_cpu_safe_ratio']),
         ) if self.adaptive_tool_budget_controller is not None else None
+        self.node_runner._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
         self.worker_heartbeat_service = WorkerHeartbeatServiceV2(
             store=self.store,
             scheduler=self.global_scheduler,
@@ -1877,10 +1889,21 @@ class MainRuntimeService:
             'recover_window_seconds': max(0.1, float(getattr(parallelism, 'adaptive_total_tool_budget_recover_window_seconds', 10.0) or 10.0)),
             'warn_consecutive_samples': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_warn_consecutive_samples', 3) or 3)),
             'safe_consecutive_samples': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_safe_consecutive_samples', 5) or 5)),
+            'pressure_snapshot_stale_after_seconds': max(0.1, float(getattr(parallelism, 'adaptive_pressure_snapshot_stale_after_seconds', 3.0) or 3.0)),
             'event_loop_warn_ms': max(0.0, float(getattr(parallelism, 'adaptive_event_loop_warn_ms', 250.0) or 250.0)),
             'event_loop_safe_ms': max(0.0, float(getattr(parallelism, 'adaptive_event_loop_safe_ms', 100.0) or 100.0)),
             'writer_queue_warn': max(1, int(getattr(parallelism, 'adaptive_writer_queue_warn', 50) or 50)),
             'writer_queue_safe': max(1, int(getattr(parallelism, 'adaptive_writer_queue_safe', 10) or 10)),
+            'sqlite_write_wait_warn_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_write_wait_warn_ms', 200.0) or 200.0)),
+            'sqlite_write_wait_safe_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_write_wait_safe_ms', 50.0) or 50.0)),
+            'sqlite_query_warn_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_query_warn_ms', 150.0) or 150.0)),
+            'sqlite_query_safe_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_query_safe_ms', 30.0) or 30.0)),
+            'machine_cpu_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_warn_percent', 85.0) or 85.0)),
+            'machine_cpu_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_safe_percent', 55.0) or 55.0)),
+            'machine_memory_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_warn_percent', 88.0) or 88.0)),
+            'machine_memory_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_safe_percent', 75.0) or 75.0)),
+            'machine_disk_busy_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_warn_percent', 70.0) or 70.0)),
+            'machine_disk_busy_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_safe_percent', 35.0) or 35.0)),
             'process_cpu_warn_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_warn_ratio', 0.85) or 0.85)),
             'process_cpu_safe_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_safe_ratio', 0.50) or 0.50)),
         }
@@ -1936,10 +1959,21 @@ class MainRuntimeService:
                 recover_window_seconds=float(adaptive_budget_settings['recover_window_seconds']),
                 warn_consecutive_samples=int(adaptive_budget_settings['warn_consecutive_samples']),
                 safe_consecutive_samples=int(adaptive_budget_settings['safe_consecutive_samples']),
+                pressure_snapshot_stale_after_seconds=float(adaptive_budget_settings['pressure_snapshot_stale_after_seconds']),
                 event_loop_warn_ms=float(adaptive_budget_settings['event_loop_warn_ms']),
                 event_loop_safe_ms=float(adaptive_budget_settings['event_loop_safe_ms']),
                 writer_queue_warn=int(adaptive_budget_settings['writer_queue_warn']),
                 writer_queue_safe=int(adaptive_budget_settings['writer_queue_safe']),
+                sqlite_write_wait_warn_ms=float(adaptive_budget_settings['sqlite_write_wait_warn_ms']),
+                sqlite_write_wait_safe_ms=float(adaptive_budget_settings['sqlite_write_wait_safe_ms']),
+                sqlite_query_warn_ms=float(adaptive_budget_settings['sqlite_query_warn_ms']),
+                sqlite_query_safe_ms=float(adaptive_budget_settings['sqlite_query_safe_ms']),
+                machine_cpu_warn_percent=float(adaptive_budget_settings['machine_cpu_warn_percent']),
+                machine_cpu_safe_percent=float(adaptive_budget_settings['machine_cpu_safe_percent']),
+                machine_memory_warn_percent=float(adaptive_budget_settings['machine_memory_warn_percent']),
+                machine_memory_safe_percent=float(adaptive_budget_settings['machine_memory_safe_percent']),
+                machine_disk_busy_warn_percent=float(adaptive_budget_settings['machine_disk_busy_warn_percent']),
+                machine_disk_busy_safe_percent=float(adaptive_budget_settings['machine_disk_busy_safe_percent']),
                 process_cpu_warn_ratio=float(adaptive_budget_settings['process_cpu_warn_ratio']),
                 process_cpu_safe_ratio=float(adaptive_budget_settings['process_cpu_safe_ratio']),
             )
@@ -3579,6 +3613,21 @@ class MainRuntimeService:
         current_payload = dict(item.get('payload') or {}) if isinstance(item, dict) else {}
         live_snapshot = self._tool_pressure_snapshot() if self.execution_mode == 'worker' else {}
         merged = {**current_payload, **live_snapshot}
+        sample_at = str(merged.get('pressure_sample_at') or merged.get('tool_pressure_sample_at') or '')
+        sample_age_ms: float | None
+        sample_dt = self._parse_worker_timestamp(sample_at)
+        if sample_dt is None:
+            sample_age_ms = None
+        else:
+            sample_age_ms = max(0.0, (datetime.now(timezone.utc) - sample_dt).total_seconds() * 1000.0)
+        stale_after_seconds = float(
+            self._adaptive_tool_budget_settings(self._app_config).get('pressure_snapshot_stale_after_seconds', 3.0)
+        )
+        pressure_snapshot_fresh = bool(
+            sample_age_ms is not None
+            and bool(merged.get('machine_pressure_available'))
+            and sample_age_ms <= (stale_after_seconds * 1000.0)
+        )
         return {
             'tool_pressure_state': str(merged.get('tool_pressure_state') or 'normal'),
             'tool_pressure_target_limit': int(merged.get('tool_pressure_target_limit') or 0),
@@ -3589,6 +3638,23 @@ class MainRuntimeService:
             'tool_pressure_process_cpu_ratio': float(merged.get('tool_pressure_process_cpu_ratio') or 0.0),
             'tool_pressure_last_transition_at': str(merged.get('tool_pressure_last_transition_at') or ''),
             'tool_pressure_throttled_since': str(merged.get('tool_pressure_throttled_since') or ''),
+            'worker_execution_state': str(merged.get('worker_execution_state') or merged.get('tool_pressure_state') or 'normal'),
+            'worker_execution_target_limit': int(merged.get('worker_execution_target_limit') or merged.get('tool_pressure_target_limit') or 0),
+            'worker_execution_running_count': int(merged.get('worker_execution_running_count') or merged.get('tool_pressure_running_count') or 0),
+            'worker_execution_waiting_count': int(merged.get('worker_execution_waiting_count') or merged.get('tool_pressure_waiting_count') or 0),
+            'worker_execution_oldest_wait_ms': float(merged.get('worker_execution_oldest_wait_ms') or 0.0),
+            'machine_pressure_available': bool(merged.get('machine_pressure_available')),
+            'machine_pressure_cpu_percent': float(merged.get('machine_pressure_cpu_percent') or 0.0),
+            'machine_pressure_memory_percent': float(merged.get('machine_pressure_memory_percent') or 0.0),
+            'machine_pressure_disk_busy_percent': float(merged.get('machine_pressure_disk_busy_percent') or 0.0),
+            'machine_pressure_disk_busy_available': bool(merged.get('machine_pressure_disk_busy_available')),
+            'machine_pressure_disk_read_bytes_per_sec': float(merged.get('machine_pressure_disk_read_bytes_per_sec') or 0.0),
+            'machine_pressure_disk_write_bytes_per_sec': float(merged.get('machine_pressure_disk_write_bytes_per_sec') or 0.0),
+            'sqlite_write_wait_ms': float(merged.get('sqlite_write_wait_ms') or 0.0),
+            'sqlite_query_latency_ms': float(merged.get('sqlite_query_latency_ms') or 0.0),
+            'pressure_sample_at': sample_at,
+            'pressure_sample_age_ms': round(sample_age_ms, 3) if sample_age_ms is not None else None,
+            'pressure_snapshot_fresh': pressure_snapshot_fresh,
         }
 
     def _clamp_depth(self, requested: int | None) -> int:

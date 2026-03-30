@@ -4,6 +4,7 @@ import json
 import queue
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -31,6 +32,13 @@ class SQLiteTaskStore:
         self._closed = False
         self._writer_queue: queue.Queue[tuple[Callable[[sqlite3.Connection], Any] | None, threading.Event | None, dict[str, Any] | None]] = queue.Queue()
         self._writer_thread: threading.Thread | None = None
+        self._metrics_lock = threading.RLock()
+        self._runtime_metrics: dict[str, float] = {
+            'sqlite_write_wait_ms': 0.0,
+            'sqlite_write_exec_ms': 0.0,
+            'sqlite_query_latency_ms': 0.0,
+            'runtime_metrics_updated_mono': 0.0,
+        }
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._conn:
@@ -297,17 +305,27 @@ class SQLiteTaskStore:
     def _writer_loop(self) -> None:
         while True:
             operation, done, outcome = self._writer_queue.get()
+            started_mono = 0.0
+            finished_mono = 0.0
             try:
                 if operation is None:
                     break
+                started_mono = time.perf_counter()
                 with self._conn:
                     value = operation(self._conn)
+                finished_mono = time.perf_counter()
                 if outcome is not None:
                     outcome['value'] = value
             except Exception as exc:
+                finished_mono = time.perf_counter()
                 if outcome is not None:
                     outcome['error'] = exc
             finally:
+                if outcome is not None:
+                    if started_mono > 0.0:
+                        outcome['started_mono'] = started_mono
+                    if finished_mono > 0.0:
+                        outcome['finished_mono'] = finished_mono
                 if done is not None:
                     done.set()
                 self._writer_queue.task_done()
@@ -318,8 +336,16 @@ class SQLiteTaskStore:
                 raise RuntimeError('sqlite_task_store_closed')
         outcome: dict[str, Any] = {}
         done = threading.Event()
+        queued_mono = time.perf_counter()
         self._writer_queue.put((operation, done, outcome))
         done.wait()
+        completed_mono = time.perf_counter()
+        started_mono = float(outcome.get('started_mono') or completed_mono)
+        finished_mono = float(outcome.get('finished_mono') or completed_mono)
+        self._update_runtime_metrics(
+            sqlite_write_wait_ms=max(0.0, (finished_mono - queued_mono) * 1000.0),
+            sqlite_write_exec_ms=max(0.0, (finished_mono - started_mono) * 1000.0),
+        )
         error = outcome.get('error')
         if error is not None:
             raise error
@@ -333,6 +359,12 @@ class SQLiteTaskStore:
             return max(0, int(self._writer_queue.qsize()))
         except Exception:
             return 0
+
+    def runtime_metrics_snapshot(self) -> dict[str, float]:
+        with self._metrics_lock:
+            snapshot = dict(self._runtime_metrics)
+        snapshot['writer_queue_depth'] = float(self.writer_queue_depth())
+        return snapshot
 
     def upsert_task(self, record: TaskRecord) -> TaskRecord:
         self._upsert(
@@ -1255,12 +1287,29 @@ class SQLiteTaskStore:
         conn.execute(sql, values)
 
     def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
+        started_mono = time.perf_counter()
         with self._read_lock:
-            return self._read_conn.execute(sql, params).fetchone()
+            row = self._read_conn.execute(sql, params).fetchone()
+        self._update_runtime_metrics(
+            sqlite_query_latency_ms=max(0.0, (time.perf_counter() - started_mono) * 1000.0),
+        )
+        return row
 
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
+        started_mono = time.perf_counter()
         with self._read_lock:
-            return list(self._read_conn.execute(sql, params).fetchall())
+            rows = list(self._read_conn.execute(sql, params).fetchall())
+        self._update_runtime_metrics(
+            sqlite_query_latency_ms=max(0.0, (time.perf_counter() - started_mono) * 1000.0),
+        )
+        return rows
+
+    def _update_runtime_metrics(self, **values: float) -> None:
+        updated_mono = time.perf_counter()
+        with self._metrics_lock:
+            for key, value in values.items():
+                self._runtime_metrics[str(key)] = max(0.0, float(value or 0.0))
+            self._runtime_metrics['runtime_metrics_updated_mono'] = updated_mono
 
     @staticmethod
     def _task_terminal_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:
