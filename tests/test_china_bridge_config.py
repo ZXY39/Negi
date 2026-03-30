@@ -10,7 +10,14 @@ import pytest
 import g3ku_bootstrap
 import g3ku.china_bridge.supervisor as supervisor_module
 from g3ku.china_bridge.supervisor import ChinaBridgeSupervisor
-from g3ku.config.loader import _migrate_config, load_config
+from g3ku.config.loader import (
+    _migrate_config,
+    build_runtime_config_payload,
+    ensure_startup_config_ready,
+    load_config,
+    save_config,
+)
+from g3ku.security import get_bootstrap_security_service
 
 
 def test_migrate_config_normalizes_china_bridge_channel_aliases():
@@ -173,6 +180,44 @@ def test_load_config_migrates_legacy_gateway_bind_config(tmp_path, monkeypatch):
     assert "gateway" not in saved
 
 
+def _prepare_runtime_config_with_qqbot_secret_overlay(workspace: Path, monkeypatch) -> object:
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workspace)
+    ensure_startup_config_ready()
+
+    cfg = load_config()
+    cfg.china_bridge.enabled = True
+    cfg.china_bridge.auto_start = True
+    cfg.china_bridge.node_bin = "node"
+    cfg.china_bridge.npm_client = "pnpm"
+    cfg.china_bridge.channels.qqbot.enabled = True
+    cfg.china_bridge.channels.qqbot.app_id = "1903529517"
+    save_config(cfg)
+
+    security = get_bootstrap_security_service(workspace)
+    security.setup_initial_realm(password="test-password")
+    security.set_overlay_values(
+        {"config.chinaBridge.channels.qqbot.clientSecret": "overlay-secret"}
+    )
+    return load_config()
+
+
+def test_build_runtime_config_payload_applies_china_bridge_secret_overlay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    cfg = _prepare_runtime_config_with_qqbot_secret_overlay(workspace, monkeypatch)
+
+    runtime_payload = build_runtime_config_payload(cfg)
+    saved_payload = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
+
+    assert (
+        saved_payload["chinaBridge"]["channels"]["qqbot"].get("clientSecret", "") == ""
+    )
+    assert runtime_payload["chinaBridge"]["channels"]["qqbot"]["clientSecret"] == "overlay-secret"
+    assert runtime_payload["chinaBridge"]["channels"]["qqbot"]["appId"] == "1903529517"
+
+
 class _BridgeTestTransport:
     def __init__(self) -> None:
         self.sender = None
@@ -206,6 +251,63 @@ def _build_supervisor(workspace: Path) -> ChinaBridgeSupervisor:
         )
     )
     return ChinaBridgeSupervisor(app_config=config, workspace=workspace, transport=_BridgeTestTransport())
+
+
+@pytest.mark.asyncio
+async def test_supervisor_spawn_process_uses_resolved_runtime_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    cfg = _prepare_runtime_config_with_qqbot_secret_overlay(workspace, monkeypatch)
+    dist_entry = workspace / "subsystems" / "china_channels_host" / "dist" / "index.js"
+    dist_entry.parent.mkdir(parents=True, exist_ok=True)
+    dist_entry.write_text("export {};\n", encoding="utf-8")
+
+    supervisor = ChinaBridgeSupervisor(
+        app_config=cfg,
+        workspace=workspace,
+        transport=_BridgeTestTransport(),
+    )
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        pid = 4321
+        returncode = 0
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr(
+        supervisor_module.asyncio,
+        "create_subprocess_exec",
+        _fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        supervisor_module, "assign_process_to_kill_on_close_job", lambda _process: None
+    )
+
+    await supervisor._spawn_process(dist_entry)
+    supervisor._close_host_log_handles()
+
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert args[2] == "--config"
+
+    host_config_path = Path(str(args[3]))
+    payload = json.loads(host_config_path.read_text(encoding="utf-8"))
+
+    assert host_config_path == (
+        workspace / ".g3ku" / "china-bridge" / "host.config.json"
+    ).resolve()
+    assert host_config_path != (workspace / ".g3ku" / "config.json").resolve()
+    assert payload["chinaBridge"]["channels"]["qqbot"]["clientSecret"] == "overlay-secret"
+    assert payload["chinaBridge"]["channels"]["qqbot"]["appId"] == "1903529517"
+    assert supervisor.state.pid == 4321
 
 
 def test_supervisor_install_required_uses_dependency_stamp(tmp_path: Path) -> None:

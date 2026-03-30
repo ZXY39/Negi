@@ -12,6 +12,7 @@ from typing import Any
 from g3ku.china_bridge.client import ChinaBridgeClient
 from g3ku.china_bridge.models import ChinaBridgeState
 from g3ku.china_bridge.status import ChinaBridgeStatusStore
+from g3ku.config.loader import build_runtime_config_payload
 from g3ku.web.windows_job import assign_process_to_kill_on_close_job
 
 
@@ -287,6 +288,19 @@ class ChinaBridgeSupervisor:
     def _host_stderr_log_path(self) -> Path:
         return self._state_root / "host.err.log"
 
+    def _host_config_path(self) -> Path:
+        return self._state_root / "host.config.json"
+
+    def _write_host_runtime_config(self) -> Path:
+        config_path = self._host_config_path()
+        payload = build_runtime_config_payload(self._app_config)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return config_path
+
     def _append_process_logs(self, *, args: tuple[str, ...], stdout: bytes, stderr: bytes) -> None:
         self._state_root.mkdir(parents=True, exist_ok=True)
         banner = f"\n\n=== {' '.join(args)} @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
@@ -396,7 +410,7 @@ class ChinaBridgeSupervisor:
 
     async def _spawn_process(self, dist_entry: Path) -> None:
         dist_entry = Path(dist_entry).resolve()
-        config_path = (self._workspace / ".g3ku" / "config.json").resolve()
+        config_path = self._write_host_runtime_config().resolve()
         env = os.environ.copy()
         stdout_handle, stderr_handle = self._open_host_log_handles()
         self._process = await asyncio.create_subprocess_exec(

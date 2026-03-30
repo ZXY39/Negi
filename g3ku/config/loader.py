@@ -475,6 +475,12 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     }
 
 
+def build_runtime_config_payload(cfg: Config) -> dict[str, object]:
+    """Build the full runtime config payload, including resolved secret overlays."""
+
+    return deepcopy(_runtime_config_payload(cfg))
+
+
 def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> None:
     middlewares = ((raw_data.get("agents") or {}).get("defaults") or {}).get("middlewares")
     if middlewares is not None:
