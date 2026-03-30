@@ -712,6 +712,11 @@ function resetTaskView() {
     S.taskNodeChildrenCache = {};
     S.taskNodeChildrenRequests = {};
     S.taskTreeHasFullSnapshot = false;
+    S.taskTreeBranchRefreshQueue = {};
+    if (S.taskTreeBranchRefreshTimerId) {
+        window.clearTimeout(S.taskTreeBranchRefreshTimerId);
+        S.taskTreeBranchRefreshTimerId = null;
+    }
     S.taskNodeBusy = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
@@ -984,13 +989,23 @@ function handleTaskEvent(payload) {
             runnable_node_count: runnableNodeIds.length,
             waiting_node_count: waitingNodeIds.length,
         };
-        if (S.tree) renderTree();
+        if (S.tree) {
+            const candidateNodeIds = [...new Set([...activeNodeIds, ...runnableNodeIds, ...waitingNodeIds]
+                .map((item) => String(item || "").trim())
+                .filter(Boolean))];
+            candidateNodeIds
+                .filter((item) => !findRawTaskTreeNode(S.tree, item))
+                .slice(0, 3)
+                .forEach((item) => { void reconcileTaskTreeForNode(item); });
+            renderTree();
+        }
         return;
     }
     if (payload.type === "task.node.patch") {
         const nextNode = payload.data?.node && typeof payload.data.node === "object" ? payload.data.node : {};
         const nodeId = String(nextNode?.node_id || "").trim();
         if (nodeId) {
+            const parentNodeId = String(nextNode?.parent_node_id || "").trim();
             const rootNodeId = String(S.rootNode?.node_id || "").trim();
             if (rootNodeId && rootNodeId === nodeId) {
                 S.rootNode = { ...(S.rootNode || {}), ...nextNode };
@@ -1002,11 +1017,17 @@ function handleTaskEvent(payload) {
                 };
             }
             if (S.tree) {
-                updateTaskTreeNode(S.tree, nodeId, (node) => {
-                    const patchNode = buildTaskTreeNodeFromDetail(nextNode, node);
-                    Object.assign(node, patchNode);
-                });
-                renderTree();
+                const existingTreeNode = findRawTaskTreeNode(S.tree, nodeId);
+                if (existingTreeNode) {
+                    updateTaskTreeNode(S.tree, nodeId, (node) => {
+                        const patchNode = buildTaskTreeNodeFromDetail(nextNode, node);
+                        Object.assign(node, patchNode);
+                    });
+                    renderTree();
+                } else if (parentNodeId) {
+                    // Only refresh the affected parent branch when a new node appears.
+                    scheduleTaskTreeBranchRefresh(parentNodeId);
+                }
             }
             if (String(S.selectedNodeId || "") === nodeId) {
                 const currentViewState = captureTaskDetailViewState();

@@ -193,6 +193,47 @@ async function ensureTaskNodeChildren(nodeId, { roundId = "", force = false } = 
     return request;
 }
 
+function clearTaskNodeChildrenCache(nodeId, { includeDescendants = false } = {}) {
+    const normalizedNodeId = String(nodeId || "").trim();
+    if (!normalizedNodeId) return;
+    const next = {};
+    Object.entries(S.taskNodeChildrenCache || {}).forEach(([cacheKey, payload]) => {
+        const parentNodeId = String(payload?.parent_node_id || cacheKey.split("::")[0] || "").trim();
+        if (parentNodeId === normalizedNodeId) return;
+        if (includeDescendants) {
+            const current = S.tree ? findRawTaskTreeNode(S.tree, parentNodeId) : null;
+            let ancestorId = String(current?.parent_node_id || "").trim();
+            while (ancestorId) {
+                if (ancestorId === normalizedNodeId) return;
+                ancestorId = String(findRawTaskTreeNode(S.tree, ancestorId)?.parent_node_id || "").trim();
+            }
+        }
+        next[cacheKey] = payload;
+    });
+    S.taskNodeChildrenCache = next;
+}
+
+function scheduleTaskTreeBranchRefresh(nodeId, { roundId = "", delayMs = 120 } = {}) {
+    const normalizedNodeId = String(nodeId || "").trim();
+    const normalizedRoundId = String(roundId || "").trim();
+    if (!normalizedNodeId || !S.currentTaskId || !S.tree) return;
+    const queueKey = `${normalizedNodeId}::${normalizedRoundId || "default"}`;
+    S.taskTreeBranchRefreshQueue = {
+        ...(S.taskTreeBranchRefreshQueue || {}),
+        [queueKey]: { nodeId: normalizedNodeId, roundId: normalizedRoundId },
+    };
+    if (S.taskTreeBranchRefreshTimerId) return;
+    S.taskTreeBranchRefreshTimerId = window.setTimeout(() => {
+        const pending = Object.values(S.taskTreeBranchRefreshQueue || {});
+        S.taskTreeBranchRefreshQueue = {};
+        S.taskTreeBranchRefreshTimerId = null;
+        pending.forEach(({ nodeId: pendingNodeId, roundId: pendingRoundId }) => {
+            clearTaskNodeChildrenCache(pendingNodeId);
+            void ensureTaskNodeChildren(pendingNodeId, { roundId: pendingRoundId, force: true });
+        });
+    }, Math.max(0, Number(delayMs) || 0));
+}
+
 function taskNodeChildrenSnapshotFromTree(nodeId, { roundId = "" } = {}) {
     const taskId = String(S.currentTaskId || "").trim();
     const normalizedNodeId = String(nodeId || "").trim();
@@ -1576,6 +1617,19 @@ async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
     })();
     S.taskNodeDetailRequests = { ...S.taskNodeDetailRequests, [key]: request };
     return request;
+}
+
+async function reconcileTaskTreeForNode(nodeId) {
+    const normalizedNodeId = String(nodeId || "").trim();
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!normalizedNodeId || !taskId || !S.tree) return;
+    if (findRawTaskTreeNode(S.tree, normalizedNodeId)) return;
+    const detail = await ensureTaskNodeDetail(normalizedNodeId);
+    if (String(S.currentTaskId || "").trim() !== taskId) return;
+    const parentNodeId = String(detail?.parent_node_id || "").trim();
+    if (parentNodeId) {
+        scheduleTaskTreeBranchRefresh(parentNodeId);
+    }
 }
 
 async function showAgent(node, { preserveViewState = true, forceRefresh = false } = {}) {

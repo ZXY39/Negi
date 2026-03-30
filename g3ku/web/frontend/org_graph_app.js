@@ -121,6 +121,8 @@ const S = {
     taskNodeChildrenCache: {},
     taskNodeChildrenRequests: {},
     taskTreeHasFullSnapshot: false,
+    taskTreeBranchRefreshQueue: {},
+    taskTreeBranchRefreshTimerId: null,
     taskDetailViewStates: {},
     pendingTaskDetailRestore: null,
     taskNodeBusy: false,

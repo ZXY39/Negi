@@ -57,6 +57,7 @@ class RuntimeAgentSession:
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
         self._preserved_inflight_turn: dict[str, Any] | None = None
+        self._paused_execution_context: dict[str, Any] | None = None
         self._interaction_trace: dict[str, Any] | None = None
         self._current_stage: dict[str, Any] | None = None
         self._active_turn_id: str | None = None
@@ -87,6 +88,8 @@ class RuntimeAgentSession:
     def set_interaction_trace(self, trace: dict[str, Any] | None, *, stage: dict[str, Any] | None = None) -> None:
         self._interaction_trace = copy.deepcopy(trace) if isinstance(trace, dict) and trace else None
         self._current_stage = copy.deepcopy(stage) if isinstance(stage, dict) and stage else None
+        if self._interaction_trace is not None or self._current_stage is not None:
+            self.clear_paused_execution_context()
         self._sync_persisted_inflight_turn()
 
     def clear_interaction_trace(self) -> None:
@@ -102,6 +105,32 @@ class RuntimeAgentSession:
         if not isinstance(self._current_stage, dict) or not self._current_stage:
             return None
         return copy.deepcopy(self._current_stage)
+
+    def paused_execution_context_snapshot(self) -> dict[str, Any] | None:
+        if self._paused_execution_context is not None:
+            return copy.deepcopy(self._paused_execution_context)
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return None
+        try:
+            from g3ku.runtime.web_ceo_sessions import read_paused_execution_context
+
+            snapshot = read_paused_execution_context(session_key)
+        except Exception:
+            logger.debug("paused execution context restore skipped for {}", session_key)
+            return None
+        if isinstance(snapshot, dict) and snapshot:
+            self._paused_execution_context = copy.deepcopy(snapshot)
+            return copy.deepcopy(self._paused_execution_context)
+        return None
+
+    def _set_paused_execution_context(self, snapshot: dict[str, Any] | None) -> None:
+        self._paused_execution_context = copy.deepcopy(snapshot) if isinstance(snapshot, dict) and snapshot else None
+        self._sync_persisted_paused_execution_context()
+
+    def clear_paused_execution_context(self) -> None:
+        self._paused_execution_context = None
+        self._sync_persisted_paused_execution_context()
 
     def _normalize_live_context(self, live_context: dict[str, str] | None) -> dict[str, str]:
         current_channel = str(getattr(self, "_channel", "") or "cli").strip() or "cli"
@@ -424,10 +453,15 @@ class RuntimeAgentSession:
             execution_id,
         )
 
-    def _current_inflight_turn_snapshot(self) -> dict[str, Any] | None:
-        if self.manual_pause_waiting_reason():
+    def _build_execution_context_snapshot(
+        self,
+        *,
+        allow_manual_pause: bool = False,
+        status_override: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not allow_manual_pause and self.manual_pause_waiting_reason():
             return None
-        status = str(self._state.status or "").strip().lower()
+        status = str(status_override or self._state.status or "").strip().lower()
         if not (self._state.is_running or status in {"paused", "error"}):
             return None
         snapshot: dict[str, Any] = {
@@ -461,6 +495,9 @@ class RuntimeAgentSession:
         ):
             return None
         return snapshot
+
+    def _current_inflight_turn_snapshot(self) -> dict[str, Any] | None:
+        return self._build_execution_context_snapshot()
 
     def inflight_turn_snapshot(self) -> dict[str, Any] | None:
         if self.manual_pause_waiting_reason():
@@ -531,6 +568,23 @@ class RuntimeAgentSession:
             write_inflight_turn_snapshot(session_key, snapshot)
         except Exception:
             logger.debug("Skipped persisted inflight turn sync for {}", session_key)
+
+    def _sync_persisted_paused_execution_context(self) -> None:
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return
+        try:
+            from g3ku.runtime.web_ceo_sessions import (
+                is_restorable_inflight_turn_snapshot,
+                write_paused_execution_context,
+            )
+
+            snapshot = copy.deepcopy(self._paused_execution_context)
+            if not is_restorable_inflight_turn_snapshot(snapshot):
+                snapshot = None
+            write_paused_execution_context(session_key, snapshot)
+        except Exception:
+            logger.debug("Skipped paused execution context sync for {}", session_key)
 
     async def _persist_turn_transcript(
         self,
@@ -1009,6 +1063,8 @@ class RuntimeAgentSession:
                     interaction_trace=interaction_trace,
                     stage=stage_snapshot,
                 )
+                if internal_source is None or interaction_trace is not None:
+                    self.clear_paused_execution_context()
                 self.clear_interaction_trace()
                 await self._emit("turn_end", session_key=self._state.session_key, status="completed")
                 await self._emit("agent_end", session_key=self._state.session_key, status="completed")
@@ -1032,10 +1088,17 @@ class RuntimeAgentSession:
         self._state.queued_follow_up_messages.append(UserInputMessage(content=content))
 
     async def pause(self, *, manual: bool = False) -> None:
-        self._set_manual_pause_waiting_reason(manual)
         self._state.paused = True
         self._state.is_running = False
         self._state.status = "paused"
+        paused_snapshot = (
+            self._build_execution_context_snapshot(allow_manual_pause=True, status_override="paused")
+            if manual
+            else None
+        )
+        if manual:
+            self._set_paused_execution_context(paused_snapshot)
+        self._set_manual_pause_waiting_reason(manual)
         await self._emit_safe_stop_notice("pause")
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason="用户已请求暂停，正在安全停止...")
@@ -1079,6 +1142,7 @@ class RuntimeAgentSession:
         await self._loop.cancel_session_tasks(self._state.session_key)
         self._set_manual_pause_waiting_reason(False)
         self._preserved_inflight_turn = None
+        self.clear_paused_execution_context()
         self.clear_interaction_trace()
         self._state.is_running = False
         self._state.paused = False

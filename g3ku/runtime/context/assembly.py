@@ -20,8 +20,7 @@ from g3ku.runtime.web_ceo_sessions import (
     DEFAULT_LIVE_RAW_TAIL_TURNS,
     build_completed_stage_abstracts,
     build_task_continuity_payload,
-    extract_active_stage_raw_tail,
-    extract_live_raw_tail,
+    extract_execution_live_raw_tail,
     latest_interaction_trace,
     render_task_continuity_markdown,
 )
@@ -215,6 +214,7 @@ class ContextAssemblyService:
             active_task_count = len(list(active_tasks or []))
         task_payload = build_task_continuity_payload(
             session=persisted_session,
+            runtime_session=session,
             active_tasks=active_tasks,
             limit=3,
         )
@@ -293,17 +293,12 @@ class ContextAssemblyService:
             )
 
         has_active_stage = bool(stage_record.active_stage)
-        if has_active_stage:
-            live_raw_messages = extract_active_stage_raw_tail(
-                session,
-                persisted_session,
-                turn_limit=live_raw_tail_turns,
-            )
-        else:
-            live_raw_messages = extract_live_raw_tail(
-                persisted_session,
-                turn_limit=live_raw_tail_turns,
-            ) if persisted_session is not None else []
+        live_raw_messages, live_raw_source = extract_execution_live_raw_tail(
+            session,
+            persisted_session,
+            turn_limit=live_raw_tail_turns,
+            require_active_stage=has_active_stage,
+        )
 
         user_message = {"role": "user", "content": user_content if user_content is not None else query_text}
         system_tokens = estimate_tokens(system_prompt)
@@ -318,7 +313,14 @@ class ContextAssemblyService:
 
         if task_markdown:
             block_messages.append({"role": "assistant", "content": task_markdown})
-            blocks.append(ContextBlock(kind="task_continuity", content=task_markdown, source="session_metadata", tokens=task_tokens))
+            blocks.append(
+                ContextBlock(
+                    kind="task_continuity",
+                    content=task_markdown,
+                    source=str((task_payload or {}).get("source") or "session_metadata"),
+                    tokens=task_tokens,
+                )
+            )
 
         stage_markdown, stage_trim_reason = self._fit_optional_block(stage_markdown, remaining_budget)
         if stage_markdown:
@@ -401,7 +403,7 @@ class ContextAssemblyService:
                 ContextBlock(
                     kind="live_raw_tail",
                     content=self._messages_to_text(fitted_live_raw),
-                    source="transcript",
+                    source=live_raw_source or "transcript",
                     tokens=live_raw_tokens,
                     trimmed=len(fitted_live_raw) < len(live_raw_messages),
                     trim_reason="live_raw_tail_budget" if len(fitted_live_raw) < len(live_raw_messages) else "",

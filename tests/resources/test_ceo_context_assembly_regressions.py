@@ -363,6 +363,81 @@ async def test_ceo_context_assembly_includes_active_task_snapshot_message() -> N
 
 
 @pytest.mark.asyncio
+async def test_ceo_context_assembly_uses_paused_execution_context_for_task_stage_and_live_raw(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            'status': 'paused',
+            'user_message': {'content': '继续完成当前网页自动化流程'},
+            'assistant_text': 'I already created task task:paused-1 and was about to inspect the next node.',
+            'tool_events': [
+                {
+                    'status': 'success',
+                    'tool_name': 'create_async_task',
+                    'text': 'Created task task:paused-1 as the continuation task.',
+                    'timestamp': '2026-03-30T12:00:00+08:00',
+                }
+            ],
+            'interaction_trace': {
+                'stages': [
+                    {
+                        'stage_id': 'ceo-stage-1',
+                        'stage_index': 1,
+                        'stage_goal': 'Continue the current browser automation flow',
+                        'status': 'active',
+                        'tool_round_budget': 3,
+                        'tool_rounds_used': 1,
+                        'rounds': [
+                            {
+                                'tools': [
+                                    {
+                                        'tool_name': 'create_async_task',
+                                        'status': 'success',
+                                        'output_text': 'Created task task:paused-1',
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response='')
+    service = ContextAssemblyService(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = SimpleNamespace(
+        key='web:shared',
+        messages=[],
+        metadata={'last_task_memory': {}},
+        archive_segments=[],
+    )
+
+    result = await service.build_for_ceo(
+        session=_session(),
+        query_text='继续完成，不要重新查询状态',
+        exposure={'skills': [], 'tool_families': [], 'tool_names': ['create_async_task']},
+        persisted_session=persisted_session,
+    )
+
+    task_block = next(block for block in result.context_snapshot.blocks if block.kind == 'task_continuity')
+    stage_block = next(block for block in result.context_snapshot.blocks if block.kind == 'stage_context')
+    live_raw_block = next(block for block in result.context_snapshot.blocks if block.kind == 'live_raw_tail')
+
+    assert task_block.source == 'paused_execution'
+    assert stage_block.source == 'paused_execution'
+    assert live_raw_block.source == 'paused_execution'
+    assert 'task:paused-1' in task_block.content
+    assert 'Continue the current browser automation flow' in stage_block.content
+    assert '继续完成当前网页自动化流程' in live_raw_block.content
+    assert result.trace['stage_context']['source'] == 'paused_execution'
+
+
+@pytest.mark.asyncio
 async def test_ceo_context_assembly_lists_enabled_but_unregistered_callable_tools_as_context_resources() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response='')

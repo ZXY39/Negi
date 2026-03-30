@@ -778,6 +778,11 @@ async def test_runtime_agent_session_manual_pause_freezes_heartbeat_and_persists
     assert session.manual_pause_waiting_reason() is True
     assert session.inflight_turn_snapshot() is None
     assert web_ceo_sessions.read_inflight_turn_snapshot("web:pause-manual") is None
+    paused_snapshot = session.paused_execution_context_snapshot()
+    assert paused_snapshot is not None
+    assert paused_snapshot["status"] == "paused"
+    assert paused_snapshot["user_message"]["content"] == "Pause and wait"
+    assert web_ceo_sessions.read_paused_execution_context("web:pause-manual") is not None
 
     reloaded = SessionManager(tmp_path).get_or_create("web:pause-manual")
     assert [message["role"] for message in reloaded.messages] == ["user"]
@@ -873,6 +878,85 @@ def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: P
 
     assert session.inflight_turn_snapshot() is None
     assert web_ceo_sessions.read_inflight_turn_snapshot("web:shared") is None
+
+
+def test_runtime_agent_session_restores_paused_execution_context_from_disk(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            "status": "paused",
+            "user_message": {"content": "Resume the browser automation flow"},
+            "assistant_text": "I already created task task:resume-1 and was about to query its next node.",
+            "interaction_trace": {
+                "stages": [
+                    {
+                        "stage_id": "ceo-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Continue the current browser automation stage",
+                        "status": "active",
+                        "tool_round_budget": 3,
+                        "tool_rounds_used": 1,
+                        "rounds": [],
+                    }
+                ]
+            },
+        },
+    )
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+
+    snapshot = session.paused_execution_context_snapshot()
+
+    assert snapshot is not None
+    assert snapshot["status"] == "paused"
+    assert snapshot["user_message"]["content"] == "Resume the browser automation flow"
+
+
+def test_runtime_agent_session_clears_paused_execution_context_when_new_trace_arrives(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            "status": "paused",
+            "user_message": {"content": "Resume the browser automation flow"},
+        },
+    )
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+
+    assert session.paused_execution_context_snapshot() is not None
+
+    session.set_interaction_trace(
+        {
+            "stages": [
+                {
+                    "stage_id": "ceo-stage-2",
+                    "stage_index": 2,
+                    "stage_goal": "Continue from the restored pause point",
+                    "status": "active",
+                    "tool_round_budget": 3,
+                    "tool_rounds_used": 0,
+                    "rounds": [],
+                }
+            ]
+        },
+        stage={"stage_goal": "Continue from the restored pause point"},
+    )
+
+    assert session.paused_execution_context_snapshot() is None
+    assert web_ceo_sessions.read_paused_execution_context("web:shared") is None
 
 
 def test_read_inflight_turn_snapshot_ignores_terminal_error_snapshot(tmp_path: Path, monkeypatch) -> None:

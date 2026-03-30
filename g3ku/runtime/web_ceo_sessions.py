@@ -21,6 +21,7 @@ DEFAULT_CEO_SESSION_TITLE = "新会话"
 WEB_CEO_STATE_FILE = Path(".g3ku") / "web-ceo-state.json"
 WEB_CEO_UPLOAD_ROOT = Path(".g3ku") / "web-ceo-uploads"
 WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
+WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
 DEFAULT_LIVE_RAW_TAIL_TURNS = 4
@@ -167,9 +168,186 @@ def build_last_task_memory(session: Any) -> dict[str, Any]:
     )
 
 
+def _normalize_execution_snapshot(snapshot: Any) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return None
+    normalized = dict(snapshot)
+    interaction_trace = normalized.get('interaction_trace')
+    if isinstance(interaction_trace, dict):
+        normalized['interaction_trace'] = normalize_interaction_trace(interaction_trace)
+    return normalized
+
+
+def _session_key_for_execution_sources(runtime_session: Any | None, persisted_session: Any | None) -> str:
+    session_key = str(
+        getattr(getattr(runtime_session, 'state', None), 'session_key', '')
+        or getattr(persisted_session, 'key', '')
+        or ''
+    ).strip()
+    return session_key
+
+
+def _runtime_execution_snapshot(runtime_session: Any | None) -> tuple[dict[str, Any] | None, str]:
+    if runtime_session is None:
+        return None, ''
+    snapshot_supplier = getattr(runtime_session, 'inflight_turn_snapshot', None)
+    snapshot = snapshot_supplier() if callable(snapshot_supplier) else None
+    normalized_snapshot = _normalize_execution_snapshot(snapshot)
+    if normalized_snapshot is not None:
+        return normalized_snapshot, 'live_runtime'
+    trace_supplier = getattr(runtime_session, 'interaction_trace_snapshot', None)
+    trace = trace_supplier() if callable(trace_supplier) else None
+    normalized_trace = normalize_interaction_trace(trace)
+    if normalized_trace.get('stages'):
+        synthetic_snapshot: dict[str, Any] = {'interaction_trace': normalized_trace}
+        stage_supplier = getattr(runtime_session, 'current_stage_snapshot', None)
+        stage = stage_supplier() if callable(stage_supplier) else None
+        if isinstance(stage, dict) and stage:
+            synthetic_snapshot['stage'] = dict(stage)
+        return synthetic_snapshot, 'live_runtime'
+    paused_supplier = getattr(runtime_session, 'paused_execution_context_snapshot', None)
+    paused_snapshot = paused_supplier() if callable(paused_supplier) else None
+    normalized_paused = _normalize_execution_snapshot(paused_snapshot)
+    if normalized_paused is not None:
+        return normalized_paused, 'paused_execution'
+    return None, ''
+
+
+def resolve_execution_snapshot(
+    runtime_session: Any | None,
+    persisted_session: Any | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    runtime_snapshot, runtime_source = _runtime_execution_snapshot(runtime_session)
+    if runtime_snapshot is not None:
+        return runtime_snapshot, runtime_source
+    session_key = _session_key_for_execution_sources(runtime_session, persisted_session)
+    if session_key:
+        paused_snapshot = read_paused_execution_context(session_key)
+        normalized_paused = _normalize_execution_snapshot(paused_snapshot)
+        if normalized_paused is not None:
+            return normalized_paused, 'paused_execution'
+    return None, ''
+
+
+def _execution_snapshot_history_messages(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    normalized_snapshot = _normalize_execution_snapshot(snapshot)
+    if normalized_snapshot is None:
+        return []
+    messages: list[dict[str, Any]] = []
+    user_message = normalized_snapshot.get('user_message')
+    if isinstance(user_message, dict):
+        user_content = str(user_message.get('content') or '').strip()
+        if user_content:
+            messages.append({'role': 'user', 'content': user_content})
+    assistant_message: dict[str, Any] = {'role': 'assistant'}
+    assistant_text = summarize_preview_text(normalized_snapshot.get('assistant_text') or '', max_chars=480)
+    if assistant_text:
+        assistant_message['content'] = assistant_text
+    tool_events = normalized_snapshot.get('tool_events')
+    if isinstance(tool_events, list) and tool_events:
+        assistant_message['tool_events'] = list(tool_events)
+    interaction_trace = normalize_interaction_trace(normalized_snapshot.get('interaction_trace'))
+    if interaction_trace.get('stages'):
+        assistant_message['interaction_trace'] = interaction_trace
+    if assistant_message.get('content') or assistant_message.get('tool_events') or assistant_message.get('interaction_trace'):
+        messages.append(_history_entry_from_message(assistant_message))
+    return messages
+
+
+def _build_task_memory_from_messages(
+    messages: list[dict[str, Any]],
+    *,
+    source: str,
+    reason: str,
+    updated_at: str,
+) -> dict[str, Any]:
+    remembered: list[str] = []
+    remembered_results: list[dict[str, str]] = []
+    for raw in reversed(list(messages or [])):
+        if not isinstance(raw, dict):
+            continue
+        task_ids = _extract_task_ids_from_message(raw)
+        if not task_ids:
+            continue
+        for task_id in task_ids:
+            if task_id not in remembered:
+                remembered.append(task_id)
+                if len(remembered) >= _TASK_MEMORY_MAX_IDS:
+                    break
+        metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
+        for item in _normalize_task_results(metadata.get('task_results')):
+            if item not in remembered_results:
+                remembered_results.append(item)
+        if len(remembered) >= _TASK_MEMORY_MAX_IDS:
+            break
+    return normalize_task_memory(
+        {
+            'task_ids': remembered,
+            'source': source,
+            'reason': reason,
+            'updated_at': updated_at,
+            'task_results': remembered_results,
+        }
+    )
+
+
+def _task_memory_from_execution_snapshot(snapshot: dict[str, Any] | None, *, source: str) -> dict[str, Any]:
+    messages = _execution_snapshot_history_messages(snapshot)
+    if not messages:
+        return normalize_task_memory(None)
+    return _build_task_memory_from_messages(
+        messages,
+        source=source,
+        reason='paused execution context',
+        updated_at=_inflight_updated_at(snapshot),
+    )
+
+
+def _merge_task_memory_layers(
+    *layers: dict[str, Any],
+    limit: int = _TASK_MEMORY_MAX_IDS,
+) -> dict[str, Any]:
+    remembered_ids: list[str] = []
+    remembered_results: list[dict[str, str]] = []
+    sources: list[str] = []
+    reasons: list[str] = []
+    updated_at = ''
+    normalized_limit = max(1, int(limit or _TASK_MEMORY_MAX_IDS))
+    for raw in layers:
+        memory = normalize_task_memory(raw)
+        source = str(memory.get('source') or '').strip()
+        reason = str(memory.get('reason') or '').strip()
+        if source and source not in sources:
+            sources.append(source)
+        if reason and reason not in reasons:
+            reasons.append(reason)
+        if not updated_at and str(memory.get('updated_at') or '').strip():
+            updated_at = str(memory.get('updated_at') or '').strip()
+        for task_id in list(memory.get('task_ids') or []):
+            if task_id and task_id not in remembered_ids:
+                remembered_ids.append(task_id)
+                if len(remembered_ids) >= normalized_limit:
+                    break
+        for result in list(memory.get('task_results') or []):
+            if result not in remembered_results:
+                remembered_results.append(result)
+        if len(remembered_ids) >= normalized_limit:
+            break
+    return normalize_task_memory(
+        {
+            'task_ids': remembered_ids[:normalized_limit],
+            'source': ' + '.join(sources),
+            'reason': ' + '.join(reasons),
+            'updated_at': updated_at,
+            'task_results': remembered_results[:normalized_limit],
+        }
+    )
+
+
 def build_task_continuity_payload(
     *,
     session: Any | None,
+    runtime_session: Any | None = None,
     active_tasks: Any = None,
     limit: int = _TASK_MEMORY_MAX_IDS,
 ) -> dict[str, Any] | None:
@@ -199,16 +377,28 @@ def build_task_continuity_payload(
         if len(normalized_active) >= max(1, int(limit or _TASK_MEMORY_MAX_IDS)):
             break
 
+    execution_snapshot, execution_source = resolve_execution_snapshot(runtime_session, session)
+    execution_task_memory = _task_memory_from_execution_snapshot(execution_snapshot, source=execution_source)
     last_task_memory = normalize_task_memory(
         getattr(session, 'metadata', {}).get('last_task_memory') if session is not None else None
     )
     if not last_task_memory.get('task_ids') and session is not None:
         last_task_memory = build_last_task_memory(session)
+    merged_memory = _merge_task_memory_layers(
+        execution_task_memory,
+        last_task_memory,
+        limit=limit,
+    )
 
-    if not normalized_active and not last_task_memory.get('task_ids'):
+    if not normalized_active and not merged_memory.get('task_ids'):
         return None
 
-    last_results = list(last_task_memory.get('task_results') or [])
+    last_results = list(merged_memory.get('task_results') or [])
+    active_task_ids = {
+        str(item.get('task_id') or '').strip()
+        for item in normalized_active
+        if str(item.get('task_id') or '').strip()
+    }
     for task in normalized_active:
         task_id = str(task.get('task_id') or '').strip()
         if not task_id:
@@ -220,9 +410,33 @@ def build_task_continuity_payload(
         ]
         if matched:
             task['task_results'] = matched[:1]
+    if active_task_ids:
+        merged_memory = normalize_task_memory(
+            {
+                **merged_memory,
+                'task_ids': [
+                    task_id
+                    for task_id in list(merged_memory.get('task_ids') or [])
+                    if task_id not in active_task_ids
+                ],
+                'task_results': [
+                    result
+                    for result in list(merged_memory.get('task_results') or [])
+                    if str(result.get('task_id') or '').strip() not in active_task_ids
+                ],
+            }
+        )
+    source_parts: list[str] = []
+    if normalized_active:
+        source_parts.append('active_tasks')
+    if execution_task_memory.get('task_ids'):
+        source_parts.append(execution_source or 'paused_execution')
+    if last_task_memory.get('task_ids'):
+        source_parts.append('session_metadata')
     return {
         'active_tasks': normalized_active,
-        'last_task_memory': last_task_memory,
+        'last_task_memory': merged_memory,
+        'source': ' + '.join(source_parts),
     }
 
 
@@ -401,15 +615,17 @@ def transcript_messages(session: Any) -> list[dict[str, Any]]:
     ]
 
 
-def extract_live_raw_tail(
-    session: Any,
+def extract_live_raw_tail_context(
+    session: Any | None,
     *,
     turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
+    if session is None:
+        return [], ''
     messages = transcript_messages(session)
     normalized_turns = max(1, int(turn_limit or DEFAULT_LIVE_RAW_TAIL_TURNS))
     if not messages:
-        return []
+        return [], 'transcript'
     turn_start_indexes: list[int] = []
     current_user_index: int | None = None
     for index, message in enumerate(messages):
@@ -428,7 +644,38 @@ def extract_live_raw_tail(
         )
     else:
         start_index = max(0, len(messages) - max(1, normalized_turns * 2))
-    return [_history_entry_from_message(message) for message in messages[start_index:]]
+    return [_history_entry_from_message(message) for message in messages[start_index:]], 'transcript'
+
+
+def extract_live_raw_tail(
+    session: Any,
+    *,
+    turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
+) -> list[dict[str, Any]]:
+    return extract_live_raw_tail_context(session, turn_limit=turn_limit)[0]
+
+
+def extract_execution_live_raw_tail(
+    runtime_session: Any | None,
+    persisted_session: Any | None,
+    *,
+    turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
+    require_active_stage: bool,
+) -> tuple[list[dict[str, Any]], str]:
+    snapshot, source = resolve_execution_snapshot(runtime_session, persisted_session)
+    normalized_snapshot = _normalize_execution_snapshot(snapshot)
+    if normalized_snapshot is not None:
+        interaction_trace = normalize_interaction_trace(normalized_snapshot.get('interaction_trace'))
+        has_active_stage = any(
+            str(stage.get('status') or '').strip() == CEO_STAGE_STATUS_ACTIVE
+            for stage in list(interaction_trace.get('stages') or [])
+        )
+        messages = _execution_snapshot_history_messages(normalized_snapshot)
+        if messages and (has_active_stage or not require_active_stage):
+            return messages, source
+    if persisted_session is None:
+        return [], ''
+    return extract_live_raw_tail_context(persisted_session, turn_limit=turn_limit)
 
 
 def extract_active_stage_raw_tail(
@@ -437,49 +684,19 @@ def extract_active_stage_raw_tail(
     *,
     turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
 ) -> list[dict[str, Any]]:
-    if runtime_session is not None:
-        snapshot_supplier = getattr(runtime_session, 'inflight_turn_snapshot', None)
-        snapshot = snapshot_supplier() if callable(snapshot_supplier) else None
-        if isinstance(snapshot, dict):
-            interaction_trace = normalize_interaction_trace(snapshot.get('interaction_trace'))
-            stages = list(interaction_trace.get('stages') or [])
-            has_active_stage = any(
-                str(stage.get('status') or '').strip() == CEO_STAGE_STATUS_ACTIVE for stage in stages
-            )
-            if has_active_stage:
-                messages: list[dict[str, Any]] = []
-                user_message = snapshot.get('user_message')
-                if isinstance(user_message, dict) and str(user_message.get('content') or '').strip():
-                    messages.append({'role': 'user', 'content': str(user_message.get('content') or '').strip()})
-                assistant_text = summarize_preview_text(snapshot.get('assistant_text') or '', max_chars=480)
-                tool_events = snapshot.get('tool_events') if isinstance(snapshot.get('tool_events'), list) else []
-                if assistant_text or tool_events:
-                    assistant_message = {
-                        'role': 'assistant',
-                        'content': assistant_text,
-                        'tool_events': tool_events,
-                        'interaction_trace': interaction_trace,
-                    }
-                    messages.append(_history_entry_from_message(assistant_message))
-                if messages:
-                    return messages
-    if persisted_session is None:
-        return []
-    return extract_live_raw_tail(persisted_session, turn_limit=turn_limit)
+    return extract_execution_live_raw_tail(
+        runtime_session,
+        persisted_session,
+        turn_limit=turn_limit,
+        require_active_stage=True,
+    )[0]
 
 
 def latest_interaction_trace(runtime_session: Any | None, persisted_session: Any | None) -> tuple[dict[str, Any], str]:
-    if runtime_session is not None:
-        trace_supplier = getattr(runtime_session, 'interaction_trace_snapshot', None)
-        trace = trace_supplier() if callable(trace_supplier) else None
-        normalized = normalize_interaction_trace(trace)
-        if normalized.get('stages'):
-            return normalized, 'runtime'
-        snapshot_supplier = getattr(runtime_session, 'inflight_turn_snapshot', None)
-        snapshot = snapshot_supplier() if callable(snapshot_supplier) else None
-        normalized = normalize_interaction_trace((snapshot or {}).get('interaction_trace'))
-        if normalized.get('stages'):
-            return normalized, 'inflight'
+    snapshot, source = resolve_execution_snapshot(runtime_session, persisted_session)
+    normalized = normalize_interaction_trace((snapshot or {}).get('interaction_trace'))
+    if normalized.get('stages'):
+        return normalized, source
     if persisted_session is not None:
         for raw in reversed(transcript_messages(persisted_session)):
             normalized = normalize_interaction_trace(raw.get('interaction_trace'))
@@ -718,6 +935,13 @@ def inflight_snapshot_path_for_session(session_id: str, *, create: bool = True) 
     return directory / f"{safe_session}.json"
 
 
+def paused_execution_context_path_for_session(session_id: str, *, create: bool = True) -> Path:
+    safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
+    root = workspace_path() / WEB_CEO_PAUSED_ROOT
+    directory = ensure_dir(root) if create else root
+    return directory / f"{safe_session}.json"
+
+
 def is_restorable_inflight_turn_snapshot(snapshot: Any) -> bool:
     if not isinstance(snapshot, dict) or not snapshot:
         return False
@@ -754,6 +978,36 @@ def write_inflight_turn_snapshot(session_id: str, snapshot: dict[str, Any] | Non
 
 def clear_inflight_turn_snapshot(session_id: str) -> None:
     path = inflight_snapshot_path_for_session(session_id, create=False)
+    path.unlink(missing_ok=True)
+
+
+def read_paused_execution_context(session_id: str) -> dict[str, Any] | None:
+    path = paused_execution_context_path_for_session(session_id, create=False)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if is_restorable_inflight_turn_snapshot(payload) else None
+
+
+def write_paused_execution_context(session_id: str, snapshot: dict[str, Any] | None) -> None:
+    key = str(session_id or "").strip()
+    if not key:
+        return
+    path = paused_execution_context_path_for_session(key)
+    if not isinstance(snapshot, dict) or not snapshot:
+        path.unlink(missing_ok=True)
+        return
+    payload = dict(snapshot)
+    payload["session_id"] = key
+    payload["persisted_at"] = datetime.now().isoformat()
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clear_paused_execution_context(session_id: str) -> None:
+    path = paused_execution_context_path_for_session(session_id, create=False)
     path.unlink(missing_ok=True)
 
 
@@ -1330,6 +1584,7 @@ def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str) -
         path.unlink()
     session_manager.invalidate(session_id)
     clear_inflight_turn_snapshot(session_id)
+    clear_paused_execution_context(session_id)
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)

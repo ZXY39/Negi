@@ -1556,6 +1556,104 @@ def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: 
     }
 
 
+def _build_inflight_only_ceo_session_delete_client(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+    from g3ku.session.manager import SessionManager
+
+    manager = SessionManager(tmp_path)
+    current = Session(key='web:ceo-active-current', metadata={'title': 'Current Session'})
+    manager.save(current)
+    target_id = 'web:ceo-inflight-only'
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(web_ceo_sessions, 'workspace_path', lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+    web_ceo_sessions.write_inflight_turn_snapshot(
+        target_id,
+        {
+            'status': 'running',
+            'started_at': datetime.now().isoformat(),
+            'user_message': {'role': 'user', 'content': 'Delete the inflight-only session'},
+        },
+    )
+
+    class _TaskService:
+        async def startup(self) -> None:
+            return None
+
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return []
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            _ = session_id
+            return {'total': 0, 'unfinished': 0, 'in_progress': 0, 'paused': 0, 'terminal': 0, 'deletable': 0}
+
+    class _RuntimeManager:
+        def get(self, session_id: str):
+            _ = session_id
+            return None
+
+        def remove(self, session_id: str):
+            captured['removed_session'] = session_id
+            return None
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        captured['cancelled_session'] = session_key
+        return 0
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    monkeypatch.setattr(
+        ceo_sessions,
+        'get_agent',
+        lambda: SimpleNamespace(
+            sessions=manager,
+            main_task_service=_TaskService(),
+            cancel_session_tasks=_cancel_session_tasks,
+        ),
+    )
+    monkeypatch.setattr(ceo_sessions, 'get_runtime_manager', lambda _agent: _RuntimeManager())
+    monkeypatch.setattr(ceo_sessions, 'get_web_heartbeat_service', lambda _agent: None)
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+    inflight_path = web_ceo_sessions.inflight_snapshot_path_for_session(target_id, create=False)
+    return client, current, target_id, captured, inflight_path
+
+
+def test_ceo_session_delete_check_accepts_inflight_only_session(tmp_path: Path, monkeypatch):
+    client, _current, target_id, _captured, inflight_path = _build_inflight_only_ceo_session_delete_client(tmp_path, monkeypatch)
+
+    response = client.get(f'/api/ceo/sessions/{target_id}/delete-check')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['session_id'] == target_id
+    assert payload['can_delete'] is True
+    assert payload['related_tasks']['total'] == 0
+    assert inflight_path.exists()
+
+
+def test_ceo_session_delete_accepts_inflight_only_session(tmp_path: Path, monkeypatch):
+    client, current, target_id, captured, inflight_path = _build_inflight_only_ceo_session_delete_client(tmp_path, monkeypatch)
+
+    response = client.delete(f'/api/ceo/sessions/{target_id}')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['deleted'] is True
+    assert payload['session_id'] == target_id
+    assert payload['active_session_id'] == current.key
+    assert captured == {
+        'removed_session': target_id,
+        'cancelled_session': target_id,
+    }
+    assert not inflight_path.exists()
+
+
 def test_task_rest_endpoint_normalizes_short_task_id():
     captured: dict[str, str] = {}
 
