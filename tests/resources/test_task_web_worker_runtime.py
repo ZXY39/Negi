@@ -576,6 +576,161 @@ def test_worker_task_status_outbox_keeps_latest_payload(tmp_path: Path):
     assert pending[0]["payload"]["data"]["worker"]["payload"]["active_task_count"] == 1
 
 
+def test_worker_task_summary_persists_outbox_and_schedules_delivery(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    scheduled: list[str] = []
+    service._schedule_task_summary_delivery = lambda task_id: scheduled.append(str(task_id))
+
+    updated_at = now_iso()
+    service._schedule_task_event_callback(
+        {
+            "event_type": "task.summary.patch",
+            "session_id": "web:shared",
+            "task_id": "task:demo-summary",
+            "data": {
+                "task": {
+                    "task_id": "task:demo-summary",
+                    "session_id": "web:shared",
+                    "title": "demo",
+                    "updated_at": updated_at,
+                    "token_usage": {"tracked": True, "input_tokens": 12, "output_tokens": 4, "cache_hit_tokens": 2},
+                }
+            },
+        }
+    )
+
+    pending = service.store.list_pending_task_summary_outbox(limit=10)
+    assert len(pending) == 1
+    assert pending[0]["task_id"] == "task:demo-summary"
+    assert pending[0]["payload"]["event_type"] == "task.summary.patch"
+    assert pending[0]["payload"]["data"]["task"]["updated_at"] == updated_at
+    assert scheduled == ["task:demo-summary"]
+
+
+def test_worker_task_summary_outbox_keeps_latest_payload(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    service._schedule_task_summary_delivery = lambda _task_id: None
+
+    first_updated_at = now_iso()
+    second_updated_at = (datetime.now(timezone.utc) + timedelta(seconds=3)).isoformat()
+    service._schedule_task_event_callback(
+        {
+            "event_type": "task.summary.patch",
+            "session_id": "web:shared",
+            "task_id": "task:demo-summary",
+            "data": {
+                "task": {
+                    "task_id": "task:demo-summary",
+                    "session_id": "web:shared",
+                    "title": "demo",
+                    "updated_at": first_updated_at,
+                    "token_usage": {"tracked": True, "input_tokens": 3, "output_tokens": 1, "cache_hit_tokens": 0},
+                }
+            },
+        }
+    )
+    service._schedule_task_event_callback(
+        {
+            "event_type": "task.summary.patch",
+            "session_id": "web:shared",
+            "task_id": "task:demo-summary",
+            "data": {
+                "task": {
+                    "task_id": "task:demo-summary",
+                    "session_id": "web:shared",
+                    "title": "demo",
+                    "updated_at": second_updated_at,
+                    "token_usage": {"tracked": True, "input_tokens": 9, "output_tokens": 5, "cache_hit_tokens": 4},
+                }
+            },
+        }
+    )
+
+    pending = service.store.list_pending_task_summary_outbox(limit=10)
+    assert len(pending) == 1
+    assert pending[0]["version"] == 2
+    assert pending[0]["payload"]["data"]["task"]["updated_at"] == second_updated_at
+    assert pending[0]["payload"]["data"]["task"]["token_usage"]["input_tokens"] == 9
+
+
+@pytest.mark.asyncio
+async def test_worker_task_summary_outbox_retries_and_marks_delivered(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    service._schedule_task_summary_delivery = lambda _task_id: None
+    service._schedule_task_event_callback(
+        {
+            "event_type": "task.summary.patch",
+            "session_id": "web:shared",
+            "task_id": "task:demo-summary",
+            "data": {
+                "task": {
+                    "task_id": "task:demo-summary",
+                    "session_id": "web:shared",
+                    "title": "demo",
+                    "updated_at": now_iso(),
+                    "token_usage": {"tracked": True, "input_tokens": 6, "output_tokens": 2, "cache_hit_tokens": 1},
+                }
+            },
+        }
+    )
+    monkeypatch.setenv("G3KU_INTERNAL_CALLBACK_URL", "http://127.0.0.1:18790/api/internal/task-terminal")
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+
+    attempts: list[str] = []
+
+    class _AsyncClient:
+        def __init__(self, timeout: float):
+            assert float(timeout) == 2.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, json: dict | None = None, headers: dict | None = None):
+            attempts.append(str(url))
+            assert str(headers.get("x-g3ku-internal-token") or "") == "secret-token"
+            if len(attempts) == 1:
+                return httpx.Response(500, json={"error": "retry"})
+            return httpx.Response(200, json={"ok": True})
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("main.service.runtime_service.httpx.AsyncClient", _AsyncClient)
+    monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
+
+    await service._deliver_task_summary_outbox("task:demo-summary")
+
+    entry = service.store.get_task_summary_outbox("task:demo-summary")
+    assert entry is not None
+    assert entry["delivery_state"] == "delivered"
+    assert entry["attempts"] == 1
+    assert len(attempts) == 2
+
+
 @pytest.mark.asyncio
 async def test_worker_task_status_outbox_retries_and_marks_delivered(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
@@ -673,6 +828,44 @@ async def test_worker_startup_replays_pending_worker_status_outbox(tmp_path: Pat
     await service.startup()
 
     assert scheduled == ["worker:pending"]
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_replays_pending_task_summary_outbox(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    scheduled: list[str] = []
+    service._start_worker_loops = lambda: None
+    service._schedule_task_summary_delivery = lambda task_id: scheduled.append(str(task_id))
+    service.store.put_task_summary_outbox(
+        task_id="task:pending-summary",
+        session_id="web:shared",
+        created_at=now_iso(),
+        payload={
+            "event_type": "task.summary.patch",
+            "session_id": "web:shared",
+            "task_id": "task:pending-summary",
+            "data": {
+                "task": {
+                    "task_id": "task:pending-summary",
+                    "session_id": "web:shared",
+                    "title": "demo",
+                    "updated_at": now_iso(),
+                    "token_usage": {"tracked": True, "input_tokens": 7, "output_tokens": 3, "cache_hit_tokens": 1},
+                }
+            },
+        },
+    )
+
+    await service.startup()
+
+    assert scheduled == ["task:pending-summary"]
 
 
 def test_web_mode_create_task_enqueues_command_without_running(tmp_path: Path):

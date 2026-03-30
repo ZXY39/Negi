@@ -365,6 +365,7 @@ class MainRuntimeService:
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_worker_status_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_summary_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_event_dispatch_tasks: set[asyncio.Task[Any]] = set()
         if self.execution_mode == 'worker':
             self.log_service.add_task_terminal_listener(self._enqueue_task_terminal_callback)
@@ -396,6 +397,7 @@ class MainRuntimeService:
             if self.tool_pressure_monitor is not None:
                 self.tool_pressure_monitor.start()
             self._start_worker_loops()
+            self._schedule_pending_task_summary_callbacks()
             self._schedule_pending_task_worker_status_callbacks()
             self._schedule_pending_task_terminal_callbacks()
             self._schedule_pending_task_stall_callbacks()
@@ -1017,6 +1019,9 @@ class MainRuntimeService:
             return
         normalized = normalize_task_event_payload(payload)
         if not normalized:
+            return
+        if str(normalized.get('event_type') or '').strip() == 'task.summary.patch':
+            self._enqueue_task_summary_callback(normalized)
             return
         try:
             loop = asyncio.get_running_loop()
@@ -1663,6 +1668,31 @@ class MainRuntimeService:
             return
         self._schedule_task_worker_status_delivery(worker_id)
 
+    def _enqueue_task_summary_callback(self, payload: dict[str, Any] | None) -> None:
+        if self.execution_mode != 'worker':
+            return
+        normalized = normalize_task_event_payload(payload)
+        if not normalized or str(normalized.get('event_type') or '').strip() != 'task.summary.patch':
+            return
+        task_id = str(normalized.get('task_id') or '').strip()
+        if not task_id:
+            return
+        session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
+        data = dict(normalized.get('data') or {})
+        task_payload = dict(data.get('task') or {}) if isinstance(data.get('task'), dict) else {}
+        created_at = str(task_payload.get('updated_at') or now_iso()).strip() or now_iso()
+        try:
+            self.store.put_task_summary_outbox(
+                task_id=task_id,
+                session_id=session_id,
+                created_at=created_at,
+                payload=normalized,
+            )
+        except Exception:
+            logger.exception('failed to persist task summary outbox for {}', task_id)
+            return
+        self._schedule_task_summary_delivery(task_id)
+
     def _schedule_pending_task_worker_status_callbacks(self) -> None:
         if self.execution_mode != 'worker':
             return
@@ -1670,6 +1700,90 @@ class MainRuntimeService:
             worker_id = str(entry.get('worker_id') or '').strip()
             if worker_id:
                 self._schedule_task_worker_status_delivery(worker_id)
+
+    def _schedule_pending_task_summary_callbacks(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        for entry in self.store.list_pending_task_summary_outbox(limit=500):
+            task_id = str(entry.get('task_id') or '').strip()
+            if task_id:
+                self._schedule_task_summary_delivery(task_id)
+
+    def _schedule_task_summary_delivery(self, task_id: str) -> None:
+        key = self.normalize_task_id(str(task_id or '').strip())
+        if self.execution_mode != 'worker' or not key:
+            return
+        current = self._task_summary_delivery_tasks.get(key)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._deliver_task_summary_outbox(key), name=f'main-runtime-task-summary:{key}')
+        self._task_summary_delivery_tasks[key] = task
+        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_summary_delivery_task(stored_key, done_task))
+
+    def _clear_task_summary_delivery_task(self, task_id: str, done_task: asyncio.Task[Any]) -> None:
+        current = self._task_summary_delivery_tasks.get(task_id)
+        if current is done_task:
+            self._task_summary_delivery_tasks.pop(task_id, None)
+
+    async def _deliver_task_summary_outbox(self, task_id: str) -> None:
+        retry_delays = list(_WORKER_STATUS_CALLBACK_RETRY_DELAYS or [0.0, 0.5, 2.0, 5.0])
+        if not retry_delays:
+            retry_delays = [0.0]
+        attempt_index = 0
+        while True:
+            delay_seconds = float(retry_delays[min(attempt_index, len(retry_delays) - 1)] or 0.0)
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            entry = self.store.get_task_summary_outbox(task_id)
+            if not entry:
+                return
+            if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+                return
+            payload = dict(entry.get('payload') or {})
+            version = max(1, int(entry.get('version') or 0))
+            callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
+            if not callback_url:
+                updated = self.store.mark_task_summary_outbox_attempt(
+                    task_id,
+                    attempted_at=now_iso(),
+                    error_text='task_event_callback_url_unavailable',
+                    expected_version=version,
+                )
+                attempt_index = attempt_index + 1 if updated else 0
+                continue
+            headers: dict[str, str] = {}
+            callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
+            if callback_token:
+                headers['x-g3ku-internal-token'] = callback_token
+            try:
+                async with httpx.AsyncClient(timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS) as client:
+                    response = await client.post(callback_url, json=payload, headers=headers)
+                if 200 <= int(response.status_code or 0) < 300:
+                    delivered = self.store.mark_task_summary_outbox_delivered(
+                        task_id,
+                        delivered_at=now_iso(),
+                        expected_version=version,
+                    )
+                    if delivered:
+                        return
+                    attempt_index = 0
+                    continue
+                error_text = f'task_event_callback_http_{int(response.status_code or 0)}'
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_text = str(exc or 'task_event_callback_failed').strip() or 'task_event_callback_failed'
+            updated = self.store.mark_task_summary_outbox_attempt(
+                task_id,
+                attempted_at=now_iso(),
+                error_text=error_text,
+                expected_version=version,
+            )
+            attempt_index = attempt_index + 1 if updated else 0
 
     def _schedule_task_worker_status_delivery(self, worker_id: str) -> None:
         key = str(worker_id or '').strip()
@@ -3626,6 +3740,12 @@ class MainRuntimeService:
         if worker_status_delivery_tasks:
             await asyncio.gather(*worker_status_delivery_tasks, return_exceptions=True)
         self._task_worker_status_delivery_tasks.clear()
+        task_summary_delivery_tasks = [task for task in self._task_summary_delivery_tasks.values() if task is not None and not task.done()]
+        for task in task_summary_delivery_tasks:
+            task.cancel()
+        if task_summary_delivery_tasks:
+            await asyncio.gather(*task_summary_delivery_tasks, return_exceptions=True)
+        self._task_summary_delivery_tasks.clear()
         callback_tasks = [task for task in list(self._task_event_dispatch_tasks) if task is not None and not task.done()]
         for task in callback_tasks:
             task.cancel()

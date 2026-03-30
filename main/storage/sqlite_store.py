@@ -281,6 +281,21 @@ class SQLiteTaskStore:
                 payload_json TEXT NOT NULL
             )
             ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_summary_outbox (
+                task_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                delivery_state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                last_attempt_at TEXT NOT NULL,
+                last_error TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
             'CREATE INDEX IF NOT EXISTS idx_nodes_task_id ON nodes(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id)',
@@ -299,6 +314,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_terminal_outbox_state_created_at ON task_terminal_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_stall_outbox_state_created_at ON task_stall_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
+            'CREATE INDEX IF NOT EXISTS idx_task_summary_outbox_state_updated_at ON task_summary_outbox(delivery_state, updated_at)',
         ]
         with self._conn:
             for statement in statements:
@@ -507,6 +523,7 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_stall_outbox WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_summary_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM artifacts WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
@@ -904,6 +921,128 @@ class SQLiteTaskStore:
             'UPDATE task_worker_status_outbox SET delivery_state = ?, delivered_at = ?, last_error = ? WHERE worker_id = ?',
             ('delivered', delivered_at, '', key),
         )
+
+    def put_task_summary_outbox(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        created_at: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        key = str(task_id or '').strip()
+        if not key:
+            raise ValueError('task_id_required')
+        normalized_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+        payload_json = json.dumps(payload, ensure_ascii=False)
+
+        def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            row = conn.execute(
+                'SELECT task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, version, payload_json '
+                'FROM task_summary_outbox WHERE task_id = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    'INSERT INTO task_summary_outbox (task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, version, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (key, normalized_session_id, 'pending', created_at, created_at, '', 0, '', '', 1, payload_json),
+                )
+            else:
+                existing_created_at = str(row['created_at'] or created_at).strip() or created_at
+                next_version = max(1, int(row['version'] or 0) + 1)
+                conn.execute(
+                    'UPDATE task_summary_outbox SET session_id = ?, delivery_state = ?, created_at = ?, updated_at = ?, delivered_at = ?, attempts = ?, last_attempt_at = ?, last_error = ?, version = ?, payload_json = ? '
+                    'WHERE task_id = ?',
+                    (normalized_session_id, 'pending', existing_created_at, created_at, '', 0, '', '', next_version, payload_json, key),
+                )
+            row = conn.execute(
+                'SELECT task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, version, payload_json '
+                'FROM task_summary_outbox WHERE task_id = ?',
+                (key,),
+            ).fetchone()
+            return self._task_summary_outbox_row(row)
+
+        return self._run_write(operation)
+
+    def get_task_summary_outbox(self, task_id: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, version, payload_json '
+            'FROM task_summary_outbox WHERE task_id = ?',
+            (str(task_id or '').strip(),),
+        )
+        return self._task_summary_outbox_row(row) if row else None
+
+    def list_pending_task_summary_outbox(self, *, limit: int = 200) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            'SELECT task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, version, payload_json '
+            'FROM task_summary_outbox WHERE delivery_state != ? ORDER BY updated_at ASC LIMIT ?',
+            ('delivered', max(1, int(limit or 200))),
+        )
+        return [self._task_summary_outbox_row(row) for row in rows]
+
+    def mark_task_summary_outbox_attempt(
+        self,
+        task_id: str,
+        *,
+        attempted_at: str,
+        error_text: str,
+        expected_version: int | None = None,
+    ) -> bool:
+        key = str(task_id or '').strip()
+        if not key:
+            return False
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            row = conn.execute(
+                'SELECT attempts, delivery_state, version FROM task_summary_outbox WHERE task_id = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                return False
+            delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
+            if delivery_state == 'delivered':
+                return False
+            current_version = max(1, int(row['version'] or 0))
+            if expected_version is not None and current_version != int(expected_version):
+                return False
+            attempts = int(row['attempts'] or 0) + 1
+            conn.execute(
+                'UPDATE task_summary_outbox SET delivery_state = ?, updated_at = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE task_id = ? AND version = ?',
+                ('pending', attempted_at, attempts, attempted_at, str(error_text or ''), key, current_version),
+            )
+            return True
+
+        return bool(self._run_write(operation))
+
+    def mark_task_summary_outbox_delivered(
+        self,
+        task_id: str,
+        *,
+        delivered_at: str,
+        expected_version: int | None = None,
+    ) -> bool:
+        key = str(task_id or '').strip()
+        if not key:
+            return False
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            row = conn.execute(
+                'SELECT delivery_state, version FROM task_summary_outbox WHERE task_id = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                return False
+            current_version = max(1, int(row['version'] or 0))
+            if expected_version is not None and current_version != int(expected_version):
+                return False
+            conn.execute(
+                'UPDATE task_summary_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ? WHERE task_id = ? AND version = ?',
+                ('delivered', delivered_at, delivered_at, '', key, current_version),
+            )
+            return True
+
+        return bool(self._run_write(operation))
 
     def upsert_worker_status(
         self,
@@ -1385,6 +1524,25 @@ class SQLiteTaskStore:
             'attempts': int(row['attempts'] or 0),
             'last_attempt_at': row['last_attempt_at'],
             'last_error': row['last_error'],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
+
+    @staticmethod
+    def _task_summary_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return {}
+        payload = json.loads(row['payload_json'])
+        return {
+            'task_id': row['task_id'],
+            'session_id': row['session_id'],
+            'delivery_state': row['delivery_state'],
+            'created_at': row['created_at'],
+            'updated_at': row['updated_at'],
+            'delivered_at': row['delivered_at'],
+            'attempts': int(row['attempts'] or 0),
+            'last_attempt_at': row['last_attempt_at'],
+            'last_error': row['last_error'],
+            'version': max(1, int(row['version'] or 0)),
             'payload': payload if isinstance(payload, dict) else {},
         }
 
