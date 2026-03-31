@@ -7,7 +7,7 @@ import pytest
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.agent.tools.base import Tool
 from main.protocol import now_iso
-from main.runtime.internal_tools import SpawnChildNodesTool, SubmitNextStageTool
+from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
 from main.runtime.stage_budget import STAGE_TOOL_NAME, visible_tools_for_stage_iteration
 from main.service.runtime_service import MainRuntimeService
 
@@ -37,6 +37,39 @@ class _StaticTool(Tool):
     async def execute(self, **kwargs):
         _ = kwargs
         return self._result
+
+
+def _final_result_call(
+    *,
+    call_id: str = "call:final",
+    status: str,
+    delivery_status: str,
+    summary: str,
+    answer: str,
+    evidence: list[dict[str, object]] | None = None,
+    remaining_work: list[str] | None = None,
+    blocking_reason: str = "",
+) -> ToolCallRequest:
+    return ToolCallRequest(
+        id=call_id,
+        name="submit_final_result",
+        arguments={
+            "status": status,
+            "delivery_status": delivery_status,
+            "summary": summary,
+            "answer": answer,
+            "evidence": list(evidence or []),
+            "remaining_work": list(remaining_work or []),
+            "blocking_reason": blocking_reason,
+        },
+    )
+
+
+def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalResultTool:
+    async def _submit(payload: dict[str, object]) -> dict[str, object]:
+        return dict(payload)
+
+    return SubmitFinalResultTool(_submit, node_kind=node_kind)
 
 
 def _mark_worker_online(service: MainRuntimeService) -> None:
@@ -117,8 +150,23 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
             arguments={},
             runtime_context=runtime_context,
         )
+        final_result = await service._react_loop._execute_tool(
+            tools={'submit_final_result': _submit_final_result_tool()},
+            tool_name='submit_final_result',
+            arguments={
+                'status': 'failed',
+                'delivery_status': 'blocked',
+                'summary': 'blocked after budget',
+                'answer': '',
+                'evidence': [],
+                'remaining_work': [],
+                'blocking_reason': 'budget exhausted',
+            },
+            runtime_context=runtime_context,
+        )
         assert exhausted_ordinary.startswith('Error: current stage budget is exhausted')
         assert exhausted_spawn.startswith('Error: current stage budget is exhausted')
+        assert not final_result.startswith('Error:')
     finally:
         await service.close()
 
@@ -150,6 +198,7 @@ async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget
         )
         tools = service.node_runner._build_tools(task=task, node=acceptance)
         assert 'submit_next_stage' in tools
+        assert 'submit_final_result' in tools
         assert 'spawn_child_nodes' not in tools
 
         runtime_context = {
@@ -497,9 +546,19 @@ async def test_react_loop_uses_stable_prompt_cache_key_despite_dynamic_stage_ove
                     usage={'input_tokens': 12, 'output_tokens': 5, 'cache_hit_tokens': 92},
                 )
             return LLMResponse(
-                content='{"status":"failed","delivery_status":"blocked","summary":"stop","answer":"","evidence":[],"remaining_work":[],"blocking_reason":"stop"}',
-                tool_calls=[],
-                finish_reason='stop',
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        status='failed',
+                        delivery_status='blocked',
+                        summary='stop',
+                        answer='',
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason='stop',
+                    )
+                ],
+                finish_reason='tool_calls',
                 usage={'input_tokens': 11, 'output_tokens': 4, 'cache_hit_tokens': 95},
             )
 
@@ -606,6 +665,21 @@ def test_submit_next_stage_tool_schema_budget_max_is_ten() -> None:
     assert tool.parameters['properties']['tool_round_budget']['maximum'] == 10
 
 
+def test_submit_final_result_tool_schema_is_hard_switched_to_final_or_blocked() -> None:
+    tool = _submit_final_result_tool()
+
+    assert tool.parameters['properties']['delivery_status']['enum'] == ['final', 'blocked']
+    assert tool.parameters['required'] == [
+        'status',
+        'delivery_status',
+        'summary',
+        'answer',
+        'evidence',
+        'remaining_work',
+        'blocking_reason',
+    ]
+
+
 @pytest.mark.asyncio
 async def test_submit_next_stage_rejects_budget_above_ten(tmp_path: Path):
     service = MainRuntimeService(
@@ -625,6 +699,334 @@ async def test_submit_next_stage_rejects_budget_above_ten(tmp_path: Path):
                 stage_goal='预算校验；优先派生：无；自行完成：拒绝超出上限的阶段预算',
                 tool_round_budget=11,
             )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_node_can_finish_via_submit_final_result_tool(tmp_path: Path):
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        status='success',
+                        delivery_status='final',
+                        summary='done',
+                        answer='done',
+                        evidence=[{'kind': 'artifact', 'note': 'final result tool path'}],
+                        remaining_work=[],
+                        blocking_reason='',
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    try:
+        record = await service.create_task('submit-final-result success', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+        assert task.status == 'success'
+        assert root.status == 'success'
+        assert root.final_output == 'done'
+        assert str((root.metadata or {}).get('result_payload_ref') or '').strip()
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_node_rejects_failed_final_then_accepts_blocked(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        _final_result_call(
+                            status='failed',
+                            delivery_status='final',
+                            summary='invalid execution failure',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='',
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        status='failed',
+                        delivery_status='blocked',
+                        summary='blocked',
+                        answer='',
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason='blocked correctly',
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    backend = _Backend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    try:
+        record = await service.create_task('invalid failed final', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert backend.turn == 2
+        assert task.status == 'failed'
+        assert 'blocked correctly' in str(task.failure_reason or '')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_old_text_json_no_longer_finishes_node(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    content='{"status":"success","delivery_status":"final","summary":"old path","answer":"old path","evidence":[{"kind":"artifact","note":"legacy"}],"remaining_work":[],"blocking_reason":""}',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        status='success',
+                        delivery_status='final',
+                        summary='new path',
+                        answer='new path',
+                        evidence=[{'kind': 'artifact', 'note': 'new tool path'}],
+                        remaining_work=[],
+                        blocking_reason='',
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    backend = _Backend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    try:
+        record = await service.create_task('legacy text result path', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+        assert backend.turn == 2
+        assert task.status == 'success'
+        assert root.final_output == 'new path'
+        assert len(list(root.output or [])) >= 2
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_submit_final_result_fails_after_five_attempts(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        call_id=f'call:final:{self.turn}',
+                        status='failed',
+                        delivery_status='final',
+                        summary='still invalid',
+                        answer='',
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason='',
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    backend = _Backend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    try:
+        record = await service.create_task('invalid final result limit', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert backend.turn == 5
+        assert task.status == 'failed'
+        assert 'Invalid final result submission detected 5 consecutive times' in str(task.failure_reason or '')
+        assert 'execution failed result requires delivery_status=blocked' in str(task.failure_reason or '')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_next_stage_only_loop_fails_after_five_turns(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id=f'call:stage:{self.turn}',
+                        name='submit_next_stage',
+                        arguments={
+                            'stage_goal': f'stage only loop {self.turn}',
+                            'tool_round_budget': 1,
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    backend = _Backend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    try:
+        record = await service.create_task('stage only loop', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert backend.turn == 5
+        assert task.status == 'failed'
+        assert 'Repeated stage switching without progress detected 5 consecutive times' in str(task.failure_reason or '')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('status', 'delivery_status', 'answer', 'blocking_reason'),
+    [
+        ('success', 'final', 'accepted', ''),
+        ('failed', 'final', 'rejected', ''),
+        ('failed', 'blocked', '', 'missing evidence'),
+    ],
+)
+async def test_acceptance_node_supports_allowed_final_result_combinations(
+    tmp_path: Path,
+    status: str,
+    delivery_status: str,
+    answer: str,
+    blocking_reason: str,
+) -> None:
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        status=status,
+                        delivery_status=delivery_status,
+                        summary='acceptance result',
+                        answer=answer,
+                        evidence=[{'kind': 'artifact', 'note': 'acceptance evidence'}] if status == 'success' else [],
+                        remaining_work=[],
+                        blocking_reason=blocking_reason,
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / f'{status}-{delivery_status}.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / f'{status}-{delivery_status}-governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=root,
+            goal='accept root output',
+            acceptance_prompt='verify the root output',
+            parent_node_id=root.node_id,
+        )
+        result = await service.node_runner.run_node(record.task_id, acceptance.node_id)
+        latest = service.store.get_node(acceptance.node_id)
+        assert latest is not None
+        assert result.status == status
+        assert result.delivery_status == delivery_status
+        assert latest.status == status
     finally:
         await service.close()
 
@@ -654,9 +1056,19 @@ async def test_submit_next_stage_does_not_trip_repeated_action_breaker(tmp_path:
                     usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
                 )
             return LLMResponse(
-                content='{"status":"failed","delivery_status":"blocked","summary":"intentional stop","answer":"","evidence":[],"remaining_work":["stop after breaker check"],"blocking_reason":"intentional stop"}',
-                tool_calls=[],
-                finish_reason='stop',
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        status='failed',
+                        delivery_status='blocked',
+                        summary='intentional stop',
+                        answer='',
+                        evidence=[],
+                        remaining_work=['stop after breaker check'],
+                        blocking_reason='intentional stop',
+                    )
+                ],
+                finish_reason='tool_calls',
                 usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
             )
 

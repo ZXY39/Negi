@@ -5,7 +5,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
-from main.models import SpawnChildResult, SpawnChildSpec, build_execution_policy_schema
+from main.models import NodeEvidenceItem, SpawnChildResult, SpawnChildSpec, build_execution_policy_schema
+from main.runtime.stage_budget import FINAL_RESULT_TOOL_NAME, STAGE_TOOL_NAME
 
 
 class SubmitNextStageTool(Tool):
@@ -17,7 +18,7 @@ class SubmitNextStageTool(Tool):
 
     @property
     def name(self) -> str:
-        return 'submit_next_stage'
+        return STAGE_TOOL_NAME
 
     @property
     def description(self) -> str:
@@ -134,3 +135,118 @@ class SpawnChildNodesTool(Tool):
             {'children': [item.model_dump(mode='json', exclude_none=True) for item in results]},
             ensure_ascii=False,
         )
+
+
+class SubmitFinalResultTool(Tool):
+    def __init__(
+        self,
+        submit_callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+        *,
+        node_kind: str,
+    ) -> None:
+        self._submit_callback = submit_callback
+        self._node_kind = str(node_kind or '').strip().lower() or 'execution'
+
+    @property
+    def name(self) -> str:
+        return FINAL_RESULT_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        if self._node_kind == 'acceptance':
+            return (
+                'Submit the final structured acceptance result for the current node. '
+                'Use this only when you are ready to end the node, and make it the only tool call in the turn.'
+            )
+        return (
+            'Submit the final structured result for the current execution node. '
+            'Use this only when you are ready to end the node, and make it the only tool call in the turn.'
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'status': {
+                    'type': 'string',
+                    'enum': ['success', 'failed'],
+                    'description': 'Whether the node completed successfully or failed.',
+                },
+                'delivery_status': {
+                    'type': 'string',
+                    'enum': ['final', 'blocked'],
+                    'description': 'Use final for completed delivery or explicit rejection; use blocked only for genuine blockers.',
+                },
+                'summary': {
+                    'type': 'string',
+                    'description': 'Short conclusion for the node result.',
+                    'minLength': 1,
+                },
+                'answer': {
+                    'type': 'string',
+                    'description': 'Final answer body for the node.',
+                },
+                'evidence': {
+                    'type': 'array',
+                    'description': 'Structured evidence supporting the submitted result.',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'kind': {'type': 'string', 'enum': ['file', 'artifact', 'url']},
+                            'path': {'type': 'string'},
+                            'ref': {'type': 'string'},
+                            'start_line': {'type': 'integer', 'minimum': 1},
+                            'end_line': {'type': 'integer', 'minimum': 1},
+                            'note': {'type': 'string'},
+                        },
+                        'required': ['kind'],
+                    },
+                },
+                'remaining_work': {
+                    'type': 'array',
+                    'description': 'Remaining work items. Must be empty on success.',
+                    'items': {'type': 'string'},
+                },
+                'blocking_reason': {
+                    'type': 'string',
+                    'description': 'Blocking reason. Must be empty on success.',
+                },
+            },
+            'required': [
+                'status',
+                'delivery_status',
+                'summary',
+                'answer',
+                'evidence',
+                'remaining_work',
+                'blocking_reason',
+            ],
+        }
+
+    async def execute(
+        self,
+        status: str,
+        delivery_status: str,
+        summary: str,
+        answer: str,
+        evidence: list[dict[str, Any]],
+        remaining_work: list[str],
+        blocking_reason: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        _ = kwargs
+        payload = {
+            'status': str(status or '').strip().lower(),
+            'delivery_status': str(delivery_status or '').strip().lower(),
+            'summary': str(summary or '').strip(),
+            'answer': str(answer or ''),
+            'evidence': [
+                NodeEvidenceItem.model_validate(item).model_dump(mode='json')
+                for item in list(evidence or [])
+                if isinstance(item, dict)
+            ],
+            'remaining_work': [str(item or '').strip() for item in list(remaining_work or [])],
+            'blocking_reason': str(blocking_reason or '').strip(),
+        }
+        return await self._submit_callback(payload)

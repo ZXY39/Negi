@@ -68,6 +68,19 @@ def _python_launcher() -> str:
     return 'python3' if shutil.which('python3') else 'python'
 
 
+def _large_direct_load_payload(*, uri: str, body_label: str) -> dict[str, object]:
+    body = '\n'.join(f'{body_label} line {index:03d}' for index in range(1, 321))
+    return {
+        'ok': True,
+        'level': 'l2',
+        'content': body,
+        'l0': f'{body_label} short summary',
+        'l1': f'{body_label} structured overview',
+        'path': f'/virtual/{body_label}.md',
+        'uri': uri,
+    }
+
+
 def _write_demo_tool(root: Path, *, name: str = 'demo_echo', guide: str = 'Demo echo guide') -> Path:
     tool_root = root / 'tools' / name
     (tool_root / 'toolskills').mkdir(parents=True, exist_ok=True)
@@ -1524,6 +1537,73 @@ def test_externalize_for_message_keeps_open_excerpt_inline(tmp_path: Path):
     assert payload['end_line'] == 120
     assert 'line-040' in payload['excerpt']
     assert 'line-120' in payload['excerpt']
+
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ('source_kind', 'uri'),
+    [
+        ('tool_result:load_skill_context', 'g3ku://skill/full_body_skill'),
+        ('tool_result:load_tool_context', 'g3ku://resource/tool/content'),
+    ],
+)
+def test_externalize_for_message_keeps_direct_load_context_inline(tmp_path: Path, source_kind: str, uri: str):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = _large_direct_load_payload(uri=uri, body_label=source_kind.replace(':', '_'))
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='load-context',
+        source_kind=source_kind,
+        compact=True,
+    )
+
+    assert parse_content_envelope(rendered) is None
+    parsed = json.loads(str(rendered))
+    assert parsed == payload
+
+    store.close()
+
+
+def test_externalize_for_message_still_externalizes_large_non_direct_load_search_payload(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = {
+        'ok': True,
+        'mode': 'search',
+        'query': 'long search',
+        'candidates': [
+            {
+                'tool_id': f'tool-{index:03d}',
+                'description': 'candidate description ' + ('x' * 80),
+            }
+            for index in range(40)
+        ],
+        'next_action_hint': 'Call load_tool_context(tool_id="<tool_id>") to load details for a candidate.',
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='tool-search',
+        source_kind='tool_result:load_tool_context',
+        compact=True,
+    )
+
+    envelope = parse_content_envelope(rendered)
+    assert envelope is not None
+    assert envelope.ref.startswith('artifact:')
 
     store.close()
 

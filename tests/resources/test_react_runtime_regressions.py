@@ -7,9 +7,13 @@ import pytest
 
 from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
+from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from main.runtime.internal_tools import SubmitFinalResultTool
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
+from main.storage.artifact_store import TaskArtifactStore
+from main.storage.sqlite_store import SQLiteTaskStore
 
 
 class _FakeTaskStore:
@@ -49,6 +53,40 @@ class _FakeLogService:
         return None
 
 
+def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalResultTool:
+    async def _submit(payload: dict[str, object]) -> dict[str, object]:
+        return dict(payload)
+
+    return SubmitFinalResultTool(_submit, node_kind=node_kind)
+
+
+class _DirectLoadTool(Tool):
+    @property
+    def name(self) -> str:
+        return "direct_load_tool"
+
+    @property
+    def description(self) -> str:
+        return "Return a large direct-load payload."
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, **kwargs):
+        _ = kwargs
+        payload = {
+            "ok": True,
+            "level": "l2",
+            "content": "\n".join(f"tool line {index:03d}" for index in range(1, 321)),
+            "l0": "tool short summary",
+            "l1": "tool structured overview",
+            "path": "/virtual/content-tool.md",
+            "uri": "g3ku://resource/tool/content",
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+
 def test_prepare_messages_passthrough_keeps_original_messages_even_with_content_store() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
     original = [
@@ -72,9 +110,23 @@ async def test_react_loop_run_keeps_long_history_uncompacted() -> None:
         async def chat(self, **kwargs):
             calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
             return LLMResponse(
-                content='{"status":"failed","delivery_status":"blocked","summary":"done","answer":"","evidence":[],"remaining_work":[],"blocking_reason":"done"}',
-                tool_calls=[],
-                finish_reason="stop",
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "failed",
+                            "delivery_status": "blocked",
+                            "summary": "done",
+                            "answer": "",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "done",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
                 usage={"input_tokens": 8, "output_tokens": 3},
             )
 
@@ -91,7 +143,7 @@ async def test_react_loop_run_keeps_long_history_uncompacted() -> None:
         task=SimpleNamespace(task_id='task-1'),
         node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
         messages=messages,
-        tools={},
+        tools={"submit_final_result": _submit_final_result_tool()},
         model_refs=['fake'],
         runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
         max_iterations=2,
@@ -144,6 +196,34 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
 
 
 @pytest.mark.asyncio
+async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    log_service = _FakeLogService()
+    log_service._content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+
+    try:
+        rendered = await loop._execute_tool(
+            tools={"direct_load_tool": _DirectLoadTool()},
+            tool_name="direct_load_tool",
+            arguments={},
+            runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
+        )
+
+        assert parse_content_envelope(rendered) is None
+        payload = json.loads(rendered)
+        assert payload["uri"] == "g3ku://resource/tool/content"
+        assert payload["content"].startswith("tool line 001")
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -> None:
     model_ref_calls: list[list[str]] = []
     current_refs = ['old-model']
@@ -163,9 +243,23 @@ async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -
                     usage={"input_tokens": 8, "output_tokens": 3},
                 )
             return LLMResponse(
-                content='{"status":"failed","delivery_status":"blocked","summary":"done","answer":"","evidence":[],"remaining_work":[],"blocking_reason":"done"}',
-                tool_calls=[],
-                finish_reason="stop",
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "failed",
+                            "delivery_status": "blocked",
+                            "summary": "done",
+                            "answer": "",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "done",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
                 usage={"input_tokens": 8, "output_tokens": 3},
             )
 
@@ -196,7 +290,10 @@ async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
         ],
-        tools={"flip_refs": _FlipRefsTool()},
+        tools={
+            "flip_refs": _FlipRefsTool(),
+            "submit_final_result": _submit_final_result_tool(),
+        },
         model_refs=['old-model'],
         model_refs_supplier=lambda: list(current_refs),
         runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
@@ -424,17 +521,19 @@ def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
     request_messages = loop._apply_temporary_system_overlay(base_messages, overlay_text=overlay)
 
     assert base_messages[0]['content'] == 'base system'
-    assert request_messages[0]['role'] == 'system'
-    assert request_messages[0]['content'] == overlay
-    assert request_messages[1:] == base_messages
+    assert request_messages[0] == base_messages[0]
+    assert request_messages[1]['role'] == 'user'
+    assert 'System note for this turn only:' in str(request_messages[1]['content'])
+    assert overlay in str(request_messages[1]['content'])
+    assert 'base user' in str(request_messages[1]['content'])
 
 
 def test_execution_result_protocol_message_avoids_partial_guidance() -> None:
     message = ReActToolLoop._result_protocol_message(node_kind='execution')
 
-    assert 'failed+partial' not in message
-    assert 'delivery_status="partial"' in message
-    assert 'failed+blocked' in message
+    assert 'delivery_status="partial"' not in message
+    assert 'submit_final_result' in message
+    assert 'final|blocked' in message
     assert 'If you are ending the node now' in message
     assert 'If the task is not complete yet' in message
 
@@ -445,9 +544,9 @@ def test_execution_result_contract_violation_message_keeps_workflow_open() -> No
         node_kind='execution',
     )
 
-    assert 'Fix every violation and reply with only one JSON object.' not in message
+    assert 'submit_final_result' in message
     assert 'If you are ending the node now' in message
-    assert 'do not force another premature result JSON' in message
+    assert 'do not force another premature final submission' in message
 
 
 def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only() -> None:
@@ -456,8 +555,8 @@ def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only
         node_kind='acceptance',
     )
 
-    assert 'failed+partial' not in message
-    assert 'delivery_status="partial"' in message
+    assert 'delivery_status="partial"' not in message
+    assert 'submit_final_result' in message
     assert 'failed+final' in message
     assert 'failed+blocked' in message
 
@@ -476,9 +575,23 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
                     usage={'input_tokens': 8, 'output_tokens': 3},
                 ),
                 LLMResponse(
-                    content='{"status":"failed","delivery_status":"blocked","summary":"done","answer":"","evidence":[],"remaining_work":[],"blocking_reason":"done"}',
-                    tool_calls=[],
-                    finish_reason='stop',
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:final',
+                            name='submit_final_result',
+                            arguments={
+                                'status': 'failed',
+                                'delivery_status': 'blocked',
+                                'summary': 'done',
+                                'answer': '',
+                                'evidence': [],
+                                'remaining_work': [],
+                                'blocking_reason': 'done',
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
                     usage={'input_tokens': 8, 'output_tokens': 3},
                 ),
             ]
@@ -495,7 +608,7 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-1","goal":"demo"}'},
         ],
-        tools={},
+        tools={'submit_final_result': _submit_final_result_tool()},
         model_refs=['fake'],
         runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
         max_iterations=3,
@@ -505,8 +618,7 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
     assert len(calls) == 2
     second_request = calls[1]
     assert second_request[0]['role'] == 'system'
-    assert 'If you are ending the node now' in str(second_request[0]['content'])
-    assert not any(
-        message.get('role') == 'user' and 'If you are ending the node now' in str(message.get('content') or '')
-        for message in second_request
-    )
+    overlay_carrier = second_request[-1]
+    assert overlay_carrier['role'] == 'user'
+    assert 'If you are ending the node now' in str(overlay_carrier['content'])
+    assert 'submit_final_result' in str(overlay_carrier['content'])

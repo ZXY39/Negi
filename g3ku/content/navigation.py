@@ -174,7 +174,34 @@ def _parsed_json_payload(value: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str) -> bool:
+    normalized = str(source_kind or "").strip().lower()
+    if not normalized.startswith("tool_result:"):
+        return False
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("ok") is not True:
+        return False
+    level = str(payload.get("level") or "").strip().lower()
+    if level != "l2":
+        return False
+    uri = str(payload.get("uri") or "").strip()
+    if not uri.startswith(("g3ku://skill/", "g3ku://resource/tool/")):
+        return False
+    content = payload.get("content")
+    l0 = payload.get("l0")
+    l1 = payload.get("l1")
+    if not isinstance(content, str):
+        return False
+    if not isinstance(l0, str) or not isinstance(l1, str):
+        return False
+    return True
+
+
 def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
+    if _should_keep_inline_direct_load_tool_result(value, source_kind=source_kind):
+        return True
     normalized = str(source_kind or "").strip().lower()
     if normalized not in {"tool_result:content", "tool_result:filesystem"}:
         return False

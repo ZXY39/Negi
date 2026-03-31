@@ -23,6 +23,7 @@ from main.models import (
     normalize_final_acceptance_metadata,
 )
 from main.runtime.stage_budget import (
+    FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
     response_tool_calls_count_against_stage_budget,
     tool_call_counts_against_stage_budget,
@@ -61,6 +62,7 @@ _EXECUTION_STAGE_STATUS_COMPLETED = '完成'
 _EXECUTION_STAGE_STATUS_FAILED = '失败'
 _NON_BUDGET_EXECUTION_TOOLS = {
     _EXECUTION_STAGE_TOOL_NAME,
+    FINAL_RESULT_TOOL_NAME,
     'spawn_child_nodes',
     'wait_tool_execution',
     'stop_tool_execution',

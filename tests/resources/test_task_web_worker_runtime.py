@@ -3242,9 +3242,23 @@ async def test_pause_during_model_call_keeps_task_resumable_and_resume_finishes_
                     usage={"input_tokens": 8, "output_tokens": 4},
                 )
             return LLMResponse(
-                content='{"status":"success","delivery_status":"final","summary":"done","answer":"done","evidence":[{"kind":"artifact","note":"resume path completed"}],"remaining_work":[],"blocking_reason":""}',
-                tool_calls=[],
-                finish_reason="stop",
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [{"kind": "artifact", "note": "resume path completed"}],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
                 usage={"input_tokens": 8, "output_tokens": 4},
             )
 

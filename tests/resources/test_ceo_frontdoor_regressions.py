@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from langchain_core.messages import HumanMessage
 
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.base import Tool
+from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.integrations.langchain_runtime import ProviderChatModelAdapter
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
@@ -18,6 +20,8 @@ from g3ku.runtime.frontdoor.interaction_trace import new_interaction_trace, reco
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import Session, SessionManager
 from main.service.runtime_service import CreateAsyncTaskTool
+from main.storage.artifact_store import TaskArtifactStore
+from main.storage.sqlite_store import SQLiteTaskStore
 
 
 class _PromptBuilder:
@@ -172,6 +176,37 @@ class _CronTool(Tool):
 
 def _cron_tool() -> _CronTool:
     return _CronTool()
+
+
+class _DirectLoadTool(Tool):
+    @property
+    def name(self) -> str:
+        return 'direct_load_tool'
+
+    @property
+    def description(self) -> str:
+        return 'Return a large direct-load payload.'
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            'type': 'object',
+            'properties': {},
+            'required': [],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        _ = kwargs
+        payload = {
+            'ok': True,
+            'level': 'l2',
+            'content': '\n'.join(f'skill line {index:03d}' for index in range(1, 321)),
+            'l0': 'skill short summary',
+            'l1': 'skill structured overview',
+            'path': '/virtual/full_body_skill.md',
+            'uri': 'g3ku://skill/full_body_skill',
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
 
 def test_live_raw_tail_returns_recent_complete_turns_without_compact_history() -> None:
@@ -857,6 +892,109 @@ async def test_ceo_frontdoor_runner_exposes_ordinary_tools_before_first_stage(mo
     ]
     assert 'submit_next_stage' in tool_names
     assert 'filesystem' in tool_names
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_keeps_direct_load_tool_result_inline(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    class _MainTaskService:
+        def __init__(self, *, content_store) -> None:
+            self.log_service = SimpleNamespace(_content_store=content_store)
+
+        async def startup(self) -> None:
+            return None
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'load direct tool context', 'tool_round_budget': 2},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='',
+                tool_calls=[ToolCallRequest(id='tool-1', name='direct_load_tool', arguments={})],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(content='done', finish_reason='stop'),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=_MainTaskService(content_store=content_store),
+        tools=_FakeToolRegistry([_DirectLoadTool()]),
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['direct_load_tool']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['direct_load_tool'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    try:
+        output = await runner.run_turn(user_input=SimpleNamespace(content='load tool context'), session=session)
+
+        assert output == 'done'
+        assert len(backend.calls) == 3
+        tool_messages = [
+            item
+            for item in list(backend.calls[2].get('messages') or [])
+            if (
+                str(item.get('role') or '').strip() == 'tool'
+                and str(item.get('name') or '').strip() == 'direct_load_tool'
+            )
+        ]
+        assert len(tool_messages) == 1
+        assert parse_content_envelope(tool_messages[0]['content']) is None
+        payload = json.loads(str(tool_messages[0]['content']))
+        assert payload['uri'] == 'g3ku://skill/full_body_skill'
+        assert payload['content'].startswith('skill line 001')
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio

@@ -26,8 +26,7 @@ from main.models import (
     normalize_result_payload,
 )
 from main.prompts import load_prompt
-from main.runtime.internal_tools import SpawnChildNodesTool, SubmitNextStageTool
-from main.runtime.stage_messages import build_execution_stage_result_block_message
+from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -184,75 +183,8 @@ class NodeRunner:
         latest = self._store.get_node(node_id)
         if latest is None or latest.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return None
-
-        candidate_text = self._latest_output_candidate_text(latest)
-        if not str(candidate_text or '').strip():
-            return None
-
-        parsed = self._react_loop._parse_final_result(candidate_text)
-        if parsed is None:
-            return None
-
-        stage_gate = self._react_loop._execution_stage_gate(
-            task_id=task_id,
-            node_id=node_id,
-            node_kind=latest.node_kind,
-        )
-        if build_execution_stage_result_block_message(
-            node_kind=latest.node_kind,
-            stage_gate=stage_gate,
-        ):
-            return None
-
-        result, raw_payload = parsed
-        messages = self._runtime_frame_messages(task_id=task_id, node_id=node_id)
-        has_tool_results = self._react_loop._has_tool_results(messages)
-        if not has_tool_results:
-            has_tool_results = any(list(getattr(entry, 'tool_calls', []) or []) for entry in list(latest.output or []))
-        violations = self._react_loop._validate_final_result(
-            result=result,
-            raw_payload=raw_payload,
-            has_tool_results=has_tool_results,
-        )
-        if violations:
-            return None
-        return self._mark_finished(task_id, node_id, result)
-
-    def _latest_output_candidate_text(self, node: NodeRecord) -> str:
-        for entry in reversed(list(node.output or [])):
-            ref = str(getattr(entry, 'content_ref', '') or '').strip()
-            if ref:
-                resolved = self._resolve_content_ref(ref)
-                if str(resolved or '').strip():
-                    return str(resolved or '')
-            text = str(getattr(entry, 'content', '') or '')
-            if text.strip():
-                return text
-
-        detail_getter = getattr(self._store, 'get_task_node_detail', None)
-        if callable(detail_getter):
-            detail = detail_getter(node.node_id)
-            if detail is not None:
-                ref = str(getattr(detail, 'output_ref', '') or '').strip()
-                if ref:
-                    resolved = self._resolve_content_ref(ref)
-                    if str(resolved or '').strip():
-                        return str(resolved or '')
-                text = str(getattr(detail, 'output_text', '') or '')
-                if text.strip():
-                    return text
-        return ''
-
-    def _resolve_content_ref(self, ref: str) -> str:
-        content_store = getattr(self._log_service, '_content_store', None)
-        resolver = getattr(content_store, '_resolve', None) if content_store is not None else None
-        if not callable(resolver):
-            return ''
-        try:
-            text, _handle = resolver(ref=ref, path=None)
-        except Exception:
-            return ''
-        return str(text or '')
+        _ = task_id
+        return None
 
     def _runtime_frame_messages(self, *, task_id: str, node_id: str) -> list[dict[str, Any]]:
         frame = self._log_service.read_runtime_frame(task_id, node_id) or {}
@@ -272,8 +204,13 @@ class NodeRunner:
                     tool_round_budget=tool_round_budget,
                 )
             )
+            tools['submit_final_result'] = SubmitFinalResultTool(
+                lambda payload: self._submit_final_result(payload),
+                node_kind=node.node_kind,
+            )
         else:
             tools.pop('submit_next_stage', None)
+            tools.pop('submit_final_result', None)
         if node.node_kind == KIND_EXECUTION:
             if node.can_spawn_children:
                 tools['spawn_child_nodes'] = SpawnChildNodesTool(
@@ -1372,6 +1309,10 @@ class NodeRunner:
             'tool_round_budget': int(stage.get('tool_round_budget') or 0),
             'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
         }
+
+    @staticmethod
+    async def _submit_final_result(payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(payload or {})
 
     def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED

@@ -69,9 +69,9 @@
 
 ## 4. 最终输出协议
 
-### 4.1 最终 JSON 形状
+### 4.1 最终结果提交工具
 
-最终回复必须是一个精确符合以下形状的单个 JSON 对象：
+结束 acceptance 节点时，不允许直接输出原始 JSON、Markdown 或 prose 作为最终结论；必须调用 `submit_final_result`，并且让它成为该回合唯一的工具调用。参数形状必须精确符合：
 
 ```json
 {
@@ -100,4 +100,4 @@
 - 如果本节点使用过工具，返回 `success` 时应至少提供一条 `evidence`。
 - `summary` 应是简洁的验收结论；`answer` 可给出更完整的裁定说明。
 - `failed + blocked` 时，`blocking_reason` 必须非空。
-- 不要用 Markdown 代码块包裹你最终实际输出的 JSON。
+- 不要把上述对象当成最终文本回复直接输出；必须通过 `submit_final_result` 提交。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -9,7 +10,10 @@ import pytest
 
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
+from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.runtime.tool_bridge import ToolExecutionBridge
+from main.storage.artifact_store import TaskArtifactStore
+from main.storage.sqlite_store import SQLiteTaskStore
 
 
 class _ImmediateTool(Tool):
@@ -32,6 +36,37 @@ class _ImmediateTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         _ = kwargs
         return "done"
+
+
+class _DirectLoadTool(Tool):
+    @property
+    def name(self) -> str:
+        return "direct_load_tool"
+
+    @property
+    def description(self) -> str:
+        return "Return a large direct-load payload."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        payload = {
+            "ok": True,
+            "level": "l2",
+            "content": "\n".join(f"skill line {index:03d}" for index in range(1, 321)),
+            "l0": "skill short summary",
+            "l1": "skill structured overview",
+            "path": "/virtual/full_body_skill.md",
+            "uri": "g3ku://skill/full_body_skill",
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
 
 class _LoopStub:
@@ -134,3 +169,46 @@ async def test_tool_execution_bridge_uses_watchdog_for_ceo_roles(tmp_path: Path,
     assert calls == [{"tool_name": "immediate_tool", "actor_role": "ceo"}]
     assert result.content == "done"
     assert result.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_bridge_keeps_direct_load_tool_result_inline(tmp_path: Path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+
+    try:
+        loop = _LoopStub(tmp_path)
+        loop.tools.register(_DirectLoadTool())
+        loop.main_task_service = SimpleNamespace(content_store=content_store)
+        bridge = ToolExecutionBridge(loop)
+        runtime_context = SimpleNamespace(
+            actor_role="execution",
+            session_key="web:test-inline",
+            channel="web",
+            chat_id="test-inline",
+            message_id=None,
+            iteration=1,
+            on_progress=None,
+            cancel_token=None,
+        )
+
+        result = await bridge.execute_named_tool(
+            name="direct_load_tool",
+            arguments={},
+            tool_call_id="call-inline",
+            runtime_context=runtime_context,
+            emit_progress=False,
+        )
+
+        assert parse_content_envelope(result.content) is None
+        payload = json.loads(result.content)
+        assert payload["uri"] == "g3ku://skill/full_body_skill"
+        assert payload["content"].startswith("skill line 001")
+        assert result.status == "success"
+    finally:
+        store.close()
