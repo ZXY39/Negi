@@ -21,6 +21,9 @@ from main.monitoring.models import (
     TaskProgressResult,
     TaskSpawnRound,
     TaskSummaryResult,
+    TaskTreeSnapshot,
+    TaskTreeSnapshotNode,
+    TaskTreeSnapshotRound,
     TaskTreeNodeSummary,
 )
 
@@ -143,7 +146,6 @@ class TaskQueryService:
         task_id: str,
         *,
         mark_read: bool = True,
-        include_tree: bool = False,
     ) -> dict[str, Any] | None:
         started_at = datetime.now().astimezone().isoformat(timespec='seconds')
         started_mono = time.perf_counter()
@@ -155,7 +157,6 @@ class TaskQueryService:
             task = self._store.get_task(task_id) or task
         live_state = self._projection_live_state(task.task_id)
         root_node = self.get_node_detail(task.task_id, task.root_node_id)
-        tree_root = self._projection_root(task) if include_tree else None
         runtime_summary = live_state.model_dump(mode='json') if live_state is not None else {
             'active_node_ids': [],
             'runnable_node_ids': [],
@@ -196,8 +197,6 @@ class TaskQueryService:
             'counts': counts,
             'recent_model_calls': [item.model_dump(mode='json') for item in self._recent_model_calls(task.task_id)],
         }
-        if include_tree:
-            payload['tree_root'] = tree_root.model_dump(mode='json') if tree_root is not None else None
         self._record_debug('query_service.get_task_snapshot', started_at=started_at, started_mono=started_mono)
         return payload
 
@@ -241,79 +240,197 @@ class TaskQueryService:
         )
         return detail
 
-    def get_node_children(
+    def get_tree_snapshot(self, task_id: str) -> TaskTreeSnapshot | None:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        return self._build_tree_snapshot(task_id=task.task_id, root_node_id=task.root_node_id)
+
+    def get_tree_subtree(
         self,
         task_id: str,
         node_id: str,
         *,
         round_id: str | None = None,
-        offset: int = 0,
-        limit: int = 50,
-    ) -> dict[str, Any] | None:
-        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
-        started_mono = time.perf_counter()
+    ) -> TaskTreeSnapshot | None:
         task = self._store.get_task(task_id)
-        if task is None:
+        root = self._store.get_task_node(node_id)
+        if task is None or root is None or str(root.task_id or '').strip() != task.task_id:
             return None
-        parent = self._store.get_task_node(node_id)
-        if parent is None or str(parent.task_id or '').strip() != task.task_id:
-            return None
-        rounds = [item for item in self._store.list_task_node_rounds(task.task_id) if str(item.parent_node_id or '').strip() == str(node_id or '').strip()]
-        normalized_round_id = str(round_id or '').strip()
-        default_round_id = ''
+        return self._build_tree_snapshot(
+            task_id=task.task_id,
+            root_node_id=task.root_node_id,
+            scope_root_id=str(node_id or '').strip(),
+            root_round_id=str(round_id or '').strip(),
+        )
+
+    def _snapshot_projection_maps(self, task_id: str) -> tuple[dict[str, Any], dict[str, list[Any]], dict[str, list[str]]]:
+        projection_nodes = list(self._store.list_task_nodes(task_id) or [])
+        node_map = {
+            str(item.node_id or '').strip(): item
+            for item in projection_nodes
+            if str(item.node_id or '').strip()
+        }
+        rounds = list(self._store.list_task_node_rounds(task_id) or [])
+        rounds_by_parent: dict[str, list[Any]] = {}
+        for item in rounds:
+            rounds_by_parent.setdefault(str(item.parent_node_id or '').strip(), []).append(item)
+        for parent_id, items in rounds_by_parent.items():
+            rounds_by_parent[parent_id] = sorted(
+                [item for item in items if str(getattr(item, 'round_id', '') or '').strip()],
+                key=lambda item: (int(getattr(item, 'round_index', 0) or 0), str(getattr(item, 'round_id', '') or '')),
+            )
+        direct_children: dict[str, list[str]] = {}
+        for item in projection_nodes:
+            parent_id = str(getattr(item, 'parent_node_id', '') or '').strip()
+            node_id = str(getattr(item, 'node_id', '') or '').strip()
+            if not parent_id or not node_id:
+                continue
+            direct_children.setdefault(parent_id, []).append(node_id)
+        for parent_id, child_ids in list(direct_children.items()):
+            direct_children[parent_id] = sorted(
+                [child_id for child_id in child_ids if child_id in node_map],
+                key=lambda child_id: (
+                    str(getattr(node_map[child_id], 'sort_key', '') or ''),
+                    str(child_id or ''),
+                ),
+            )
+        return node_map, rounds_by_parent, direct_children
+
+    @staticmethod
+    def _snapshot_default_round_id(record: Any, rounds: list[Any]) -> str:
+        explicit_default = str(getattr(record, 'default_round_id', '') or '').strip()
+        if explicit_default and any(str(getattr(item, 'round_id', '') or '').strip() == explicit_default for item in rounds):
+            return explicit_default
         if rounds:
-            default_round_id = str(next((item.round_id for item in rounds if bool(item.is_latest)), rounds[-1].round_id) or '').strip()
-        selected_round_id = normalized_round_id or default_round_id
-        explicit_ids = {
+            latest = next((item for item in rounds if bool(getattr(item, 'is_latest', False))), rounds[-1])
+            return str(getattr(latest, 'round_id', '') or '').strip()
+        return ''
+
+    def _snapshot_node_from_projection(
+        self,
+        record: Any,
+        *,
+        rounds_by_parent: dict[str, list[Any]],
+        direct_children: dict[str, list[str]],
+    ) -> TaskTreeSnapshotNode:
+        node_id = str(getattr(record, 'node_id', '') or '').strip()
+        parent_rounds = list(rounds_by_parent.get(node_id, []))
+        round_child_ids = {
             str(child_id or '').strip()
-            for round_item in rounds
-            for child_id in list(round_item.child_node_ids or [])
+            for round_record in parent_rounds
+            for child_id in list(getattr(round_record, 'child_node_ids', []) or [])
             if str(child_id or '').strip()
         }
-        direct_children = [item for item in self._store.list_task_nodes(task.task_id) if str(item.parent_node_id or '').strip() == str(node_id or '').strip()]
         auxiliary_child_ids = [
-            str(item.node_id or '').strip()
-            for item in direct_children
-            if str(item.node_id or '').strip() and str(item.node_id or '').strip() not in explicit_ids
+            child_id
+            for child_id in list(direct_children.get(node_id, []) or [])
+            if child_id not in round_child_ids
         ]
-        child_ids: list[str] = list(auxiliary_child_ids)
-        if selected_round_id:
-            selected = next((item for item in rounds if str(item.round_id or '').strip() == selected_round_id), None)
-            if selected is not None:
-                child_ids.extend(str(item or '').strip() for item in list(selected.child_node_ids or []) if str(item or '').strip())
-        child_ids = child_ids[max(0, int(offset or 0)) : max(0, int(offset or 0)) + max(1, int(limit or 50))]
-        details = []
-        for child_id in child_ids:
-            detail = self.get_node_detail(task.task_id, child_id)
-            if detail is not None:
-                details.append(detail.model_dump(mode='json'))
-        payload = {
-            'task_id': task.task_id,
-            'parent_node_id': str(node_id or '').strip(),
-            'round_id': selected_round_id,
-            'default_round_id': default_round_id,
-            'rounds': [
-                {
-                    'round_id': str(item.round_id or ''),
-                    'round_index': int(item.round_index or 0),
-                    'label': str(item.label or ''),
-                    'is_latest': bool(item.is_latest),
-                    'created_at': str(item.created_at or ''),
-                    'child_node_ids': [str(child_id or '').strip() for child_id in list(item.child_node_ids or []) if str(child_id or '').strip()],
-                    'source': str(item.source or 'explicit'),
-                    'total_children': int(item.total_children or 0),
-                    'completed_children': int(item.completed_children or 0),
-                    'running_children': int(item.running_children or 0),
-                    'failed_children': int(item.failed_children or 0),
-                }
-                for item in rounds
-            ],
-            'items': details,
-            'offset': max(0, int(offset or 0)),
-            'limit': max(1, int(limit or 50)),
+        snapshot_rounds = [
+            TaskTreeSnapshotRound(
+                round_id=str(getattr(round_record, 'round_id', '') or '').strip(),
+                label=str(getattr(round_record, 'label', '') or '').strip(),
+                is_latest=bool(getattr(round_record, 'is_latest', False)),
+                total_children=int(getattr(round_record, 'total_children', 0) or 0),
+                completed_children=int(getattr(round_record, 'completed_children', 0) or 0),
+                running_children=int(getattr(round_record, 'running_children', 0) or 0),
+                failed_children=int(getattr(round_record, 'failed_children', 0) or 0),
+                child_ids=[
+                    str(child_id or '').strip()
+                    for child_id in list(getattr(round_record, 'child_node_ids', []) or [])
+                    if str(child_id or '').strip()
+                ],
+            )
+            for round_record in parent_rounds
+        ]
+        return TaskTreeSnapshotNode(
+            node_id=node_id,
+            parent_node_id=str(getattr(record, 'parent_node_id', '') or '').strip() or None,
+            node_kind=str(getattr(record, 'node_kind', '') or 'execution').strip() or 'execution',
+            status=str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress',
+            title=str(getattr(record, 'title', '') or node_id).strip() or node_id,
+            updated_at=str(getattr(record, 'updated_at', '') or '').strip(),
+            children_fingerprint=str(getattr(record, 'children_fingerprint', '') or '').strip(),
+            default_round_id=self._snapshot_default_round_id(record, parent_rounds),
+            rounds=snapshot_rounds,
+            auxiliary_child_ids=auxiliary_child_ids,
+        )
+
+    @staticmethod
+    def _snapshot_visible_child_ids(node: TaskTreeSnapshotNode, *, round_override: str = '') -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for child_id in list(getattr(node, 'auxiliary_child_ids', []) or []):
+            normalized = str(child_id or '').strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            out.append(normalized)
+        rounds = list(getattr(node, 'rounds', []) or [])
+        if not rounds:
+            return out
+        requested_round_id = str(round_override or '').strip()
+        default_round_id = str(getattr(node, 'default_round_id', '') or '').strip()
+        selected = next((item for item in rounds if str(getattr(item, 'round_id', '') or '').strip() == requested_round_id), None)
+        if selected is None:
+            selected = next((item for item in rounds if str(getattr(item, 'round_id', '') or '').strip() == default_round_id), None)
+        if selected is None:
+            selected = next((item for item in rounds if bool(getattr(item, 'is_latest', False))), None) or rounds[-1]
+        for child_id in list(getattr(selected, 'child_ids', []) or []):
+            normalized = str(child_id or '').strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            out.append(normalized)
+        return out
+
+    def _build_tree_snapshot(
+        self,
+        *,
+        task_id: str,
+        root_node_id: str,
+        scope_root_id: str = '',
+        root_round_id: str = '',
+    ) -> TaskTreeSnapshot:
+        node_map, rounds_by_parent, direct_children = self._snapshot_projection_maps(task_id)
+        snapshot_nodes = {
+            node_id: self._snapshot_node_from_projection(
+                record,
+                rounds_by_parent=rounds_by_parent,
+                direct_children=direct_children,
+            )
+            for node_id, record in node_map.items()
         }
-        self._record_debug('query_service.get_node_children', started_at=started_at, started_mono=started_mono)
-        return payload
+        included_ids: set[str]
+        normalized_scope_root_id = str(scope_root_id or '').strip()
+        if normalized_scope_root_id:
+            included_ids = set()
+            queue: list[tuple[str, str]] = [(normalized_scope_root_id, str(root_round_id or '').strip())]
+            while queue:
+                current_id, round_override = queue.pop(0)
+                if current_id in included_ids:
+                    continue
+                snapshot_node = snapshot_nodes.get(current_id)
+                if snapshot_node is None:
+                    continue
+                included_ids.add(current_id)
+                for child_id in self._snapshot_visible_child_ids(snapshot_node, round_override=round_override):
+                    if child_id not in included_ids:
+                        queue.append((child_id, ''))
+        else:
+            included_ids = set(snapshot_nodes.keys())
+        projection_meta = self._store.get_task_projection_meta(task_id)
+        snapshot_version = str(getattr(projection_meta, 'version', '') or '').strip() or str(
+            max(0, len(snapshot_nodes))
+        )
+        return TaskTreeSnapshot(
+            task_id=task_id,
+            root_node_id=normalized_scope_root_id or str(root_node_id or '').strip(),
+            generated_at=datetime.now().astimezone().isoformat(timespec='seconds'),
+            snapshot_version=snapshot_version,
+            nodes_by_id={node_id: snapshot_nodes[node_id] for node_id in included_ids if node_id in snapshot_nodes},
+        )
 
     def _record_debug(self, section: str, *, started_at: str, started_mono: float) -> None:
         recorder = self._debug_recorder

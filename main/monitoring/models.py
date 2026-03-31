@@ -23,6 +23,38 @@ class TaskSpawnRound(Model):
     children: list['TaskTreeNode | TaskTreeNodeSummary'] = Field(default_factory=list)
 
 
+class TaskTreeSnapshotRound(Model):
+    round_id: str = ''
+    label: str = ''
+    is_latest: bool = False
+    total_children: int = 0
+    completed_children: int = 0
+    running_children: int = 0
+    failed_children: int = 0
+    child_ids: list[str] = Field(default_factory=list)
+
+
+class TaskTreeSnapshotNode(Model):
+    node_id: str
+    parent_node_id: str | None = None
+    node_kind: str = 'execution'
+    status: NodeStatus = 'in_progress'
+    title: str = ''
+    updated_at: str = ''
+    children_fingerprint: str = ''
+    default_round_id: str = ''
+    rounds: list[TaskTreeSnapshotRound] = Field(default_factory=list)
+    auxiliary_child_ids: list[str] = Field(default_factory=list)
+
+
+class TaskTreeSnapshot(Model):
+    task_id: str
+    root_node_id: str = ''
+    generated_at: str = ''
+    snapshot_version: str = ''
+    nodes_by_id: dict[str, TaskTreeSnapshotNode] = Field(default_factory=dict)
+
+
 class TaskTreeNode(Model):
     node_id: str
     parent_node_id: str | None = None

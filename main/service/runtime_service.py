@@ -1191,45 +1191,6 @@ class MainRuntimeService:
         )
         self.registry.publish_global_task(task.task_id, payload)
 
-    def _publish_task_node_children_snapshot(
-        self,
-        *,
-        task: TaskRecord,
-        parent_node_id: str,
-        round_id: str | None = None,
-    ) -> None:
-        normalized_parent_node_id = str(parent_node_id or '').strip()
-        if not normalized_parent_node_id:
-            return
-        payload = self.get_node_children_payload(
-            task.task_id,
-            normalized_parent_node_id,
-            round_id=round_id,
-            offset=0,
-            limit=200,
-        )
-        if payload is None:
-            return
-        data = dict(payload)
-        event = build_envelope(
-            channel='task',
-            session_id=task.session_id,
-            task_id=task.task_id,
-            seq=self.registry.next_global_task_seq(task.task_id),
-            type='task.node.children.snapshot',
-            data=data,
-        )
-        self.registry.publish_global_task(task.task_id, event)
-        if self.execution_mode == 'worker':
-            self._schedule_task_event_callback(
-                {
-                    'event_type': 'task.node.children.snapshot',
-                    'session_id': task.session_id,
-                    'task_id': task.task_id,
-                    'data': data,
-                }
-            )
-
     def _publish_live_snapshot(self, task: TaskRecord, payload: dict[str, Any], publish_summary: bool) -> None:
         started_at = now_iso()
         started_mono = time.perf_counter()
@@ -1273,6 +1234,34 @@ class MainRuntimeService:
             self.registry.publish_global_task(task.task_id, detail_payload)
             self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
             return
+        if event_type == 'task.token.patch':
+            if self.execution_mode == 'worker':
+                self._schedule_task_event_callback(
+                    {
+                        'event_type': event_type,
+                        'session_id': task.session_id,
+                        'task_id': task.task_id,
+                        'data': data,
+                    }
+                )
+                self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+                return
+            self._publish_task_list_envelope(
+                target_session_id=task.session_id,
+                session_id=task.session_id,
+                task_id=task.task_id,
+                event_type=event_type,
+                data=data,
+            )
+            self._publish_task_list_envelope(
+                target_session_id='all',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                event_type=event_type,
+                data=data,
+            )
+            self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+            return
         if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'}:
             detail_payload = build_envelope(
                 channel='task',
@@ -1292,14 +1281,6 @@ class MainRuntimeService:
                         'data': data,
                     }
                 )
-            if event_type == 'task.node.patch':
-                node_payload = dict(data.get('node') or {}) if isinstance(data.get('node'), dict) else {}
-                node_id = str(node_payload.get('node_id') or '').strip()
-                parent_node_id = str(node_payload.get('parent_node_id') or '').strip()
-                if node_id:
-                    self._publish_task_node_children_snapshot(task=task, parent_node_id=node_id)
-                if parent_node_id and parent_node_id != node_id:
-                    self._publish_task_node_children_snapshot(task=task, parent_node_id=parent_node_id)
             self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
             return
         self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
@@ -1313,7 +1294,7 @@ class MainRuntimeService:
         session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
         task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip()) if normalized.get('task_id') else ''
         data = dict(normalized.get('data') or {})
-        if event_type in {'task.node.patch', 'task.node.children.snapshot', 'task.live.patch', 'task.model.call', 'task.terminal'} and task_id:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'} and task_id:
             payload = build_envelope(
                 channel='task',
                 session_id=session_id,
@@ -1323,6 +1304,16 @@ class MainRuntimeService:
                 data=data,
             )
             self.registry.publish_global_task(task_id, payload)
+            return True
+        if event_type == 'task.token.patch' and task_id:
+            for target_session_id in {session_id, 'all'}:
+                self._publish_task_list_envelope(
+                    target_session_id=target_session_id,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type='task.token.patch',
+                    data=data,
+                )
             return True
         if event_type == 'task.summary.patch':
             normalized_task_payload = dict(data.get('task') or {})
@@ -3559,17 +3550,39 @@ class MainRuntimeService:
         task_id: str,
         *,
         mark_read: bool = False,
-        include_tree: bool = False,
     ) -> dict[str, Any] | None:
         task_id = self.normalize_task_id(task_id)
         payload = self.query_service.get_task_snapshot(
             task_id,
             mark_read=mark_read,
-            include_tree=include_tree,
         )
         if payload is None:
             return None
         return payload
+
+    def get_task_tree_snapshot_payload(self, task_id: str) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        snapshot = self.query_service.get_tree_snapshot(normalized_task_id)
+        if snapshot is None:
+            return None
+        return {'ok': True, **snapshot.model_dump(mode='json')}
+
+    def get_task_tree_subtree_payload(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        round_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        snapshot = self.query_service.get_tree_subtree(
+            normalized_task_id,
+            node_id,
+            round_id=round_id,
+        )
+        if snapshot is None:
+            return None
+        return {'ok': True, **snapshot.model_dump(mode='json')}
 
     def get_node_detail_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         normalized_task_id = self.normalize_task_id(task_id)
@@ -3582,27 +3595,6 @@ class MainRuntimeService:
             'node_id': node_id,
             'item': detail.model_dump(mode='json'),
         }
-
-    def get_node_children_payload(
-        self,
-        task_id: str,
-        node_id: str,
-        *,
-        round_id: str | None = None,
-        offset: int = 0,
-        limit: int = 50,
-    ) -> dict[str, Any] | None:
-        normalized_task_id = self.normalize_task_id(task_id)
-        payload = self.query_service.get_node_children(
-            normalized_task_id,
-            node_id,
-            round_id=round_id,
-            offset=offset,
-            limit=limit,
-        )
-        if payload is None:
-            return None
-        return {'ok': True, **payload}
 
     def node_detail(self, task_id: str, node_id: str) -> dict[str, Any] | str:
         normalized_task_id = self.normalize_task_id(task_id)

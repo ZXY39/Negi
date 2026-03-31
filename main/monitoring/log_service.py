@@ -336,6 +336,7 @@ class TaskLogService:
                 self._sync_node_read_models_locked(updated)
                 self._publish_task_node_patch_locked(task=task, node=updated)
                 if delta_usage is not None:
+                    self._publish_task_token_patch_locked(task=task)
                     model_call_payload = self._model_call_payload(
                         task_id=task_id,
                         node_id=node_id,
@@ -1745,6 +1746,15 @@ class TaskLogService:
         self._append_task_event(task=task, event_type='task.node.patch', data=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.node.patch', data=payload)
 
+    def _publish_task_token_patch_locked(self, *, task: TaskRecord) -> None:
+        payload = {
+            'task_id': task.task_id,
+            'updated_at': str(task.updated_at or ''),
+            'token_usage': task.token_usage.model_dump(mode='json'),
+        }
+        self._append_task_event(task=task, event_type='task.token.patch', data=payload)
+        self._dispatch_live_event_locked(task=task, event_type='task.token.patch', data=payload)
+
     def _publish_task_live_patch_locked(
         self,
         *,
@@ -1807,6 +1817,20 @@ class TaskLogService:
                         data=dict(data or {}),
                     ),
                 )
+        if event_type == 'task.token.patch':
+            for target_session_id in {session_id, 'all'}:
+                self._registry.publish_task_list(
+                    target_session_id,
+                    build_envelope(
+                        channel='task',
+                        session_id=session_id,
+                        task_id=task.task_id,
+                        seq=self._registry.next_task_list_seq(target_session_id),
+                        type=event_type,
+                        data=dict(data or {}),
+                    ),
+                )
+            return
         if event_type == 'task.model.call':
             self._registry.publish_global_task(
                 task.task_id,

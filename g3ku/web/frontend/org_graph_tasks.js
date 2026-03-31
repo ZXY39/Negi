@@ -945,17 +945,13 @@ function resetTaskView() {
     S.currentNodeDetail = null;
     S.taskNodeDetails = {};
     S.taskNodeDetailRequests = {};
-    S.taskNodeChildrenCache = {};
-    S.taskNodeChildrenRequests = {};
-    S.taskTreeHasFullSnapshot = false;
-    if (typeof resetTaskTreeBranchSyncState === "function") resetTaskTreeBranchSyncState();
+    if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();
     S.taskNodeBusy = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
     S.artifactContent = "";
-    S.tree = null;
     S.treeView = null;
-    S.treeRoundSelectionsByNodeId = {};
+    S.treeSelectedRoundByNodeId = {};
     S.selectedNodeId = null;
     S.treePan.active = false;
     S.treePan.originNodeId = null;
@@ -1140,7 +1136,7 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
         switchView("task-details");
         resetTaskView();
     }
-    const payload = await ApiClient.getTask(taskId, true, { includeTree: true });
+    const payload = await ApiClient.getTask(taskId, true);
     applyTaskPayload(payload);
     if (reopenSocket) {
         if (S.taskWs) {
@@ -1150,6 +1146,7 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
         S.taskWs = new WebSocket(ApiClient.getTaskWsUrl(taskId));
         S.taskWs.onmessage = (ev) => handleTaskEvent(JSON.parse(ev.data));
     }
+    await loadTaskTreeSnapshot(taskId);
     return payload;
 }
 
@@ -1159,7 +1156,8 @@ async function restoreTaskDetailSession() {
     try {
         await loadTaskDetail(snapshot.currentTaskId);
         S.taskDetailViewStates = snapshot.nodeViewStates || {};
-        S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, snapshot.treeRoundSelectionsByNodeId);
+        S.treeSelectedRoundByNodeId = normalizeTreeRoundSelections(snapshot.treeSelectedRoundByNodeId);
+        if (String(S.treeRootNodeId || "").trim()) renderTree();
         S.selectedArtifactId = snapshot.selectedArtifactId || "";
         if (snapshot.selectedNodeId) {
             const pendingViewState = getStoredTaskDetailViewState(snapshot.currentTaskId, snapshot.selectedNodeId);
@@ -1221,15 +1219,15 @@ function handleTaskEvent(payload) {
             runnable_node_count: runnableNodeIds.length,
             waiting_node_count: waitingNodeIds.length,
         };
-        if (S.tree) {
+        if (String(S.treeRootNodeId || "").trim()) {
             const candidateNodeIds = [...new Set([...activeNodeIds, ...runnableNodeIds, ...waitingNodeIds]
                 .map((item) => String(item || "").trim())
                 .filter(Boolean))];
             candidateNodeIds
-                .filter((item) => !findRawTaskTreeNode(S.tree, item))
+                .filter((item) => !treeSnapshotNode(item))
                 .slice(0, 3)
                 .forEach((item) => { void reconcileTaskTreeForNode(item); });
-            renderTree();
+            if (typeof scheduleRenderedTreeNodeStatusRefresh === "function") scheduleRenderedTreeNodeStatusRefresh();
         }
         return;
     }
@@ -1248,17 +1246,19 @@ function handleTaskEvent(payload) {
                     [nodeId]: { ...(S.taskNodeDetails[nodeId] || {}), ...nextNode },
                 };
             }
-            if (S.tree) {
-                const existingTreeNode = findRawTaskTreeNode(S.tree, nodeId);
+            if (String(S.treeRootNodeId || "").trim()) {
+                const existingTreeNode = treeSnapshotNode(nodeId);
                 if (existingTreeNode) {
                     const previousFingerprint = String(existingTreeNode?.children_fingerprint || "").trim();
-                    const nextFingerprint = String(nextNode?.children_fingerprint || "").trim();
-                    updateTaskTreeNode(S.tree, nodeId, (node) => {
-                        const patchNode = buildTaskTreeNodeFromDetail(nextNode, node);
-                        Object.assign(node, patchNode);
-                    });
-                    renderTree();
-                    if (previousFingerprint !== nextFingerprint) {
+                    S.treeNodesById = {
+                        ...(S.treeNodesById || {}),
+                        [nodeId]: normalizeTaskTreeSnapshotNode({
+                            ...existingTreeNode,
+                            ...nextNode,
+                        }, existingTreeNode),
+                    };
+                    if (typeof refreshRenderedTreeNodeStatus === "function") refreshRenderedTreeNodeStatus(nodeId);
+                    if (previousFingerprint !== String(nextNode?.children_fingerprint || "").trim()) {
                         scheduleTaskTreeBranchSync(nodeId);
                     }
                 } else if (parentNodeId) {
@@ -1269,7 +1269,7 @@ function handleTaskEvent(payload) {
                 const currentViewState = captureTaskDetailViewState();
                 stashTaskDetailViewState({ nodeId, viewState: currentViewState });
                 S.pendingTaskDetailRestore = { nodeId, viewState: currentViewState };
-                const selected = findTreeNode(S.treeView || S.tree, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
+                const selected = findTreeNode(S.treeView || S.treeRenderedRoot, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
                 void showAgent(selected, { preserveViewState: true, forceRefresh: true });
             } else {
                 const nextDetails = { ...(S.taskNodeDetails || {}) };
@@ -1277,10 +1277,6 @@ function handleTaskEvent(payload) {
                 S.taskNodeDetails = nextDetails;
             }
         }
-        return;
-    }
-    if (payload.type === "task.node.children.snapshot") {
-        applyTaskNodeChildrenSnapshot(payload.data || {}, { render: true });
         return;
     }
     if (payload.type === "task.artifact.added" || payload.type === "task.artifact.applied" || payload.type === "artifact.applied") {
@@ -1427,7 +1423,12 @@ function startTaskWorkerStatusPolling() {
         void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
         S.taskWorkerStatusPollId = window.setInterval(() => {
             void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
-            const lastPatchMs = S.lastTaskSummaryPatchAt ? Date.parse(S.lastTaskSummaryPatchAt) : Number.NaN;
+            const lastSummaryPatchMs = S.lastTaskSummaryPatchAt ? Date.parse(S.lastTaskSummaryPatchAt) : Number.NaN;
+            const lastTokenPatchMs = S.lastTaskTokenPatchAt ? Date.parse(S.lastTaskTokenPatchAt) : Number.NaN;
+            const lastPatchMs = Math.max(
+                Number.isFinite(lastSummaryPatchMs) ? lastSummaryPatchMs : -Infinity,
+                Number.isFinite(lastTokenPatchMs) ? lastTokenPatchMs : -Infinity,
+            );
             const hasRunningTasks = (S.tasks || []).some((task) => taskStatusKey(task) === "in_progress");
             if (
                 taskListViewVisible()
@@ -1479,6 +1480,15 @@ function initTasksWs() {
         }
         if (payload.type === "task.summary.patch") {
             patchTaskListItem(payload.data?.task || {});
+            return;
+        }
+        if (payload.type === "task.token.patch") {
+            S.lastTaskTokenPatchAt = new Date().toISOString();
+            patchTaskListItem({
+                task_id: payload.data?.task_id || payload.task_id || "",
+                updated_at: payload.data?.updated_at || "",
+                token_usage: payload.data?.token_usage || {},
+            });
             return;
         }
         if (payload.type === "task.deleted") {

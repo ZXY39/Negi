@@ -358,7 +358,7 @@ async def main() -> None:
             repeats=max(1, int(args.probes or 1)),
         )
         children_stats, children_payload = _measure_sync(
-            lambda: service.get_node_children_payload(sample_task.task_id, sample_task.root_node_id, limit=50),
+            lambda: service.get_task_tree_subtree_payload(sample_task.task_id, sample_task.root_node_id),
             repeats=max(1, int(args.probes or 1)),
         )
         worker_stats, worker_payload = _measure_sync(

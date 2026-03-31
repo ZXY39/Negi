@@ -17,6 +17,180 @@ function normalizeTreeRoundSelections(value) {
     return next;
 }
 
+function treeNormalizeInt(value, fallback = 0) {
+    const numeric = Number.parseInt(String(value ?? ""), 10);
+    return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function normalizeTaskTreeSnapshotRound(value = {}) {
+    return {
+        round_id: String(value?.round_id || "").trim(),
+        label: String(value?.label || "").trim(),
+        is_latest: !!value?.is_latest,
+        total_children: Math.max(0, treeNormalizeInt(value?.total_children, 0)),
+        completed_children: Math.max(0, treeNormalizeInt(value?.completed_children, 0)),
+        running_children: Math.max(0, treeNormalizeInt(value?.running_children, 0)),
+        failed_children: Math.max(0, treeNormalizeInt(value?.failed_children, 0)),
+        child_ids: (Array.isArray(value?.child_ids) ? value.child_ids : [])
+            .map((item) => String(item || "").trim())
+            .filter(Boolean),
+    };
+}
+
+function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
+    const prior = existing && typeof existing === "object" ? existing : {};
+    return {
+        node_id: String(value?.node_id || prior?.node_id || "").trim(),
+        parent_node_id: String(value?.parent_node_id || prior?.parent_node_id || "").trim() || null,
+        node_kind: String(value?.node_kind || prior?.node_kind || "execution").trim() || "execution",
+        status: String(value?.status || prior?.status || "in_progress").trim() || "in_progress",
+        title: String(value?.title || prior?.title || value?.goal || "").trim(),
+        updated_at: String(value?.updated_at || prior?.updated_at || "").trim(),
+        children_fingerprint: String(value?.children_fingerprint || prior?.children_fingerprint || "").trim(),
+        default_round_id: String(value?.default_round_id || prior?.default_round_id || "").trim(),
+        rounds: (Array.isArray(value?.rounds) ? value.rounds : Array.isArray(prior?.rounds) ? prior.rounds : [])
+            .map((item) => normalizeTaskTreeSnapshotRound(item))
+            .filter((item) => item.round_id),
+        auxiliary_child_ids: (Array.isArray(value?.auxiliary_child_ids) ? value.auxiliary_child_ids : Array.isArray(prior?.auxiliary_child_ids) ? prior.auxiliary_child_ids : [])
+            .map((item) => String(item || "").trim())
+            .filter(Boolean),
+    };
+}
+
+function treeSnapshotNode(nodeId) {
+    const key = String(nodeId || "").trim();
+    if (!key) return null;
+    return S.treeNodesById?.[key] || null;
+}
+
+function snapshotNodeDefaultRoundId(node) {
+    const rounds = Array.isArray(node?.rounds) ? node.rounds : [];
+    if (!rounds.length) return "";
+    const explicit = String(node?.default_round_id || "").trim();
+    if (explicit && rounds.some((round) => round.round_id === explicit)) return explicit;
+    return String(rounds.find((round) => round?.is_latest)?.round_id || rounds[rounds.length - 1]?.round_id || "");
+}
+
+function snapshotNodeSelectedRoundId(node, selections = S.treeSelectedRoundByNodeId) {
+    const rounds = Array.isArray(node?.rounds) ? node.rounds : [];
+    if (!rounds.length) return "";
+    const nodeId = String(node?.node_id || "").trim();
+    const selected = String(selections?.[nodeId] || "").trim();
+    if (selected && rounds.some((round) => round.round_id === selected)) return selected;
+    return snapshotNodeDefaultRoundId(node);
+}
+
+function snapshotNodeVisibleChildIds(node, selections = S.treeSelectedRoundByNodeId) {
+    const seen = new Set();
+    const out = [];
+    (Array.isArray(node?.auxiliary_child_ids) ? node.auxiliary_child_ids : []).forEach((childId) => {
+        const normalized = String(childId || "").trim();
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        out.push(normalized);
+    });
+    const rounds = Array.isArray(node?.rounds) ? node.rounds : [];
+    if (!rounds.length) return out;
+    const selectedRoundId = snapshotNodeSelectedRoundId(node, selections);
+    const selectedRound = rounds.find((round) => round.round_id === selectedRoundId) || null;
+    (Array.isArray(selectedRound?.child_ids) ? selectedRound.child_ids : []).forEach((childId) => {
+        const normalized = String(childId || "").trim();
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        out.push(normalized);
+    });
+    return out;
+}
+
+function collectSnapshotSubtreeIds(rootNodeId, nodesById = S.treeNodesById) {
+    const rootId = String(rootNodeId || "").trim();
+    if (!rootId) return new Set();
+    const collected = new Set();
+    const queue = [rootId];
+    while (queue.length) {
+        const currentId = queue.shift();
+        if (!currentId || collected.has(currentId)) continue;
+        const node = nodesById?.[currentId];
+        if (!node) continue;
+        collected.add(currentId);
+        snapshotNodeVisibleChildIds(node, S.treeSelectedRoundByNodeId).forEach((childId) => {
+            if (!collected.has(childId)) queue.push(childId);
+        });
+        (Array.isArray(node?.rounds) ? node.rounds : []).forEach((round) => {
+            (Array.isArray(round?.child_ids) ? round.child_ids : []).forEach((childId) => {
+                if (!collected.has(childId)) queue.push(childId);
+            });
+        });
+        (Array.isArray(node?.auxiliary_child_ids) ? node.auxiliary_child_ids : []).forEach((childId) => {
+            if (!collected.has(childId)) queue.push(childId);
+        });
+    }
+    return collected;
+}
+
+function resetTaskTreeSnapshotState({ clearDirty = true } = {}) {
+    Object.values(S.treeBranchSyncTokenById || {}).forEach((token) => {
+        if (token) window.clearTimeout(token);
+    });
+    S.treeRootNodeId = "";
+    S.treeNodesById = {};
+    S.treeSnapshotVersion = "";
+    S.treeRenderedRoot = null;
+    S.treeView = null;
+    S.treeLargeMode = false;
+    S.treeSelectedRoundByNodeId = {};
+    S.treeBranchSyncTokenById = {};
+    S.treeBranchSyncInFlightById = {};
+    S.treeBranchSyncQueuedById = {};
+    if (clearDirty) S.treeDirtyParentsById = {};
+}
+
+function applyTaskTreeSnapshotPayload(payload = {}) {
+    const rootNodeId = String(payload?.root_node_id || "").trim();
+    const sourceNodes = payload?.nodes_by_id && typeof payload.nodes_by_id === "object" ? payload.nodes_by_id : {};
+    const nextNodesById = {};
+    Object.entries(sourceNodes).forEach(([nodeId, node]) => {
+        const normalizedNodeId = String(nodeId || node?.node_id || "").trim();
+        if (!normalizedNodeId) return;
+        nextNodesById[normalizedNodeId] = normalizeTaskTreeSnapshotNode(node);
+    });
+    S.treeRootNodeId = rootNodeId;
+    S.treeNodesById = nextNodesById;
+    S.treeSnapshotVersion = String(payload?.snapshot_version || "").trim();
+    S.treeRenderedRoot = null;
+    S.treeView = null;
+    S.treeLargeMode = false;
+    S.treeSelectedRoundByNodeId = {};
+    if (rootNodeId) {
+        S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(buildRenderedTaskTreeRoot(), S.treeSelectedRoundByNodeId);
+    }
+}
+
+function applyTaskTreeSubtreePayload(payload = {}) {
+    const subtreeRootId = String(payload?.root_node_id || "").trim();
+    if (!subtreeRootId) return;
+    const nextNodesById = { ...(S.treeNodesById || {}) };
+    collectSnapshotSubtreeIds(subtreeRootId, nextNodesById).forEach((nodeId) => {
+        delete nextNodesById[nodeId];
+    });
+    const sourceNodes = payload?.nodes_by_id && typeof payload.nodes_by_id === "object" ? payload.nodes_by_id : {};
+    Object.entries(sourceNodes).forEach(([nodeId, node]) => {
+        const normalizedNodeId = String(nodeId || node?.node_id || "").trim();
+        if (!normalizedNodeId) return;
+        nextNodesById[normalizedNodeId] = normalizeTaskTreeSnapshotNode(node, nextNodesById[normalizedNodeId] || null);
+    });
+    S.treeNodesById = nextNodesById;
+    if (!String(S.treeRootNodeId || "").trim()) {
+        S.treeRootNodeId = subtreeRootId;
+    }
+    if (String(payload?.snapshot_version || "").trim()) {
+        S.treeSnapshotVersion = String(payload.snapshot_version || "").trim();
+    }
+    S.treeRenderedRoot = null;
+    S.treeView = null;
+    S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(buildRenderedTaskTreeRoot(), S.treeSelectedRoundByNodeId);
+}
+
 function dedupeTreeNodes(nodes) {
     const seen = new Set();
     const out = [];
@@ -88,193 +262,98 @@ function findRawTaskTreeNode(node, nodeId, seen = new Set()) {
     return null;
 }
 
-function normalizeTaskTreeChildren(items, existingItems = []) {
-    const priorById = new Map(
-        (Array.isArray(existingItems) ? existingItems : [])
-            .map((item) => [String(item?.node_id || "").trim(), item]),
-    );
-    return dedupeTreeNodes(items)
-        .map((item) => {
-            const nodeId = String(item?.node_id || "").trim();
-            return buildTaskTreeNodeFromDetail(item, nodeId ? priorById.get(nodeId) || null : null);
-        })
-        .filter((item) => String(item?.node_id || "").trim());
-}
-
-function normalizeTaskSpawnRounds(rounds, existingRounds = []) {
-    const priorById = new Map(
-        (Array.isArray(existingRounds) ? existingRounds : [])
-            .map((round) => [String(round?.round_id || "").trim(), round]),
-    );
-    return (Array.isArray(rounds) ? rounds : [])
-        .map((round) => {
-            const roundId = String(round?.round_id || "").trim();
-            if (!roundId) return null;
-            const prior = priorById.get(roundId) || {};
-            return {
-                ...prior,
-                ...round,
-                round_id: roundId,
-                label: String(round?.label || prior?.label || "").trim(),
-                children: Array.isArray(round?.children)
-                    ? normalizeTaskTreeChildren(round.children, Array.isArray(prior?.children) ? prior.children : [])
-                    : (Array.isArray(prior?.children) ? prior.children : []),
-            };
-        })
-        .filter(Boolean);
-}
-
-function buildTaskTreeNodeFromDetail(detail = {}, existing = null) {
-    const prior = existing && typeof existing === "object" ? existing : {};
-    return {
-        ...prior,
-        node_id: String(detail?.node_id || prior?.node_id || "").trim(),
-        parent_node_id: String(detail?.parent_node_id || prior?.parent_node_id || "").trim() || null,
-        depth: Number(detail?.depth ?? prior?.depth ?? 0) || 0,
-        node_kind: String(detail?.node_kind || prior?.node_kind || "execution").trim() || "execution",
-        status: String(detail?.status || prior?.status || "in_progress").trim() || "in_progress",
-        title: String(detail?.goal || detail?.title || prior?.title || detail?.node_id || "").trim(),
-        updated_at: String(detail?.updated_at || prior?.updated_at || "").trim(),
-        children_fingerprint: String(detail?.children_fingerprint || prior?.children_fingerprint || "").trim(),
-        default_round_id: String(detail?.default_round_id || prior?.default_round_id || "").trim(),
-        spawn_rounds: Array.isArray(detail?.spawn_rounds)
-            ? normalizeTaskSpawnRounds(detail.spawn_rounds, Array.isArray(prior?.spawn_rounds) ? prior.spawn_rounds : [])
-            : (Array.isArray(prior?.spawn_rounds) ? prior.spawn_rounds : []),
-        auxiliary_children: Array.isArray(detail?.auxiliary_children)
-            ? normalizeTaskTreeChildren(detail.auxiliary_children, Array.isArray(prior?.auxiliary_children) ? prior.auxiliary_children : [])
-            : (Array.isArray(prior?.auxiliary_children) ? prior.auxiliary_children : []),
-        children: Array.isArray(detail?.children)
-            ? normalizeTaskTreeChildren(detail.children, Array.isArray(prior?.children) ? prior.children : [])
-            : (Array.isArray(prior?.children) ? prior.children : []),
-    };
-}
-
-function updateTaskTreeNode(root, nodeId, updater) {
-    const normalizedId = String(nodeId || "").trim();
-    if (!root || !normalizedId) return root;
-    const current = findRawTaskTreeNode(root, normalizedId);
-    if (!current) return root;
-    updater(current);
-    return root;
-}
-
-function resetTaskTreeBranchSyncState({ clearDirty = true } = {}) {
-    Object.values(S.branchSyncTokenByNodeId || {}).forEach((token) => {
-        if (token) window.clearTimeout(token);
-    });
-    S.branchSyncTokenByNodeId = {};
-    S.branchSyncInFlightByNodeId = {};
-    S.branchSyncQueuedByNodeId = {};
-    if (clearDirty) S.dirtyParentsByNodeId = {};
-}
-
 function markTaskTreeParentDirty(nodeId) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId) return false;
-    const wasDirty = !!S.dirtyParentsByNodeId?.[normalizedNodeId];
-    S.dirtyParentsByNodeId = { ...(S.dirtyParentsByNodeId || {}), [normalizedNodeId]: true };
+    const wasDirty = !!S.treeDirtyParentsById?.[normalizedNodeId];
+    S.treeDirtyParentsById = { ...(S.treeDirtyParentsById || {}), [normalizedNodeId]: true };
     return !wasDirty;
 }
 
 function clearTaskTreeParentDirty(nodeId) {
     const normalizedNodeId = String(nodeId || "").trim();
-    if (!normalizedNodeId || !S.dirtyParentsByNodeId?.[normalizedNodeId]) return;
-    const next = { ...(S.dirtyParentsByNodeId || {}) };
+    if (!normalizedNodeId || !S.treeDirtyParentsById?.[normalizedNodeId]) return;
+    const next = { ...(S.treeDirtyParentsById || {}) };
     delete next[normalizedNodeId];
-    S.dirtyParentsByNodeId = next;
+    S.treeDirtyParentsById = next;
 }
 
 function taskTreeParentIsDirty(nodeId) {
     const normalizedNodeId = String(nodeId || "").trim();
-    return !!(normalizedNodeId && S.dirtyParentsByNodeId?.[normalizedNodeId]);
+    return !!(normalizedNodeId && S.treeDirtyParentsById?.[normalizedNodeId]);
 }
 
 function resolveTaskTreeBranchRoundId(nodeId) {
     const normalizedNodeId = String(nodeId || "").trim();
-    if (!normalizedNodeId || !S.tree) return "";
-    const rawNode = findRawTaskTreeNode(S.tree, normalizedNodeId);
-    if (!rawNode) return "";
-    return resolveSelectedRoundId(rawNode, S.treeRoundSelectionsByNodeId);
+    const node = treeSnapshotNode(normalizedNodeId);
+    if (!node) return "";
+    return snapshotNodeSelectedRoundId(node, S.treeSelectedRoundByNodeId);
 }
 
-async function ensureTaskNodeChildren(nodeId, { roundId = "", force = false } = {}) {
+async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!normalizedTaskId) return null;
+    if (U.tree) U.tree.innerHTML = '<div class="empty-state">Loading task tree...</div>';
+    try {
+        const payload = await ApiClient.getTaskTreeSnapshot(normalizedTaskId);
+        if (String(S.currentTaskId || "").trim() !== normalizedTaskId) return null;
+        applyTaskTreeSnapshotPayload(payload || {});
+        renderTree();
+        return payload || null;
+    } catch (error) {
+        if (!isAbortLike(error) && U.tree) {
+            U.tree.innerHTML = `<div class="empty-state error">Task tree unavailable: ${esc(error.message || "Unknown error")}</div>`;
+        }
+        return null;
+    }
+}
+
+async function ensureTaskTreeSubtree(nodeId, { roundId = "", force = false } = {}) {
     const taskId = String(S.currentTaskId || "").trim();
     const normalizedNodeId = String(nodeId || "").trim();
     const normalizedRoundId = String(roundId || "").trim();
     if (!taskId || !normalizedNodeId) return null;
-    const cacheKey = `${normalizedNodeId}::${normalizedRoundId || "default"}`;
-    const parentDirty = taskTreeParentIsDirty(normalizedNodeId);
-    if (!force && S.taskNodeChildrenRequests?.[cacheKey]) return S.taskNodeChildrenRequests[cacheKey];
-    if (!force && !parentDirty && S.taskNodeChildrenCache?.[cacheKey]) return S.taskNodeChildrenCache[cacheKey];
-    if (!force && !parentDirty && S.taskTreeHasFullSnapshot && S.tree) {
-        const snapshot = taskNodeChildrenSnapshotFromTree(normalizedNodeId, { roundId: normalizedRoundId });
-        if (snapshot) {
-            S.taskNodeChildrenCache = { ...(S.taskNodeChildrenCache || {}), [cacheKey]: snapshot };
-            return snapshot;
-        }
-    }
+    const requestKey = `${normalizedNodeId}::${normalizedRoundId || "default"}`;
+    if (!force && S.treeBranchSyncInFlightById?.[requestKey]) return S.treeBranchSyncInFlightById[requestKey];
     const request = (async () => {
         try {
-            const payload = await ApiClient.getTaskNodeChildren(taskId, normalizedNodeId, { roundId: normalizedRoundId, offset: 0, limit: 200 });
+            const payload = await ApiClient.getTaskNodeTreeSubtree(taskId, normalizedNodeId, { roundId: normalizedRoundId });
             if (String(S.currentTaskId || "").trim() !== taskId) return null;
-            applyTaskNodeChildrenSnapshot(payload, { render: true });
+            applyTaskTreeSubtreePayload(payload || {});
             clearTaskTreeParentDirty(normalizedNodeId);
-            return payload;
+            renderTree();
+            return payload || null;
         } catch (error) {
             if (!isAbortLike(error)) {
-                showToast({ title: "Node children load failed", text: error.message || "Unknown error", kind: "error" });
+                showToast({ title: "Task subtree load failed", text: error.message || "Unknown error", kind: "error" });
             }
             return null;
         } finally {
-            const next = { ...(S.taskNodeChildrenRequests || {}) };
-            if (next[cacheKey] === request) delete next[cacheKey];
-            S.taskNodeChildrenRequests = next;
+            const next = { ...(S.treeBranchSyncInFlightById || {}) };
+            if (next[requestKey] === request) delete next[requestKey];
+            S.treeBranchSyncInFlightById = next;
         }
     })();
-    S.taskNodeChildrenRequests = { ...(S.taskNodeChildrenRequests || {}), [cacheKey]: request };
+    S.treeBranchSyncInFlightById = { ...(S.treeBranchSyncInFlightById || {}), [requestKey]: request };
     return request;
-}
-
-function clearTaskNodeChildrenCache(nodeId, { includeDescendants = false } = {}) {
-    const normalizedNodeId = String(nodeId || "").trim();
-    if (!normalizedNodeId) return;
-    const next = {};
-    Object.entries(S.taskNodeChildrenCache || {}).forEach(([cacheKey, payload]) => {
-        const parentNodeId = String(payload?.parent_node_id || cacheKey.split("::")[0] || "").trim();
-        if (parentNodeId === normalizedNodeId) return;
-        if (includeDescendants) {
-            const current = S.tree ? findRawTaskTreeNode(S.tree, parentNodeId) : null;
-            let ancestorId = String(current?.parent_node_id || "").trim();
-            while (ancestorId) {
-                if (ancestorId === normalizedNodeId) return;
-                ancestorId = String(findRawTaskTreeNode(S.tree, ancestorId)?.parent_node_id || "").trim();
-            }
-        }
-        next[cacheKey] = payload;
-    });
-    S.taskNodeChildrenCache = next;
 }
 
 async function syncTaskTreeDirtyBranch(nodeId) {
     const normalizedNodeId = String(nodeId || "").trim();
     const taskId = String(S.currentTaskId || "").trim();
-    if (!normalizedNodeId || !S.currentTaskId || !S.tree) return;
+    if (!normalizedNodeId || !S.currentTaskId || !String(S.treeRootNodeId || "").trim()) return;
     if (!taskTreeParentIsDirty(normalizedNodeId)) return;
-    S.branchSyncInFlightByNodeId = { ...(S.branchSyncInFlightByNodeId || {}), [normalizedNodeId]: true };
-    const queuedBefore = { ...(S.branchSyncQueuedByNodeId || {}) };
+    const queuedBefore = { ...(S.treeBranchSyncQueuedById || {}) };
     delete queuedBefore[normalizedNodeId];
-    S.branchSyncQueuedByNodeId = queuedBefore;
+    S.treeBranchSyncQueuedById = queuedBefore;
     try {
-        await ensureTaskNodeChildren(normalizedNodeId, {
+        await ensureTaskTreeSubtree(normalizedNodeId, {
             roundId: resolveTaskTreeBranchRoundId(normalizedNodeId),
-            force: false,
+            force: true,
         });
     } finally {
-        const nextInFlight = { ...(S.branchSyncInFlightByNodeId || {}) };
-        delete nextInFlight[normalizedNodeId];
-        S.branchSyncInFlightByNodeId = nextInFlight;
         if (String(S.currentTaskId || "").trim() !== taskId) return;
-        if (S.branchSyncQueuedByNodeId?.[normalizedNodeId] || taskTreeParentIsDirty(normalizedNodeId)) {
+        if (S.treeBranchSyncQueuedById?.[normalizedNodeId] || taskTreeParentIsDirty(normalizedNodeId)) {
             scheduleTaskTreeBranchSync(normalizedNodeId, { delayMs: 0 });
         }
     }
@@ -282,93 +361,65 @@ async function syncTaskTreeDirtyBranch(nodeId) {
 
 function scheduleTaskTreeBranchSync(nodeId, { delayMs = 120 } = {}) {
     const normalizedNodeId = String(nodeId || "").trim();
-    if (!normalizedNodeId || !S.currentTaskId || !S.tree) return;
+    if (!normalizedNodeId || !S.currentTaskId || !String(S.treeRootNodeId || "").trim()) return;
     markTaskTreeParentDirty(normalizedNodeId);
-    if (S.branchSyncInFlightByNodeId?.[normalizedNodeId]) {
-        S.branchSyncQueuedByNodeId = { ...(S.branchSyncQueuedByNodeId || {}), [normalizedNodeId]: true };
+    if (Object.keys(S.treeBranchSyncInFlightById || {}).some((key) => key.startsWith(`${normalizedNodeId}::`))) {
+        S.treeBranchSyncQueuedById = { ...(S.treeBranchSyncQueuedById || {}), [normalizedNodeId]: true };
         return;
     }
-    const existingToken = S.branchSyncTokenByNodeId?.[normalizedNodeId];
+    const existingToken = S.treeBranchSyncTokenById?.[normalizedNodeId];
     if (existingToken) window.clearTimeout(existingToken);
     const timeoutId = window.setTimeout(() => {
-        const nextTokens = { ...(S.branchSyncTokenByNodeId || {}) };
+        const nextTokens = { ...(S.treeBranchSyncTokenById || {}) };
         delete nextTokens[normalizedNodeId];
-        S.branchSyncTokenByNodeId = nextTokens;
+        S.treeBranchSyncTokenById = nextTokens;
         void syncTaskTreeDirtyBranch(normalizedNodeId);
     }, Math.max(0, Number(delayMs) || 0));
-    S.branchSyncTokenByNodeId = { ...(S.branchSyncTokenByNodeId || {}), [normalizedNodeId]: timeoutId };
+    S.treeBranchSyncTokenById = { ...(S.treeBranchSyncTokenById || {}), [normalizedNodeId]: timeoutId };
 }
 
-function taskNodeChildrenSnapshotFromTree(nodeId, { roundId = "" } = {}) {
-    const taskId = String(S.currentTaskId || "").trim();
+function buildRenderedTaskTreeNode(nodeId, selections = S.treeSelectedRoundByNodeId, seen = new Set()) {
     const normalizedNodeId = String(nodeId || "").trim();
-    const normalizedRoundId = String(roundId || "").trim();
-    if (!taskId || !normalizedNodeId || !S.tree) return null;
-    const rawNode = findRawTaskTreeNode(S.tree, normalizedNodeId);
-    if (!rawNode) return null;
-    const rounds = rawNodeRounds(rawNode);
-    const defaultRoundId = resolveDefaultRoundId(rawNode);
-    const selectedRoundId = rounds.length
-        ? (rounds.some((round) => round.round_id === normalizedRoundId) ? normalizedRoundId : defaultRoundId)
-        : "";
-    const auxiliaryChildren = normalizeTaskTreeChildren(rawAuxiliaryChildren(rawNode));
+    if (!normalizedNodeId || seen.has(normalizedNodeId)) return null;
+    const snapshotNode = treeSnapshotNode(normalizedNodeId);
+    if (!snapshotNode) return null;
+    seen.add(normalizedNodeId);
+    const selectedRoundId = snapshotNodeSelectedRoundId(snapshotNode, selections);
+    const rounds = (Array.isArray(snapshotNode?.rounds) ? snapshotNode.rounds : []).map((round) => ({
+        ...round,
+        round_id: String(round?.round_id || "").trim(),
+        label: String(round?.label || "").trim(),
+        child_node_ids: Array.isArray(round?.child_ids) ? [...round.child_ids] : [],
+        children: String(round?.round_id || "").trim() === selectedRoundId
+            ? (Array.isArray(round?.child_ids) ? round.child_ids : [])
+                .map((childId) => buildRenderedTaskTreeNode(childId, selections, seen))
+                .filter(Boolean)
+            : [],
+    }));
+    const auxiliaryChildren = (Array.isArray(snapshotNode?.auxiliary_child_ids) ? snapshotNode.auxiliary_child_ids : [])
+        .map((childId) => buildRenderedTaskTreeNode(childId, selections, seen))
+        .filter(Boolean);
     const selectedRound = rounds.find((round) => round.round_id === selectedRoundId) || null;
-    const treeItems = rounds.length
-        ? [...auxiliaryChildren, ...normalizeTaskTreeChildren(selectedRound?.children)]
-        : normalizeTaskTreeChildren(dedupeTreeNodes(rawNode?.children));
     return {
-        task_id: taskId,
-        parent_node_id: normalizedNodeId,
-        round_id: selectedRoundId,
-        default_round_id: defaultRoundId,
-        rounds: rounds.map((round) => ({
-            ...round,
-            children: normalizeTaskTreeChildren(round.children),
-        })),
-        items: treeItems,
-        offset: 0,
-        limit: treeItems.length || 200,
+        node_id: snapshotNode.node_id,
+        parent_node_id: snapshotNode.parent_node_id,
+        node_kind: snapshotNode.node_kind,
+        status: snapshotNode.status,
+        title: snapshotNode.title,
+        updated_at: snapshotNode.updated_at,
+        children_fingerprint: snapshotNode.children_fingerprint,
+        default_round_id: snapshotNode.default_round_id,
+        selected_round_id: selectedRoundId,
+        spawn_rounds: rounds,
+        auxiliary_children: auxiliaryChildren,
+        children: [...auxiliaryChildren, ...((selectedRound?.children) || [])],
     };
 }
 
-function applyTaskNodeChildrenSnapshot(payload, { render = true } = {}) {
-    const normalizedNodeId = String(payload?.parent_node_id || "").trim();
-    const normalizedRoundId = String(payload?.round_id || "").trim();
-    if (!normalizedNodeId) return;
-    const cacheKey = `${normalizedNodeId}::${normalizedRoundId || "default"}`;
-    const items = Array.isArray(payload?.items) ? payload.items : [];
-    const rounds = Array.isArray(payload?.rounds) ? payload.rounds : [];
-    const defaultRoundId = String(payload?.default_round_id || "").trim();
-    S.taskNodeChildrenCache = { ...(S.taskNodeChildrenCache || {}), [cacheKey]: payload };
-    if (S.tree) {
-        updateTaskTreeNode(S.tree, normalizedNodeId, (node) => {
-            const existingDirectChildren = rawTreeDirectChildren(node);
-            const treeItems = normalizeTaskTreeChildren(items, existingDirectChildren);
-            node.default_round_id = defaultRoundId || node.default_round_id || "";
-            const currentRounds = Array.isArray(node.spawn_rounds) ? node.spawn_rounds : [];
-            const roundMap = new Map(currentRounds.map((round) => [String(round?.round_id || "").trim(), round]));
-            node.spawn_rounds = rounds.map((round) => {
-                const roundKey = String(round?.round_id || "").trim();
-                const previous = roundMap.get(roundKey) || {};
-                return {
-                    ...previous,
-                    ...round,
-                    round_id: roundKey,
-                    children: roundKey === String(payload?.round_id || defaultRoundId || "").trim()
-                        ? treeItems
-                        : (Array.isArray(previous?.children) ? previous.children : []),
-                };
-            });
-            const selectedRoundId = String(payload?.round_id || defaultRoundId || "").trim();
-            node.children = treeItems;
-            if (!selectedRoundId) {
-                node.auxiliary_children = treeItems;
-            }
-        });
-        S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
-        if (render) renderTree();
-    }
-    clearTaskTreeParentDirty(normalizedNodeId);
+function buildRenderedTaskTreeRoot() {
+    const rootNodeId = String(S.treeRootNodeId || "").trim();
+    if (!rootNodeId) return null;
+    return buildRenderedTaskTreeNode(rootNodeId, S.treeSelectedRoundByNodeId);
 }
 
 function pruneTreeRoundSelections(root, selections) {
@@ -401,33 +452,6 @@ function resolveSelectedRoundId(node, selections) {
     const selected = String(selections?.[nodeId] || "").trim();
     if (rounds.some((round) => round.round_id === selected)) return selected;
     return resolveDefaultRoundId(node);
-}
-
-function projectTaskTree(node, selections) {
-    if (!node) return null;
-    const rounds = rawNodeRounds(node);
-    const projectedAuxiliaryChildren = rawAuxiliaryChildren(node)
-        .map((child) => projectTaskTree(child, selections))
-        .filter(Boolean);
-    const projectedRounds = rounds.map((round) => ({
-        ...round,
-        children: dedupeTreeNodes(round.children).map((child) => projectTaskTree(child, selections)).filter(Boolean),
-    }));
-    const fallbackChildren = (!projectedAuxiliaryChildren.length && !projectedRounds.length)
-        ? dedupeTreeNodes(node?.children).map((child) => projectTaskTree(child, selections)).filter(Boolean)
-        : [];
-    const selectedRoundId = resolveSelectedRoundId(node, selections);
-    const selectedRound = projectedRounds.find((round) => round.round_id === selectedRoundId) || null;
-    const projectedChildren = projectedRounds.length
-        ? [...projectedAuxiliaryChildren, ...((selectedRound?.children) || [])]
-        : (projectedAuxiliaryChildren.length ? projectedAuxiliaryChildren : fallbackChildren);
-    return {
-        ...node,
-        auxiliary_children: projectedAuxiliaryChildren,
-        spawn_rounds: projectedRounds,
-        selected_round_id: selectedRoundId,
-        children: projectedChildren,
-    };
 }
 
 function countVisibleTreeNodes(root, predicate = null) {
@@ -493,7 +517,7 @@ function resolveExecutionTreeDensity(root) {
 }
 
 function hasManualTreeRoundSelections() {
-    return Object.keys(normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId)).length > 0;
+    return Object.keys(normalizeTreeRoundSelections(S.treeSelectedRoundByNodeId)).length > 0;
 }
 
 function taskDetailStatusLabel(task) {
@@ -536,29 +560,28 @@ function syncTaskTreeHeaderState(projectedRoot = null) {
 }
 
 function resetTaskTreeRoundSelections() {
-    S.treeRoundSelectionsByNodeId = {};
+    S.treeSelectedRoundByNodeId = {};
     renderTree();
     scheduleTaskDetailSessionPersist();
 }
 
 function setNodeRoundSelection(nodeId, roundId) {
     const normalizedNodeId = String(nodeId || "").trim();
-    if (!normalizedNodeId || !S.tree) return;
-    const rawNode = findRawTaskTreeNode(S.tree, normalizedNodeId);
-    if (!rawNode) return;
-    const rounds = rawNodeRounds(rawNode);
+    const snapshotNode = treeSnapshotNode(normalizedNodeId);
+    if (!normalizedNodeId || !snapshotNode) return;
+    const rounds = Array.isArray(snapshotNode?.rounds) ? snapshotNode.rounds : [];
     const normalizedRoundId = String(roundId || "").trim();
-    const nextSelections = normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId);
-    const defaultRoundId = resolveDefaultRoundId(rawNode);
+    const nextSelections = normalizeTreeRoundSelections(S.treeSelectedRoundByNodeId);
+    const defaultRoundId = snapshotNodeDefaultRoundId(snapshotNode);
     if (!normalizedRoundId || normalizedRoundId === defaultRoundId || !rounds.some((round) => round.round_id === normalizedRoundId)) {
         delete nextSelections[normalizedNodeId];
     } else {
         nextSelections[normalizedNodeId] = normalizedRoundId;
     }
-    S.treeRoundSelectionsByNodeId = nextSelections;
+    S.treeSelectedRoundByNodeId = nextSelections;
     renderTree();
     scheduleTaskDetailSessionPersist();
-    void ensureTaskNodeChildren(normalizedNodeId, { roundId: normalizedRoundId, force: true });
+    void ensureTaskTreeSubtree(normalizedNodeId, { roundId: normalizedRoundId, force: true });
 }
 
 function clearAgentSelection({ rerender = true } = {}) {
@@ -586,12 +609,20 @@ function bindTreePan() {
     if (!U.tree || U.tree.dataset.panBound === "true") return;
     U.tree.dataset.panBound = "true";
     const state = S.treePan;
-    const applyPan = () => {
+    let panRaf = 0;
+    const commitPan = () => {
         const canvas = U.tree?.querySelector(".execution-tree");
         if (canvas) {
             canvas.style.transformOrigin = "0 0";
             canvas.style.transform = `translate(${Math.round(state.offsetX)}px, ${Math.round(state.offsetY)}px) scale(${state.scale})`;
         }
+    };
+    const applyPan = () => {
+        if (panRaf) return;
+        panRaf = window.requestAnimationFrame(() => {
+            panRaf = 0;
+            commitPan();
+        });
     };
     window.addEventListener("mousemove", (e) => {
         if (!state.active) return;
@@ -1300,22 +1331,10 @@ function buildNodeRoundState(node) {
 
 function buildExecutionTree(rawTree) {
     if (!rawTree) return null;
-    const nodeMap = new Map();
-    if (S.rootNode && String(S.rootNode?.node_id || "").trim()) {
-        nodeMap.set(String(S.rootNode.node_id || "").trim(), S.rootNode);
-    }
-    Object.entries(S.taskNodeDetails || {}).forEach(([nodeId, item]) => {
-        const normalizedNodeId = String(nodeId || "").trim();
-        if (!normalizedNodeId || !item || typeof item !== "object") return;
-        nodeMap.set(normalizedNodeId, item);
-    });
-    const liveFrameMap = liveFramesByNodeId();
     const walk = (node) => {
-        const nodeId = String(node.node_id || "");
-        const detail = nodeMap.get(nodeId) || {};
-        const kind = String(detail.node_kind || node.node_kind || "execution").trim().toLowerCase() || "execution";
-        const status = String(node.status || detail.status || "unknown").trim().toLowerCase() || "unknown";
-        const title = resolveNodeTitle(node, detail);
+        const kind = String(node.node_kind || "execution").trim().toLowerCase() || "execution";
+        const status = String(node.status || "unknown").trim().toLowerCase() || "unknown";
+        const title = resolveNodeTitle(node, node);
         const roundState = buildNodeRoundState(node);
         const allChildren = Array.isArray(node.children) ? node.children.map(walk) : [];
         const inspectionNodes = [];
@@ -1335,7 +1354,6 @@ function buildExecutionTree(rawTree) {
             state: status,
             visual_state: stateMeta.visualState,
             display_state: stateMeta.displayState,
-            executionTrace: buildNodeExecutionTrace(node, detail, liveFrameMap.get(nodeId) || null),
             roundOptions: roundState.options,
             selectedRoundId: roundState.selectedRoundId,
             defaultRoundId: roundState.defaultRoundId,
@@ -1354,6 +1372,12 @@ function executionTreeNodeSelector(nodeId) {
         .replace(/\\/g, "\\\\")
         .replace(/"/g, '\\"');
     return `.execution-tree-node[data-id="${escaped}"]`;
+}
+
+function refreshTreeViewFromSnapshot() {
+    S.treeRenderedRoot = buildRenderedTaskTreeRoot();
+    S.treeView = buildExecutionTree(S.treeRenderedRoot);
+    return S.treeView;
 }
 
 function syncExecutionTreeSelection(previousNodeId, nextNodeId) {
@@ -1386,11 +1410,12 @@ function buildTaskTreeRecoveryBubble(text) {
 }
 
 function renderTree() {
-    if (!S.tree) return;
+    if (!String(S.treeRootNodeId || "").trim()) return;
     const recoveryNotice = String(S.currentTask?.metadata?.recovery_notice || "").trim();
-    const projectedTree = projectTaskTree(S.tree, S.treeRoundSelectionsByNodeId);
-    syncTaskTreeHeaderState(projectedTree);
-    S.treeView = buildExecutionTree(projectedTree);
+    const renderedRoot = buildRenderedTaskTreeRoot();
+    S.treeRenderedRoot = renderedRoot;
+    syncTaskTreeHeaderState(renderedRoot);
+    S.treeView = buildExecutionTree(renderedRoot);
     if (!S.treeView) {
         U.tree.innerHTML = "";
         if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));
@@ -1404,9 +1429,17 @@ function renderTree() {
     const wrapper = document.createElement("div");
     wrapper.className = "execution-tree";
     const layoutDensity = resolveExecutionTreeDensity(S.treeView);
+    const activeLikeCount = Math.max(
+        0,
+        normalizeInt(S.taskSummary?.active_node_count, 0),
+        normalizeInt(S.taskSummary?.runnable_node_count, 0),
+        normalizeInt(S.taskSummary?.waiting_node_count, 0),
+    );
+    S.treeLargeMode = layoutDensity.stats.totalItems > 150 || activeLikeCount > 80;
     wrapper.dataset.layout = layoutDensity.mode;
     wrapper.dataset.totalItems = String(layoutDensity.stats.totalItems);
     wrapper.dataset.maxBreadth = String(layoutDensity.stats.maxBreadth);
+    wrapper.dataset.largeTree = S.treeLargeMode ? "true" : "false";
     if (layoutDensity.mode === "wide" || layoutDensity.mode === "dense") {
         wrapper.classList.add("execution-tree--wide");
     }
@@ -1686,11 +1719,61 @@ async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
     return request;
 }
 
+function refreshRenderedTreeNodeStatuses() {
+    if (!U.tree || !String(S.treeRootNodeId || "").trim()) return;
+    const nextTreeView = refreshTreeViewFromSnapshot();
+    if (!nextTreeView) return;
+    const buttons = new Map(
+        Array.from(U.tree.querySelectorAll(".execution-tree-node[data-id]"))
+            .map((button) => [String(button.dataset.id || "").trim(), button])
+            .filter(([nodeId]) => !!nodeId),
+    );
+    const walk = (node) => {
+        if (!node) return;
+        const button = buttons.get(String(node.node_id || "").trim());
+        if (button instanceof HTMLElement) {
+            const title = String(node.title || node.node_id || "");
+            const fullTitle = String(node.fullTitle || title);
+            const nodeStatus = String(node.visual_state || node.state || "").trim().toLowerCase();
+            const displayState = String(node.display_state || node.state || "").trim() || String(node.state || "").toUpperCase();
+            button.dataset.status = nodeStatus;
+            button.title = fullTitle;
+            const titleEl = button.querySelector(".execution-tree-node-title");
+            if (titleEl instanceof HTMLElement) titleEl.textContent = title;
+            const badgeEl = button.querySelector(".status-badge");
+            if (badgeEl instanceof HTMLElement) {
+                badgeEl.dataset.status = String(node.visual_state || node.state || "");
+                badgeEl.textContent = displayState;
+            }
+            const item = button.closest(".execution-tree-item");
+            if (item instanceof HTMLElement) item.dataset.status = nodeStatus;
+            const branch = item?.querySelector(":scope > .execution-tree-list");
+            if (branch instanceof HTMLElement) branch.dataset.parentStatus = nodeStatus;
+        }
+        treeViewChildren(node).forEach(walk);
+    };
+    walk(nextTreeView);
+}
+
+function refreshRenderedTreeNodeStatus() {
+    scheduleRenderedTreeNodeStatusRefresh();
+}
+
+let treeVisualRefreshRaf = 0;
+
+function scheduleRenderedTreeNodeStatusRefresh() {
+    if (treeVisualRefreshRaf) return;
+    treeVisualRefreshRaf = window.requestAnimationFrame(() => {
+        treeVisualRefreshRaf = 0;
+        refreshRenderedTreeNodeStatuses();
+    });
+}
+
 async function reconcileTaskTreeForNode(nodeId) {
     const normalizedNodeId = String(nodeId || "").trim();
     const taskId = String(S.currentTaskId || "").trim();
-    if (!normalizedNodeId || !taskId || !S.tree) return;
-    if (findRawTaskTreeNode(S.tree, normalizedNodeId)) return;
+    if (!normalizedNodeId || !taskId || !String(S.treeRootNodeId || "").trim()) return;
+    if (treeSnapshotNode(normalizedNodeId)) return;
     const detail = await ensureTaskNodeDetail(normalizedNodeId);
     if (String(S.currentTaskId || "").trim() !== taskId) return;
     const parentNodeId = String(detail?.parent_node_id || "").trim();
@@ -1702,7 +1785,6 @@ async function reconcileTaskTreeForNode(nodeId) {
 async function showAgent(node, { preserveViewState = true, forceRefresh = false } = {}) {
     const nodeId = String(node?.node_id || "").trim();
     if (!nodeId) return;
-    void ensureTaskNodeChildren(nodeId, { roundId: String(node?.selected_round_id || node?.default_round_id || "").trim() });
     const renderToken = (Number(S.taskDetailRenderToken || 0) || 0) + 1;
     S.taskDetailRenderToken = renderToken;
     const previousDetailNodeId = String(S.currentNodeDetail?.node_id || "").trim();
@@ -1758,10 +1840,6 @@ function applyTaskPayload(payload) {
     const previousTaskId = String(S.currentTask?.task_id || "").trim();
     const nextTaskId = String(payload.task?.task_id || "").trim();
     const rootNode = payload.root_node || null;
-    const treeSnapshot = payload.tree_root && typeof payload.tree_root === "object" ? payload.tree_root : null;
-    const treeRoot = treeSnapshot
-        ? buildTaskTreeNodeFromDetail(treeSnapshot)
-        : (rootNode ? buildTaskTreeNodeFromDetail(rootNode) : null);
     const frontier = Array.isArray(payload.frontier) ? payload.frontier : [];
     const recentModelCalls = Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [];
     S.currentTask = payload.task;
@@ -1773,23 +1851,13 @@ function applyTaskPayload(payload) {
     if (rootNode && String(rootNode?.node_id || "").trim()) {
         S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [String(rootNode.node_id || "").trim()]: rootNode };
     }
-    resetTaskTreeBranchSyncState();
-    S.tree = treeRoot;
-    S.taskTreeHasFullSnapshot = !!treeSnapshot;
-    S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, S.treeRoundSelectionsByNodeId);
+    resetTaskTreeSnapshotState();
+    S.treeSelectedRoundByNodeId = {};
     renderTaskDetailHeader({ resetPromptDisclosure: previousTaskId !== nextTaskId });
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
-    if (S.tree) {
-        renderTree();
-        if (!treeSnapshot) {
-            void ensureTaskNodeChildren(String(S.tree?.node_id || "").trim());
-        }
-    }
-    else {
-        syncTaskTreeHeaderState(null);
-        U.tree.innerHTML = '<div class="empty-state">No task tree.</div>';
-        setTaskSelectionEmptyVisible(false);
-        hideAgent();
-    }
+    syncTaskTreeHeaderState(null);
+    if (U.tree) U.tree.innerHTML = '<div class="empty-state">Loading task tree...</div>';
+    setTaskSelectionEmptyVisible(false);
+    hideAgent();
 }

@@ -1117,6 +1117,28 @@ textarea {
     box-shadow: var(--shadow-md);
 }
 
+.execution-tree[data-large-tree="true"] .execution-tree-node,
+.execution-tree[data-large-tree="true"] .execution-tree-node::after,
+.execution-tree[data-large-tree="true"] .execution-tree-round-select {
+    transition: none;
+}
+
+.execution-tree[data-large-tree="true"] .execution-tree-node:hover {
+    transform: none;
+    box-shadow: var(--tree-node-shadow);
+}
+
+.execution-tree[data-large-tree="true"] .execution-tree-node.selected {
+    box-shadow: var(--tree-node-shadow);
+}
+
+.execution-tree[data-large-tree="true"] .execution-tree-node[data-status="running"]::after,
+.execution-tree[data-large-tree="true"] .execution-tree-node[data-status="in_progress"]::after,
+.execution-tree[data-large-tree="true"] .execution-tree-node[data-status="inspecting"]::after {
+    animation: none;
+    opacity: 0;
+}
+
 .execution-tree-node:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--brand-primary) 72%, transparent);
     outline-offset: 2px;

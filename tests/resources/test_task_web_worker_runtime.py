@@ -351,6 +351,45 @@ def test_internal_task_event_batch_callback_forwards_summary_patches(tmp_path: P
         assert briefs[second.task_id] == "patched-two"
 
 
+def test_task_list_websocket_streams_token_patch_events(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    client = TestClient(_build_app())
+    record = asyncio.run(_create_web_task(service))
+    with client.websocket_connect("/api/ws/tasks?session_id=all&after_seq=0") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "task.worker.status"
+
+        service.log_service.append_node_output(
+            record.task_id,
+            record.root_node_id,
+            content="token update",
+            tool_calls=[],
+            usage_attempts=[
+                LLMModelAttempt(
+                    model_key="gpt-5.4",
+                    provider_id="openai",
+                    provider_model="gpt-5.4",
+                    usage={"input_tokens": 7, "output_tokens": 3, "cache_hit_tokens": 1},
+                )
+            ],
+        )
+
+        token_event = _receive_until_type(ws, "task.token.patch")
+        assert token_event["data"]["task_id"] == record.task_id
+        assert token_event["data"]["token_usage"]["input_tokens"] >= 7
+        assert token_event["data"]["token_usage"]["output_tokens"] >= 3
+
+
 @pytest.mark.asyncio
 async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
@@ -1547,7 +1586,7 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
         assert event["data"]["call_index"] == 4
 
 
-def test_task_detail_payload_can_include_full_tree_snapshot(tmp_path: Path) -> None:
+def test_task_tree_snapshot_payload_contains_root_and_child_nodes(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -1576,12 +1615,14 @@ def test_task_detail_payload_can_include_full_tree_snapshot(tmp_path: Path) -> N
         final_output="child done",
     )
 
-    payload = service.get_task_detail_payload(record.task_id, mark_read=False, include_tree=True)
+    payload = service.get_task_tree_snapshot_payload(record.task_id)
 
     assert payload is not None
-    assert payload["root_node"]["node_id"] == root.node_id
-    assert payload["tree_root"]["node_id"] == root.node_id
-    assert [item["node_id"] for item in payload["tree_root"]["children"]] == [child.node_id]
+    assert payload["root_node_id"] == root.node_id
+    assert root.node_id in payload["nodes_by_id"]
+    assert child.node_id in payload["nodes_by_id"]
+    root_snapshot = payload["nodes_by_id"][root.node_id]
+    assert root_snapshot["auxiliary_child_ids"] == [child.node_id]
 
 
 def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> None:
@@ -1704,12 +1745,12 @@ def test_task_snapshot_preserves_auxiliary_acceptance_children(tmp_path: Path):
         final_output="楠屾敹閫氳繃",
     )
 
-    children = service.get_node_children_payload(record.task_id, root.node_id)
+    subtree = service.get_task_tree_subtree_payload(record.task_id, root.node_id)
 
-    assert children is not None
-    assert children["rounds"] == []
-    assert [item["node_id"] for item in children["items"]] == [acceptance.node_id]
-    assert children["items"][0]["node_kind"] == "acceptance"
+    assert subtree is not None
+    assert subtree["root_node_id"] == root.node_id
+    assert acceptance.node_id in subtree["nodes_by_id"]
+    assert subtree["nodes_by_id"][acceptance.node_id]["node_kind"] == "acceptance"
 
 
 def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path):
@@ -1759,54 +1800,12 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
         final_output="楠屾敹閫氳繃",
     )
 
-    children = service.get_node_children_payload(record.task_id, child.node_id)
+    subtree = service.get_task_tree_subtree_payload(record.task_id, child.node_id)
 
-    assert children is not None
-    assert children["rounds"] == []
-    assert [item["node_id"] for item in children["items"]] == [acceptance.node_id]
-    assert children["items"][0]["node_kind"] == "acceptance"
-
-
-def test_task_detail_websocket_streams_children_snapshot_for_parent(tmp_path: Path, monkeypatch):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-
-    import asyncio
-
-    record = asyncio.run(_create_web_task(service))
-    task = service.get_task(record.task_id)
-    root = service.get_node(record.root_node_id)
-
-    assert task is not None
-    assert root is not None
-
-    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
-    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
-
-    client = TestClient(_build_app())
-    with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
-        assert ws.receive_json()["type"] == "hello"
-
-        child = service.node_runner._create_execution_child(
-            task=task,
-            parent=root,
-            spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
-        )
-
-        children_event = _receive_until_type(
-            ws,
-            "task.node.children.snapshot",
-            predicate=lambda item: item["data"]["parent_node_id"] == root.node_id,
-        )
-        assert children_event["type"] == "task.node.children.snapshot"
-        assert children_event["data"]["parent_node_id"] == root.node_id
-        assert [item["node_id"] for item in children_event["data"]["items"]] == [child.node_id]
+    assert subtree is not None
+    assert subtree["root_node_id"] == child.node_id
+    assert acceptance.node_id in subtree["nodes_by_id"]
+    assert subtree["nodes_by_id"][acceptance.node_id]["node_kind"] == "acceptance"
 
 
 def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint(tmp_path: Path):
@@ -2474,15 +2473,17 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
         assert second_results[0].failure_info is None
         assert first_child_id != second_child_id
 
-        default_children = service.get_node_children_payload(record.task_id, root.node_id)
-        first_round_children = service.get_node_children_payload(record.task_id, root.node_id, round_id="round-1")
+        default_subtree = service.get_task_tree_subtree_payload(record.task_id, root.node_id)
+        first_round_subtree = service.get_task_tree_subtree_payload(record.task_id, root.node_id, round_id="round-1")
 
-        assert default_children is not None
-        assert first_round_children is not None
-        assert [item["round_id"] for item in default_children["rounds"]] == ["round-1", "round-2"]
-        assert default_children["default_round_id"] == "round-2"
-        assert [item["node_id"] for item in default_children["items"]] == [second_child_id]
-        assert [item["node_id"] for item in first_round_children["items"]] == [first_child_id]
+        assert default_subtree is not None
+        assert first_round_subtree is not None
+        default_root = default_subtree["nodes_by_id"][root.node_id]
+        first_round_root = first_round_subtree["nodes_by_id"][root.node_id]
+        assert [item["round_id"] for item in default_root["rounds"]] == ["round-1", "round-2"]
+        assert default_root["default_round_id"] == "round-2"
+        assert second_child_id in default_subtree["nodes_by_id"]
+        assert first_child_id in first_round_subtree["nodes_by_id"]
     finally:
         await service.close()
 
@@ -2634,11 +2635,11 @@ def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
         metadata={"final_acceptance": True},
     )
 
-    payload = service.get_node_children_payload(record.task_id, root.node_id)
+    payload = service.get_task_tree_subtree_payload(record.task_id, root.node_id)
 
     assert payload is not None
-    assert [item["node_id"] for item in payload["items"]] == [acceptance.node_id]
-    assert payload["items"][0]["node_kind"] == "acceptance"
+    assert acceptance.node_id in payload["nodes_by_id"]
+    assert payload["nodes_by_id"][acceptance.node_id]["node_kind"] == "acceptance"
 
 
 def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: Path):

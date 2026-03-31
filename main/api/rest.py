@@ -59,19 +59,27 @@ async def get_task_worker_status():
 async def get_task(
     task_id: str,
     mark_read: bool = Query(False),
-    include_tree: bool = Query(False),
 ):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    if include_tree:
-        payload = service.get_task_detail_payload(task_id, mark_read=bool(mark_read), include_tree=True)
-    else:
-        payload = service.get_task_detail_payload(task_id, mark_read=bool(mark_read))
+    payload = service.get_task_detail_payload(task_id, mark_read=bool(mark_read))
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, **payload}
+
+
+@router.get('/tasks/{task_id}/tree-snapshot')
+async def get_task_tree_snapshot(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = service.get_task_tree_snapshot_payload(task_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return payload
 
 
 @router.get('/tasks/{task_id}/nodes/{node_id}')
@@ -86,24 +94,20 @@ async def get_task_node_detail(task_id: str, node_id: str):
     return payload
 
 
-@router.get('/tasks/{task_id}/nodes/{node_id}/children')
-async def get_task_node_children(
+@router.get('/tasks/{task_id}/nodes/{node_id}/tree-subtree')
+async def get_task_node_tree_subtree(
     task_id: str,
     node_id: str,
     round_id: str | None = Query(None),
-    offset: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
 ):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_node_children_payload(
+    payload = service.get_task_tree_subtree_payload(
         task_id,
         node_id,
         round_id=round_id,
-        offset=offset,
-        limit=limit,
     )
     if payload is None:
         raise HTTPException(status_code=404, detail='node_not_found')

@@ -21,7 +21,7 @@ def _run_node_script(script: str) -> dict[str, object]:
     return json.loads(completed.stdout.strip())
 
 
-def test_children_snapshot_merge_preserves_existing_descendants() -> None:
+def test_rendered_tree_builds_from_normalized_snapshot() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -29,18 +29,22 @@ def test_children_snapshot_merge_preserves_existing_descendants() -> None:
         global.window = global;
         global.S = {
           currentTaskId: "task:test",
-          taskNodeChildrenCache: {},
-          taskNodeChildrenRequests: {},
-          taskTreeHasFullSnapshot: true,
-          dirtyParentsByNodeId: {},
-          branchSyncInFlightByNodeId: {},
-          branchSyncQueuedByNodeId: {},
-          branchSyncTokenByNodeId: {},
-          treeRoundSelectionsByNodeId: {},
-          tree: null,
+          treeRootNodeId: "",
+          treeNodesById: {},
+          treeSnapshotVersion: "",
+          treeRenderedRoot: null,
+          treeView: null,
+          treeLargeMode: false,
+          treeDirtyParentsById: {},
+          treeBranchSyncInFlightById: {},
+          treeBranchSyncQueuedById: {},
+          treeBranchSyncTokenById: {},
+          treeSelectedRoundByNodeId: {},
+          taskNodeDetails: {},
+          liveFrameMap: {},
         };
         global.U = {};
-        global.ApiClient = { getTaskNodeChildren: async () => ({}) };
+        global.ApiClient = {};
         global.showToast = () => {};
         global.isAbortLike = () => false;
         global.renderTree = () => {};
@@ -48,57 +52,64 @@ def test_children_snapshot_merge_preserves_existing_descendants() -> None:
         vm.runInThisContext(code);
         global.renderTree = () => {};
 
-        S.tree = buildTaskTreeNodeFromDetail({
-          node_id: "root",
-          title: "root",
-          children: [
-            {
+        applyTaskTreeSnapshotPayload({
+          task_id: "task:test",
+          root_node_id: "root",
+          snapshot_version: "1",
+          nodes_by_id: {
+            root: {
+              node_id: "root",
+              title: "root",
+              status: "in_progress",
+              node_kind: "execution",
+              default_round_id: "r1",
+              rounds: [{ round_id: "r1", label: "Round 1", is_latest: true, child_ids: ["a", "b"] }],
+              auxiliary_child_ids: [],
+            },
+            a: {
               node_id: "a",
+              parent_node_id: "root",
               title: "a",
-              children: [
-                { node_id: "a1", title: "a1", children: [{ node_id: "a1x", title: "a1x" }] },
-                { node_id: "a2", title: "a2" },
-              ],
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: ["a1"],
             },
-            {
+            a1: {
+              node_id: "a1",
+              parent_node_id: "a",
+              title: "a1",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
+            },
+            b: {
               node_id: "b",
+              parent_node_id: "root",
               title: "b",
-              children: [{ node_id: "b1", title: "b1" }],
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
             },
-          ],
+          },
         });
 
-        applyTaskNodeChildrenSnapshot({
-          parent_node_id: "root",
-          round_id: "",
-          default_round_id: "",
-          rounds: [],
-          items: [
-            { node_id: "a", title: "a patched" },
-            { node_id: "b", title: "b patched" },
-            { node_id: "c", title: "c new" },
-          ],
-        }, { render: false });
-
-        const a = findRawTaskTreeNode(S.tree, "a");
-        const a1x = findRawTaskTreeNode(S.tree, "a1x");
-        const b = findRawTaskTreeNode(S.tree, "b");
+        const root = buildRenderedTaskTreeRoot();
+        const a = findRawTaskTreeNode(root, "a");
         console.log(JSON.stringify({
-          rootChildren: rawTreeDirectChildren(S.tree).map((node) => node.node_id),
+          rootChildren: rawTreeDirectChildren(root).map((node) => node.node_id),
           aChildren: rawTreeDirectChildren(a).map((node) => node.node_id),
-          bChildren: rawTreeDirectChildren(b).map((node) => node.node_id),
-          a1xExists: !!a1x,
         }));
         """
     )
 
-    assert result["rootChildren"] == ["a", "b", "c"]
-    assert result["aChildren"] == ["a1", "a2"]
-    assert result["bChildren"] == ["b1"]
-    assert result["a1xExists"] is True
+    assert result["rootChildren"] == ["a", "b"]
+    assert result["aChildren"] == ["a1"]
 
 
-def test_dirty_parent_forces_children_request_instead_of_local_snapshot() -> None:
+def test_ensure_task_tree_subtree_uses_new_snapshot_endpoint() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -107,36 +118,68 @@ def test_dirty_parent_forces_children_request_instead_of_local_snapshot() -> Non
         let requestCount = 0;
         global.S = {
           currentTaskId: "task:test",
-          taskNodeChildrenCache: {
-            "root::default": {
-              task_id: "task:test",
-              parent_node_id: "root",
-              round_id: "",
+          treeRootNodeId: "root",
+          treeNodesById: {
+            root: {
+              node_id: "root",
+              title: "root",
+              status: "in_progress",
+              node_kind: "execution",
               default_round_id: "",
               rounds: [],
-              items: [{ node_id: "stale-child", title: "stale child" }],
+              auxiliary_child_ids: ["old-child"],
+            },
+            "old-child": {
+              node_id: "old-child",
+              parent_node_id: "root",
+              title: "old child",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
             },
           },
-          taskNodeChildrenRequests: {},
-          taskTreeHasFullSnapshot: true,
-          dirtyParentsByNodeId: { root: true },
-          branchSyncInFlightByNodeId: {},
-          branchSyncQueuedByNodeId: {},
-          branchSyncTokenByNodeId: {},
-          treeRoundSelectionsByNodeId: {},
-          tree: null,
+          treeSnapshotVersion: "1",
+          treeRenderedRoot: null,
+          treeView: null,
+          treeLargeMode: false,
+          treeDirtyParentsById: { root: true },
+          treeBranchSyncInFlightById: {},
+          treeBranchSyncQueuedById: {},
+          treeBranchSyncTokenById: {},
+          treeSelectedRoundByNodeId: {},
+          taskNodeDetails: {},
+          liveFrameMap: {},
         };
         global.U = {};
         global.ApiClient = {
-          getTaskNodeChildren: async () => {
+          getTaskTreeSnapshot: async () => ({}),
+          getTaskNodeTreeSubtree: async () => {
             requestCount += 1;
             return {
               task_id: "task:test",
-              parent_node_id: "root",
-              round_id: "",
-              default_round_id: "",
-              rounds: [],
-              items: [{ node_id: "fresh-child", title: "fresh child", children_fingerprint: "" }],
+              root_node_id: "root",
+              snapshot_version: "2",
+              nodes_by_id: {
+                root: {
+                  node_id: "root",
+                  title: "root",
+                  status: "in_progress",
+                  node_kind: "execution",
+                  default_round_id: "",
+                  rounds: [],
+                  auxiliary_child_ids: ["fresh-child"],
+                },
+                "fresh-child": {
+                  node_id: "fresh-child",
+                  parent_node_id: "root",
+                  title: "fresh child",
+                  status: "in_progress",
+                  node_kind: "execution",
+                  rounds: [],
+                  auxiliary_child_ids: [],
+                },
+              },
             };
           },
         };
@@ -147,17 +190,12 @@ def test_dirty_parent_forces_children_request_instead_of_local_snapshot() -> Non
         vm.runInThisContext(code);
         global.renderTree = () => {};
 
-        S.tree = buildTaskTreeNodeFromDetail({
-          node_id: "root",
-          title: "root",
-          children: [{ node_id: "stale-child", title: "stale child" }],
-        });
-
-        ensureTaskNodeChildren("root").then((payload) => {
+        ensureTaskTreeSubtree("root", { force: true }).then((payload) => {
           console.log(JSON.stringify({
             requestCount,
             dirtyCleared: taskTreeParentIsDirty("root") === false,
-            itemIds: (payload.items || []).map((item) => item.node_id),
+            childIds: S.treeNodesById.root.auxiliary_child_ids,
+            returnedRoot: payload.root_node_id,
           }));
         });
         """
@@ -165,4 +203,5 @@ def test_dirty_parent_forces_children_request_instead_of_local_snapshot() -> Non
 
     assert result["requestCount"] == 1
     assert result["dirtyCleared"] is True
-    assert result["itemIds"] == ["fresh-child"]
+    assert result["childIds"] == ["fresh-child"]
+    assert result["returnedRoot"] == "root"

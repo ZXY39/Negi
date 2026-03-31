@@ -391,13 +391,10 @@ class ApiClient {
         return data || {};
     }
 
-    static async getTask(taskId, markRead = false, { includeTree = false } = {}) {
+    static async getTask(taskId, markRead = false) {
         return this._request("GET", `/api/tasks/${taskId}`, {
-            params: {
-                mark_read: markRead,
-                include_tree: includeTree || undefined,
-            },
-            requestKey: `tasks:detail:${taskId}:${includeTree ? "tree" : "summary"}`,
+            params: { mark_read: markRead },
+            requestKey: `tasks:detail:${taskId}`,
         });
     }
 
@@ -408,14 +405,18 @@ class ApiClient {
         return data.item || null;
     }
 
-    static async getTaskNodeChildren(taskId, nodeId, { roundId = "", offset = 0, limit = 50 } = {}) {
-        return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/children`, {
+    static async getTaskTreeSnapshot(taskId) {
+        return this._request("GET", `/api/tasks/${taskId}/tree-snapshot`, {
+            requestKey: `tasks:tree-snapshot:${taskId}`,
+        });
+    }
+
+    static async getTaskNodeTreeSubtree(taskId, nodeId, { roundId = "" } = {}) {
+        return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/tree-subtree`, {
             params: {
                 round_id: roundId || undefined,
-                offset,
-                limit,
             },
-            requestKey: `tasks:node-children:${taskId}:${nodeId}:${roundId || "default"}:${offset}:${limit}`,
+            requestKey: `tasks:tree-subtree:${taskId}:${nodeId}:${roundId || "default"}`,
         });
     }
 
