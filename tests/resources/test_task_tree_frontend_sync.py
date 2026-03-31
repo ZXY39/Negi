@@ -32,7 +32,6 @@ def test_rendered_tree_builds_from_normalized_snapshot() -> None:
           treeRootNodeId: "",
           treeNodesById: {},
           treeSnapshotVersion: "",
-          treeRenderedRoot: null,
           treeView: null,
           treeLargeMode: false,
           treeDirtyParentsById: {},
@@ -96,11 +95,11 @@ def test_rendered_tree_builds_from_normalized_snapshot() -> None:
           },
         });
 
-        const root = buildRenderedTaskTreeRoot();
-        const a = findRawTaskTreeNode(root, "a");
+        const root = buildExecutionTreeFromSnapshot();
+        const a = findTreeNode(root, "a");
         console.log(JSON.stringify({
-          rootChildren: rawTreeDirectChildren(root).map((node) => node.node_id),
-          aChildren: rawTreeDirectChildren(a).map((node) => node.node_id),
+          rootChildren: root.children.map((node) => node.node_id),
+          aChildren: a.children.map((node) => node.node_id),
         }));
         """
     )
@@ -140,7 +139,6 @@ def test_ensure_task_tree_subtree_uses_new_snapshot_endpoint() -> None:
             },
           },
           treeSnapshotVersion: "1",
-          treeRenderedRoot: null,
           treeView: null,
           treeLargeMode: false,
           treeDirtyParentsById: { root: true },

@@ -17,6 +17,12 @@ BANNED_PATTERNS = [
     "tree_snapshot_path",
     "tree_text_path",
     "runtime_states",
+    "TaskTreeNode",
+    "TaskTreeNodeSummary",
+    "_projection_root(",
+    "findRawTaskTreeNode",
+    "rawTreeDirectChildren",
+    "rawNodeRounds",
 ]
 
 

@@ -121,7 +121,6 @@ const S = {
     treeRootNodeId: "",
     treeNodesById: {},
     treeSnapshotVersion: "",
-    treeRenderedRoot: null,
     treeDirtyParentsById: {},
     treeBranchSyncInFlightById: {},
     treeBranchSyncQueuedById: {},

@@ -8,21 +8,6 @@ from main.models import Model, ModelTokenUsageRecord, TokenUsageSummary
 from main.types import NodeStatus, TaskStatus
 
 
-class TaskSpawnRound(Model):
-    round_id: str = ''
-    round_index: int = 0
-    label: str = ''
-    is_latest: bool = False
-    created_at: str = ''
-    child_node_ids: list[str] = Field(default_factory=list)
-    source: str = 'explicit'
-    total_children: int = 0
-    completed_children: int = 0
-    running_children: int = 0
-    failed_children: int = 0
-    children: list['TaskTreeNode | TaskTreeNodeSummary'] = Field(default_factory=list)
-
-
 class TaskTreeSnapshotRound(Model):
     round_id: str = ''
     label: str = ''
@@ -53,29 +38,6 @@ class TaskTreeSnapshot(Model):
     generated_at: str = ''
     snapshot_version: str = ''
     nodes_by_id: dict[str, TaskTreeSnapshotNode] = Field(default_factory=dict)
-
-
-class TaskTreeNode(Model):
-    node_id: str
-    parent_node_id: str | None = None
-    depth: int = 0
-    node_kind: str = 'execution'
-    status: NodeStatus = 'in_progress'
-    title: str = ''
-    input: str = ''
-    input_ref: str = ''
-    output: str = ''
-    output_ref: str = ''
-    check_result: str = ''
-    check_result_ref: str = ''
-    updated_at: str = ''
-    children_fingerprint: str = ''
-    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
-    token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
-    spawn_rounds: list[TaskSpawnRound] = Field(default_factory=list)
-    auxiliary_children: list['TaskTreeNode'] = Field(default_factory=list)
-    default_round_id: str = ''
-    children: list['TaskTreeNode'] = Field(default_factory=list)
 
 
 class LatestTaskNodeOutput(Model):
@@ -157,21 +119,6 @@ class TaskListItem(Model):
     updated_at: str = ''
     max_depth: int = 0
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
-
-
-class TaskTreeNodeSummary(Model):
-    node_id: str
-    parent_node_id: str | None = None
-    depth: int = 0
-    node_kind: str = 'execution'
-    status: NodeStatus = 'in_progress'
-    title: str = ''
-    updated_at: str = ''
-    children_fingerprint: str = ''
-    spawn_rounds: list[TaskSpawnRound] = Field(default_factory=list)
-    default_round_id: str = ''
-    auxiliary_children: list['TaskTreeNodeSummary'] = Field(default_factory=list)
-    children: list['TaskTreeNodeSummary'] = Field(default_factory=list)
 
 
 class TaskRuntimeSummary(Model):
@@ -302,7 +249,6 @@ class TaskProgressResult(Model):
     task_id: str
     task_status: TaskStatus = 'in_progress'
     tree_text: str = ''
-    root: TaskTreeNode | TaskTreeNodeSummary | None = None
     latest_node: LatestTaskNodeOutput | None = None
     live_state: TaskLiveState | None = None
     nodes: list[dict[str, Any]] = Field(default_factory=list)
@@ -310,9 +256,4 @@ class TaskProgressResult(Model):
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
     model_calls: list[TaskModelCallRecord] = Field(default_factory=list)
     text: str = ''
-
-
-TaskSpawnRound.model_rebuild()
-TaskTreeNode.model_rebuild()
-TaskTreeNodeSummary.model_rebuild()
 

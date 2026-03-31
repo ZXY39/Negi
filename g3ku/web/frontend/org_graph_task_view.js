@@ -135,7 +135,6 @@ function resetTaskTreeSnapshotState({ clearDirty = true } = {}) {
     S.treeRootNodeId = "";
     S.treeNodesById = {};
     S.treeSnapshotVersion = "";
-    S.treeRenderedRoot = null;
     S.treeView = null;
     S.treeLargeMode = false;
     S.treeSelectedRoundByNodeId = {};
@@ -157,13 +156,9 @@ function applyTaskTreeSnapshotPayload(payload = {}) {
     S.treeRootNodeId = rootNodeId;
     S.treeNodesById = nextNodesById;
     S.treeSnapshotVersion = String(payload?.snapshot_version || "").trim();
-    S.treeRenderedRoot = null;
     S.treeView = null;
     S.treeLargeMode = false;
-    S.treeSelectedRoundByNodeId = {};
-    if (rootNodeId) {
-        S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(buildRenderedTaskTreeRoot(), S.treeSelectedRoundByNodeId);
-    }
+    S.treeSelectedRoundByNodeId = pruneTreeRoundSelections({});
 }
 
 function applyTaskTreeSubtreePayload(payload = {}) {
@@ -186,80 +181,8 @@ function applyTaskTreeSubtreePayload(payload = {}) {
     if (String(payload?.snapshot_version || "").trim()) {
         S.treeSnapshotVersion = String(payload.snapshot_version || "").trim();
     }
-    S.treeRenderedRoot = null;
     S.treeView = null;
-    S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(buildRenderedTaskTreeRoot(), S.treeSelectedRoundByNodeId);
-}
-
-function dedupeTreeNodes(nodes) {
-    const seen = new Set();
-    const out = [];
-    (Array.isArray(nodes) ? nodes : []).forEach((node) => {
-        const nodeId = String(node?.node_id || "").trim();
-        const key = nodeId || `anon:${out.length}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        out.push(node);
-    });
-    return out;
-}
-
-function rawNodeRounds(node) {
-    return (Array.isArray(node?.spawn_rounds) ? node.spawn_rounds : [])
-        .map((round) => ({
-            ...round,
-            round_id: String(round?.round_id || "").trim(),
-            label: String(round?.label || "").trim(),
-            children: dedupeTreeNodes(round?.children),
-        }))
-        .filter((round) => round.round_id);
-}
-
-function rawAuxiliaryChildren(node) {
-    const explicitAuxiliary = dedupeTreeNodes(node?.auxiliary_children);
-    if (explicitAuxiliary.length) return explicitAuxiliary;
-    const directChildren = dedupeTreeNodes(node?.children);
-    const rounds = rawNodeRounds(node);
-    if (!directChildren.length || !rounds.length) return [];
-    const roundChildIds = new Set(
-        rounds.flatMap((round) => dedupeTreeNodes(round.children)
-            .map((child) => String(child?.node_id || "").trim())
-            .filter(Boolean)),
-    );
-    return directChildren.filter((child) => {
-        const childId = String(child?.node_id || "").trim();
-        return !childId || !roundChildIds.has(childId);
-    });
-}
-
-function rawTreeDirectChildren(node) {
-    const rounds = rawNodeRounds(node);
-    const auxiliary = rawAuxiliaryChildren(node);
-    const roundChildren = rounds.flatMap((round) => dedupeTreeNodes(round.children));
-    if (auxiliary.length || roundChildren.length) return dedupeTreeNodes([...auxiliary, ...roundChildren]);
-    return dedupeTreeNodes(node?.children);
-}
-
-function walkFullTaskTree(node, visitor, seen = new Set()) {
-    if (!node) return;
-    const nodeId = String(node?.node_id || "").trim();
-    if (nodeId && seen.has(nodeId)) return;
-    if (nodeId) seen.add(nodeId);
-    visitor(node);
-    rawTreeDirectChildren(node).forEach((child) => walkFullTaskTree(child, visitor, seen));
-}
-
-function findRawTaskTreeNode(node, nodeId, seen = new Set()) {
-    if (!node) return null;
-    const currentId = String(node?.node_id || "").trim();
-    if (currentId && seen.has(currentId)) return null;
-    if (currentId) seen.add(currentId);
-    if (currentId === String(nodeId || "").trim()) return node;
-    for (const child of rawTreeDirectChildren(node)) {
-        const found = findRawTaskTreeNode(child, nodeId, seen);
-        if (found) return found;
-    }
-    return null;
+    S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(S.treeSelectedRoundByNodeId);
 }
 
 function markTaskTreeParentDirty(nodeId) {
@@ -378,80 +301,105 @@ function scheduleTaskTreeBranchSync(nodeId, { delayMs = 120 } = {}) {
     S.treeBranchSyncTokenById = { ...(S.treeBranchSyncTokenById || {}), [normalizedNodeId]: timeoutId };
 }
 
-function buildRenderedTaskTreeNode(nodeId, selections = S.treeSelectedRoundByNodeId, seen = new Set()) {
+function pruneTreeRoundSelections(selections, { rootNodeId = S.treeRootNodeId, nodesById = S.treeNodesById } = {}) {
+    const source = normalizeTreeRoundSelections(selections);
+    const normalizedRootNodeId = String(rootNodeId || "").trim();
+    if (!normalizedRootNodeId) return {};
+    const next = {};
+
+    const walk = (nodeId, seen = new Set()) => {
+        const normalizedNodeId = String(nodeId || "").trim();
+        if (!normalizedNodeId || seen.has(normalizedNodeId)) return;
+        const node = nodesById?.[normalizedNodeId] || null;
+        if (!node) return;
+        seen.add(normalizedNodeId);
+        if (source[normalizedNodeId] && (Array.isArray(node?.rounds) ? node.rounds : []).some((round) => round.round_id === source[normalizedNodeId])) {
+            next[normalizedNodeId] = source[normalizedNodeId];
+        }
+        snapshotNodeVisibleChildIds(node, source).forEach((childId) => walk(childId, seen));
+    };
+
+    walk(normalizedRootNodeId);
+    return next;
+}
+
+function buildNodeRoundState(node, selections = S.treeSelectedRoundByNodeId) {
+    const rounds = (Array.isArray(node?.rounds) ? node.rounds : []).map((round, index) => ({
+        roundId: String(round?.round_id || ""),
+        roundIndex: index + 1,
+        label: formatRoundLabel(round?.label, index + 1),
+        isLatest: !!round?.is_latest,
+        childCount: Array.isArray(round?.child_ids) ? round.child_ids.length : 0,
+        createdAt: "",
+        totalChildren: Math.max(0, treeNormalizeInt(round?.total_children, Array.isArray(round?.child_ids) ? round.child_ids.length : 0)),
+        completedChildren: Math.max(0, treeNormalizeInt(round?.completed_children, 0)),
+        runningChildren: Math.max(0, treeNormalizeInt(round?.running_children, 0)),
+        failedChildren: Math.max(0, treeNormalizeInt(round?.failed_children, 0)),
+    }));
+    if (!rounds.length) {
+        return {
+            options: [],
+            selectedRoundId: "",
+            defaultRoundId: "",
+            summary: "当前节点无派生轮次",
+        };
+    }
+    const defaultRoundId = snapshotNodeDefaultRoundId(node);
+    const selectedRoundId = snapshotNodeSelectedRoundId(node, selections);
+    const selectedRound = rounds.find((round) => round.roundId === selectedRoundId) || rounds[rounds.length - 1];
+    const selectionMode = selectedRound.roundId && selectedRound.roundId !== defaultRoundId ? "手动" : "最新";
+    const totalChildren = selectedRound.totalChildren || selectedRound.childCount;
+    const counts = [
+        `${selectedRound.completedChildren}/${totalChildren || selectedRound.childCount} 完成`,
+        selectedRound.runningChildren ? `${selectedRound.runningChildren} 进行中` : "",
+        selectedRound.failedChildren ? `${selectedRound.failedChildren} 失败` : "",
+    ].filter(Boolean).join("，");
+    return {
+        options: rounds,
+        selectedRoundId,
+        defaultRoundId,
+        summary: `${selectedRound.label}${selectedRound.isLatest ? "（最新）" : ""} | ${selectionMode} | ${counts || `${selectedRound.childCount} 个子节点`} | 共 ${rounds.length} 轮`,
+    };
+}
+
+function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = S.treeSelectedRoundByNodeId, seen = new Set()) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId || seen.has(normalizedNodeId)) return null;
     const snapshotNode = treeSnapshotNode(normalizedNodeId);
     if (!snapshotNode) return null;
     seen.add(normalizedNodeId);
-    const selectedRoundId = snapshotNodeSelectedRoundId(snapshotNode, selections);
-    const rounds = (Array.isArray(snapshotNode?.rounds) ? snapshotNode.rounds : []).map((round) => ({
-        ...round,
-        round_id: String(round?.round_id || "").trim(),
-        label: String(round?.label || "").trim(),
-        child_node_ids: Array.isArray(round?.child_ids) ? [...round.child_ids] : [],
-        children: String(round?.round_id || "").trim() === selectedRoundId
-            ? (Array.isArray(round?.child_ids) ? round.child_ids : [])
-                .map((childId) => buildRenderedTaskTreeNode(childId, selections, seen))
-                .filter(Boolean)
-            : [],
-    }));
-    const auxiliaryChildren = (Array.isArray(snapshotNode?.auxiliary_child_ids) ? snapshotNode.auxiliary_child_ids : [])
-        .map((childId) => buildRenderedTaskTreeNode(childId, selections, seen))
+    const kind = String(snapshotNode.node_kind || "execution").trim().toLowerCase() || "execution";
+    const status = String(snapshotNode.status || "unknown").trim().toLowerCase() || "unknown";
+    const title = resolveNodeTitle(snapshotNode, snapshotNode);
+    const roundState = buildNodeRoundState(snapshotNode, selections);
+    const visibleChildren = snapshotNodeVisibleChildIds(snapshotNode, selections)
+        .map((childId) => buildExecutionTreeFromSnapshot(childId, selections, seen))
         .filter(Boolean);
-    const selectedRound = rounds.find((round) => round.round_id === selectedRoundId) || null;
+    const inspectionNodes = [];
+    const childNodes = [];
+    visibleChildren.forEach((child) => {
+        if (isAcceptanceNodeKind(child?.kind)) inspectionNodes.push(child);
+        else childNodes.push(child);
+    });
+    const inspectionActive = inspectionNodes.some((child) => isInspectionActiveStatus(child?.state || child?.visual_state));
+    const stateMeta = resolveTreeNodeStatusLabel(status, { kind, inspectionActive });
     return {
         node_id: snapshotNode.node_id,
         parent_node_id: snapshotNode.parent_node_id,
-        node_kind: snapshotNode.node_kind,
-        status: snapshotNode.status,
-        title: snapshotNode.title,
-        updated_at: snapshotNode.updated_at,
-        children_fingerprint: snapshotNode.children_fingerprint,
-        default_round_id: snapshotNode.default_round_id,
-        selected_round_id: selectedRoundId,
-        spawn_rounds: rounds,
-        auxiliary_children: auxiliaryChildren,
-        children: [...auxiliaryChildren, ...((selectedRound?.children) || [])],
+        title: title.title,
+        fullTitle: title.fullTitle,
+        goal: title.goal,
+        kind,
+        state: status,
+        visual_state: stateMeta.visualState,
+        display_state: stateMeta.displayState,
+        roundOptions: roundState.options,
+        selectedRoundId: roundState.selectedRoundId,
+        defaultRoundId: roundState.defaultRoundId,
+        roundSummary: roundState.summary,
+        inspectionNodes,
+        children: childNodes,
     };
-}
-
-function buildRenderedTaskTreeRoot() {
-    const rootNodeId = String(S.treeRootNodeId || "").trim();
-    if (!rootNodeId) return null;
-    return buildRenderedTaskTreeNode(rootNodeId, S.treeSelectedRoundByNodeId);
-}
-
-function pruneTreeRoundSelections(root, selections) {
-    const source = normalizeTreeRoundSelections(selections);
-    if (!root) return {};
-    const next = {};
-    walkFullTaskTree(root, (node) => {
-        const nodeId = String(node?.node_id || "").trim();
-        if (!nodeId || !source[nodeId]) return;
-        const rounds = rawNodeRounds(node);
-        if (rounds.some((round) => round.round_id === source[nodeId])) {
-            next[nodeId] = source[nodeId];
-        }
-    });
-    return next;
-}
-
-function resolveDefaultRoundId(node) {
-    const rounds = rawNodeRounds(node);
-    if (!rounds.length) return "";
-    const explicitDefault = String(node?.default_round_id || "").trim();
-    if (rounds.some((round) => round.round_id === explicitDefault)) return explicitDefault;
-    return String(rounds.find((round) => round?.is_latest)?.round_id || rounds[rounds.length - 1]?.round_id || "");
-}
-
-function resolveSelectedRoundId(node, selections) {
-    const rounds = rawNodeRounds(node);
-    if (!rounds.length) return "";
-    const nodeId = String(node?.node_id || "").trim();
-    const selected = String(selections?.[nodeId] || "").trim();
-    if (rounds.some((round) => round.round_id === selected)) return selected;
-    return resolveDefaultRoundId(node);
 }
 
 function countVisibleTreeNodes(root, predicate = null) {
@@ -1282,87 +1230,12 @@ function renderAcceptanceResult(text) {
 
 function formatRoundLabel(label, roundIndex) {
     const normalizedLabel = String(label || "").trim();
-    const normalizedIndex = normalizeInt(roundIndex, 0);
+    const normalizedIndex = treeNormalizeInt(roundIndex, 0);
     const fallbackLabel = normalizedIndex > 0 ? `第${normalizedIndex}轮树` : "轮次";
     if (!normalizedLabel) return fallbackLabel;
     const matchedRound = normalizedLabel.match(/^Round\s+(\d+)$/i);
     if (matchedRound) return `第${matchedRound[1]}轮树`;
     return normalizedLabel;
-}
-
-function buildNodeRoundState(node) {
-    const rounds = rawNodeRounds(node).map((round) => ({
-        roundId: String(round.round_id || ""),
-        roundIndex: normalizeInt(round.round_index, 0),
-        label: formatRoundLabel(round.label, round.round_index),
-        isLatest: !!round.is_latest,
-        childCount: Array.isArray(round.children) ? round.children.length : Math.max(0, normalizeInt(round.child_node_ids?.length, 0)),
-        createdAt: String(round.created_at || ""),
-        totalChildren: Math.max(0, normalizeInt(round.total_children, Array.isArray(round.children) ? round.children.length : 0)),
-        completedChildren: Math.max(0, normalizeInt(round.completed_children, 0)),
-        runningChildren: Math.max(0, normalizeInt(round.running_children, 0)),
-        failedChildren: Math.max(0, normalizeInt(round.failed_children, 0)),
-    }));
-    if (!rounds.length) {
-        return {
-            options: [],
-            selectedRoundId: "",
-            defaultRoundId: "",
-            summary: "当前节点无派生轮次",
-        };
-    }
-    const defaultRoundId = resolveDefaultRoundId(node);
-    const selectedRoundId = String(node?.selected_round_id || defaultRoundId || "");
-    const selectedRound = rounds.find((round) => round.roundId === selectedRoundId) || rounds[rounds.length - 1];
-    const selectionMode = selectedRound.roundId && selectedRound.roundId !== defaultRoundId ? "手动" : "最新";
-    const totalChildren = selectedRound.totalChildren || selectedRound.childCount;
-    const counts = [
-        `${selectedRound.completedChildren}/${totalChildren || selectedRound.childCount} 完成`,
-        selectedRound.runningChildren ? `${selectedRound.runningChildren} 进行中` : "",
-        selectedRound.failedChildren ? `${selectedRound.failedChildren} 失败` : "",
-    ].filter(Boolean).join("，");
-    return {
-        options: rounds,
-        selectedRoundId,
-        defaultRoundId,
-        summary: `${selectedRound.label}${selectedRound.isLatest ? "（最新）" : ""} | ${selectionMode} | ${counts || `${selectedRound.childCount} 个子节点`} | 共 ${rounds.length} 轮`,
-    };
-}
-
-function buildExecutionTree(rawTree) {
-    if (!rawTree) return null;
-    const walk = (node) => {
-        const kind = String(node.node_kind || "execution").trim().toLowerCase() || "execution";
-        const status = String(node.status || "unknown").trim().toLowerCase() || "unknown";
-        const title = resolveNodeTitle(node, node);
-        const roundState = buildNodeRoundState(node);
-        const allChildren = Array.isArray(node.children) ? node.children.map(walk) : [];
-        const inspectionNodes = [];
-        const childNodes = [];
-        allChildren.forEach((child) => {
-            if (isAcceptanceNodeKind(child?.kind)) inspectionNodes.push(child);
-            else childNodes.push(child);
-        });
-        const inspectionActive = inspectionNodes.some((child) => isInspectionActiveStatus(child?.state || child?.visual_state));
-        const stateMeta = resolveTreeNodeStatusLabel(status, { kind, inspectionActive });
-        return {
-            node_id: node.node_id,
-            title: title.title,
-            fullTitle: title.fullTitle,
-            goal: title.goal,
-            kind,
-            state: status,
-            visual_state: stateMeta.visualState,
-            display_state: stateMeta.displayState,
-            roundOptions: roundState.options,
-            selectedRoundId: roundState.selectedRoundId,
-            defaultRoundId: roundState.defaultRoundId,
-            roundSummary: roundState.summary,
-            inspectionNodes,
-            children: childNodes,
-        };
-    };
-    return walk(rawTree);
 }
 
 function executionTreeNodeSelector(nodeId) {
@@ -1375,8 +1248,7 @@ function executionTreeNodeSelector(nodeId) {
 }
 
 function refreshTreeViewFromSnapshot() {
-    S.treeRenderedRoot = buildRenderedTaskTreeRoot();
-    S.treeView = buildExecutionTree(S.treeRenderedRoot);
+    S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
     return S.treeView;
 }
 
@@ -1412,10 +1284,8 @@ function buildTaskTreeRecoveryBubble(text) {
 function renderTree() {
     if (!String(S.treeRootNodeId || "").trim()) return;
     const recoveryNotice = String(S.currentTask?.metadata?.recovery_notice || "").trim();
-    const renderedRoot = buildRenderedTaskTreeRoot();
-    S.treeRenderedRoot = renderedRoot;
-    syncTaskTreeHeaderState(renderedRoot);
-    S.treeView = buildExecutionTree(renderedRoot);
+    S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
+    syncTaskTreeHeaderState(S.treeView);
     if (!S.treeView) {
         U.tree.innerHTML = "";
         if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));

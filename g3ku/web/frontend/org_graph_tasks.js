@@ -1269,7 +1269,7 @@ function handleTaskEvent(payload) {
                 const currentViewState = captureTaskDetailViewState();
                 stashTaskDetailViewState({ nodeId, viewState: currentViewState });
                 S.pendingTaskDetailRestore = { nodeId, viewState: currentViewState };
-                const selected = findTreeNode(S.treeView || S.treeRenderedRoot, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
+                const selected = findTreeNode(S.treeView, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
                 void showAgent(selected, { preserveViewState: true, forceRefresh: true });
             } else {
                 const nextDetails = { ...(S.taskNodeDetails || {}) };

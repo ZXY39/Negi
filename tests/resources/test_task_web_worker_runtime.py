@@ -2484,6 +2484,8 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
         assert default_root["default_round_id"] == "round-2"
         assert second_child_id in default_subtree["nodes_by_id"]
         assert first_child_id in first_round_subtree["nodes_by_id"]
+        visible_failed_ids = service.query_service.failed_node_ids(record.task_id)
+        assert visible_failed_ids == []
     finally:
         await service.close()
 
@@ -2854,6 +2856,7 @@ def test_view_progress_nodes_are_compact_summaries(tmp_path: Path):
     assert "prompt" not in root_progress_node
     assert "input" not in root_progress_node
     assert "metadata" not in root_progress_node
+    assert "root" not in progress.model_dump(mode="json")
 
 
 @pytest.mark.asyncio
