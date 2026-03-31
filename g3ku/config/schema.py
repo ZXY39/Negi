@@ -726,7 +726,32 @@ class MainRuntimeConfig(Base):
     governance_store_path: str = '.g3ku/main-runtime/governance.sqlite3'
     default_max_depth: int = 1
     hard_max_depth: int = 4
+    event_history: "MainRuntimeEventHistoryConfig" = Field(default_factory=lambda: MainRuntimeEventHistoryConfig())
     node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())
+
+
+class MainRuntimeEventHistoryConfig(Base):
+    enabled: bool = True
+    dir: str = '.g3ku/main-runtime/event-history'
+    live_patch_persist_window_ms: int = 1000
+    archive_encoding: str = 'gzip'
+
+    @field_validator("live_patch_persist_window_ms", mode="before")
+    @classmethod
+    def _normalize_live_patch_persist_window_ms(cls, value: Any) -> int:
+        if value is None:
+            return 1000
+        if isinstance(value, str) and not value.strip():
+            return 1000
+        return max(0, int(value))
+
+    @field_validator("archive_encoding", mode="before")
+    @classmethod
+    def _normalize_archive_encoding(cls, value: Any) -> str:
+        normalized = str(value or "gzip").strip().lower() or "gzip"
+        if normalized not in {"gzip", "plain"}:
+            return "gzip"
+        return normalized
 
 
 class NodeDispatchConcurrencyConfig(Base):

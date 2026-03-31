@@ -121,17 +121,18 @@ _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定�
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
 
 
-_TASK_RUNTIME_V2_MARKER = '.task-runtime-v2'
+_TASK_RUNTIME_V3_MARKER = '.task-runtime-v3'
 
 
-def _prepare_task_runtime_v2_root(
+def _prepare_task_runtime_v3_root(
     *,
     store_path: Path,
     files_base_dir: Path,
     artifact_dir: Path,
+    event_history_dir: Path,
 ) -> None:
     runtime_root = store_path.parent
-    marker_path = runtime_root / _TASK_RUNTIME_V2_MARKER
+    marker_path = runtime_root / _TASK_RUNTIME_V3_MARKER
     if marker_path.exists():
         return
     runtime_root.mkdir(parents=True, exist_ok=True)
@@ -145,13 +146,13 @@ def _prepare_task_runtime_v2_root(
                 candidate.unlink()
         except FileNotFoundError:
             continue
-    for directory in (files_base_dir, artifact_dir):
+    for directory in (files_base_dir, artifact_dir, event_history_dir):
         try:
             if directory.exists():
                 shutil.rmtree(directory, ignore_errors=True)
         except Exception:
-            logger.debug('task runtime v2 cleanup skipped for {}', directory)
-    marker_path.write_text('task-runtime-v2\n', encoding='utf-8')
+            logger.debug('task runtime v3 cleanup skipped for {}', directory)
+    marker_path.write_text('task-runtime-v3\n', encoding='utf-8')
 
 
 class ResourceDeleteBlockedError(ValueError):
@@ -235,13 +236,24 @@ class MainRuntimeService:
         resolved_store_path = Path(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
         resolved_files_base_dir = Path(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
         resolved_artifact_dir = Path(artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'))
-        _prepare_task_runtime_v2_root(
+        event_history_settings = self._event_history_settings(app_config)
+        resolved_event_history_dir = Path(
+            str(event_history_settings.get('dir') or (Path.cwd() / '.g3ku' / 'main-runtime' / 'event-history'))
+        )
+        _prepare_task_runtime_v3_root(
             store_path=resolved_store_path,
             files_base_dir=resolved_files_base_dir,
             artifact_dir=resolved_artifact_dir,
+            event_history_dir=resolved_event_history_dir,
         )
         self.runtime_debug_recorder = RuntimeDebugRecorder()
-        self.store = SQLiteTaskStore(resolved_store_path, debug_recorder=self.runtime_debug_recorder)
+        self.store = SQLiteTaskStore(
+            resolved_store_path,
+            debug_recorder=self.runtime_debug_recorder,
+            event_history_dir=resolved_event_history_dir,
+            event_history_enabled=bool(event_history_settings.get('enabled', True)),
+            event_history_archive_encoding=str(event_history_settings.get('archive_encoding') or 'gzip'),
+        )
         self.file_store = TaskFileStore(resolved_files_base_dir)
         self.artifact_store = TaskArtifactStore(artifact_dir=resolved_artifact_dir, store=self.store)
         self.content_store = ContentNavigationService(
@@ -256,6 +268,8 @@ class MainRuntimeService:
             registry=self.registry,
             content_store=self.content_store,
             debug_recorder=self.runtime_debug_recorder,
+            event_history_enabled=bool(event_history_settings.get('enabled', True)),
+            live_patch_persist_window_ms=int(event_history_settings.get('live_patch_persist_window_ms') or 0),
         )
         self.log_service.add_live_snapshot_publisher(self._publish_live_snapshot)
         self.log_service.add_summary_metric_reporter(self._increment_summary_stat)
@@ -2214,6 +2228,20 @@ class MainRuntimeService:
         }
 
     @staticmethod
+    def _event_history_settings(config: Any | None) -> dict[str, Any]:
+        main_runtime = getattr(config, 'main_runtime', None) if config is not None else None
+        history = getattr(main_runtime, 'event_history', None) if main_runtime is not None else None
+        return {
+            'enabled': bool(getattr(history, 'enabled', True)) if history is not None else True,
+            'dir': str(getattr(history, 'dir', '.g3ku/main-runtime/event-history') or '.g3ku/main-runtime/event-history'),
+            'live_patch_persist_window_ms': max(
+                0,
+                int(getattr(history, 'live_patch_persist_window_ms', 1000) or 1000),
+            ),
+            'archive_encoding': str(getattr(history, 'archive_encoding', 'gzip') or 'gzip').strip().lower() or 'gzip',
+        }
+
+    @staticmethod
     def _adaptive_tool_budget_settings(config: Any | None) -> dict[str, Any]:
         agents = getattr(config, 'agents', None) if config is not None else None
         parallelism = getattr(agents, 'node_parallelism', None) if agents is not None else None
@@ -3986,6 +4014,7 @@ class MainRuntimeService:
             )
             self.publish_worker_status_event(item=stopped_item)
         await self.global_scheduler.close()
+        self.log_service.close()
         await self.registry.close()
         self.governance_store.close()
         self.store.close()

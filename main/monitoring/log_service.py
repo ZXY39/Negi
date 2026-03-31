@@ -67,7 +67,17 @@ _NON_BUDGET_EXECUTION_TOOLS = {
 }
 
 class TaskLogService:
-    def __init__(self, *, store, file_store: TaskFileStore, registry=None, content_store: ContentNavigationService | None = None, debug_recorder=None):
+    def __init__(
+        self,
+        *,
+        store,
+        file_store: TaskFileStore,
+        registry=None,
+        content_store: ContentNavigationService | None = None,
+        debug_recorder=None,
+        event_history_enabled: bool = True,
+        live_patch_persist_window_ms: int = 1000,
+    ):
         self._store = store
         self._file_store = file_store
         self._registry = registry
@@ -81,6 +91,13 @@ class TaskLogService:
         self._summary_metric_reporters: list[Callable[[str, float], None]] = []
         self._task_locks: dict[str, threading.RLock] = {}
         self._task_locks_guard = threading.Lock()
+        self._event_history_enabled = bool(event_history_enabled)
+        self._live_patch_persist_window_ms = max(0, int(live_patch_persist_window_ms or 0))
+        self._live_patch_history_guard = threading.Lock()
+        self._pending_live_patch_history: dict[str, dict[str, Any]] = {}
+        self._live_patch_history_timers: dict[str, threading.Timer] = {}
+        self._last_live_patch_boundary_key: dict[str, tuple[Any, ...]] = {}
+        self._last_node_patch_persist_fingerprints: dict[tuple[str, str], str] = {}
 
     def add_live_snapshot_publisher(self, publisher: Callable[[TaskRecord, dict[str, Any], bool], None]) -> None:
         if callable(publisher):
@@ -98,6 +115,20 @@ class TaskLogService:
         if callable(reporter):
             self._summary_metric_reporters.append(reporter)
 
+    def close(self) -> None:
+        pending_task_ids: list[str] = []
+        with self._live_patch_history_guard:
+            timers = list(self._live_patch_history_timers.items())
+            self._live_patch_history_timers = {}
+            pending_task_ids = list(self._pending_live_patch_history.keys())
+        for _task_id, timer in timers:
+            try:
+                timer.cancel()
+            except Exception:
+                continue
+        for task_id in pending_task_ids:
+            self.flush_live_patch_history(task_id)
+
     def append_task_event(
         self,
         *,
@@ -113,6 +144,27 @@ class TaskLogService:
             data=data,
         )
 
+    def flush_live_patch_history(self, task_id: str) -> None:
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return
+        with self._live_patch_history_guard:
+            entry = self._pending_live_patch_history.pop(normalized_task_id, None)
+            timer = self._live_patch_history_timers.pop(normalized_task_id, None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        if not isinstance(entry, dict):
+            return
+        task = entry.get('task')
+        payload = entry.get('payload')
+        if not isinstance(task, TaskRecord) or not isinstance(payload, dict):
+            return
+        self._append_task_event(task=task, event_type='task.live.patch', data=payload)
+        self._last_live_patch_boundary_key[normalized_task_id] = self._live_patch_boundary_key(task=task, payload=payload)
+
     def _task_lock(self, task_id: str) -> threading.RLock:
         key = str(task_id or '').strip()
         with self._task_locks_guard:
@@ -121,6 +173,75 @@ class TaskLogService:
                 lock = threading.RLock()
                 self._task_locks[key] = lock
             return lock
+
+    def _buffer_task_live_patch_locked(self, *, task: TaskRecord, payload: dict[str, Any]) -> None:
+        if not self._event_history_enabled:
+            self._append_task_event(task=task, event_type='task.live.patch', data=payload)
+            return
+        task_id = str(task.task_id or '').strip()
+        if not task_id:
+            return
+        boundary_key = self._live_patch_boundary_key(task=task, payload=payload)
+        immediate = (
+            self._live_patch_persist_window_ms <= 0
+            or bool(task.is_paused)
+            or bool(task.pause_requested)
+            or self._is_terminal_status(task.status)
+            or boundary_key != self._last_live_patch_boundary_key.get(task_id)
+            or str(payload.get('removed_node_id') or '').strip()
+        )
+        if immediate:
+            self.flush_live_patch_history(task_id)
+            self._append_task_event(task=task, event_type='task.live.patch', data=payload)
+            self._last_live_patch_boundary_key[task_id] = boundary_key
+            return
+        with self._live_patch_history_guard:
+            self._pending_live_patch_history[task_id] = {
+                'task': task.model_copy(deep=True),
+                'payload': copy.deepcopy(payload),
+            }
+            timer = self._live_patch_history_timers.get(task_id)
+            if timer is not None:
+                return
+            timer = threading.Timer(
+                max(0.001, float(self._live_patch_persist_window_ms) / 1000.0),
+                lambda target_task_id=task_id: self.flush_live_patch_history(target_task_id),
+            )
+            timer.daemon = True
+            self._live_patch_history_timers[task_id] = timer
+            timer.start()
+
+    @staticmethod
+    def _live_patch_boundary_key(*, task: TaskRecord, payload: dict[str, Any]) -> tuple[Any, ...]:
+        runtime_summary = dict(payload.get('runtime_summary') or {}) if isinstance(payload.get('runtime_summary'), dict) else {}
+        frame = dict(payload.get('frame') or {}) if isinstance(payload.get('frame'), dict) else {}
+        active_ids = tuple(str(item or '').strip() for item in list(runtime_summary.get('active_node_ids') or []) if str(item or '').strip())
+        runnable_ids = tuple(str(item or '').strip() for item in list(runtime_summary.get('runnable_node_ids') or []) if str(item or '').strip())
+        waiting_ids = tuple(str(item or '').strip() for item in list(runtime_summary.get('waiting_node_ids') or []) if str(item or '').strip())
+        return (
+            active_ids,
+            runnable_ids,
+            waiting_ids,
+            str(frame.get('phase') or '').strip(),
+            str(frame.get('node_id') or '').strip(),
+            bool(task.is_paused),
+            bool(task.pause_requested),
+            str(task.status or '').strip().lower(),
+        )
+
+    @staticmethod
+    def _node_patch_persist_fingerprint(payload: dict[str, Any]) -> str:
+        node_payload = dict(payload.get('node') or {}) if isinstance(payload.get('node'), dict) else {}
+        normalized = {
+            'node_id': str(node_payload.get('node_id') or '').strip(),
+            'parent_node_id': str(node_payload.get('parent_node_id') or '').strip(),
+            'depth': int(node_payload.get('depth') or 0),
+            'node_kind': str(node_payload.get('node_kind') or '').strip(),
+            'status': str(node_payload.get('status') or '').strip(),
+            'title': str(node_payload.get('title') or '').strip(),
+            'children_fingerprint': str(node_payload.get('children_fingerprint') or '').strip(),
+        }
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
     @staticmethod
     def _default_frame(*, node_id: str = '', depth: int = 0, node_kind: str = 'execution', phase: str = '') -> dict[str, Any]:
@@ -582,6 +703,8 @@ class TaskLogService:
             updated = self._store.update_task(task_id, _mutate)
             if updated is None:
                 return None
+            if bool(updated.is_paused) or bool(updated.pause_requested) or bool(updated.cancel_requested):
+                self.flush_live_patch_history(task_id)
             return self.refresh_task_view(task_id, mark_unread=False) or updated
 
     def update_task_metadata(self, task_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]], *, mark_unread: bool = True) -> TaskRecord | None:
@@ -998,6 +1121,8 @@ class TaskLogService:
         if record is None:
             return None
         with self._task_lock(record.task_id):
+            previous_metadata = dict(record.metadata or {})
+
             def _mutate(current: NodeRecord) -> NodeRecord:
                 metadata = metadata_mutator(dict(current.metadata or {}))
                 if not isinstance(metadata, dict):
@@ -1007,9 +1132,20 @@ class TaskLogService:
             updated = self._store.update_node(node_id, _mutate)
             task = self._store.get_task(record.task_id)
             if updated is not None and task is not None:
-                self._sync_node_read_models_locked(updated)
-                self._sync_task_node_rounds_locked(updated)
-                self._publish_task_node_patch_locked(task=task, node=updated)
+                next_metadata = dict(updated.metadata or {})
+                spawn_changed = previous_metadata.get('spawn_operations') != next_metadata.get('spawn_operations')
+                execution_stage_changed = previous_metadata.get(_EXECUTION_STAGE_METADATA_KEY) != next_metadata.get(_EXECUTION_STAGE_METADATA_KEY)
+                result_payload_only_keys = {'result_schema_version', 'result_payload', 'result_payload_ref', 'result_payload_summary'}
+                changed_keys = {
+                    key
+                    for key in set(previous_metadata) | set(next_metadata)
+                    if previous_metadata.get(key) != next_metadata.get(key)
+                }
+                if spawn_changed or execution_stage_changed or any(key not in result_payload_only_keys for key in changed_keys):
+                    self._sync_node_read_models_locked(updated)
+                if spawn_changed:
+                    self._sync_task_node_rounds_locked(updated)
+                    self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
 
     def ensure_node_output_externalized(self, task_id: str, node_id: str) -> NodeRecord | None:
@@ -1284,7 +1420,8 @@ class TaskLogService:
             if not isinstance(mutated, dict):
                 raise TypeError('frame mutator must return a dict')
             record = self._runtime_frame_record(task=task, frame=self._sanitize_runtime_frame(mutated))
-            self._store.upsert_task_runtime_frame(record)
+            if current is None or self._runtime_frame_record_fingerprint(current) != self._runtime_frame_record_fingerprint(record):
+                self._store.upsert_task_runtime_frame(record)
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task, frame=record)
             result = self.read_runtime_state(task_id) or {}
@@ -1324,20 +1461,37 @@ class TaskLogService:
                 output_fields=output_fields,
             )
             terminal_transition = self._is_terminal_status(next_status) and not self._is_terminal_status(previous_status)
+            next_is_unread = True if mark_unread else task.is_unread
+            next_final_output = str(output_fields.get('final_output') or '')
+            next_final_output_ref = str(output_fields.get('final_output_ref') or '')
+            next_failure_reason = str(output_fields.get('failure_reason') or '')
+            next_finished_at = now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at
+            if (
+                str(task.status or '').strip() == str(next_status or '').strip()
+                and str(task.brief_text or '') == str(brief_text or '')
+                and bool(task.is_unread) == bool(next_is_unread)
+                and str(task.final_output or '') == next_final_output
+                and str(task.final_output_ref or '') == next_final_output_ref
+                and str(task.failure_reason or '') == next_failure_reason
+                and str(task.finished_at or '') == str(next_finished_at or '')
+            ):
+                self._record_debug('log_service.refresh_task_view', started_at=started_at, started_mono=started_mono)
+                return task
             updated = task.model_copy(
                 update={
                     'status': next_status,
                     'brief_text': brief_text,
-                    'is_unread': True if mark_unread else task.is_unread,
+                    'is_unread': next_is_unread,
                     'updated_at': now_iso(),
-                    'final_output': str(output_fields.get('final_output') or ''),
-                    'final_output_ref': str(output_fields.get('final_output_ref') or ''),
-                    'failure_reason': str(output_fields.get('failure_reason') or ''),
-                    'finished_at': now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at,
+                    'final_output': next_final_output,
+                    'final_output_ref': next_final_output_ref,
+                    'failure_reason': next_failure_reason,
+                    'finished_at': next_finished_at,
                 }
             )
             self._store.upsert_task(updated)
             if self._is_terminal_status(next_status):
+                self.flush_live_patch_history(updated.task_id)
                 self._store.replace_task_runtime_frames(updated.task_id, [])
                 self.update_task_runtime_meta(updated.task_id)
             self._publish_task_summary_patch_locked(task=updated, previous_task=task)
@@ -1389,11 +1543,35 @@ class TaskLogService:
     def _sync_task_node_rounds_locked(self, node: NodeRecord) -> None:
         if node is None:
             return
-        self._projector.sync_rounds_for_parent(
-            node.task_id,
-            node.node_id,
-            self._task_projection_round_records(node),
-        )
+        next_records = self._task_projection_round_records(node)
+        current_records = [
+            item
+            for item in list(self._store.list_task_node_rounds(node.task_id) or [])
+            if str(getattr(item, 'parent_node_id', '') or '').strip() == str(node.node_id or '').strip()
+        ]
+        if self._round_records_fingerprint(current_records) == self._round_records_fingerprint(next_records):
+            return
+        self._projector.sync_rounds_for_parent(node.task_id, node.node_id, next_records)
+
+    @staticmethod
+    def _round_records_fingerprint(records: list[TaskProjectionRoundRecord]) -> str:
+        normalized = [
+            {
+                'round_id': str(item.round_id or '').strip(),
+                'round_index': int(item.round_index or 0),
+                'label': str(item.label or '').strip(),
+                'is_latest': bool(item.is_latest),
+                'created_at': str(item.created_at or '').strip(),
+                'source': str(item.source or '').strip(),
+                'total_children': int(item.total_children or 0),
+                'completed_children': int(item.completed_children or 0),
+                'running_children': int(item.running_children or 0),
+                'failed_children': int(item.failed_children or 0),
+                'child_node_ids': [str(child_id or '').strip() for child_id in list(item.child_node_ids or []) if str(child_id or '').strip()],
+            }
+            for item in list(records or [])
+        ]
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
     def _task_projection_node_children_fingerprint(
         self,
@@ -1613,6 +1791,22 @@ class TaskLogService:
             },
         )
 
+    @staticmethod
+    def _runtime_frame_record_fingerprint(record: TaskProjectionRuntimeFrameRecord) -> str:
+        payload = dict(record.payload or {})
+        normalized = {
+            'task_id': str(record.task_id or '').strip(),
+            'node_id': str(record.node_id or '').strip(),
+            'depth': int(record.depth or 0),
+            'node_kind': str(record.node_kind or '').strip(),
+            'phase': str(record.phase or '').strip(),
+            'active': bool(record.active),
+            'runnable': bool(record.runnable),
+            'waiting': bool(record.waiting),
+            'payload': payload,
+        }
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
     def _hydrate_runtime_frame_record(self, record: TaskProjectionRuntimeFrameRecord) -> dict[str, Any]:
         payload = dict(record.payload or {})
         messages: list[dict[str, Any]] = []
@@ -1743,7 +1937,12 @@ class TaskLogService:
                 ),
             }
         }
-        self._append_task_event(task=task, event_type='task.node.patch', data=payload)
+        fingerprint = self._node_patch_persist_fingerprint(payload)
+        cache_key = (str(task.task_id or '').strip(), str(node.node_id or '').strip())
+        previous_fingerprint = self._last_node_patch_persist_fingerprints.get(cache_key)
+        if previous_fingerprint != fingerprint:
+            self._append_task_event(task=task, event_type='task.node.patch', data=payload)
+            self._last_node_patch_persist_fingerprints[cache_key] = fingerprint
         self._dispatch_live_event_locked(task=task, event_type='task.node.patch', data=payload)
 
     def _publish_task_token_patch_locked(self, *, task: TaskRecord) -> None:
@@ -1752,7 +1951,6 @@ class TaskLogService:
             'updated_at': str(task.updated_at or ''),
             'token_usage': task.token_usage.model_dump(mode='json'),
         }
-        self._append_task_event(task=task, event_type='task.token.patch', data=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.token.patch', data=payload)
 
     def _publish_task_live_patch_locked(
@@ -1768,7 +1966,7 @@ class TaskLogService:
             'frame': self._public_runtime_frame(self._hydrate_runtime_frame_record(frame)) if frame is not None else None,
             'removed_node_id': str(removed_node_id or '').strip(),
         }
-        self._append_task_event(task=task, event_type='task.live.patch', data=payload)
+        self._buffer_task_live_patch_locked(task=task, payload=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.live.patch', data=payload)
 
     def _publish_task_terminal_locked(self, *, task: TaskRecord) -> None:

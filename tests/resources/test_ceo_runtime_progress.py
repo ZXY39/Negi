@@ -857,6 +857,91 @@ async def test_runtime_agent_session_manual_pause_dedupes_pending_transcript(
     assert reloaded.messages[0]["metadata"]["_transcript_state"] == "pending"
 
 
+@pytest.mark.asyncio
+async def test_runtime_agent_session_follow_up_after_manual_pause_uses_new_transcript_turn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    started = asyncio.Event()
+    turn_task_ref: dict[str, asyncio.Task[object] | None] = {"task": None}
+    heartbeat = _HeartbeatController()
+
+    class _BlockingRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session, on_progress
+            started.set()
+            await asyncio.Future()
+
+    class _AnswerRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session, on_progress
+            return "Because this follow-up only needed a direct explanation."
+
+    async def _cancel_session_tasks(_session_key: str) -> int:
+        task = turn_task_ref.get("task")
+        if task is None:
+            return 0
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return 1
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_BlockingRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        web_session_heartbeat=heartbeat,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session_id = "web:pause-follow-up-turn"
+    session = RuntimeAgentSession(loop, session_key=session_id, channel="web", chat_id="pause-follow-up-turn")
+
+    turn_task = asyncio.create_task(session.prompt("Original paused request"))
+    turn_task_ref["task"] = turn_task
+
+    await started.wait()
+    await session.pause(manual=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn_task
+
+    loop.multi_agent_runner = _AnswerRunner()
+    result = await session.prompt("Why no async task?")
+
+    assert result.output == "Because this follow-up only needed a direct explanation."
+
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in reloaded.messages] == ["user", "user", "assistant"]
+    assert reloaded.messages[0]["content"] == "Original paused request"
+    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "pending"
+    assert reloaded.messages[1]["content"] == "Why no async task?"
+    assert reloaded.messages[1]["metadata"]["_transcript_state"] == "completed"
+    assert reloaded.messages[2]["content"] == "Because this follow-up only needed a direct explanation."
+    first_turn_id = str(reloaded.messages[0]["metadata"]["_transcript_turn_id"]).strip()
+    second_turn_id = str(reloaded.messages[1]["metadata"]["_transcript_turn_id"]).strip()
+    assert first_turn_id
+    assert second_turn_id
+    assert first_turn_id != second_turn_id
+
+
 def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     session = RuntimeAgentSession(
@@ -1477,6 +1562,57 @@ def test_ceo_websocket_does_not_restore_terminal_error_inflight_snapshot_from_di
             raise AssertionError("Did not receive snapshot.ceo payload")
 
     assert snapshot["data"].get("inflight_turn") is None
+
+
+def test_ceo_websocket_unknown_local_session_falls_back_to_existing_active_session(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+
+    session_manager = SessionManager(tmp_path)
+    active_session_id = "web:ceo-existing"
+    existing_session = web_ceo_sessions.create_web_ceo_session(session_manager, session_id=active_session_id)
+    existing_session.add_message("user", "Keep the original context")
+    existing_session.add_message("assistant", "Still here")
+    session_manager.save(existing_session)
+    web_ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(active_session_id)
+
+    live_session = _FakeLiveSession()
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        main_task_service=_TaskService(),
+    )
+    runtime_manager = SimpleNamespace(
+        get=lambda key: live_session if str(key or "") == active_session_id else None,
+        get_or_create=lambda **kwargs: live_session,
+    )
+
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: runtime_manager)
+
+    missing_session_id = "web:ceo-missing"
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={missing_session_id}") as ws:
+        hello = ws.receive_json()
+        snapshot = ws.receive_json()
+        state = ws.receive_json()
+        sessions_snapshot = ws.receive_json()
+
+    assert hello["type"] == "hello"
+    assert hello["session_id"] == active_session_id
+    assert snapshot["type"] == "snapshot.ceo"
+    assert snapshot["session_id"] == active_session_id
+    assert state["type"] == "ceo.state"
+    assert state["session_id"] == active_session_id
+    assert sessions_snapshot["type"] == "ceo.sessions.snapshot"
+    assert sessions_snapshot["data"]["active_session_id"] == active_session_id
+    assert [message["role"] for message in snapshot["data"]["messages"]] == ["user", "assistant"]
+    assert snapshot["data"]["messages"][0]["content"] == "Keep the original context"
+    assert snapshot["data"]["messages"][1]["content"] == "Still here"
+    assert not session_manager.get_path(missing_session_id).exists()
 
 
 def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:

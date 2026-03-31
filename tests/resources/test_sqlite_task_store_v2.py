@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
@@ -147,5 +148,58 @@ def test_sqlite_task_store_task_summary_outbox_keeps_latest_payload(tmp_path: Pa
         assert second["version"] == 2
         assert pending[0]["payload"]["data"]["task"]["updated_at"] == "2026-03-29T00:00:05+08:00"
         assert pending[0]["payload"]["data"]["task"]["token_usage"]["input_tokens"] == 9
+    finally:
+        store.close()
+
+
+def test_sqlite_task_store_externalizes_live_patch_payload_and_hydrates_on_read(tmp_path: Path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    try:
+        seq = store.append_task_event(
+            task_id="task:demo",
+            session_id="web:shared",
+            event_type="task.live.patch",
+            created_at="2026-03-29T00:00:00+08:00",
+            payload={
+                "task_id": "task:demo",
+                "runtime_summary": {
+                    "active_node_ids": ["node:root"],
+                    "runnable_node_ids": ["node:root"],
+                    "waiting_node_ids": [],
+                    "frames": [],
+                },
+                "frame": {
+                    "node_id": "node:root",
+                    "phase": "before_model",
+                    "stage_goal": "demo stage goal",
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                },
+                "removed_node_id": "",
+            },
+        )
+
+        row = store._fetchone(
+            "SELECT payload_is_external, payload_archive_path, payload_json FROM task_events WHERE seq = ?",
+            (seq,),
+        )
+        assert row is not None
+        assert int(row["payload_is_external"] or 0) == 1
+        archive_rel = str(row["payload_archive_path"] or "").strip()
+        assert archive_rel
+        assert (store._event_history_dir / archive_rel).exists()
+
+        stored_preview = json.loads(row["payload_json"])
+        assert stored_preview["payload_externalized"] is True
+        assert stored_preview["runtime_summary_preview"]["active_node_count"] == 1
+        assert "runtime_summary" not in stored_preview
+
+        hydrated = store.list_task_events(task_id="task:demo", limit=10)
+        assert hydrated[-1]["payload"]["runtime_summary"]["active_node_ids"] == ["node:root"]
+        assert hydrated[-1]["payload"]["frame"]["stage_goal"] == "demo stage goal"
+
+        preview_only = store.list_task_events(task_id="task:demo", limit=10, hydrate_external=False)
+        assert preview_only[-1]["payload"]["payload_externalized"] is True
+        assert "runtime_summary" not in preview_only[-1]["payload"]
     finally:
         store.close()

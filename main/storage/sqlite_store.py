@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import queue
 import sqlite3
@@ -25,9 +27,24 @@ R = TypeVar('R')
 
 
 class SQLiteTaskStore:
-    def __init__(self, path: Path | str, debug_recorder=None):
+    def __init__(
+        self,
+        path: Path | str,
+        debug_recorder=None,
+        *,
+        event_history_dir: Path | str | None = None,
+        event_history_enabled: bool = True,
+        event_history_archive_encoding: str = 'gzip',
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._event_history_dir = Path(event_history_dir or (self.path.parent / 'event-history'))
+        self._event_history_enabled = bool(event_history_enabled)
+        self._event_history_archive_encoding = str(event_history_archive_encoding or 'gzip').strip().lower() or 'gzip'
+        if self._event_history_archive_encoding not in {'gzip', 'plain'}:
+            self._event_history_archive_encoding = 'gzip'
+        if self._event_history_enabled:
+            self._event_history_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._read_lock = threading.RLock()
         self._closed = False
@@ -123,7 +140,11 @@ class SQLiteTaskStore:
                 session_id TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                payload_json TEXT NOT NULL
+                payload_json TEXT NOT NULL,
+                payload_is_external INTEGER NOT NULL DEFAULT 0,
+                payload_archive_path TEXT NOT NULL DEFAULT '',
+                payload_archive_encoding TEXT NOT NULL DEFAULT '',
+                payload_hash TEXT NOT NULL DEFAULT ''
             )
             ''',
             '''
@@ -319,6 +340,17 @@ class SQLiteTaskStore:
         with self._conn:
             for statement in statements:
                 self._conn.execute(statement)
+            self._ensure_column(self._conn, 'task_events', 'payload_is_external', "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(self._conn, 'task_events', 'payload_archive_path', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'task_events', 'payload_archive_encoding', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'task_events', 'payload_hash', "TEXT NOT NULL DEFAULT ''")
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {str(row[1]) for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
+        if str(column or '') in columns:
+            return
+        conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
 
     def _writer_loop(self) -> None:
         while True:
@@ -554,13 +586,52 @@ class SQLiteTaskStore:
         created_at: str,
         payload: dict[str, object],
     ) -> int:
-        payload_json = json.dumps(payload)
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
+        should_externalize = self._should_externalize_task_event(
+            task_id=task_id,
+            event_type=event_type,
+            payload=payload,
+        )
+        stored_payload = self._task_event_storage_payload(
+            task_id=task_id,
+            event_type=event_type,
+            payload=payload,
+        ) if should_externalize else payload
+        stored_payload_json = json.dumps(stored_payload, ensure_ascii=False)
+        archive_encoding = self._event_history_archive_encoding if should_externalize else ''
+
         def operation(conn: sqlite3.Connection) -> int:
+            if should_externalize:
+                previous = conn.execute(
+                    'SELECT seq, payload_hash FROM task_events WHERE task_id = ? AND event_type = ? ORDER BY seq DESC LIMIT 1',
+                    (task_id, event_type),
+                ).fetchone()
+                if previous is not None and str(previous['payload_hash'] or '') == payload_hash:
+                    return int(previous['seq'] or 0)
             cursor = conn.execute(
-                'INSERT INTO task_events (task_id, session_id, event_type, created_at, payload_json) VALUES (?, ?, ?, ?, ?)',
-                (task_id, session_id, event_type, created_at, payload_json),
+                'INSERT INTO task_events (task_id, session_id, event_type, created_at, payload_json, payload_is_external, payload_archive_path, payload_archive_encoding, payload_hash) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    task_id,
+                    session_id,
+                    event_type,
+                    created_at,
+                    stored_payload_json,
+                    1 if should_externalize else 0,
+                    '',
+                    archive_encoding,
+                    payload_hash,
+                ),
             )
-            return int(cursor.lastrowid or 0)
+            seq = int(cursor.lastrowid or 0)
+            if should_externalize and seq > 0:
+                archive_path = self._write_task_event_archive(task_id=task_id, seq=seq, payload_json=payload_json)
+                conn.execute(
+                    'UPDATE task_events SET payload_archive_path = ? WHERE seq = ?',
+                    (archive_path, seq),
+                )
+            return seq
         return self._run_write(operation)
 
     def list_task_events(
@@ -570,6 +641,7 @@ class SQLiteTaskStore:
         task_id: str | None = None,
         session_id: str | None = None,
         limit: int = 200,
+        hydrate_external: bool = True,
     ) -> list[dict[str, object]]:
         predicates = ['seq > ?']
         params: list[object] = [max(0, int(after_seq or 0))]
@@ -581,13 +653,20 @@ class SQLiteTaskStore:
             params.append(str(session_id or ''))
         params.append(max(1, int(limit or 200)))
         sql = (
-            'SELECT seq, task_id, session_id, event_type, created_at, payload_json '
+            'SELECT seq, task_id, session_id, event_type, created_at, payload_json, payload_is_external, payload_archive_path, payload_archive_encoding, payload_hash '
             f'FROM task_events WHERE {" AND ".join(predicates)} ORDER BY seq ASC LIMIT ?'
         )
         rows = self._fetchall(sql, tuple(params))
         events: list[dict[str, object]] = []
         for row in rows:
             payload = json.loads(row['payload_json'])
+            if bool(row['payload_is_external']) and bool(hydrate_external):
+                hydrated = self._read_task_event_archive(
+                    path=str(row['payload_archive_path'] or '').strip(),
+                    encoding=str(row['payload_archive_encoding'] or '').strip(),
+                )
+                if isinstance(hydrated, dict):
+                    payload = hydrated
             events.append(
                 {
                     'seq': int(row['seq']),
@@ -599,6 +678,106 @@ class SQLiteTaskStore:
                 }
             )
         return events
+
+    def _should_externalize_task_event(
+        self,
+        *,
+        task_id: str | None,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> bool:
+        _ = payload
+        if not self._event_history_enabled:
+            return False
+        return bool(str(task_id or '').strip()) and str(event_type or '').strip() == 'task.live.patch'
+
+    @staticmethod
+    def _task_event_storage_payload(
+        *,
+        task_id: str | None,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        if str(event_type or '').strip() != 'task.live.patch':
+            return dict(payload or {})
+        runtime_summary = dict(payload.get('runtime_summary') or {}) if isinstance(payload.get('runtime_summary'), dict) else {}
+        frame = dict(payload.get('frame') or {}) if isinstance(payload.get('frame'), dict) else {}
+        active_node_ids = [str(item) for item in list(runtime_summary.get('active_node_ids') or []) if str(item or '').strip()]
+        runnable_node_ids = [str(item) for item in list(runtime_summary.get('runnable_node_ids') or []) if str(item or '').strip()]
+        waiting_node_ids = [str(item) for item in list(runtime_summary.get('waiting_node_ids') or []) if str(item or '').strip()]
+        return {
+            'task_id': str(payload.get('task_id') or task_id or '').strip(),
+            'runtime_summary_preview': {
+                'active_node_count': len(active_node_ids),
+                'runnable_node_count': len(runnable_node_ids),
+                'waiting_node_count': len(waiting_node_ids),
+                'active_node_ids_preview': active_node_ids[:5],
+                'runnable_node_ids_preview': runnable_node_ids[:5],
+                'waiting_node_ids_preview': waiting_node_ids[:5],
+            },
+            'frame_preview': {
+                'node_id': str(frame.get('node_id') or '').strip(),
+                'phase': str(frame.get('phase') or '').strip(),
+                'stage_goal': SQLiteTaskStore._clip_text(frame.get('stage_goal')),
+                'tool_call_count': len(list(frame.get('tool_calls') or [])),
+                'child_pipeline_count': len(list(frame.get('child_pipelines') or [])),
+            },
+            'removed_node_id': str(payload.get('removed_node_id') or '').strip(),
+            'payload_externalized': True,
+        }
+
+    def _write_task_event_archive(self, *, task_id: str | None, seq: int, payload_json: str) -> str:
+        task_component = self._safe_path_component(task_id or 'global')
+        suffix = '.json.gz' if self._event_history_archive_encoding == 'gzip' else '.json'
+        relative_path = Path(task_component) / f'{int(seq)}{suffix}'
+        archive_path = self._event_history_dir / relative_path
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = archive_path.with_name(f'{archive_path.name}.tmp')
+        try:
+            if self._event_history_archive_encoding == 'gzip':
+                with gzip.open(temp_path, 'wt', encoding='utf-8') as handle:
+                    handle.write(payload_json)
+            else:
+                temp_path.write_text(payload_json, encoding='utf-8')
+            temp_path.replace(archive_path)
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+        return relative_path.as_posix()
+
+    def _read_task_event_archive(self, *, path: str, encoding: str) -> dict[str, object] | None:
+        relative_path = Path(str(path or '').strip())
+        if not str(relative_path).strip():
+            return None
+        archive_path = self._event_history_dir / relative_path
+        if not archive_path.exists():
+            return None
+        normalized_encoding = str(encoding or '').strip().lower() or self._event_history_archive_encoding
+        try:
+            if normalized_encoding == 'gzip':
+                with gzip.open(archive_path, 'rt', encoding='utf-8') as handle:
+                    payload = json.loads(handle.read())
+            else:
+                payload = json.loads(archive_path.read_text(encoding='utf-8'))
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _safe_path_component(value: str) -> str:
+        text = str(value or '').strip() or 'global'
+        safe = ''.join(ch if ch.isalnum() or ch in {'-', '_', '.'} else '_' for ch in text)
+        return safe or 'global'
+
+    @staticmethod
+    def _clip_text(value: Any, *, limit: int = 240) -> str:
+        text = ' '.join(str(value or '').split())
+        if len(text) <= limit:
+            return text
+        return f'{text[: max(0, limit - 3)].rstrip()}...'
 
     def latest_task_event_seq(
         self,

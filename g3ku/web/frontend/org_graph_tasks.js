@@ -1211,11 +1211,14 @@ function handleTaskEvent(payload) {
         const activeNodeIds = Array.isArray(runtimeSummary?.active_node_ids) ? runtimeSummary.active_node_ids : [];
         const runnableNodeIds = Array.isArray(runtimeSummary?.runnable_node_ids) ? runtimeSummary.runnable_node_ids : [];
         const waitingNodeIds = Array.isArray(runtimeSummary?.waiting_node_ids) ? runtimeSummary.waiting_node_ids : [];
+        const hasTreeContext = !!String(S.treeRootNodeId || "").trim();
         S.frontier = frames;
         S.liveFrameMap = indexTaskLiveFrames(frames);
         S.taskSummary = {
             ...(S.taskSummary || {}),
-            active_node_count: activeNodeIds.length,
+            active_node_count: hasTreeContext
+                ? normalizeInt(S.taskSummary?.active_node_count, 0)
+                : activeNodeIds.length,
             runnable_node_count: runnableNodeIds.length,
             waiting_node_count: waitingNodeIds.length,
         };

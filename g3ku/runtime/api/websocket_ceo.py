@@ -546,15 +546,23 @@ async def ceo_websocket(websocket: WebSocket):
         return
     state_store = WebCeoStateStore(workspace_path())
     requested_session_id = str(websocket.query_params.get('session_id') or '').strip()
-    fallback_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
-    requested_catalog = build_ceo_session_catalog(
+    initial_catalog = build_ceo_session_catalog(
         transcript_store,
-        active_session_id=requested_session_id or fallback_session_id,
+        active_session_id=requested_session_id,
         is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
     )
-    if requested_session_id and find_ceo_session_catalog_item(requested_catalog, requested_session_id) is None:
+    requested_item = find_ceo_session_catalog_item(initial_catalog, requested_session_id) if requested_session_id else None
+    fallback_session_id = ''
+    if requested_item is not None:
+        session_id = str(requested_item.get('session_id') or requested_session_id).strip()
+    elif requested_session_id:
         if str(requested_session_id or '').strip().startswith('web:'):
-            create_web_ceo_session(transcript_store, session_id=requested_session_id)
+            if list(initial_catalog.get('items') or []):
+                fallback_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
+                session_id = fallback_session_id
+            else:
+                create_web_ceo_session(transcript_store, session_id=requested_session_id)
+                session_id = requested_session_id
         else:
             try:
                 await websocket_send_json(
@@ -565,7 +573,9 @@ async def ceo_websocket(websocket: WebSocket):
             except WebSocketChannelClosed:
                 return
             return
-    session_id = requested_session_id or fallback_session_id
+    else:
+        fallback_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
+        session_id = fallback_session_id
     session_path = transcript_store.get_path(session_id)
     is_channel_session = _is_channel_session_id(session_id)
     if is_channel_session:

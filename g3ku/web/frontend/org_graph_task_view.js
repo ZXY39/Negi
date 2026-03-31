@@ -383,6 +383,11 @@ function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = 
     });
     const inspectionActive = inspectionNodes.some((child) => isInspectionActiveStatus(child?.state || child?.visual_state));
     const stateMeta = resolveTreeNodeStatusLabel(status, { kind, inspectionActive });
+    const liveFrame = S.liveFrameMap?.[normalizedNodeId] || null;
+    const waitingForChildren = isWaitingForChildResultsFrame(liveFrame);
+    const isActiveNode = !isTerminalTreeNodeStatus(status) && !waitingForChildren;
+    const activeNodeCount = (isActiveNode ? 1 : 0)
+        + visibleChildren.reduce((sum, child) => sum + treeNormalizeInt(child?.activeNodeCount, 0), 0);
     return {
         node_id: snapshotNode.node_id,
         parent_node_id: snapshotNode.parent_node_id,
@@ -399,6 +404,7 @@ function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = 
         roundSummary: roundState.summary,
         inspectionNodes,
         children: childNodes,
+        activeNodeCount,
     };
 }
 
@@ -411,6 +417,24 @@ function countVisibleTreeNodes(root, predicate = null) {
     };
     walk(root);
     return count;
+}
+
+function isTerminalTreeNodeStatus(status) {
+    const normalized = String(status || "").trim().toLowerCase();
+    return normalized === "success" || normalized === "failed";
+}
+
+function isActiveChildPipelineStatus(status) {
+    const normalized = String(status || "").trim().toLowerCase();
+    return normalized === "queued" || normalized === "running";
+}
+
+function isWaitingForChildResultsFrame(frame) {
+    if (!frame || typeof frame !== "object") return false;
+    const phase = String(frame?.phase || "").trim().toLowerCase();
+    if (phase === "waiting_children" || phase === "waiting_acceptance") return true;
+    return (Array.isArray(frame?.child_pipelines) ? frame.child_pipelines : [])
+        .some((item) => isActiveChildPipelineStatus(item?.status || ""));
 }
 
 function analyzeExecutionTreeLayout(root) {
@@ -490,12 +514,15 @@ function renderTaskDetailHeader({ resetPromptDisclosure = false } = {}) {
 
 function syncTaskTreeHeaderState(projectedRoot = null) {
     const hasManual = hasManualTreeRoundSelections();
+    const activeNodeCount = projectedRoot ? treeNormalizeInt(projectedRoot?.activeNodeCount, 0) : 0;
     if (U.tdActiveCount) {
-        U.tdActiveCount.textContent = String(
-            projectedRoot
-                ? countVisibleTreeNodes(projectedRoot, (node) => String(node?.status || "").trim().toLowerCase() === "in_progress")
-                : 0,
-        );
+        U.tdActiveCount.textContent = String(activeNodeCount);
+    }
+    if (S.taskSummary && typeof S.taskSummary === "object") {
+        S.taskSummary = {
+            ...(S.taskSummary || {}),
+            active_node_count: activeNodeCount,
+        };
     }
     if (U.taskTreeResetRounds) {
         U.taskTreeResetRounds.hidden = !hasManual;
@@ -1593,6 +1620,7 @@ function refreshRenderedTreeNodeStatuses() {
     if (!U.tree || !String(S.treeRootNodeId || "").trim()) return;
     const nextTreeView = refreshTreeViewFromSnapshot();
     if (!nextTreeView) return;
+    syncTaskTreeHeaderState(nextTreeView);
     const buttons = new Map(
         Array.from(U.tree.querySelectorAll(".execution-tree-node[data-id]"))
             .map((button) => [String(button.dataset.id || "").trim(), button])

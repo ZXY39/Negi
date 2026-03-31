@@ -1114,6 +1114,12 @@ class RuntimeAgentSession:
                 except Exception:
                     logger.debug("manual pause heartbeat clear skipped for {}", self._state.session_key)
             await self._persist_manual_pause_user_message()
+            # Manual pause persists the current prompt's transcript state using the
+            # existing turn id so the pending user message can be updated in place.
+            # Clear the active turn binding again afterwards so the next real user
+            # message starts a fresh transcript turn instead of overwriting the
+            # paused request that was just preserved.
+            self._active_turn_id = None
         await self._emit(
             "control_ack",
             action="pause",
