@@ -1878,6 +1878,46 @@ def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path,
     assert saved['models']['catalog'][0]['retryCount'] == 3
 
 
+def test_model_update_returns_503_when_worker_runtime_refresh_ack_fails(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        _ = force, reason
+        return True
+
+    class _StubService:
+        execution_mode = 'web'
+
+        def is_worker_online(self, **kwargs) -> bool:
+            _ = kwargs
+            return True
+
+        async def request_worker_runtime_refresh(self, *, reason: str):
+            raise TimeoutError(f'{reason}:worker_runtime_refresh_timeout')
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(admin_rest, '_service', lambda: _StubService())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/models/m', json={'retryCount': 4})
+
+    assert response.status_code == 503
+    detail = response.json()['detail']
+    assert detail['code'] == 'worker_runtime_refresh_failed'
+    assert detail['saved'] is True
+    assert detail['web_refreshed'] is True
+    assert detail['worker_refresh_acked'] is False
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['catalog'][0]['retryCount'] == 4
+
+
 def test_llm_config_update_refreshes_runtime(monkeypatch):
     captured: dict[str, object] = {}
 

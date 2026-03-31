@@ -159,6 +159,18 @@ class SQLiteTaskStore:
                 finished_at TEXT,
                 worker_id TEXT,
                 error_text TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL,
+                result_json TEXT NOT NULL DEFAULT ''
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS worker_leases (
+                role TEXT PRIMARY KEY,
+                worker_id TEXT NOT NULL,
+                holder_pid INTEGER NOT NULL,
+                acquired_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             )
             ''',
@@ -344,6 +356,7 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_events', 'payload_archive_path', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_events', 'payload_archive_encoding', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_events', 'payload_hash', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'task_commands', 'result_json', "TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -811,9 +824,9 @@ class SQLiteTaskStore:
     ) -> None:
         payload_json = json.dumps(payload)
         self._execute_write(
-            'INSERT INTO task_commands (command_id, task_id, session_id, command_type, status, created_at, payload_json) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (command_id, task_id, session_id, command_type, 'pending', created_at, payload_json),
+            'INSERT INTO task_commands (command_id, task_id, session_id, command_type, status, created_at, payload_json, result_json) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (command_id, task_id, session_id, command_type, 'pending', created_at, payload_json, ''),
         )
 
     def claim_pending_task_commands(
@@ -836,8 +849,8 @@ class SQLiteTaskStore:
             command_ids = [str(row['command_id']) for row in rows]
             for command_id in command_ids:
                 conn.execute(
-                    'UPDATE task_commands SET status = ?, worker_id = ?, claimed_at = ? WHERE command_id = ?',
-                    ('claimed', worker_id, claimed_at, command_id),
+                    'UPDATE task_commands SET status = ?, worker_id = ?, claimed_at = ?, result_json = ? WHERE command_id = ?',
+                    ('claimed', worker_id, claimed_at, '', command_id),
                 )
             commands: list[dict[str, object]] = []
             for row in rows:
@@ -855,6 +868,14 @@ class SQLiteTaskStore:
             return commands
         return self._run_write(operation)
 
+    def get_task_command(self, command_id: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT command_id, task_id, session_id, command_type, status, created_at, claimed_at, finished_at, worker_id, error_text, payload_json, result_json '
+            'FROM task_commands WHERE command_id = ?',
+            (str(command_id or '').strip(),),
+        )
+        return self._task_command_row(row) if row else None
+
     def finish_task_command(
         self,
         command_id: str,
@@ -862,10 +883,172 @@ class SQLiteTaskStore:
         finished_at: str,
         success: bool,
         error_text: str = '',
+        result: dict[str, object] | None = None,
     ) -> None:
         self._execute_write(
-            'UPDATE task_commands SET status = ?, finished_at = ?, error_text = ? WHERE command_id = ?',
-            ('completed' if success else 'failed', finished_at, str(error_text or ''), command_id),
+            'UPDATE task_commands SET status = ?, finished_at = ?, error_text = ?, result_json = ? WHERE command_id = ?',
+            (
+                'completed' if success else 'failed',
+                finished_at,
+                str(error_text or ''),
+                json.dumps(result or {}, ensure_ascii=False) if result is not None else '',
+                command_id,
+            ),
+        )
+
+    @staticmethod
+    def _parse_iso_datetime(value: Any) -> datetime | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+
+    def acquire_worker_lease(
+        self,
+        *,
+        role: str,
+        worker_id: str,
+        holder_pid: int,
+        acquired_at: str,
+        heartbeat_at: str,
+        expires_at: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        normalized_role = str(role or '').strip()
+        if not normalized_role:
+            raise ValueError('worker_lease_role_required')
+        normalized_worker_id = str(worker_id or '').strip()
+        if not normalized_worker_id:
+            raise ValueError('worker_lease_worker_id_required')
+        normalized_payload = dict(payload or {})
+        normalized_pid = max(0, int(holder_pid or 0))
+
+        def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            row = conn.execute(
+                'SELECT role, worker_id, holder_pid, acquired_at, heartbeat_at, expires_at, payload_json FROM worker_leases WHERE role = ?',
+                (normalized_role,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    'INSERT INTO worker_leases (role, worker_id, holder_pid, acquired_at, heartbeat_at, expires_at, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (
+                        normalized_role,
+                        normalized_worker_id,
+                        normalized_pid,
+                        acquired_at,
+                        heartbeat_at,
+                        expires_at,
+                        json.dumps(normalized_payload, ensure_ascii=False),
+                    ),
+                )
+                return {
+                    'acquired': True,
+                    'takeover': False,
+                    'role': normalized_role,
+                    'worker_id': normalized_worker_id,
+                    'holder_pid': normalized_pid,
+                    'acquired_at': acquired_at,
+                    'heartbeat_at': heartbeat_at,
+                    'expires_at': expires_at,
+                    'payload': normalized_payload,
+                }
+
+            current = self._worker_lease_row(row)
+            current_expires_at = self._parse_iso_datetime(current.get('expires_at'))
+            requested_at = self._parse_iso_datetime(acquired_at)
+            current_worker_id = str(current.get('worker_id') or '').strip()
+            can_take = current_worker_id == normalized_worker_id
+            if not can_take and current_expires_at is not None and requested_at is not None:
+                can_take = current_expires_at <= requested_at
+            if not can_take:
+                return {
+                    'acquired': False,
+                    'takeover': False,
+                    **current,
+                }
+
+            conn.execute(
+                'UPDATE worker_leases SET worker_id = ?, holder_pid = ?, acquired_at = ?, heartbeat_at = ?, expires_at = ?, payload_json = ? '
+                'WHERE role = ?',
+                (
+                    normalized_worker_id,
+                    normalized_pid,
+                    acquired_at,
+                    heartbeat_at,
+                    expires_at,
+                    json.dumps(normalized_payload, ensure_ascii=False),
+                    normalized_role,
+                ),
+            )
+            return {
+                'acquired': True,
+                'takeover': current_worker_id not in {'', normalized_worker_id},
+                'previous_worker_id': current_worker_id,
+                'role': normalized_role,
+                'worker_id': normalized_worker_id,
+                'holder_pid': normalized_pid,
+                'acquired_at': acquired_at,
+                'heartbeat_at': heartbeat_at,
+                'expires_at': expires_at,
+                'payload': normalized_payload,
+            }
+
+        return self._run_write(operation)
+
+    def renew_worker_lease(
+        self,
+        *,
+        role: str,
+        worker_id: str,
+        heartbeat_at: str,
+        expires_at: str,
+        payload: dict[str, object],
+    ) -> bool:
+        normalized_role = str(role or '').strip()
+        normalized_worker_id = str(worker_id or '').strip()
+        if not normalized_role or not normalized_worker_id:
+            return False
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            row = conn.execute(
+                'SELECT worker_id FROM worker_leases WHERE role = ?',
+                (normalized_role,),
+            ).fetchone()
+            if row is None or str(row['worker_id'] or '').strip() != normalized_worker_id:
+                return False
+            conn.execute(
+                'UPDATE worker_leases SET heartbeat_at = ?, expires_at = ?, payload_json = ? WHERE role = ? AND worker_id = ?',
+                (
+                    heartbeat_at,
+                    expires_at,
+                    json.dumps(dict(payload or {}), ensure_ascii=False),
+                    normalized_role,
+                    normalized_worker_id,
+                ),
+            )
+            return True
+
+        return bool(self._run_write(operation))
+
+    def get_worker_lease(self, role: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT role, worker_id, holder_pid, acquired_at, heartbeat_at, expires_at, payload_json FROM worker_leases WHERE role = ?',
+            (str(role or '').strip(),),
+        )
+        return self._worker_lease_row(row) if row else None
+
+    def release_worker_lease(self, *, role: str, worker_id: str) -> None:
+        normalized_role = str(role or '').strip()
+        normalized_worker_id = str(worker_id or '').strip()
+        if not normalized_role or not normalized_worker_id:
+            return
+        self._execute_write(
+            'DELETE FROM worker_leases WHERE role = ? AND worker_id = ?',
+            (normalized_role, normalized_worker_id),
         )
 
     def put_task_terminal_outbox(
@@ -1703,6 +1886,43 @@ class SQLiteTaskStore:
             'attempts': int(row['attempts'] or 0),
             'last_attempt_at': row['last_attempt_at'],
             'last_error': row['last_error'],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
+
+    @staticmethod
+    def _task_command_row(row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return {}
+        payload = json.loads(row['payload_json'])
+        raw_result = str(row['result_json'] or '').strip()
+        result = json.loads(raw_result) if raw_result else {}
+        return {
+            'command_id': row['command_id'],
+            'task_id': row['task_id'],
+            'session_id': row['session_id'],
+            'command_type': row['command_type'],
+            'status': row['status'],
+            'created_at': row['created_at'],
+            'claimed_at': row['claimed_at'],
+            'finished_at': row['finished_at'],
+            'worker_id': row['worker_id'],
+            'error_text': row['error_text'],
+            'payload': payload if isinstance(payload, dict) else {},
+            'result': result if isinstance(result, dict) else {},
+        }
+
+    @staticmethod
+    def _worker_lease_row(row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return {}
+        payload = json.loads(row['payload_json'])
+        return {
+            'role': row['role'],
+            'worker_id': row['worker_id'],
+            'holder_pid': int(row['holder_pid'] or 0),
+            'acquired_at': row['acquired_at'],
+            'heartbeat_at': row['heartbeat_at'],
+            'expires_at': row['expires_at'],
             'payload': payload if isinstance(payload, dict) else {},
         }
 

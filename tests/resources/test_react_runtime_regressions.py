@@ -7,7 +7,7 @@ import pytest
 
 from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
-from g3ku.providers.base import LLMResponse
+from g3ku.providers.base import LLMResponse, ToolCallRequest
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
 
@@ -141,6 +141,70 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
     assert "orphan tool result" in result.summary
     assert "call-orphan" in result.blocking_reason
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -> None:
+    model_ref_calls: list[list[str]] = []
+    current_refs = ['old-model']
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        async def chat(self, **kwargs):
+            self._calls += 1
+            model_ref_calls.append(list(kwargs.get("model_refs") or []))
+            if self._calls == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[ToolCallRequest(id="call-1", name="flip_refs", arguments={})],
+                    finish_reason="tool_calls",
+                    usage={"input_tokens": 8, "output_tokens": 3},
+                )
+            return LLMResponse(
+                content='{"status":"failed","delivery_status":"blocked","summary":"done","answer":"","evidence":[],"remaining_work":[],"blocking_reason":"done"}',
+                tool_calls=[],
+                finish_reason="stop",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    class _FlipRefsTool(Tool):
+        @property
+        def name(self) -> str:
+            return "flip_refs"
+
+        @property
+        def description(self) -> str:
+            return "flip refs"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs):
+            _ = kwargs
+            current_refs[:] = ["new-model"]
+            return "refs flipped"
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-1'),
+        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+        ],
+        tools={"flip_refs": _FlipRefsTool()},
+        model_refs=['old-model'],
+        model_refs_supplier=lambda: list(current_refs),
+        runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
+        max_iterations=3,
+    )
+
+    assert result.summary == "done"
+    assert model_ref_calls == [["old-model"], ["new-model"]]
 
 
 @pytest.mark.asyncio

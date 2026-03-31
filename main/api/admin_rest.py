@@ -755,10 +755,49 @@ def _resource_delete_http_error(exc: ValueError) -> HTTPException:
 
 
 async def _refresh_runtime(reason: str) -> None:
+    web_refreshed = False
     try:
         await refresh_web_agent_runtime(force=True, reason=reason)
+        web_refreshed = True
+    except Exception as exc:
+        if is_no_ceo_model_configured_error(exc) or str(exc or '').strip() == 'project is locked':
+            return
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'web_runtime_refresh_failed',
+                'saved': True,
+                'web_refreshed': False,
+                'worker_refresh_acked': False,
+                'reason': reason,
+                'error': str(exc or 'web_runtime_refresh_failed').strip() or 'web_runtime_refresh_failed',
+            },
+        ) from exc
+    try:
+        service = _service()
+    except HTTPException as exc:
+        _ = exc
+        return
     except Exception:
         return
+    if str(getattr(service, 'execution_mode', '') or '').strip().lower() != 'web':
+        return
+    if not bool(getattr(service, 'is_worker_online', lambda **kwargs: False)()):
+        return
+    try:
+        await service.request_worker_runtime_refresh(reason=reason)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'worker_runtime_refresh_failed',
+                'saved': True,
+                'web_refreshed': web_refreshed,
+                'worker_refresh_acked': False,
+                'reason': reason,
+                'error': str(exc or 'worker_runtime_refresh_failed').strip() or 'worker_runtime_refresh_failed',
+            },
+        ) from exc
 
 
 

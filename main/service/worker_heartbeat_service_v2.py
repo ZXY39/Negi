@@ -18,6 +18,7 @@ class WorkerHeartbeatServiceV2:
         publish_status: Callable[[dict[str, Any]], None],
         pressure_snapshot_supplier: Callable[[], dict[str, Any]] | None = None,
         debug_snapshot_supplier: Callable[[], dict[str, Any]] | None = None,
+        lease_heartbeat: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._store = store
         self._scheduler = scheduler
@@ -26,6 +27,7 @@ class WorkerHeartbeatServiceV2:
         self._publish_status = publish_status
         self._pressure_snapshot_supplier = pressure_snapshot_supplier if callable(pressure_snapshot_supplier) else None
         self._debug_snapshot_supplier = debug_snapshot_supplier if callable(debug_snapshot_supplier) else None
+        self._lease_heartbeat = lease_heartbeat if callable(lease_heartbeat) else None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -86,6 +88,8 @@ class WorkerHeartbeatServiceV2:
                     updated_at=updated_at,
                     payload=payload,
                 )
+                if self._lease_heartbeat is not None:
+                    self._lease_heartbeat(updated_at, payload)
                 self._publish_status(item)
                 wait_seconds = 1.0 if active_task_count > 0 else 2.0
                 self._stop_event.wait(wait_seconds)

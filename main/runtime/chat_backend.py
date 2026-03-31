@@ -8,13 +8,16 @@ from g3ku.config.schema import Config
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
+    RETRYABLE_MODEL_CHAIN_MAX_ROUNDS,
     exhausted_model_chain_error,
     normalized_retry_count,
     response_requires_api_key_rotation,
+    response_requires_retry,
     response_requires_fallback,
     sanitize_terminal_model_error,
     should_rotate_api_key_error,
     should_fallback_model_error,
+    should_retry_model_chain_error,
 )
 from g3ku.utils.api_keys import iter_api_key_retry_slots
 
@@ -141,85 +144,108 @@ class ConfigChatBackend:
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
         attempts: list[LLMModelAttempt] = []
-        for index, ref in enumerate(refs):
-            try:
-                base_target = build_provider_from_model_key(self._config, ref)
-            except Exception as exc:
-                last_error = exc
-                if should_fallback_model_error(exc) and index < len(refs) - 1:
-                    continue
-                if should_fallback_model_error(exc):
-                    raise exhausted_model_chain_error(exc) from exc
-                raise
-            retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
-            move_to_next_model = False
-            stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, base_target.model_id))
-            for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count):
-                target = base_target
-                request_messages = list(messages or [])
-                request_message_count, request_message_chars = _message_stats(request_messages)
+        for chain_round_index in range(RETRYABLE_MODEL_CHAIN_MAX_ROUNDS):
+            round_last_error: Exception | None = None
+            retry_full_chain = False
+            for index, ref in enumerate(refs):
                 try:
-                    target = base_target if slot.attempt_number == 1 else build_provider_from_model_key(
-                        self._config,
-                        ref,
-                        api_key_index=slot.key_index,
-                    )
-                    response = await target.provider.chat(
-                        messages=request_messages,
-                        tools=tools,
-                        model=target.model_id,
-                        max_tokens=max(1, min(int(max_tokens), int(target.max_tokens_limit))) if target.max_tokens_limit else max(1, int(max_tokens)),
-                        temperature=float(target.default_temperature) if target.default_temperature is not None else float(temperature),
-                        reasoning_effort=target.default_reasoning_effort or reasoning_effort,
-                        tool_choice='auto',
-                        parallel_tool_calls=parallel_tool_calls,
-                        prompt_cache_key=stable_prompt_cache_key,
-                    )
+                    base_target = build_provider_from_model_key(self._config, ref)
                 except Exception as exc:
-                    last_error = exc
-                    rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
-                    if rotate_key and not slot.is_last_key:
-                        continue
-                    if rotate_key and not slot.is_last_round:
-                        continue
+                    last_error = round_last_error = exc
                     if should_fallback_model_error(exc) and index < len(refs) - 1:
+                        continue
+                    if should_fallback_model_error(exc):
+                        exhausted = exhausted_model_chain_error(exc)
+                        if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                            retry_full_chain = True
+                            break
+                        raise exhausted from exc
+                    raise
+                retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
+                move_to_next_model = False
+                stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, base_target.model_id))
+                for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count):
+                    target = base_target
+                    request_messages = list(messages or [])
+                    request_message_count, request_message_chars = _message_stats(request_messages)
+                    try:
+                        target = base_target if slot.attempt_number == 1 else build_provider_from_model_key(
+                            self._config,
+                            ref,
+                            api_key_index=slot.key_index,
+                        )
+                        response = await target.provider.chat(
+                            messages=request_messages,
+                            tools=tools,
+                            model=target.model_id,
+                            max_tokens=max(1, min(int(max_tokens), int(target.max_tokens_limit))) if target.max_tokens_limit else max(1, int(max_tokens)),
+                            temperature=float(target.default_temperature) if target.default_temperature is not None else float(temperature),
+                            reasoning_effort=target.default_reasoning_effort or reasoning_effort,
+                            tool_choice='auto',
+                            parallel_tool_calls=parallel_tool_calls,
+                            prompt_cache_key=stable_prompt_cache_key,
+                        )
+                    except Exception as exc:
+                        last_error = round_last_error = exc
+                        rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
+                        if rotate_key and not slot.is_last_key:
+                            continue
+                        if rotate_key and not slot.is_last_round:
+                            continue
+                        if should_fallback_model_error(exc) and index < len(refs) - 1:
+                            move_to_next_model = True
+                            break
+                        if should_fallback_model_error(exc):
+                            exhausted = exhausted_model_chain_error(exc, retry_on=target.retry_on)
+                            if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                                retry_full_chain = True
+                                break
+                            raise exhausted from exc
+                        raise
+                    response.usage = normalize_usage_payload(response.usage)
+                    response.request_message_count = request_message_count
+                    response.request_message_chars = request_message_chars
+                    response_attempts = list(response.attempts or [])
+                    if not response_attempts:
+                        response_attempts = [
+                            LLMModelAttempt(
+                                model_key=target.provider_ref,
+                                provider_id=target.provider_id,
+                                provider_model=target.model_id,
+                                usage=dict(response.usage or {}),
+                                finish_reason=str(response.finish_reason or 'stop'),
+                            )
+                        ]
+                    attempts.extend(response_attempts)
+                    response.attempts = list(attempts)
+                    last_response = response
+                    rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
+                    retryable_response = response_requires_retry(response, retry_on=target.retry_on)
+                    fallback_response = response_requires_fallback(response)
+                    if rotate_key_response:
+                        if not slot.is_last_key:
+                            continue
+                        if not slot.is_last_round:
+                            continue
+                    if fallback_response and index < len(refs) - 1:
                         move_to_next_model = True
                         break
-                    if should_fallback_model_error(exc):
-                        raise exhausted_model_chain_error(exc) from exc
-                    raise
-                response.usage = normalize_usage_payload(response.usage)
-                response.request_message_count = request_message_count
-                response.request_message_chars = request_message_chars
-                response_attempts = list(response.attempts or [])
-                if not response_attempts:
-                    response_attempts = [
-                        LLMModelAttempt(
-                            model_key=target.provider_ref,
-                            provider_id=target.provider_id,
-                            provider_model=target.model_id,
-                            usage=dict(response.usage or {}),
-                            finish_reason=str(response.finish_reason or 'stop'),
-                        )
-                    ]
-                attempts.extend(response_attempts)
-                response.attempts = list(attempts)
-                last_response = response
-                rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
-                fallback_response = response_requires_fallback(response)
-                if rotate_key_response:
-                    if not slot.is_last_key:
-                        continue
-                    if not slot.is_last_round:
-                        continue
-                if fallback_response and index < len(refs) - 1:
-                    move_to_next_model = True
+                    if fallback_response:
+                        last_response = sanitize_terminal_model_error(response)
+                        if retryable_response and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                            retry_full_chain = True
+                            break
+                        return last_response
+                    return response
+                if retry_full_chain:
                     break
-                if fallback_response:
-                    return sanitize_terminal_model_error(response)
-                return response
-            if move_to_next_model:
+                if move_to_next_model:
+                    continue
+            if retry_full_chain:
                 continue
+            if round_last_error is not None and should_retry_model_chain_error(round_last_error) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                continue
+            break
         if last_error is not None:
             if should_fallback_model_error(last_error):
                 raise exhausted_model_chain_error(last_error) from last_error

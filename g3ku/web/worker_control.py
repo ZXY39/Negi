@@ -112,8 +112,11 @@ def start_managed_task_worker() -> bool:
             "env": {
                 **os.environ.copy(),
                 BOOTSTRAP_MASTER_KEY_ENV: master_key,
+                "G3KU_TASK_RUNTIME_ROLE": "worker",
             },
         }
+        popen_kwargs["env"].pop(WEB_AUTO_WORKER_ENV, None)
+        popen_kwargs["env"].pop(WEB_KEEP_WORKER_ENV, None)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         if creationflags:
             popen_kwargs["creationflags"] = creationflags

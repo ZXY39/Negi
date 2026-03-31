@@ -93,6 +93,7 @@ class ReActToolLoop:
         messages: list[dict[str, Any]],
         tools: dict[str, Tool],
         model_refs: list[str],
+        model_refs_supplier=None,
         runtime_context: dict[str, Any],
         max_iterations: int | None | object = _UNSET,
         max_parallel_tool_calls: int | None | object = _UNSET,
@@ -167,15 +168,20 @@ class ReActToolLoop:
                 },
                 publish_snapshot=True,
             )
+            current_model_refs = list(
+                model_refs_supplier() if callable(model_refs_supplier) else model_refs
+            )
+            if not current_model_refs:
+                raise RuntimeError('no model refs configured for node runtime')
             turn_prompt_cache_key = self._execution_prompt_cache_key(
                 model_messages=model_messages,
                 tool_schemas=tool_schemas,
-                model_refs=model_refs,
+                model_refs=current_model_refs,
             )
             response = await self._chat_with_optional_extensions(
                 messages=request_messages,
                 tools=tool_schemas or None,
-                model_refs=model_refs,
+                model_refs=current_model_refs,
                 max_tokens=1200,
                 temperature=0.2,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),

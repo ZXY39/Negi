@@ -137,6 +137,7 @@ class NodeRunner:
                 messages=list(react_state.get('messages') or []),
                 tools=tools,
                 model_refs=self._model_refs_for(node),
+                model_refs_supplier=lambda current_node=node: self._model_refs_for(current_node),
                 runtime_context=self._runtime_context(task=task, node=node),
                 max_iterations=self._max_iterations_for(node),
                 max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),

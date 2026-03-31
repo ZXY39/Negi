@@ -3053,6 +3053,121 @@ async def test_worker_commands_call_pause_and_cancel_handlers(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_request_worker_runtime_refresh_waits_for_worker_ack(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("main.service.runtime_service.get_config_path", lambda: config_path)
+
+    worker_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-worker",
+        artifact_dir=tmp_path / "artifacts-worker",
+        governance_store_path=tmp_path / "governance-worker.sqlite3",
+        execution_mode="worker",
+    )
+    web_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-web",
+        artifact_dir=tmp_path / "artifacts-web",
+        governance_store_path=tmp_path / "governance-web.sqlite3",
+        execution_mode="web",
+    )
+    captured: dict[str, object] = {}
+
+    def _ensure_runtime_config_current(*, force: bool = False, reason: str = "runtime") -> bool:
+        captured["force"] = force
+        captured["reason"] = reason
+        return True
+
+    worker_service.ensure_runtime_config_current = _ensure_runtime_config_current
+
+    try:
+        await worker_service.startup()
+
+        result = await web_service.request_worker_runtime_refresh(reason="test-refresh", timeout_s=2.0)
+
+        assert captured == {"force": True, "reason": "test-refresh"}
+        assert result["worker_refresh_acked"] is True
+        assert result["changed"] is True
+        assert result["worker_id"] == worker_service.worker_id
+        assert result["applied_config_mtime_ns"] == config_path.stat().st_mtime_ns
+    finally:
+        await web_service.close()
+        await worker_service.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_rejects_second_logical_worker(tmp_path: Path):
+    first = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-first",
+        artifact_dir=tmp_path / "artifacts-first",
+        governance_store_path=tmp_path / "governance-first.sqlite3",
+        execution_mode="worker",
+    )
+    second = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-second",
+        artifact_dir=tmp_path / "artifacts-second",
+        governance_store_path=tmp_path / "governance-second.sqlite3",
+        execution_mode="worker",
+    )
+
+    try:
+        await first.startup()
+        with pytest.raises(RuntimeError, match="worker_lease_unavailable"):
+            await second.startup()
+    finally:
+        await second.close()
+        await first.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_takes_over_stale_lease(tmp_path: Path):
+    stale_owner = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-stale",
+        artifact_dir=tmp_path / "artifacts-stale",
+        governance_store_path=tmp_path / "governance-stale.sqlite3",
+        execution_mode="worker",
+    )
+    recovered = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-recovered",
+        artifact_dir=tmp_path / "artifacts-recovered",
+        governance_store_path=tmp_path / "governance-recovered.sqlite3",
+        execution_mode="worker",
+    )
+    stale_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).astimezone().isoformat(timespec="seconds")
+
+    stale_owner.store.acquire_worker_lease(
+        role="task_worker",
+        worker_id="worker:stale",
+        holder_pid=99999,
+        acquired_at=stale_at,
+        heartbeat_at=stale_at,
+        expires_at=stale_at,
+        payload={"workspace": str(tmp_path)},
+    )
+
+    try:
+        await recovered.startup()
+        lease = recovered.store.get_worker_lease("task_worker")
+        assert recovered._worker_lease_takeover is True
+        assert lease is not None
+        assert lease["worker_id"] == recovered.worker_id
+    finally:
+        await recovered.close()
+        stale_owner.store.close()
+
+
+@pytest.mark.asyncio
 async def test_pause_task_cancels_active_background_run_without_marking_failed(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

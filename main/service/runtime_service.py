@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +15,7 @@ import httpx
 from loguru import logger
 
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.config.loader import get_config_path
 from g3ku.web.worker_control import managed_worker_snapshot
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
@@ -104,6 +106,10 @@ _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
 _WORKER_STATUS_STARTING_GRACE_SECONDS = 10.0
 _WORKER_STATUS_CALLBACK_RETRY_DELAYS = [0.0, 0.5, 2.0, 5.0]
 _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS = 2.0
+_WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS = 5.0
+_WORKER_RUNTIME_REFRESH_POLL_SECONDS = 0.1
+_WORKER_LEASE_ROLE = 'task_worker'
+_WORKER_LEASE_TTL_SECONDS = 20.0
 _TASK_SUMMARY_DEBOUNCE_SECONDS = 0.5
 _TASK_SUMMARY_MAX_WAIT_SECONDS = 1.0
 _TASK_SUMMARY_BATCH_WINDOW_SECONDS = 0.25
@@ -382,9 +388,12 @@ class MainRuntimeService:
             publish_status=self._publish_worker_status_from_any_thread,
             pressure_snapshot_supplier=self._tool_pressure_snapshot,
             debug_snapshot_supplier=lambda: {'recent_long_blocks': self.runtime_debug_recorder.snapshot()},
+            lease_heartbeat=self._renew_worker_lease_from_thread,
         )
         self._started = False
         self._runtime_loop = None
+        self._worker_lease_takeover = False
+        self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -413,6 +422,8 @@ class MainRuntimeService:
         self._started = True
         if self._runtime_loop is None:
             self._runtime_loop = asyncio.get_running_loop()
+        if self.execution_mode == 'worker':
+            self._acquire_worker_lease_or_raise()
         self.resource_registry.refresh_from_current_resources()
         self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
@@ -620,8 +631,10 @@ class MainRuntimeService:
         command_id = str(command.get('command_id') or '').strip()
         command_type = str(command.get('command_type') or '').strip()
         task_id = self.normalize_task_id(str(command.get('task_id') or '').strip())
+        payload = dict(command.get('payload') or {}) if isinstance(command.get('payload'), dict) else {}
         success = False
         error_text = ''
+        result_payload: dict[str, Any] | None = None
         try:
             if command_type == 'create_task':
                 task = self.get_task(task_id)
@@ -640,6 +653,19 @@ class MainRuntimeService:
                 if task_id:
                     await self.cancel_task(task_id)
                 success = True
+            elif command_type == 'refresh_runtime_config':
+                changed = self.ensure_runtime_config_current(
+                    force=True,
+                    reason=str(payload.get('reason') or 'worker_command_refresh').strip() or 'worker_command_refresh',
+                )
+                result_payload = {
+                    'changed': bool(changed),
+                    'applied_revision': int(getattr(self, '_runtime_model_revision', 0) or 0),
+                    'applied_config_mtime_ns': int(self._config_mtime_ns()),
+                    'worker_id': str(self.worker_id or 'worker'),
+                    'worker_pid': int(os.getpid()),
+                }
+                success = True
             else:
                 error_text = f'unsupported_command:{command_type}'
         except Exception as exc:
@@ -651,6 +677,7 @@ class MainRuntimeService:
                     finished_at=now_iso(),
                     success=success,
                     error_text=error_text,
+                    result=result_payload,
                 )
 
     def _enqueue_task_command(
@@ -671,6 +698,106 @@ class MainRuntimeService:
             payload=dict(payload or {}),
         )
         return command_id
+
+    @staticmethod
+    def _config_mtime_ns() -> int:
+        try:
+            return int(Path(get_config_path()).stat().st_mtime_ns)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _lease_expiry_from(updated_at: str, *, ttl_seconds: float = _WORKER_LEASE_TTL_SECONDS) -> str:
+        parsed = MainRuntimeService._parse_worker_timestamp(updated_at)
+        if parsed is None:
+            return now_iso()
+        return (parsed + timedelta(seconds=max(1.0, float(ttl_seconds or _WORKER_LEASE_TTL_SECONDS)))).astimezone().isoformat(timespec='seconds')
+
+    def _worker_lease_payload(self, *, heartbeat_at: str) -> dict[str, Any]:
+        return {
+            'workspace': str(Path.cwd()),
+            'worker_id': str(self.worker_id or 'worker'),
+            'worker_pid': int(os.getpid()),
+            'heartbeat_at': str(heartbeat_at or ''),
+            'execution_mode': str(self.execution_mode or ''),
+            'takeover': bool(self._worker_lease_takeover),
+        }
+
+    def _acquire_worker_lease_or_raise(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        started_at = now_iso()
+        lease = self.store.acquire_worker_lease(
+            role=_WORKER_LEASE_ROLE,
+            worker_id=str(self.worker_id or 'worker'),
+            holder_pid=int(os.getpid()),
+            acquired_at=started_at,
+            heartbeat_at=started_at,
+            expires_at=self._lease_expiry_from(started_at),
+            payload=self._worker_lease_payload(heartbeat_at=started_at),
+        )
+        if bool(lease.get('acquired')):
+            self._worker_lease_takeover = bool(lease.get('takeover'))
+            self._worker_lease_acquired = True
+            return
+        holder = str(lease.get('worker_id') or '').strip() or 'unknown'
+        expires_at = str(lease.get('expires_at') or '').strip()
+        raise RuntimeError(f'worker_lease_unavailable:{holder}:{expires_at}')
+
+    def _renew_worker_lease_from_thread(self, heartbeat_at: str, payload: dict[str, Any]) -> None:
+        if self.execution_mode != 'worker' or not self._worker_lease_acquired:
+            return
+        merged_payload = {
+            **self._worker_lease_payload(heartbeat_at=heartbeat_at),
+            'status_payload': dict(payload or {}),
+        }
+        self.store.renew_worker_lease(
+            role=_WORKER_LEASE_ROLE,
+            worker_id=str(self.worker_id or 'worker'),
+            heartbeat_at=heartbeat_at,
+            expires_at=self._lease_expiry_from(heartbeat_at),
+            payload=merged_payload,
+        )
+
+    async def request_worker_runtime_refresh(
+        self,
+        *,
+        reason: str,
+        timeout_s: float = _WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS,
+    ) -> dict[str, object]:
+        if self.execution_mode != 'web':
+            changed = self.ensure_runtime_config_current(force=True, reason=reason)
+            return {
+                'changed': bool(changed),
+                'worker_refresh_acked': True,
+                'worker_id': str(self.worker_id or ''),
+                'worker_pid': int(os.getpid()),
+                'applied_config_mtime_ns': int(self._config_mtime_ns()),
+            }
+        command_id = self._enqueue_task_command(
+            command_type='refresh_runtime_config',
+            task_id=None,
+            session_id='web:shared',
+            payload={
+                'reason': str(reason or '').strip() or 'runtime_refresh',
+                'expected_config_mtime_ns': int(self._config_mtime_ns()),
+            },
+        )
+        deadline = time.monotonic() + max(0.1, float(timeout_s or _WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS))
+        while True:
+            current = self.store.get_task_command(command_id)
+            if current and str(current.get('status') or '').strip().lower() in {'completed', 'failed'}:
+                if str(current.get('status') or '').strip().lower() == 'failed':
+                    raise RuntimeError(str(current.get('error_text') or 'worker_runtime_refresh_failed').strip() or 'worker_runtime_refresh_failed')
+                result = dict(current.get('result') or {}) if isinstance(current.get('result'), dict) else {}
+                return {
+                    'worker_refresh_acked': True,
+                    'command_id': command_id,
+                    **result,
+                }
+            if time.monotonic() >= deadline:
+                raise TimeoutError('worker_runtime_refresh_timeout')
+            await asyncio.sleep(_WORKER_RUNTIME_REFRESH_POLL_SECONDS)
 
     def _build_task_record(
         self,
@@ -3997,7 +4124,7 @@ class MainRuntimeService:
             await self.tool_pressure_monitor.close()
         await self.worker_heartbeat_service.close()
         await self.task_stall_notifier.close()
-        if self.execution_mode == 'worker' and self.worker_id:
+        if self.execution_mode == 'worker' and self.worker_id and self._worker_lease_acquired:
             stopped_item = {
                 'worker_id': self.worker_id,
                 'role': 'task_worker',
@@ -4013,6 +4140,8 @@ class MainRuntimeService:
                 payload=dict(stopped_item['payload']),
             )
             self.publish_worker_status_event(item=stopped_item)
+            self.store.release_worker_lease(role=_WORKER_LEASE_ROLE, worker_id=str(self.worker_id))
+            self._worker_lease_acquired = False
         await self.global_scheduler.close()
         self.log_service.close()
         await self.registry.close()
