@@ -254,6 +254,33 @@ def _execution_snapshot_history_messages(snapshot: dict[str, Any] | None) -> lis
     return messages
 
 
+def _snapshot_has_material_live_history(
+    snapshot: dict[str, Any] | None,
+    *,
+    require_active_stage: bool,
+) -> bool:
+    normalized_snapshot = _normalize_execution_snapshot(snapshot)
+    if normalized_snapshot is None:
+        return False
+    interaction_trace = normalize_interaction_trace(normalized_snapshot.get('interaction_trace'))
+    has_active_stage = any(
+        str(stage.get('status') or '').strip() == CEO_STAGE_STATUS_ACTIVE
+        for stage in list(interaction_trace.get('stages') or [])
+    )
+    if require_active_stage and not has_active_stage:
+        return False
+    assistant_text = str(normalized_snapshot.get('assistant_text') or '').strip()
+    tool_events = normalized_snapshot.get('tool_events')
+    has_tool_events = isinstance(tool_events, list) and bool(tool_events)
+    has_trace = bool(interaction_trace.get('stages'))
+    if has_active_stage or has_tool_events or has_trace or assistant_text:
+        return True
+    # A snapshot that only contains the current pending user message would
+    # overwrite transcript history and make the CEO frontdoor "forget" prior
+    # turns during context assembly.
+    return False
+
+
 def _build_task_memory_from_messages(
     messages: list[dict[str, Any]],
     *,
@@ -664,14 +691,12 @@ def extract_execution_live_raw_tail(
 ) -> tuple[list[dict[str, Any]], str]:
     snapshot, source = resolve_execution_snapshot(runtime_session, persisted_session)
     normalized_snapshot = _normalize_execution_snapshot(snapshot)
-    if normalized_snapshot is not None:
-        interaction_trace = normalize_interaction_trace(normalized_snapshot.get('interaction_trace'))
-        has_active_stage = any(
-            str(stage.get('status') or '').strip() == CEO_STAGE_STATUS_ACTIVE
-            for stage in list(interaction_trace.get('stages') or [])
-        )
+    if _snapshot_has_material_live_history(
+        normalized_snapshot,
+        require_active_stage=require_active_stage,
+    ):
         messages = _execution_snapshot_history_messages(normalized_snapshot)
-        if messages and (has_active_stage or not require_active_stage):
+        if messages:
             return messages, source
     if persisted_session is None:
         return [], ''

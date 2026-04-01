@@ -11,6 +11,7 @@ from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from main.runtime.internal_tools import SubmitFinalResultTool
 from main.runtime.react_loop import ReActToolLoop
+from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
 from main.service.runtime_service import MainRuntimeService
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -119,6 +120,70 @@ class _RecordingTool(Tool):
         _ = kwargs
         self._sink.append((self._name, value))
         return json.dumps({"ok": True, "tool": self._name, "value": value}, ensure_ascii=False)
+
+
+class _CountTool(Tool):
+    def __init__(self, sink: list[int]) -> None:
+        self._sink = sink
+
+    @property
+    def name(self) -> str:
+        return "count_tool"
+
+    @property
+    def description(self) -> str:
+        return "record integer counts"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "description": "count"},
+            },
+            "required": ["count"],
+        }
+
+    async def execute(self, count: int, **kwargs):
+        _ = kwargs
+        self._sink.append(int(count))
+        return json.dumps({"ok": True, "count": int(count)}, ensure_ascii=False)
+
+
+class _TypedSchemaTool(Tool):
+    @property
+    def name(self) -> str:
+        return "typed_schema_tool"
+
+    @property
+    def description(self) -> str:
+        return "exercise XML schema coercion"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer"},
+                "enabled": {"type": "boolean"},
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string"},
+                    },
+                    "required": ["source"],
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "note": {"type": "string"},
+            },
+            "required": ["count", "enabled", "metadata", "tags", "note"],
+        }
+
+    async def execute(self, **kwargs):
+        return json.dumps(kwargs, ensure_ascii=False)
 
 
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
@@ -744,8 +809,62 @@ def test_detect_xml_pseudo_tool_call_matches_supported_shape_only() -> None:
     assert rejected_plain_xml is None
 
 
+def test_extract_tool_calls_from_xml_pseudo_content_coerces_schema_typed_parameters() -> None:
+    extracted = extract_tool_calls_from_xml_pseudo_content(
+        (
+            '<minimax:tool_call>'
+            '<invoke name="typed_schema_tool">'
+            '<parameter name="count">5</parameter>'
+            '<parameter name="enabled">true</parameter>'
+            '<parameter name="metadata">{"source":"xml"}</parameter>'
+            '<parameter name="tags">["alpha","beta"]</parameter>'
+            '<parameter name="note">hello &amp; goodbye</parameter>'
+            '</invoke>'
+            '</minimax:tool_call>'
+        ),
+        visible_tools={"typed_schema_tool": _TypedSchemaTool()},
+    )
+
+    assert extracted.matched is True
+    assert extracted.issue == ""
+    assert len(extracted.tool_calls) == 1
+    arguments = extracted.tool_calls[0].arguments
+    assert arguments["count"] == 5
+    assert arguments["enabled"] is True
+    assert arguments["metadata"] == {"source": "xml"}
+    assert arguments["tags"] == ["alpha", "beta"]
+    assert arguments["note"] == "hello & goodbye"
+
+
+def test_extract_tool_calls_from_xml_pseudo_content_returns_issue_for_invalid_parameter_type() -> None:
+    extracted = extract_tool_calls_from_xml_pseudo_content(
+        '<minimax:tool_call><invoke name="count_tool"><parameter name="count">oops</parameter></invoke></minimax:tool_call>',
+        visible_tools={"count_tool": _CountTool([])},
+    )
+
+    assert extracted.matched is True
+    assert extracted.tool_calls == []
+    assert 'must be an integer' in extracted.issue
+
+
+def test_extract_tool_calls_from_xml_pseudo_content_is_all_or_nothing_for_multi_invoke() -> None:
+    extracted = extract_tool_calls_from_xml_pseudo_content(
+        (
+            '<minimax:tool_call>'
+            '<invoke name="count_tool"><parameter name="count">1</parameter></invoke>'
+            '<invoke name="count_tool"><parameter name="count">oops</parameter></invoke>'
+            '</minimax:tool_call>'
+        ),
+        visible_tools={"count_tool": _CountTool([])},
+    )
+
+    assert extracted.matched is True
+    assert extracted.tool_calls == []
+    assert 'must be an integer' in extracted.issue
+
+
 @pytest.mark.asyncio
-async def test_react_loop_repairs_xml_reply_with_json_object_tool_payload() -> None:
+async def test_react_loop_directly_executes_xml_reply_without_repair() -> None:
     calls: list[list[dict[str, object]]] = []
     executed: list[tuple[str, str]] = []
 
@@ -754,12 +873,6 @@ async def test_react_loop_repairs_xml_reply_with_json_object_tool_payload() -> N
             self._responses = [
                 LLMResponse(
                     content='<minimax:tool_call><invoke name="record_one"><parameter name="value">hello</parameter></invoke></minimax:tool_call>',
-                    tool_calls=[],
-                    finish_reason='stop',
-                    usage={'input_tokens': 8, 'output_tokens': 3},
-                ),
-                LLMResponse(
-                    content='{"name":"record_one","arguments":{"value":"hello"}}',
                     tool_calls=[],
                     finish_reason='stop',
                     usage={'input_tokens': 8, 'output_tokens': 3},
@@ -790,7 +903,7 @@ async def test_react_loop_repairs_xml_reply_with_json_object_tool_payload() -> N
             calls.append([dict(item) for item in list(kwargs.get('messages') or [])])
             return self._responses.pop(0)
 
-    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-xml-json'),
         node=SimpleNamespace(node_id='node-xml-json', depth=0, node_kind='execution'),
@@ -804,39 +917,43 @@ async def test_react_loop_repairs_xml_reply_with_json_object_tool_payload() -> N
         },
         model_refs=['fake'],
         runtime_context={'task_id': 'task-xml-json', 'node_id': 'node-xml-json'},
-        max_iterations=4,
+        max_iterations=3,
     )
 
     assert result.status == 'success'
     assert executed == [('record_one', 'hello')]
-    assert len(calls) == 3
+    assert len(calls) == 2
     second_request = calls[1]
-    assert 'XML-style pseudo tool calling' in str(second_request[-1]['content'])
-    assert '<invoke name="record_one">' in str(second_request[-1]['content'])
-    third_request = calls[2]
-    assistant_turns = [item for item in third_request if item.get('role') == 'assistant']
+    assert not any('XML-style pseudo tool calling' in str(item.get('content') or '') for item in second_request)
+    assistant_turns = [item for item in second_request if item.get('role') == 'assistant']
     assert any(
         str((((tool_call or {}).get('function') or {}).get('name') or '')).strip() == 'record_one'
         for message in assistant_turns
         for tool_call in list(message.get('tool_calls') or [])
     )
+    assert all(str(item.get('content') or '') != '<minimax:tool_call><invoke name="record_one"><parameter name="value">hello</parameter></invoke></minimax:tool_call>' for item in assistant_turns)
 
 
 @pytest.mark.asyncio
 async def test_react_loop_repairs_xml_reply_with_json_array_payload() -> None:
-    executed: list[tuple[str, str]] = []
+    executed: list[int] = []
 
     class _Backend:
         def __init__(self) -> None:
             self._responses = [
                 LLMResponse(
-                    content='<minimax:tool_call><invoke name="record_one"><parameter name="value">alpha</parameter></invoke><invoke name="record_two"><parameter name="value">beta</parameter></invoke></minimax:tool_call>',
+                    content=(
+                        '<minimax:tool_call>'
+                        '<invoke name="count_tool"><parameter name="count">1</parameter></invoke>'
+                        '<invoke name="count_tool"><parameter name="count">oops</parameter></invoke>'
+                        '</minimax:tool_call>'
+                    ),
                     tool_calls=[],
                     finish_reason='stop',
                     usage={'input_tokens': 8, 'output_tokens': 3},
                 ),
                 LLMResponse(
-                    content='[{"name":"record_one","arguments":{"value":"alpha"}},{"name":"record_two","arguments":{"value":"beta"}}]',
+                    content='[{"name":"count_tool","arguments":{"count":1}},{"name":"count_tool","arguments":{"count":2}}]',
                     tool_calls=[],
                     finish_reason='stop',
                     usage={'input_tokens': 8, 'output_tokens': 3},
@@ -876,8 +993,7 @@ async def test_react_loop_repairs_xml_reply_with_json_array_payload() -> None:
             {'role': 'user', 'content': '{"task_id":"task-xml-array","goal":"demo"}'},
         ],
         tools={
-            'record_one': _RecordingTool('record_one', executed),
-            'record_two': _RecordingTool('record_two', executed),
+            'count_tool': _CountTool(executed),
             'submit_final_result': _submit_final_result_tool(),
         },
         model_refs=['fake'],
@@ -886,11 +1002,11 @@ async def test_react_loop_repairs_xml_reply_with_json_array_payload() -> None:
     )
 
     assert result.status == 'success'
-    assert set(executed) == {('record_one', 'alpha'), ('record_two', 'beta')}
+    assert executed == [1, 2]
 
 
 @pytest.mark.asyncio
-async def test_react_loop_repairs_xml_submit_final_result_via_json_object() -> None:
+async def test_react_loop_directly_executes_xml_submit_final_result() -> None:
     calls: list[list[dict[str, object]]] = []
 
     class _Backend:
@@ -902,19 +1018,13 @@ async def test_react_loop_repairs_xml_submit_final_result_via_json_object() -> N
                     finish_reason='stop',
                     usage={'input_tokens': 8, 'output_tokens': 3},
                 ),
-                LLMResponse(
-                    content='{"name":"submit_final_result","arguments":{"status":"success","delivery_status":"final","summary":"done","answer":"done","evidence":[],"remaining_work":[],"blocking_reason":""}}',
-                    tool_calls=[],
-                    finish_reason='stop',
-                    usage={'input_tokens': 8, 'output_tokens': 3},
-                ),
             ]
 
         async def chat(self, **kwargs):
             calls.append([dict(item) for item in list(kwargs.get('messages') or [])])
             return self._responses.pop(0)
 
-    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-xml-final'),
         node=SimpleNamespace(node_id='node-xml-final', depth=0, node_kind='execution'),
@@ -925,13 +1035,83 @@ async def test_react_loop_repairs_xml_submit_final_result_via_json_object() -> N
         tools={'submit_final_result': _submit_final_result_tool()},
         model_refs=['fake'],
         runtime_context={'task_id': 'task-xml-final', 'node_id': 'node-xml-final'},
-        max_iterations=3,
+        max_iterations=2,
     )
 
     assert result.status == 'success'
     assert result.answer == 'done'
-    assert len(calls) == 2
-    assert 'JSON repair payload' in str(calls[1][-1]['content'])
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_react_loop_repairs_xml_reply_with_json_object_tool_payload_after_local_extraction_fails() -> None:
+    calls: list[list[dict[str, object]]] = []
+    executed: list[int] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._responses = [
+                LLMResponse(
+                    content='<minimax:tool_call><invoke name="count_tool"><parameter name="count">oops</parameter></invoke></minimax:tool_call>',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='{"name":"count_tool","arguments":{"count":2}}',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:final',
+                            name='submit_final_result',
+                            arguments={
+                                'status': 'success',
+                                'delivery_status': 'final',
+                                'summary': 'done',
+                                'answer': 'done',
+                                'evidence': [{'kind': 'artifact', 'note': 'json repair path'}],
+                                'remaining_work': [],
+                                'blocking_reason': '',
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+            ]
+
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get('messages') or [])])
+            return self._responses.pop(0)
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-xml-json'),
+        node=SimpleNamespace(node_id='node-xml-json', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-xml-json","goal":"demo"}'},
+        ],
+        tools={
+            'count_tool': _CountTool(executed),
+            'submit_final_result': _submit_final_result_tool(),
+        },
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-xml-json', 'node_id': 'node-xml-json'},
+        max_iterations=4,
+    )
+
+    assert result.status == 'success'
+    assert executed == [2]
+    assert len(calls) == 3
+    second_request = calls[1]
+    assert any('XML-style pseudo tool calling' in str(item.get('content') or '') for item in second_request)
+    assert any('must be an integer' in str(item.get('content') or '') for item in second_request)
 
 
 @pytest.mark.asyncio

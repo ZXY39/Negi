@@ -238,6 +238,34 @@ class _RecordingTool(Tool):
         return json.dumps({'ok': True, 'tool': self._name, 'value': value}, ensure_ascii=False)
 
 
+class _CountTool(Tool):
+    def __init__(self, sink: list[int]) -> None:
+        self._sink = sink
+
+    @property
+    def name(self) -> str:
+        return 'count_tool'
+
+    @property
+    def description(self) -> str:
+        return 'record integer counts'
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            'type': 'object',
+            'properties': {
+                'count': {'type': 'integer'},
+            },
+            'required': ['count'],
+        }
+
+    async def execute(self, count: int, **kwargs) -> str:
+        _ = kwargs
+        self._sink.append(int(count))
+        return json.dumps({'ok': True, 'count': int(count)}, ensure_ascii=False)
+
+
 def test_live_raw_tail_returns_recent_complete_turns_without_compact_history() -> None:
     session = Session(key='web:shared')
     for turn_index in range(1, 7):
@@ -250,6 +278,72 @@ def test_live_raw_tail_returns_recent_complete_turns_without_compact_history() -
         not str(item.get('content') or '').startswith('[[G3KU_COMPACT_HISTORY_V1]]')
         for item in recent_history
     )
+
+
+def test_extract_execution_live_raw_tail_falls_back_to_transcript_when_runtime_snapshot_only_has_current_user() -> None:
+    persisted_session = Session(key='web:shared')
+    _append_turn(persisted_session, 1)
+    _append_turn(persisted_session, 2)
+
+    runtime_session = SimpleNamespace(
+        inflight_turn_snapshot=lambda: {
+            'status': 'running',
+            'user_message': {'role': 'user', 'content': 'what was my first message?'},
+            'tool_events': [],
+        },
+        interaction_trace_snapshot=lambda: None,
+        current_stage_snapshot=lambda: None,
+        paused_execution_context_snapshot=lambda: None,
+    )
+
+    recent_history, source = web_ceo_sessions.extract_execution_live_raw_tail(
+        runtime_session,
+        persisted_session,
+        turn_limit=2,
+        require_active_stage=False,
+    )
+
+    assert source == 'transcript'
+    assert [item['content'] for item in recent_history] == [
+        'user turn 1',
+        'assistant turn 1',
+        'user turn 2',
+        'assistant turn 2',
+    ]
+
+
+def test_extract_execution_live_raw_tail_prefers_runtime_snapshot_with_tool_progress() -> None:
+    persisted_session = Session(key='web:shared')
+    _append_turn(persisted_session, 1)
+    _append_turn(persisted_session, 2)
+
+    runtime_session = SimpleNamespace(
+        inflight_turn_snapshot=lambda: {
+            'status': 'running',
+            'user_message': {'role': 'user', 'content': 'continue the active work'},
+            'tool_events': [
+                {
+                    'tool_name': 'task_progress',
+                    'status': 'success',
+                    'text': 'Task status: in_progress',
+                }
+            ],
+        },
+        interaction_trace_snapshot=lambda: None,
+        current_stage_snapshot=lambda: None,
+        paused_execution_context_snapshot=lambda: None,
+    )
+
+    recent_history, source = web_ceo_sessions.extract_execution_live_raw_tail(
+        runtime_session,
+        persisted_session,
+        turn_limit=2,
+        require_active_stage=False,
+    )
+
+    assert source == 'live_runtime'
+    assert recent_history[0]['content'] == 'continue the active work'
+    assert 'Task status: in_progress' in str(recent_history[1]['content'] or '')
 
 
 def test_update_ceo_session_after_turn_persists_last_task_memory() -> None:
@@ -1916,7 +2010,7 @@ async def test_ceo_frontdoor_runner_returns_direct_reply_without_langchain(monke
 
 
 @pytest.mark.asyncio
-async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload(monkeypatch, tmp_path) -> None:
+async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repair(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
 
@@ -1936,11 +2030,6 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload(monke
             ),
             LLMResponse(
                 content='<minimax:tool_call><invoke name="record_tool"><parameter name="value">alpha</parameter></invoke></minimax:tool_call>',
-                tool_calls=[],
-                finish_reason='stop',
-            ),
-            LLMResponse(
-                content='{"name":"record_tool","arguments":{"value":"alpha"}}',
                 tool_calls=[],
                 finish_reason='stop',
             ),
@@ -1992,14 +2081,94 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload(monke
 
     assert output == 'repair succeeded'
     assert executed == [('record_tool', 'alpha')]
+    assert len(backend.calls) == 3
+    assert not any(
+        'XML-style pseudo tool calling' in str(item.get('content') or '')
+        for item in list(backend.calls[2].get('messages') or [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after_local_extraction_fails(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    executed: list[int] = []
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'repair xml tool call', 'tool_round_budget': 2},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='<minimax:tool_call><invoke name="count_tool"><parameter name="count">oops</parameter></invoke></minimax:tool_call>',
+                tool_calls=[],
+                finish_reason='stop',
+            ),
+            LLMResponse(
+                content='{"name":"count_tool","arguments":{"count":2}}',
+                tool_calls=[],
+                finish_reason='stop',
+            ),
+            LLMResponse(content='repair succeeded', finish_reason='stop'),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_CountTool(executed)]),
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['count_tool']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['count_tool'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='repair xml please'), session=session)
+
+    assert output == 'repair succeeded'
+    assert executed == [2]
     assert len(backend.calls) == 4
     repair_messages = list(backend.calls[2].get('messages') or [])
-    assert any(
-        str(item.get('role') or '') == 'user'
-        and 'XML-style pseudo tool calling' in str(item.get('content') or '')
-        and '<invoke name="record_tool">' in str(item.get('content') or '')
-        for item in repair_messages
-    )
+    assert any('XML-style pseudo tool calling' in str(item.get('content') or '') for item in repair_messages)
+    assert any('must be an integer' in str(item.get('content') or '') for item in repair_messages)
 
 
 @pytest.mark.asyncio
@@ -2021,13 +2190,13 @@ async def test_ceo_frontdoor_runner_fails_safely_after_three_xml_repair_attempts
                 finish_reason='tool_calls',
             ),
             LLMResponse(
-                content='<minimax:tool_call><invoke name="record_tool"><parameter name="value">alpha</parameter></invoke></minimax:tool_call>',
+                content='<minimax:tool_call><invoke name="count_tool"><parameter name="count">oops</parameter></invoke></minimax:tool_call>',
                 tool_calls=[],
                 finish_reason='stop',
             ),
             LLMResponse(content='still invalid', tool_calls=[], finish_reason='stop'),
             LLMResponse(
-                content='<minimax:tool_call><invoke name="record_tool"><parameter name="value">alpha</parameter></invoke></minimax:tool_call>',
+                content='<minimax:tool_call><invoke name="count_tool"><parameter name="count">oops</parameter></invoke></minimax:tool_call>',
                 tool_calls=[],
                 finish_reason='stop',
             ),
@@ -2039,7 +2208,7 @@ async def test_ceo_frontdoor_runner_fails_safely_after_three_xml_repair_attempts
         _checkpointer=None,
         _store=None,
         main_task_service=None,
-        tools=_FakeToolRegistry([_RecordingTool('record_tool', [])]),
+        tools=_FakeToolRegistry([_CountTool([])]),
         max_iterations=12,
         resource_manager=None,
         tool_execution_manager=None,
@@ -2048,14 +2217,14 @@ async def test_ceo_frontdoor_runner_fails_safely_after_three_xml_repair_attempts
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {'skills': [], 'tool_families': [], 'tool_names': ['record_tool']}
+        return {'skills': [], 'tool_families': [], 'tool_names': ['count_tool']}
 
     async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
         _ = session, query_text, exposure, persisted_session
         return ContextAssemblyResult(
             system_prompt='SYSTEM PROMPT',
             recent_history=[],
-            tool_names=['record_tool'],
+            tool_names=['count_tool'],
             trace={},
         )
 

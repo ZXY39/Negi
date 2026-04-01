@@ -36,7 +36,7 @@ from main.runtime.stage_messages import build_ceo_stage_overlay, build_ceo_stage
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
-    detect_xml_pseudo_tool_call,
+    extract_tool_calls_from_xml_pseudo_content,
     format_xml_repair_failure_reason,
     recover_tool_calls_from_json_payload,
 )
@@ -684,10 +684,18 @@ class CeoFrontDoorRunner:
                 if str(name or '').strip()
             }
             response_tool_calls = list(response.tool_calls or [])
-            repair_json_tool_calls_used = False
+            synthetic_tool_calls_used = False
             xml_pseudo_call = None
             if not response_tool_calls and visible_tool_names:
-                if xml_repair_attempt_count > 0:
+                xml_extraction = extract_tool_calls_from_xml_pseudo_content(
+                    response.content,
+                    visible_tools=visible_tools,
+                    id_prefix='call:ceo-xml-direct',
+                )
+                if xml_extraction.tool_calls:
+                    response_tool_calls = xml_extraction.tool_calls
+                    synthetic_tool_calls_used = True
+                if not response_tool_calls and xml_repair_attempt_count > 0:
                     repaired_tool_calls = recover_tool_calls_from_json_payload(
                         response.content,
                         allowed_tool_names=visible_tool_names,
@@ -695,12 +703,13 @@ class CeoFrontDoorRunner:
                     )
                     if repaired_tool_calls:
                         response_tool_calls = repaired_tool_calls
-                        repair_json_tool_calls_used = True
-                if not response_tool_calls:
-                    xml_pseudo_call = detect_xml_pseudo_tool_call(
-                        response.content,
-                        allowed_tool_names=visible_tool_names,
-                    )
+                        synthetic_tool_calls_used = True
+                if not response_tool_calls and xml_extraction.matched:
+                    xml_pseudo_call = {
+                        'excerpt': xml_extraction.excerpt,
+                        'tool_names': list(xml_extraction.tool_names or []),
+                        'issue': str(xml_extraction.issue or '').strip(),
+                    }
             tool_call_payloads = [self._tool_call_payload(call) for call in response_tool_calls]
 
             if response_tool_calls:
@@ -709,7 +718,7 @@ class CeoFrontDoorRunner:
                     xml_repair_excerpt = ''
                     xml_repair_tool_names = []
                     xml_repair_last_issue = ''
-                analysis_text = '' if repair_json_tool_calls_used else self._content_text(getattr(response, "content", ""))
+                analysis_text = '' if synthetic_tool_calls_used else self._content_text(getattr(response, "content", ""))
                 if analysis_text.strip():
                     await self._emit_progress(
                         runtime_context.get("on_progress"),
@@ -725,7 +734,7 @@ class CeoFrontDoorRunner:
                     assistant_message = {
                         "role": "assistant",
                         "content": self._externalize_message_content(
-                            None if repair_json_tool_calls_used else response.content,
+                            None if synthetic_tool_calls_used else response.content,
                             runtime_context=runtime_context,
                         ),
                         "tool_calls": self._assistant_tool_calls(response_tool_calls),
@@ -823,7 +832,7 @@ class CeoFrontDoorRunner:
                 assistant_message = {
                     "role": "assistant",
                     "content": self._externalize_message_content(
-                        None if repair_json_tool_calls_used else response.content,
+                        None if synthetic_tool_calls_used else response.content,
                         runtime_context=runtime_context,
                     ),
                     "tool_calls": self._assistant_tool_calls(response_tool_calls),
@@ -852,7 +861,10 @@ class CeoFrontDoorRunner:
                 xml_repair_attempt_count += 1
                 xml_repair_excerpt = str(xml_pseudo_call.get('excerpt') or '').strip()
                 xml_repair_tool_names = list(xml_pseudo_call.get('tool_names') or [])
-                xml_repair_last_issue = 'reply used XML-like pseudo tool syntax instead of a valid tool call'
+                xml_repair_last_issue = (
+                    str(xml_pseudo_call.get('issue') or '').strip()
+                    or 'reply used XML-like pseudo tool syntax instead of a valid tool call'
+                )
                 if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
                     if interaction_trace.get('stages'):
                         interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)

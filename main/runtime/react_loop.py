@@ -28,6 +28,7 @@ from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
     detect_xml_pseudo_tool_call,
+    extract_tool_calls_from_xml_pseudo_content,
     format_xml_repair_failure_reason,
     recover_tool_calls_from_json_payload,
 )
@@ -207,22 +208,30 @@ class ReActToolLoop:
                 if str(name or '').strip()
             }
             response_tool_calls = list(response.tool_calls or [])
-            repair_json_tool_calls_used = False
+            synthetic_tool_calls_used = False
             xml_pseudo_call = None
             if not response_tool_calls and visible_tool_names:
-                if xml_repair_attempt_count > 0:
+                xml_extraction = self._extract_tool_calls_from_xml_pseudo_content(
+                    response.content,
+                    visible_tools=visible_tools,
+                )
+                if xml_extraction.tool_calls:
+                    response_tool_calls = xml_extraction.tool_calls
+                    synthetic_tool_calls_used = True
+                if not response_tool_calls and xml_repair_attempt_count > 0:
                     repaired_tool_calls = self._recover_tool_calls_from_json_payload(
                         response.content,
                         allowed_tool_names=visible_tool_names,
                     )
                     if repaired_tool_calls:
                         response_tool_calls = repaired_tool_calls
-                        repair_json_tool_calls_used = True
-                if not response_tool_calls:
-                    xml_pseudo_call = self._detect_xml_pseudo_tool_call(
-                        response.content,
-                        allowed_tool_names=visible_tool_names,
-                    )
+                        synthetic_tool_calls_used = True
+                if not response_tool_calls and xml_extraction.matched:
+                    xml_pseudo_call = {
+                        'excerpt': xml_extraction.excerpt,
+                        'tool_names': list(xml_extraction.tool_names or []),
+                        'issue': str(xml_extraction.issue or '').strip(),
+                    }
             tool_calls = [
                 {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
                 for call in response_tool_calls
@@ -293,6 +302,7 @@ class ReActToolLoop:
                         tools=tools,
                         message_history=message_history,
                         runtime_context=runtime_context,
+                        assistant_content=None if synthetic_tool_calls_used else response.content,
                     )
                     message_history = next_history
                     if terminal_result is not None:
@@ -385,7 +395,7 @@ class ReActToolLoop:
                 assistant_message = {
                     'role': 'assistant',
                     'content': self._externalize_message_content(
-                        None if repair_json_tool_calls_used else response.content,
+                        None if synthetic_tool_calls_used else response.content,
                         runtime_context=runtime_context,
                         display_name=f'assistant:{node.node_id}',
                         source_kind='assistant_message',
@@ -468,7 +478,10 @@ class ReActToolLoop:
                 xml_repair_attempt_count += 1
                 xml_repair_excerpt = str(xml_pseudo_call.get('excerpt') or '').strip()
                 xml_repair_tool_names = list(xml_pseudo_call.get('tool_names') or [])
-                xml_repair_last_issue = 'reply used XML-like pseudo tool syntax instead of a valid tool call'
+                xml_repair_last_issue = (
+                    str(xml_pseudo_call.get('issue') or '').strip()
+                    or 'reply used XML-like pseudo tool syntax instead of a valid tool call'
+                )
                 if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
                     return self._xml_repair_failure(
                         count=xml_repair_attempt_count,
@@ -1476,6 +1489,15 @@ class ReActToolLoop:
         return detect_xml_pseudo_tool_call(content, allowed_tool_names=allowed_tool_names)
 
     @classmethod
+    def _extract_tool_calls_from_xml_pseudo_content(
+        cls,
+        content: Any,
+        *,
+        visible_tools: dict[str, Tool],
+    ):
+        return extract_tool_calls_from_xml_pseudo_content(content, visible_tools=visible_tools)
+
+    @classmethod
     def _recover_tool_calls_from_json_payload(
         cls,
         content: Any,
@@ -1529,6 +1551,7 @@ class ReActToolLoop:
         tools: dict[str, Tool],
         message_history: list[dict[str, Any]],
         runtime_context: dict[str, Any],
+        assistant_content: Any,
     ) -> tuple[NodeFinalResult | None, list[dict[str, Any]], list[str], str]:
         tool_payload = {
             'id': str(getattr(tool_call, 'id', '') or ''),
@@ -1611,7 +1634,7 @@ class ReActToolLoop:
         assistant_message = {
             'role': 'assistant',
             'content': self._externalize_message_content(
-                response.content,
+                assistant_content,
                 runtime_context=runtime_context,
                 display_name=f'assistant:{node.node_id}',
                 source_kind='assistant_message',
