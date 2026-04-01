@@ -25,6 +25,7 @@ from g3ku.runtime.web_ceo_sessions import (
     is_internal_ceo_user_message,
     list_web_ceo_sessions,
     read_inflight_turn_snapshot,
+    resolve_execution_snapshot,
     resolve_active_ceo_session_id,
     upload_dir_for_session,
     workspace_path,
@@ -277,14 +278,26 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
     )
 
 
-def _build_inflight_turn_snapshot(session: Any, session_id: str) -> dict[str, Any] | None:
-    getter = getattr(session, 'inflight_turn_snapshot', None)
-    if not callable(getter):
-        snapshot = read_inflight_turn_snapshot(session_id)
-    else:
-        snapshot = getter()
-        if not isinstance(snapshot, dict):
+def _build_inflight_turn_snapshot(
+    session: Any,
+    session_id: str,
+    persisted_session: Any | None = None,
+) -> dict[str, Any] | None:
+    snapshot: dict[str, Any] | None = None
+    try:
+        resolved_snapshot, _resolved_source = resolve_execution_snapshot(session, persisted_session)
+        if isinstance(resolved_snapshot, dict):
+            snapshot = resolved_snapshot
+    except Exception:
+        snapshot = None
+    if not isinstance(snapshot, dict):
+        getter = getattr(session, 'inflight_turn_snapshot', None)
+        if not callable(getter):
             snapshot = read_inflight_turn_snapshot(session_id)
+        else:
+            snapshot = getter()
+            if not isinstance(snapshot, dict):
+                snapshot = read_inflight_turn_snapshot(session_id)
     if not isinstance(snapshot, dict):
         return None
     interaction_trace = snapshot.get('interaction_trace')
@@ -753,7 +766,7 @@ async def ceo_websocket(websocket: WebSocket):
     global_sender_task = asyncio.create_task(sender(global_queue))
     stream_task = asyncio.create_task(sender(stream_queue))
     try:
-        inflight_turn = _build_inflight_turn_snapshot(session, session_id)
+        inflight_turn = _build_inflight_turn_snapshot(session, session_id, persisted_session)
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
         await _safe_send(
             build_envelope(

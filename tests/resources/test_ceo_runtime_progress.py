@@ -1401,7 +1401,7 @@ def test_ceo_websocket_error_payload_carries_interaction_trace(tmp_path: Path, m
     assert error_events[0]["data"]["interaction_trace"]["stages"][0]["stage_goal"] == "Open bilibili"
 
 
-def test_ceo_websocket_manual_pause_hides_inflight_turn_without_final_reply(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_reply(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
     async def _ensure_services(_agent) -> None:
@@ -1512,7 +1512,11 @@ def test_ceo_websocket_manual_pause_hides_inflight_turn_without_final_reply(tmp_
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
         snapshot, _seen = _recv_until(ws, lambda payload: payload.get("type") == "snapshot.ceo")
 
-    assert snapshot["data"].get("inflight_turn") is None
+    inflight_turn = snapshot["data"].get("inflight_turn")
+    assert isinstance(inflight_turn, dict)
+    assert inflight_turn["status"] == "paused"
+    assert inflight_turn["user_message"]["content"] == "Pause and restore me"
+    assert inflight_turn["tool_events"][0]["tool_name"] == "skill-installer"
     assert [message["role"] for message in snapshot["data"].get("messages", [])] == ["user"]
     assert snapshot["data"]["messages"][0]["content"] == "Pause and restore me"
     persisted = SessionManager(tmp_path).get_or_create(session_id)
