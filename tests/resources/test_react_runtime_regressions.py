@@ -92,6 +92,35 @@ class _DirectLoadTool(Tool):
         return json.dumps(payload, ensure_ascii=False)
 
 
+class _RecordingTool(Tool):
+    def __init__(self, name: str, sink: list[tuple[str, str]]) -> None:
+        self._name = name
+        self._sink = sink
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"record {self._name}"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string", "description": "value"},
+            },
+            "required": ["value"],
+        }
+
+    async def execute(self, value: str, **kwargs):
+        _ = kwargs
+        self._sink.append((self._name, value))
+        return json.dumps({"ok": True, "tool": self._name, "value": value}, ensure_ascii=False)
+
+
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
     loop._log_service._store._node = SimpleNamespace(
@@ -600,6 +629,259 @@ def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
     assert 'System note for this turn only:' in str(request_messages[1]['content'])
     assert overlay in str(request_messages[1]['content'])
     assert 'base user' in str(request_messages[1]['content'])
+
+
+def test_detect_xml_pseudo_tool_call_matches_supported_shape_only() -> None:
+    matched = ReActToolLoop._detect_xml_pseudo_tool_call(
+        '<minimax:tool_call><invoke name="filesystem"><parameter name="path">docs/a.md</parameter></invoke></minimax:tool_call>',
+        allowed_tool_names={'filesystem', 'submit_final_result'},
+    )
+    rejected_unknown = ReActToolLoop._detect_xml_pseudo_tool_call(
+        '<minimax:tool_call><invoke name="unknown_tool"><parameter name="path">docs/a.md</parameter></invoke></minimax:tool_call>',
+        allowed_tool_names={'filesystem', 'submit_final_result'},
+    )
+    rejected_plain_xml = ReActToolLoop._detect_xml_pseudo_tool_call(
+        '<note><path>docs/a.md</path></note>',
+        allowed_tool_names={'filesystem', 'submit_final_result'},
+    )
+
+    assert matched is not None
+    assert matched['tool_names'] == ['filesystem']
+    assert rejected_unknown is None
+    assert rejected_plain_xml is None
+
+
+@pytest.mark.asyncio
+async def test_react_loop_repairs_xml_reply_with_json_object_tool_payload() -> None:
+    calls: list[list[dict[str, object]]] = []
+    executed: list[tuple[str, str]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._responses = [
+                LLMResponse(
+                    content='<minimax:tool_call><invoke name="record_one"><parameter name="value">hello</parameter></invoke></minimax:tool_call>',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='{"name":"record_one","arguments":{"value":"hello"}}',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:final',
+                            name='submit_final_result',
+                            arguments={
+                                'status': 'success',
+                                'delivery_status': 'final',
+                                'summary': 'done',
+                                'answer': 'done',
+                                'evidence': [{'kind': 'artifact', 'note': 'json repair path'}],
+                                'remaining_work': [],
+                                'blocking_reason': '',
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+            ]
+
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get('messages') or [])])
+            return self._responses.pop(0)
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-xml-json'),
+        node=SimpleNamespace(node_id='node-xml-json', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-xml-json","goal":"demo"}'},
+        ],
+        tools={
+            'record_one': _RecordingTool('record_one', executed),
+            'submit_final_result': _submit_final_result_tool(),
+        },
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-xml-json', 'node_id': 'node-xml-json'},
+        max_iterations=4,
+    )
+
+    assert result.status == 'success'
+    assert executed == [('record_one', 'hello')]
+    assert len(calls) == 3
+    second_request = calls[1]
+    assert 'XML-style pseudo tool calling' in str(second_request[-1]['content'])
+    assert '<invoke name="record_one">' in str(second_request[-1]['content'])
+    third_request = calls[2]
+    assistant_turns = [item for item in third_request if item.get('role') == 'assistant']
+    assert any(
+        str((((tool_call or {}).get('function') or {}).get('name') or '')).strip() == 'record_one'
+        for message in assistant_turns
+        for tool_call in list(message.get('tool_calls') or [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_react_loop_repairs_xml_reply_with_json_array_payload() -> None:
+    executed: list[tuple[str, str]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._responses = [
+                LLMResponse(
+                    content='<minimax:tool_call><invoke name="record_one"><parameter name="value">alpha</parameter></invoke><invoke name="record_two"><parameter name="value">beta</parameter></invoke></minimax:tool_call>',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='[{"name":"record_one","arguments":{"value":"alpha"}},{"name":"record_two","arguments":{"value":"beta"}}]',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:final',
+                            name='submit_final_result',
+                            arguments={
+                                'status': 'success',
+                                'delivery_status': 'final',
+                                'summary': 'done',
+                                'answer': 'done',
+                                'evidence': [{'kind': 'artifact', 'note': 'json array repair path'}],
+                                'remaining_work': [],
+                                'blocking_reason': '',
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+            ]
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return self._responses.pop(0)
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-xml-array'),
+        node=SimpleNamespace(node_id='node-xml-array', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-xml-array","goal":"demo"}'},
+        ],
+        tools={
+            'record_one': _RecordingTool('record_one', executed),
+            'record_two': _RecordingTool('record_two', executed),
+            'submit_final_result': _submit_final_result_tool(),
+        },
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-xml-array', 'node_id': 'node-xml-array'},
+        max_iterations=4,
+    )
+
+    assert result.status == 'success'
+    assert set(executed) == {('record_one', 'alpha'), ('record_two', 'beta')}
+
+
+@pytest.mark.asyncio
+async def test_react_loop_repairs_xml_submit_final_result_via_json_object() -> None:
+    calls: list[list[dict[str, object]]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._responses = [
+                LLMResponse(
+                    content='<minimax:tool_call><invoke name="submit_final_result"><parameter name="status">success</parameter><parameter name="delivery_status">final</parameter><parameter name="summary">done</parameter><parameter name="answer">done</parameter><parameter name="evidence">[]</parameter><parameter name="remaining_work">[]</parameter><parameter name="blocking_reason"></parameter></invoke></minimax:tool_call>',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='{"name":"submit_final_result","arguments":{"status":"success","delivery_status":"final","summary":"done","answer":"done","evidence":[],"remaining_work":[],"blocking_reason":""}}',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+            ]
+
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get('messages') or [])])
+            return self._responses.pop(0)
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-xml-final'),
+        node=SimpleNamespace(node_id='node-xml-final', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-xml-final","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-xml-final', 'node_id': 'node-xml-final'},
+        max_iterations=3,
+    )
+
+    assert result.status == 'success'
+    assert result.answer == 'done'
+    assert len(calls) == 2
+    assert 'JSON repair payload' in str(calls[1][-1]['content'])
+
+
+@pytest.mark.asyncio
+async def test_react_loop_fails_after_three_xml_repair_attempts() -> None:
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if self.turn == 1:
+                content = '<minimax:tool_call><invoke name="submit_final_result"><parameter name="status">success</parameter></invoke></minimax:tool_call>'
+            elif self.turn == 2:
+                content = 'still not valid json or structured tool call'
+            else:
+                content = '<minimax:tool_call><invoke name="submit_final_result"><parameter name="status">success</parameter></invoke></minimax:tool_call>'
+            return LLMResponse(
+                content=content,
+                tool_calls=[],
+                finish_reason='stop',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    backend = _Backend()
+    loop = ReActToolLoop(chat_backend=backend, log_service=_FakeLogService(), max_iterations=5)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-xml-fail'),
+        node=SimpleNamespace(node_id='node-xml-fail', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-xml-fail","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-xml-fail', 'node_id': 'node-xml-fail'},
+        max_iterations=5,
+    )
+
+    assert backend.turn == 3
+    assert result.status == 'failed'
+    assert result.delivery_status == 'blocked'
+    assert 'XML pseudo tool-call repair failed 3 consecutive times' in result.blocking_reason
 
 
 def test_execution_result_protocol_message_avoids_partial_guidance() -> None:

@@ -881,6 +881,52 @@ async def test_execution_node_can_finish_via_submit_final_result_tool(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_execution_node_can_finish_via_xml_repair_to_json_final_result(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    content='<minimax:tool_call><invoke name="submit_final_result"><parameter name="status">success</parameter><parameter name="delivery_status">final</parameter><parameter name="summary">done</parameter><parameter name="answer">done</parameter><parameter name="evidence">[]</parameter><parameter name="remaining_work">[]</parameter><parameter name="blocking_reason"></parameter></invoke></minimax:tool_call>',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            return LLMResponse(
+                content='{"name":"submit_final_result","arguments":{"status":"success","delivery_status":"final","summary":"done","answer":"done","evidence":[],"remaining_work":[],"blocking_reason":""}}',
+                tool_calls=[],
+                finish_reason='stop',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    backend = _Backend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    try:
+        record = await service.create_task('submit-final-result xml repair success', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+        assert backend.turn == 2
+        assert task.status == 'success'
+        assert root.final_output == 'done'
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_execution_node_rejects_failed_final_then_accepts_blocked(tmp_path: Path):
     class _Backend:
         def __init__(self) -> None:

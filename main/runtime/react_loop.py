@@ -24,10 +24,16 @@ from main.runtime.stage_budget import (
     visible_tools_for_stage_iteration,
 )
 from main.runtime.stage_messages import build_execution_stage_overlay
+from main.runtime.tool_call_repair import (
+    XML_REPAIR_ATTEMPT_LIMIT,
+    build_xml_tool_repair_message,
+    detect_xml_pseudo_tool_call,
+    format_xml_repair_failure_reason,
+    recover_tool_calls_from_json_payload,
+)
 from main.protocol import now_iso
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:artifact:[A-Za-z0-9_-]+')
-_LEGACY_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
 _STAGE_COMPACT_PREFIX = '[G3KU_STAGE_COMPACT_V1]'
 _STAGE_EXTERNALIZED_PREFIX = '[G3KU_STAGE_EXTERNALIZED_V1]'
 _STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
@@ -106,6 +112,10 @@ class ReActToolLoop:
         invalid_final_submission_count = 0
         stage_only_transition_streak = 0
         last_invalid_final_submission_reason = ''
+        xml_repair_attempt_count = 0
+        xml_repair_excerpt = ''
+        xml_repair_tool_names: list[str] = []
+        xml_repair_last_issue = ''
         while limit is None or attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
@@ -188,7 +198,28 @@ class ReActToolLoop:
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
                 prompt_cache_key=turn_prompt_cache_key,
             )
+            visible_tool_names = {
+                str(name or '').strip()
+                for name in visible_tools.keys()
+                if str(name or '').strip()
+            }
             response_tool_calls = list(response.tool_calls or [])
+            repair_json_tool_calls_used = False
+            xml_pseudo_call = None
+            if not response_tool_calls and visible_tool_names:
+                if xml_repair_attempt_count > 0:
+                    repaired_tool_calls = self._recover_tool_calls_from_json_payload(
+                        response.content,
+                        allowed_tool_names=visible_tool_names,
+                    )
+                    if repaired_tool_calls:
+                        response_tool_calls = repaired_tool_calls
+                        repair_json_tool_calls_used = True
+                if not response_tool_calls:
+                    xml_pseudo_call = self._detect_xml_pseudo_tool_call(
+                        response.content,
+                        allowed_tool_names=visible_tool_names,
+                    )
             tool_calls = [
                 {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
                 for call in response_tool_calls
@@ -206,6 +237,11 @@ class ReActToolLoop:
                 request_message_chars=getattr(response, 'request_message_chars', None),
             )
             if response_tool_calls:
+                if xml_repair_attempt_count > 0:
+                    xml_repair_attempt_count = 0
+                    xml_repair_excerpt = ''
+                    xml_repair_tool_names = []
+                    xml_repair_last_issue = ''
                 final_result_turn = self._is_final_result_turn(response_tool_calls)
                 final_result_mixed_turn = self._contains_tool_name(
                     response_tool_calls,
@@ -344,7 +380,7 @@ class ReActToolLoop:
                 assistant_message = {
                     'role': 'assistant',
                     'content': self._externalize_message_content(
-                        response.content,
+                        None if repair_json_tool_calls_used else response.content,
                         runtime_context=runtime_context,
                         display_name=f'assistant:{node.node_id}',
                         source_kind='assistant_message',
@@ -401,6 +437,44 @@ class ReActToolLoop:
             if str(response.finish_reason or '').strip().lower() == 'error':
                 error_text = str(getattr(response, 'error_text', None) or response.content or 'model response failed').strip() or 'model response failed'
                 raise RuntimeError(error_text)
+
+            if xml_pseudo_call is not None:
+                xml_repair_attempt_count += 1
+                xml_repair_excerpt = str(xml_pseudo_call.get('excerpt') or '').strip()
+                xml_repair_tool_names = list(xml_pseudo_call.get('tool_names') or [])
+                xml_repair_last_issue = 'reply used XML-like pseudo tool syntax instead of a valid tool call'
+                if xml_repair_attempt_count >= _XML_REPAIR_ATTEMPT_LIMIT:
+                    return self._xml_repair_failure(
+                        count=xml_repair_attempt_count,
+                        tool_names=xml_repair_tool_names,
+                        content_excerpt=xml_repair_excerpt,
+                    )
+                repair_overlay_text = self._xml_tool_repair_message(
+                    xml_excerpt=xml_repair_excerpt,
+                    tool_names=xml_repair_tool_names,
+                    attempt_count=xml_repair_attempt_count,
+                    attempt_limit=_XML_REPAIR_ATTEMPT_LIMIT,
+                    latest_issue=xml_repair_last_issue,
+                )
+                continue
+
+            if xml_repair_attempt_count > 0:
+                xml_repair_attempt_count += 1
+                xml_repair_last_issue = 'reply still did not contain valid structured tool_calls or a valid JSON repair payload'
+                if xml_repair_attempt_count >= _XML_REPAIR_ATTEMPT_LIMIT:
+                    return self._xml_repair_failure(
+                        count=xml_repair_attempt_count,
+                        tool_names=xml_repair_tool_names,
+                        content_excerpt=str(response.content or ''),
+                    )
+                repair_overlay_text = self._xml_tool_repair_message(
+                    xml_excerpt=xml_repair_excerpt,
+                    tool_names=xml_repair_tool_names,
+                    attempt_count=xml_repair_attempt_count,
+                    attempt_limit=_XML_REPAIR_ATTEMPT_LIMIT,
+                    latest_issue=xml_repair_last_issue,
+                )
+                continue
 
             invalid_final_submission_count += 1
             last_contract_violations = []
@@ -1299,6 +1373,70 @@ class ReActToolLoop:
             ),
         )
 
+    @classmethod
+    def _xml_repair_failure(cls, *, count: int, tool_names: list[str], content_excerpt: str) -> NodeFinalResult:
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='xml pseudo tool-call repair guard triggered',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=format_xml_repair_failure_reason(
+                count=count,
+                tool_names=tool_names,
+                content_excerpt=content_excerpt,
+            ),
+        )
+
+    @staticmethod
+    def _detect_xml_pseudo_tool_call(content: Any, *, allowed_tool_names: set[str]) -> dict[str, Any] | None:
+        return detect_xml_pseudo_tool_call(content, allowed_tool_names=allowed_tool_names)
+
+    @classmethod
+    def _recover_tool_calls_from_json_payload(
+        cls,
+        content: Any,
+        *,
+        allowed_tool_names: set[str],
+    ):
+        return recover_tool_calls_from_json_payload(content, allowed_tool_names=allowed_tool_names)
+
+    @classmethod
+    def _tool_calls_from_json_payload(
+        cls,
+        payload: Any,
+        *,
+        allowed_tool_names: set[str],
+    ):
+        from main.runtime.tool_call_repair import tool_calls_from_json_payload
+
+        return tool_calls_from_json_payload(payload, allowed_tool_names=allowed_tool_names)
+
+    @staticmethod
+    def _extract_json_payload_candidates(content: str) -> list[str]:
+        from main.runtime.tool_call_repair import extract_json_payload_candidates
+
+        return extract_json_payload_candidates(content)
+
+    @classmethod
+    def _xml_tool_repair_message(
+        cls,
+        *,
+        xml_excerpt: str,
+        tool_names: list[str],
+        attempt_count: int,
+        attempt_limit: int,
+        latest_issue: str = '',
+    ) -> str:
+        return build_xml_tool_repair_message(
+            xml_excerpt=xml_excerpt,
+            tool_names=tool_names,
+            attempt_count=attempt_count,
+            attempt_limit=attempt_limit,
+            latest_issue=latest_issue,
+        )
+
     async def _handle_final_result_tool_turn(
         self,
         *,
@@ -1756,7 +1894,7 @@ class ReActToolLoop:
                 return
             if isinstance(item, str):
                 text = str(item or '')
-                for prefix in (_STAGE_COMPACT_PREFIX, _STAGE_EXTERNALIZED_PREFIX, _LEGACY_COMPACT_HISTORY_PREFIX):
+                for prefix in (_STAGE_COMPACT_PREFIX, _STAGE_EXTERNALIZED_PREFIX):
                     if text.startswith(prefix):
                         payload_text = text[len(prefix) :].strip()
                         if payload_text.startswith('{') or payload_text.startswith('['):
@@ -1971,7 +2109,6 @@ class ReActToolLoop:
         return (
             content.startswith(_STAGE_COMPACT_PREFIX)
             or content.startswith(_STAGE_EXTERNALIZED_PREFIX)
-            or content.startswith(_LEGACY_COMPACT_HISTORY_PREFIX)
         )
 
     def _stage_prompt_prefix(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

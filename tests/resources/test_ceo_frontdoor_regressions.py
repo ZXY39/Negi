@@ -209,6 +209,35 @@ class _DirectLoadTool(Tool):
         return json.dumps(payload, ensure_ascii=False)
 
 
+class _RecordingTool(Tool):
+    def __init__(self, name: str, sink: list[tuple[str, str]]) -> None:
+        self._name = name
+        self._sink = sink
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f'record {self._name}'
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            'type': 'object',
+            'properties': {
+                'value': {'type': 'string'},
+            },
+            'required': ['value'],
+        }
+
+    async def execute(self, value: str, **kwargs) -> str:
+        _ = kwargs
+        self._sink.append((self._name, value))
+        return json.dumps({'ok': True, 'tool': self._name, 'value': value}, ensure_ascii=False)
+
+
 def test_live_raw_tail_returns_recent_complete_turns_without_compact_history() -> None:
     session = Session(key='web:shared')
     for turn_index in range(1, 7):
@@ -1884,6 +1913,175 @@ async def test_ceo_frontdoor_runner_returns_direct_reply_without_langchain(monke
 
     assert output == '我来访问。'
     assert getattr(session, '_last_route_kind', '') == 'direct_reply'
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    executed: list[tuple[str, str]] = []
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'repair xml tool call', 'tool_round_budget': 2},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='<minimax:tool_call><invoke name="record_tool"><parameter name="value">alpha</parameter></invoke></minimax:tool_call>',
+                tool_calls=[],
+                finish_reason='stop',
+            ),
+            LLMResponse(
+                content='{"name":"record_tool","arguments":{"value":"alpha"}}',
+                tool_calls=[],
+                finish_reason='stop',
+            ),
+            LLMResponse(content='repair succeeded', finish_reason='stop'),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_RecordingTool('record_tool', executed)]),
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['record_tool']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['record_tool'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='repair xml please'), session=session)
+
+    assert output == 'repair succeeded'
+    assert executed == [('record_tool', 'alpha')]
+    assert len(backend.calls) == 4
+    repair_messages = list(backend.calls[2].get('messages') or [])
+    assert any(
+        str(item.get('role') or '') == 'user'
+        and 'XML-style pseudo tool calling' in str(item.get('content') or '')
+        and '<invoke name="record_tool">' in str(item.get('content') or '')
+        for item in repair_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_fails_safely_after_three_xml_repair_attempts(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='stage-1',
+                        name='submit_next_stage',
+                        arguments={'stage_goal': 'repair xml tool call', 'tool_round_budget': 2},
+                    )
+                ],
+                finish_reason='tool_calls',
+            ),
+            LLMResponse(
+                content='<minimax:tool_call><invoke name="record_tool"><parameter name="value">alpha</parameter></invoke></minimax:tool_call>',
+                tool_calls=[],
+                finish_reason='stop',
+            ),
+            LLMResponse(content='still invalid', tool_calls=[], finish_reason='stop'),
+            LLMResponse(
+                content='<minimax:tool_call><invoke name="record_tool"><parameter name="value">alpha</parameter></invoke></minimax:tool_call>',
+                tool_calls=[],
+                finish_reason='stop',
+            ),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_RecordingTool('record_tool', [])]),
+        max_iterations=12,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {'skills': [], 'tool_families': [], 'tool_names': ['record_tool']}
+
+    async def _build_for_ceo(*, session, query_text: str, exposure, persisted_session):
+        _ = session, query_text, exposure, persisted_session
+        return ContextAssemblyResult(
+            system_prompt='SYSTEM PROMPT',
+            recent_history=[],
+            tool_names=['record_tool'],
+            trace={},
+        )
+
+    monkeypatch.setattr(runner._resolver, 'resolve_for_actor', _resolve_for_actor)
+    monkeypatch.setattr(runner._assembly, 'build_for_ceo', _build_for_ceo)
+    monkeypatch.setattr(runner, '_resolve_chat_backend', lambda: backend)
+    monkeypatch.setattr(runner, '_resolve_ceo_model_refs', lambda: ['openai_codex:gpt-test'])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key='web:shared'),
+        _memory_channel='web',
+        _memory_chat_id='shared',
+        _channel='web',
+        _chat_id='shared',
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content='repair xml please'), session=session)
+
+    assert 'XML pseudo tool-call repair failed 3 consecutive times' in output
+    assert '<minimax:tool_call>' not in output
+    assert len(backend.calls) == 4
+    trace = getattr(session, '_interaction_trace', None)
+    assert trace is not None
+    assert list(trace.get('stages') or [])[0]['status'] == 'failed'
 
 
 @pytest.mark.asyncio

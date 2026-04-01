@@ -2164,6 +2164,7 @@ def test_failed_node_ids_follow_projection_tree_for_failed_acceptance(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_execution_policy_focus_propagates_to_task_payload_child_and_acceptance_prompt(tmp_path: Path):
+    expected_core_requirement = "瀹屾垚涓€鐗堝彲鐩存帴浜や粯鐨勫彂甯冨叕鍛婂垵绋?"
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -2179,7 +2180,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
             "甯垜鍐欎竴鐗堝彂甯冨叕鍛婂垵绋?",
             session_id="web:shared",
             metadata={
-                "core_requirement": "瀹屾垚涓€鐗堝彲鐩存帴浜や粯鐨勫彂甯冨叕鍛婂垵绋?",
+                "core_requirement": expected_core_requirement,
                 "execution_policy": _execution_policy(),
             },
         )
@@ -2193,7 +2194,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
 
         messages = await service.node_runner._build_messages(task=task, node=root)
         payload = json.loads(messages[1]["content"])
-        assert payload["core_requirement"] == "瀹屾垚涓€鐗堝彲鐩存帴浜や粯鐨勫彂甯冨叕鍛婂垵绋?"
+        assert payload["core_requirement"] == expected_core_requirement
         assert payload["execution_policy"] == {"mode": "focus"}
         assert payload["prompt"] == root.prompt
 
@@ -2220,6 +2221,20 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
         assert "(empty)" in acceptance.prompt
         assert "(none)" in acceptance.prompt
         assert "浣犳鍦ㄥ畬鎴愮殑浠诲姟鏄牳蹇冮渶姹傘€?" not in acceptance.prompt
+        assert "core_requirement" not in child.metadata
+        assert "core_requirement" not in acceptance.metadata
+
+        child_messages = await service.node_runner._build_messages(task=task, node=child)
+        child_payload = json.loads(child_messages[1]["content"])
+        assert child_payload["core_requirement"] == expected_core_requirement
+        assert child_payload["execution_policy"] == {"mode": "focus"}
+        assert child_payload["prompt"] == child.prompt
+
+        acceptance_messages = await service.node_runner._build_messages(task=task, node=acceptance)
+        acceptance_payload = json.loads(acceptance_messages[1]["content"])
+        assert acceptance_payload["core_requirement"] == expected_core_requirement
+        assert acceptance_payload["execution_policy"] == {"mode": "focus"}
+        assert acceptance_payload["prompt"] == acceptance.prompt
     finally:
         await service.close()
 

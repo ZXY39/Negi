@@ -33,6 +33,13 @@ from main.runtime.chat_backend import ConfigChatBackend, build_session_prompt_ca
 from main.runtime.react_loop import RepeatedActionCircuitBreaker
 from main.runtime.stage_budget import STAGE_TOOL_NAME, stage_gate_error_for_tool, visible_tools_for_stage_iteration
 from main.runtime.stage_messages import build_ceo_stage_overlay, build_ceo_stage_result_block_message
+from main.runtime.tool_call_repair import (
+    XML_REPAIR_ATTEMPT_LIMIT,
+    build_xml_tool_repair_message,
+    detect_xml_pseudo_tool_call,
+    format_xml_repair_failure_reason,
+    recover_tool_calls_from_json_payload,
+)
 
 
 class _DirectProviderChatBackend:
@@ -322,6 +329,19 @@ class CeoFrontDoorRunner:
         return ''.join(parts)
 
     @staticmethod
+    def _xml_repair_explanation(*, count: int, tool_names: list[str], content_excerpt: str) -> str:
+        reason = format_xml_repair_failure_reason(
+            count=count,
+            tool_names=tool_names,
+            content_excerpt=content_excerpt,
+        )
+        return (
+            '本轮已停止，因为模型连续返回了无效的 XML 风格伪工具调用，'
+            '且在修复回合中仍未成功改写为合法工具调用或 JSON repair payload。'
+            f' {reason}'
+        )
+
+    @staticmethod
     def _tool_invocation_hint(tool_name: str, arguments: dict[str, Any]) -> str:
         parts: list[str] = []
         for key, value in list(arguments.items())[:3]:
@@ -603,6 +623,11 @@ class CeoFrontDoorRunner:
         used_tools: list[str] = []
         stage_created = False
         empty_response_retries = 0
+        repair_overlay_text: str | None = None
+        xml_repair_attempt_count = 0
+        xml_repair_excerpt = ''
+        xml_repair_tool_names: list[str] = []
+        xml_repair_last_issue = ''
         breaker = RepeatedActionCircuitBreaker()
         stage_tool_enabled = not bool(runtime_context.get("disable_stage_tool"))
 
@@ -624,6 +649,7 @@ class CeoFrontDoorRunner:
         attempt_index = 0
         while configured_limit is None or attempt_index < max(0, int(configured_limit)):
             attempt_index += 1
+            overlay_parts: list[str] = []
             if stage_tool_enabled:
                 stage_gate = self._stage_gate(interaction_trace)
                 visible_tools = visible_tools_for_stage_iteration(
@@ -632,14 +658,16 @@ class CeoFrontDoorRunner:
                     transition_required=bool(stage_gate.get("transition_required")),
                     stage_tool_name=STAGE_TOOL_NAME,
                 )
-                request_messages = self._apply_stage_overlay(
-                    message_history,
-                    overlay_text=build_ceo_stage_overlay(self._stage_gate(interaction_trace)),
-                )
+                overlay_parts.append(str(build_ceo_stage_overlay(self._stage_gate(interaction_trace)) or '').strip())
             else:
                 stage_gate = {"has_active_stage": True, "transition_required": False, "active_stage": {}}
                 visible_tools = dict(all_tools)
-                request_messages = list(message_history)
+            overlay_parts.append(str(repair_overlay_text or '').strip())
+            request_messages = self._apply_stage_overlay(
+                message_history,
+                overlay_text='\n\n'.join(part for part in overlay_parts if part),
+            )
+            repair_overlay_text = None
             tool_schemas = [tool.to_schema() for tool in visible_tools.values()]
             response = await chat_backend.chat(
                 messages=request_messages,
@@ -650,11 +678,38 @@ class CeoFrontDoorRunner:
                 parallel_tool_calls=(parallel_enabled if tool_schemas else None),
                 prompt_cache_key=prompt_cache_key,
             )
+            visible_tool_names = {
+                str(name or '').strip()
+                for name in visible_tools.keys()
+                if str(name or '').strip()
+            }
             response_tool_calls = list(response.tool_calls or [])
+            repair_json_tool_calls_used = False
+            xml_pseudo_call = None
+            if not response_tool_calls and visible_tool_names:
+                if xml_repair_attempt_count > 0:
+                    repaired_tool_calls = recover_tool_calls_from_json_payload(
+                        response.content,
+                        allowed_tool_names=visible_tool_names,
+                        id_prefix='call:ceo-xml-repair',
+                    )
+                    if repaired_tool_calls:
+                        response_tool_calls = repaired_tool_calls
+                        repair_json_tool_calls_used = True
+                if not response_tool_calls:
+                    xml_pseudo_call = detect_xml_pseudo_tool_call(
+                        response.content,
+                        allowed_tool_names=visible_tool_names,
+                    )
             tool_call_payloads = [self._tool_call_payload(call) for call in response_tool_calls]
 
             if response_tool_calls:
-                analysis_text = self._content_text(getattr(response, "content", ""))
+                if xml_repair_attempt_count > 0:
+                    xml_repair_attempt_count = 0
+                    xml_repair_excerpt = ''
+                    xml_repair_tool_names = []
+                    xml_repair_last_issue = ''
+                analysis_text = '' if repair_json_tool_calls_used else self._content_text(getattr(response, "content", ""))
                 if analysis_text.strip():
                     await self._emit_progress(
                         runtime_context.get("on_progress"),
@@ -669,7 +724,10 @@ class CeoFrontDoorRunner:
                 if any(payload["name"] == STAGE_TOOL_NAME for payload in tool_call_payloads) and len(tool_call_payloads) != 1:
                     assistant_message = {
                         "role": "assistant",
-                        "content": self._externalize_message_content(response.content, runtime_context=runtime_context),
+                        "content": self._externalize_message_content(
+                            None if repair_json_tool_calls_used else response.content,
+                            runtime_context=runtime_context,
+                        ),
                         "tool_calls": self._assistant_tool_calls(response_tool_calls),
                     }
                     message_history.append(assistant_message)
@@ -764,7 +822,10 @@ class CeoFrontDoorRunner:
                 )
                 assistant_message = {
                     "role": "assistant",
-                    "content": self._externalize_message_content(response.content, runtime_context=runtime_context),
+                    "content": self._externalize_message_content(
+                        None if repair_json_tool_calls_used else response.content,
+                        runtime_context=runtime_context,
+                    ),
                     "tool_calls": self._assistant_tool_calls(response_tool_calls),
                 }
                 message_history.append(assistant_message)
@@ -784,6 +845,68 @@ class CeoFrontDoorRunner:
                     used_tools=used_tools,
                     stage_created=stage_created,
                     default=route_kind,
+                )
+                continue
+
+            if xml_pseudo_call is not None:
+                xml_repair_attempt_count += 1
+                xml_repair_excerpt = str(xml_pseudo_call.get('excerpt') or '').strip()
+                xml_repair_tool_names = list(xml_pseudo_call.get('tool_names') or [])
+                xml_repair_last_issue = 'reply used XML-like pseudo tool syntax instead of a valid tool call'
+                if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
+                    if interaction_trace.get('stages'):
+                        interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
+                        self._sync_session_trace(session, interaction_trace)
+                    route_kind = self._route_kind_for_turn(
+                        used_tools=used_tools,
+                        stage_created=stage_created,
+                        default=route_kind,
+                    )
+                    return CeoTurnResult(
+                        output=self._xml_repair_explanation(
+                            count=xml_repair_attempt_count,
+                            tool_names=xml_repair_tool_names,
+                            content_excerpt=xml_repair_excerpt,
+                        ),
+                        route_kind=route_kind,
+                        interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
+                    )
+                repair_overlay_text = build_xml_tool_repair_message(
+                    xml_excerpt=xml_repair_excerpt,
+                    tool_names=xml_repair_tool_names,
+                    attempt_count=xml_repair_attempt_count,
+                    attempt_limit=XML_REPAIR_ATTEMPT_LIMIT,
+                    latest_issue=xml_repair_last_issue,
+                )
+                continue
+
+            if xml_repair_attempt_count > 0:
+                xml_repair_attempt_count += 1
+                xml_repair_last_issue = 'reply still did not contain valid structured tool_calls or a valid JSON repair payload'
+                if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
+                    if interaction_trace.get('stages'):
+                        interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
+                        self._sync_session_trace(session, interaction_trace)
+                    route_kind = self._route_kind_for_turn(
+                        used_tools=used_tools,
+                        stage_created=stage_created,
+                        default=route_kind,
+                    )
+                    return CeoTurnResult(
+                        output=self._xml_repair_explanation(
+                            count=xml_repair_attempt_count,
+                            tool_names=xml_repair_tool_names,
+                            content_excerpt=str(response.content or ''),
+                        ),
+                        route_kind=route_kind,
+                        interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
+                    )
+                repair_overlay_text = build_xml_tool_repair_message(
+                    xml_excerpt=xml_repair_excerpt,
+                    tool_names=xml_repair_tool_names,
+                    attempt_count=xml_repair_attempt_count,
+                    attempt_limit=XML_REPAIR_ATTEMPT_LIMIT,
+                    latest_issue=xml_repair_last_issue,
                 )
                 continue
 
