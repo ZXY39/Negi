@@ -416,13 +416,6 @@ class NodeRunner:
             raise ValueError('parent task or node missing')
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
-        task_execution_policy = self._resolve_execution_policy(task, node=parent)
-        for index, spec in enumerate(list(specs or [])):
-            spec_execution_policy = normalize_execution_policy_metadata(spec.execution_policy)
-            if spec_execution_policy.mode != task_execution_policy.mode:
-                raise ValueError(
-                    f'children[{index}].execution_policy.mode must match parent task execution_policy.mode'
-                )
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = str(call_id or f'call:{len(specs)}')
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)

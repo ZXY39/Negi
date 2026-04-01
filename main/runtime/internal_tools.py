@@ -140,9 +140,9 @@ class SpawnChildNodesTool(Tool):
                 },
                 'execution_policy': build_execution_policy_schema(
                     description=(
-                        'Execution strategy for the child node. It must stay consistent with the parent task: '
+                        'Execution strategy for the child node. Choose it based on the child goal itself rather than the parent node: '
                         '`focus` means only the highest-value, strictly necessary actions for the goal; '
-                        '`coverage` means still start with the highest-value actions, then expand scope when fuller coverage is explicitly needed.'
+                        '`coverage` means still start with the highest-value actions, then expand scope when the child goal explicitly needs broader coverage.'
                     ),
                 ),
                 'requires_acceptance': {

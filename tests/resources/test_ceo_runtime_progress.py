@@ -257,6 +257,16 @@ def _build_app() -> FastAPI:
     return app
 
 
+def _recv_until(ws, predicate, *, limit: int = 20):
+    seen: list[dict[str, object]] = []
+    for _ in range(limit):
+        payload = ws.receive_json()
+        seen.append(payload)
+        if predicate(payload):
+            return payload, seen
+    raise AssertionError(f"Did not receive expected websocket payload. Seen: {seen!r}")
+
+
 @pytest.fixture(autouse=True)
 def _unlock_websocket_runtime(monkeypatch) -> None:
     monkeypatch.setattr(
@@ -1290,6 +1300,110 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
 
 
+def test_ceo_websocket_turn_patch_carries_live_tool_events(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+
+    class _ToolPatchSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(status="idle", is_running=False)
+            self._listeners = set()
+            self._snapshot = None
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+
+            def _unsubscribe() -> None:
+                self._listeners.discard(listener)
+
+            return _unsubscribe
+
+        def state_dict(self) -> dict[str, object]:
+            return {"status": self.state.status, "is_running": self.state.is_running}
+
+        def inflight_turn_snapshot(self):
+            return copy.deepcopy(self._snapshot)
+
+        async def _emit(self, event_type: str, **payload) -> None:
+            event = AgentEvent(type=event_type, timestamp="2026-03-18T12:00:00", payload=payload)
+            for listener in list(self._listeners):
+                result = listener(event)
+                if hasattr(result, "__await__"):
+                    await result
+
+        async def prompt(self, user_message) -> SimpleNamespace:
+            _ = user_message
+            self.state.status = "running"
+            self.state.is_running = True
+            self._snapshot = {
+                "status": "running",
+                "source": "user",
+                "user_message": {"content": "Install the skill"},
+                "assistant_text": "Working on it...",
+                "tool_events": [],
+            }
+            await self._emit("state_snapshot", state=self.state_dict())
+            self._snapshot["tool_events"] = [
+                {
+                    "status": "running",
+                    "tool_name": "skill-installer",
+                    "text": "skill-installer started",
+                    "tool_call_id": "skill-installer:1",
+                    "source": "user",
+                }
+            ]
+            await self._emit(
+                "tool_execution_start",
+                tool_name="skill-installer",
+                tool_call_id="skill-installer:1",
+                text="skill-installer started",
+                source="user",
+            )
+            await self._emit("message_end", role="assistant", text="Still working.", source="user")
+            self.state.status = "completed"
+            self.state.is_running = False
+            self._snapshot = None
+            await self._emit("state_snapshot", state=self.state_dict())
+            return SimpleNamespace(output="Still working.")
+
+    session_id = "web:ceo-tool-patch"
+    session_manager = SessionManager(tmp_path)
+    live_session = _ToolPatchSession()
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        main_task_service=_TaskService(),
+    )
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        _recv_until(ws, lambda payload: payload.get("type") == "ceo.sessions.snapshot")
+
+        ws.send_json({"type": "client.user_message", "text": "Install the skill"})
+
+        patch_payload, _seen = _recv_until(
+            ws,
+            lambda payload: payload.get("type") == "ceo.turn.patch"
+            and isinstance(payload.get("data", {}).get("inflight_turn"), dict)
+            and list(payload.get("data", {}).get("inflight_turn", {}).get("tool_events") or []),
+        )
+        inflight_turn = patch_payload["data"]["inflight_turn"]
+        assert inflight_turn["assistant_text"] == "Working on it..."
+        assert inflight_turn["tool_events"][0]["tool_name"] == "skill-installer"
+        assert inflight_turn["tool_events"][0]["tool_call_id"] == "skill-installer:1"
+        assert "interaction_trace" not in inflight_turn
+        assert "stage" not in inflight_turn
+
+        final_payload, _seen = _recv_until(ws, lambda payload: payload.get("type") == "ceo.reply.final")
+
+    assert final_payload["data"]["text"] == "Still working."
+
+
 def test_ceo_websocket_error_payload_omits_legacy_interaction_trace(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
@@ -1392,15 +1506,6 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
         def _use_rag_memory(self) -> bool:
             return False
 
-    def _recv_until(ws, predicate, *, limit: int = 20):
-        seen: list[dict[str, object]] = []
-        for _ in range(limit):
-            payload = ws.receive_json()
-            seen.append(payload)
-            if predicate(payload):
-                return payload, seen
-        raise AssertionError(f"Did not receive expected websocket payload. Seen: {seen!r}")
-
     session_id = "web:ceo-pause-reconnect"
     agent = _AgentLoopStub(tmp_path)
     runtime_manager = SessionRuntimeManager(agent)
@@ -1415,12 +1520,17 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
 
         ws.send_json({"type": "client.user_message", "text": "Pause and restore me"})
 
-        tool_event, _tool_seen = _recv_until(
+        patch_payload, _tool_seen = _recv_until(
             ws,
-            lambda payload: payload.get("type") == "ceo.agent.tool"
-            and payload.get("data", {}).get("tool_name") == "skill-installer",
+            lambda payload: payload.get("type") == "ceo.turn.patch"
+            and isinstance(payload.get("data", {}).get("inflight_turn"), dict)
+            and list(payload.get("data", {}).get("inflight_turn", {}).get("tool_events") or []),
         )
-        assert tool_event["data"]["source"] == "user"
+        inflight_turn = patch_payload["data"]["inflight_turn"]
+        assert inflight_turn["tool_events"][0]["tool_name"] == "skill-installer"
+        assert inflight_turn["tool_events"][0]["source"] == "user"
+        assert "interaction_trace" not in inflight_turn
+        assert "stage" not in inflight_turn
 
         ws.send_json({"type": "client.pause_turn"})
 

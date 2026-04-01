@@ -2277,7 +2277,7 @@ async def test_execution_policy_coverage_is_provided_via_payload_without_prompt_
 
 
 @pytest.mark.asyncio
-async def test_spawn_children_rejects_execution_policy_mode_mismatch(tmp_path: Path):
+async def test_spawn_children_allows_execution_policy_mode_divergence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -2301,19 +2301,49 @@ async def test_spawn_children_rejects_execution_policy_mode_mismatch(tmp_path: P
 
         assert root is not None
 
-        with pytest.raises(ValueError, match="children\\[0\\]\\.execution_policy\\.mode must match parent task execution_policy\\.mode"):
-            await service.node_runner._spawn_children(
-                task_id=record.task_id,
-                parent_node_id=root.node_id,
-                specs=[
-                    SpawnChildSpec(
-                        goal="瑕嗙洊琛ユ紡",
-                        prompt="琛ュ仛鎵€鏈夎竟缂樺垎鏀€?",
-                        execution_policy=_execution_policy("coverage"),
-                    )
-                ],
-                call_id="mismatch-policy",
+        async def _fake_run_node(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="child done",
+                    answer="child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
             )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[
+                SpawnChildSpec(
+                    goal="瑕嗙洊琛ユ紡",
+                    prompt="琛ュ仛鎵€鏈夎竟缂樺垎鏀€?",
+                    execution_policy=_execution_policy("coverage"),
+                )
+            ],
+            call_id="divergent-policy",
+        )
+
+        assert len(results) == 1
+        assert results[0].goal == "瑕嗙洊琛ユ紡"
+
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        spawn_operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        entries = list((spawn_operations.get("divergent-policy") or {}).get("entries") or [])
+        assert len(entries) == 1
+
+        child_id = str(entries[0].get("child_node_id") or "").strip()
+        child = service.get_node(child_id)
+        assert child is not None
+        assert (child.metadata or {}).get("execution_policy") == _execution_policy("coverage")
     finally:
         await service.close()
 
