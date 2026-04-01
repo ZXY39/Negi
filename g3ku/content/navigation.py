@@ -18,6 +18,17 @@ MAX_SEARCH_LIMIT = 50
 _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
 _PREVIEW_CHAR_LIMIT = 220
+_ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
+    {
+        "tool_result:memory_search",
+        "tool_result:create_async_task_cn",
+        "tool_result:task_failed_nodes_cn",
+        "tool_result:task_fetch_cn",
+        "tool_result:task_node_detail_cn",
+        "tool_result:task_progress_cn",
+        "tool_result:task_summary_cn",
+    }
+)
 
 
 def _json_dumps(value: Any) -> str:
@@ -200,9 +211,11 @@ def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str)
 
 
 def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
+    normalized = str(source_kind or "").strip().lower()
+    if normalized in _ALWAYS_INLINE_TOOL_RESULT_SOURCES:
+        return True
     if _should_keep_inline_direct_load_tool_result(value, source_kind=source_kind):
         return True
-    normalized = str(source_kind or "").strip().lower()
     if normalized not in {"tool_result:content", "tool_result:filesystem"}:
         return False
     payload = _parsed_json_payload(value)

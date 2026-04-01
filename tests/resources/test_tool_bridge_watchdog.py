@@ -69,6 +69,41 @@ class _DirectLoadTool(Tool):
         return json.dumps(payload, ensure_ascii=False)
 
 
+class _MemorySearchTool(Tool):
+    @property
+    def name(self) -> str:
+        return "memory_search"
+
+    @property
+    def description(self) -> str:
+        return "Return a large structured memory search payload."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        payload = {
+            "ok": True,
+            "grouped": {
+                "memory": [
+                    {"record_id": f"memory-{index:03d}", "l1": "remembered fact " + ("x" * 60)}
+                    for index in range(40)
+                ]
+            },
+            "unified": [
+                {"record_id": f"memory-{index:03d}", "context_type": "memory", "score": 0.9}
+                for index in range(40)
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+
 class _LoopStub:
     def __init__(self, tmp_path: Path) -> None:
         self.tools = ToolRegistry()
@@ -209,6 +244,49 @@ async def test_tool_execution_bridge_keeps_direct_load_tool_result_inline(tmp_pa
         payload = json.loads(result.content)
         assert payload["uri"] == "g3ku://skill/full_body_skill"
         assert payload["content"].startswith("skill line 001")
+        assert result.status == "success"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_bridge_keeps_named_inline_exception_tool_result_inline(tmp_path: Path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+
+    try:
+        loop = _LoopStub(tmp_path)
+        loop.tools.register(_MemorySearchTool())
+        loop.main_task_service = SimpleNamespace(content_store=content_store)
+        bridge = ToolExecutionBridge(loop)
+        runtime_context = SimpleNamespace(
+            actor_role="execution",
+            session_key="web:test-inline-memory",
+            channel="web",
+            chat_id="test-inline-memory",
+            message_id=None,
+            iteration=1,
+            on_progress=None,
+            cancel_token=None,
+        )
+
+        result = await bridge.execute_named_tool(
+            name="memory_search",
+            arguments={},
+            tool_call_id="call-memory-inline",
+            runtime_context=runtime_context,
+            emit_progress=False,
+        )
+
+        assert parse_content_envelope(result.content) is None
+        payload = json.loads(result.content)
+        assert len(payload["unified"]) == 40
+        assert payload["grouped"]["memory"][0]["record_id"] == "memory-000"
         assert result.status == "success"
     finally:
         store.close()

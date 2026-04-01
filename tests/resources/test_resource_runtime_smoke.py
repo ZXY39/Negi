@@ -1572,6 +1572,52 @@ def test_externalize_for_message_keeps_direct_load_context_inline(tmp_path: Path
     store.close()
 
 
+@pytest.mark.parametrize(
+    'source_kind',
+    [
+        'tool_result:memory_search',
+        'tool_result:create_async_task_cn',
+        'tool_result:task_failed_nodes_cn',
+        'tool_result:task_fetch_cn',
+        'tool_result:task_node_detail_cn',
+        'tool_result:task_progress_cn',
+        'tool_result:task_summary_cn',
+    ],
+)
+def test_externalize_for_message_keeps_named_inline_exception_tools_inline(tmp_path: Path, source_kind: str):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = {
+        'ok': True,
+        'tool': source_kind,
+        'items': [
+            {
+                'id': f'item-{index:03d}',
+                'text': 'inline exception payload ' + ('x' * 80),
+            }
+            for index in range(60)
+        ],
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='named-inline-exception',
+        source_kind=source_kind,
+        compact=True,
+    )
+
+    assert parse_content_envelope(rendered) is None
+    parsed = json.loads(str(rendered))
+    assert parsed == payload
+
+    store.close()
+
+
 def test_externalize_for_message_still_externalizes_large_non_direct_load_search_payload(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
