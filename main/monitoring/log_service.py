@@ -24,6 +24,7 @@ from main.models import (
     normalize_final_acceptance_metadata,
 )
 from main.runtime.stage_budget import (
+    CONTROL_STAGE_TOOL_NAMES,
     FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
     response_tool_calls_count_against_stage_budget,
@@ -71,6 +72,11 @@ _NON_BUDGET_EXECUTION_TOOLS = {
     'spawn_child_nodes',
     'wait_tool_execution',
     'stop_tool_execution',
+}
+_NON_SUBSTANTIVE_EXECUTION_PROGRESS_TOOLS = {
+    _EXECUTION_STAGE_TOOL_NAME,
+    FINAL_RESULT_TOOL_NAME,
+    *CONTROL_STAGE_TOOL_NAMES,
 }
 
 class TaskLogService:
@@ -860,6 +866,20 @@ class TaskLogService:
         return None
 
     @staticmethod
+    def _execution_stage_has_substantive_progress(stage: ExecutionStageRecord | None) -> bool:
+        if stage is None:
+            return False
+        for round_item in list(stage.rounds or []):
+            tool_names = [
+                str(name or '').strip()
+                for name in list(round_item.tool_names or [])
+                if str(name or '').strip()
+            ]
+            if any(name not in _NON_SUBSTANTIVE_EXECUTION_PROGRESS_TOOLS for name in tool_names):
+                return True
+        return False
+
+    @staticmethod
     def _execution_stage_frame_payload(state: ExecutionStageState) -> dict[str, Any]:
         active = TaskLogService._active_execution_stage(state)
         if active is None:
@@ -1075,6 +1095,17 @@ class TaskLogService:
             if normalized_budget < 1 or normalized_budget > 10:
                 raise ValueError('tool_round_budget must be between 1 and 10')
             state = self._execution_stage_state(node)
+            active = self._active_execution_stage(state)
+            if (
+                active is not None
+                and str(active.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE
+                and not self._execution_stage_has_substantive_progress(active)
+            ):
+                raise ValueError(
+                    'current active stage has no substantive progress yet; '
+                    'do not call submit_next_stage again before using a non-control tool '
+                    'or spawn_child_nodes in this stage'
+                )
             now = now_iso()
             stages: list[ExecutionStageRecord] = []
             for stage in list(state.stages or []):

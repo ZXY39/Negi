@@ -41,6 +41,7 @@ _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
+_INVALID_STAGE_SUBMISSION_LIMIT = 5
 _STAGE_ONLY_TRANSITION_LIMIT = 5
 _RESULT_REQUIRED_KEYS = (
     'status',
@@ -110,8 +111,10 @@ class ReActToolLoop:
         orphan_tool_result_strikes = 0
         repair_overlay_text: str | None = None
         invalid_final_submission_count = 0
+        invalid_stage_submission_count = 0
         stage_only_transition_streak = 0
         last_invalid_final_submission_reason = ''
+        last_invalid_stage_submission_reason = ''
         xml_repair_attempt_count = 0
         xml_repair_excerpt = ''
         xml_repair_tool_names: list[str] = []
@@ -251,8 +254,10 @@ class ReActToolLoop:
                 ordinary_tool_turn = self._has_ordinary_tool_call(response_tool_calls)
                 if ordinary_tool_turn:
                     invalid_final_submission_count = 0
+                    invalid_stage_submission_count = 0
                     stage_only_transition_streak = 0
                     last_invalid_final_submission_reason = ''
+                    last_invalid_stage_submission_reason = ''
                 control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response_tool_calls)
                 if final_result_mixed_turn:
                     message_history = self._record_exclusive_tool_turn_error(
@@ -424,11 +429,32 @@ class ReActToolLoop:
                 )
                 message_history = list(prepared_history)
                 if stage_only_transition_turn:
-                    stage_only_transition_streak += 1
-                    if stage_only_transition_streak >= _STAGE_ONLY_TRANSITION_LIMIT:
-                        return self._stage_only_transition_failure(
-                            count=stage_only_transition_streak,
-                            stage_goal=str((tool_calls[0].get('arguments') or {}).get('stage_goal') or '').strip(),
+                    stage_turn_succeeded = self._tool_results_succeeded(results)
+                    stage_goal = str((tool_calls[0].get('arguments') or {}).get('stage_goal') or '').strip()
+                    if stage_turn_succeeded:
+                        invalid_stage_submission_count = 0
+                        last_invalid_stage_submission_reason = ''
+                        stage_only_transition_streak += 1
+                        if stage_only_transition_streak >= _STAGE_ONLY_TRANSITION_LIMIT:
+                            return self._stage_only_transition_failure(
+                                count=stage_only_transition_streak,
+                                stage_goal=stage_goal,
+                            )
+                    else:
+                        stage_only_transition_streak = 0
+                        invalid_stage_submission_count += 1
+                        last_invalid_stage_submission_reason = (
+                            self._first_tool_error_text(results) or f'{STAGE_TOOL_NAME} rejected'
+                        )
+                        if invalid_stage_submission_count >= _INVALID_STAGE_SUBMISSION_LIMIT:
+                            return self._invalid_stage_submission_failure(
+                                reason=last_invalid_stage_submission_reason,
+                                count=invalid_stage_submission_count,
+                                stage_goal=stage_goal,
+                            )
+                        repair_overlay_text = self._stage_submission_repair_message(
+                            reason=last_invalid_stage_submission_reason,
+                            node_kind=node.node_kind,
                         )
                 if control_only_turn:
                     attempts = max(0, attempts - 1)
@@ -1341,6 +1367,24 @@ class ReActToolLoop:
         return f'Error: {normalized} must be the only tool call in its turn'
 
     @classmethod
+    def _invalid_stage_submission_failure(cls, *, reason: str, count: int, stage_goal: str) -> NodeFinalResult:
+        text = str(reason or f'invalid stage submission detected {count} times').strip() or f'invalid stage submission detected {count} times'
+        goal = str(stage_goal or '').strip()
+        suffix = f' Latest stage goal: {goal}.' if goal else ''
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='invalid stage submission guard triggered',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=(
+                f'Invalid {STAGE_TOOL_NAME} detected {int(count or 0)} consecutive times. '
+                f'Latest issue: {text}.{suffix}'
+            ),
+        )
+
+    @classmethod
     def _invalid_final_submission_failure(cls, *, reason: str, count: int) -> NodeFinalResult:
         text = str(reason or f'final result submission failed {count} times').strip() or f'final result submission failed {count} times'
         return NodeFinalResult(
@@ -1372,6 +1416,44 @@ class ReActToolLoop:
                 f'{suffix}'
             ),
         )
+
+    @staticmethod
+    def _stage_submission_repair_message(*, reason: str, node_kind: str = 'execution') -> str:
+        text = str(reason or '').strip() or f'{STAGE_TOOL_NAME} rejected'
+        normalized_kind = str(node_kind or '').strip().lower()
+        if normalized_kind == 'acceptance':
+            return (
+                f'Your last `{STAGE_TOOL_NAME}` call was rejected: {text}. '
+                'Do not call `submit_next_stage` again until you first perform verification work in the active stage. '
+                'Continue this stage with evidence-checking tools before switching stages.'
+            )
+        return (
+            f'Your last `{STAGE_TOOL_NAME}` call was rejected: {text}. '
+            'Do not call `submit_next_stage` again until you first perform substantive work in the active stage. '
+            'Continue this stage with a non-control tool call or `spawn_child_nodes` before switching stages.'
+        )
+
+    @staticmethod
+    def _tool_results_succeeded(results: list[dict[str, Any]]) -> bool:
+        statuses = [
+            str(((item or {}).get('live_state') or {}).get('status') or '').strip().lower()
+            for item in list(results or [])
+            if isinstance(item, dict)
+        ]
+        return bool(statuses) and all(status == 'success' for status in statuses)
+
+    @staticmethod
+    def _first_tool_error_text(results: list[dict[str, Any]]) -> str:
+        for item in list(results or []):
+            if not isinstance(item, dict):
+                continue
+            live_state = dict(item.get('live_state') or {}) if isinstance(item.get('live_state'), dict) else {}
+            tool_message = dict(item.get('tool_message') or {}) if isinstance(item.get('tool_message'), dict) else {}
+            status = str(live_state.get('status') or '').strip().lower()
+            if status != 'error':
+                continue
+            return str(tool_message.get('content') or '').strip()
+        return ''
 
     @classmethod
     def _xml_repair_failure(cls, *, count: int, tool_names: list[str], content_excerpt: str) -> NodeFinalResult:
@@ -2169,16 +2251,18 @@ class ReActToolLoop:
 
     @staticmethod
     def _current_stage_active_window(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        message_list = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
         stage_boundary = 0
-        pending_stage_call_ids: set[str] = set()
-        for index, message in enumerate(list(messages or [])):
+        latest_success_boundary = -1
+        pending_stage_call_ids: dict[str, int] = {}
+        for index, message in enumerate(message_list):
             role = str(message.get('role') or '').strip().lower()
             if role == 'assistant':
                 for tool_call in list(message.get('tool_calls') or []):
                     call_id = extract_call_id((tool_call or {}).get('id'))
                     tool_name = str(((tool_call or {}).get('function') or {}).get('name') or (tool_call or {}).get('name') or '').strip()
                     if call_id and tool_name == STAGE_TOOL_NAME:
-                        pending_stage_call_ids.add(call_id)
+                        pending_stage_call_ids[call_id] = index
                 continue
             if role != 'tool':
                 continue
@@ -2189,9 +2273,12 @@ class ReActToolLoop:
                 and str(message.get('name') or '').strip() == STAGE_TOOL_NAME
                 and not str(message.get('content') or '').strip().startswith('Error:')
             ):
-                stage_boundary = index + 1
+                latest_success_boundary = pending_stage_call_ids[tool_call_id]
+                stage_boundary = latest_success_boundary
                 pending_stage_call_ids.clear()
-        return [dict(item) for item in list(messages or [])[stage_boundary:]]
+        if latest_success_boundary < 0:
+            return message_list
+        return [dict(item) for item in message_list[stage_boundary:]]
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
         prefix, remainder = self._stage_prompt_prefix(messages)

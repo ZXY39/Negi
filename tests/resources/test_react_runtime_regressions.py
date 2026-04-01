@@ -213,8 +213,101 @@ def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_windo
     rendered_contents = [str(item.get("content") or "") for item in prepared]
     assert "stage one raw detail" not in rendered_contents
     assert "archived stage history excerpt" not in rendered_contents
+    assert any(
+        any(
+            str(((tool_call or {}).get("function") or {}).get("name") or (tool_call or {}).get("name") or "").strip() == "submit_next_stage"
+            and str((tool_call or {}).get("id") or "").strip() == "call-stage-2"
+            for tool_call in list(item.get("tool_calls") or [])
+        )
+        for item in prepared
+        if str(item.get("role") or "").strip().lower() == "assistant"
+    )
+    assert any(
+        str(item.get("role") or "").strip().lower() == "tool"
+        and str(item.get("tool_call_id") or "").strip() == "call-stage-2"
+        for item in prepared
+    )
+    assert not any(
+        str(item.get("role") or "").strip().lower() == "tool"
+        and str(item.get("tool_call_id") or "").strip() == "call-stage-1"
+        for item in prepared
+    )
     assert "current stage assistant detail" in rendered_contents
     assert "current stage tool output" in rendered_contents
+
+
+def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    loop._log_service._store._node = SimpleNamespace(
+        metadata={
+            "execution_stages": {
+                "active_stage_id": "stage-2",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": "自主执行",
+                        "status": "完成",
+                        "stage_goal": "inspect the first stage",
+                        "completed_stage_summary": "finished stage one",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-2",
+                        "stage_index": 2,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": "自主执行",
+                        "status": "进行中",
+                        "stage_goal": "inspect the second stage",
+                        "tool_round_budget": 3,
+                        "tool_rounds_used": 0,
+                    },
+                ],
+            }
+        }
+    )
+    original = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage one raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-2",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "current stage assistant detail"},
+        {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": "current stage tool output"},
+    ]
+
+    prepared = loop._prepare_messages(original, runtime_context={"task_id": "task-1", "node_id": "node-1"})
+    prepared_again = loop._prepare_messages(prepared, runtime_context={"task_id": "task-1", "node_id": "node-1"})
+
+    assert prepared_again == prepared
 
 
 @pytest.mark.asyncio

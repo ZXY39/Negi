@@ -11,6 +11,7 @@ from main.protocol import now_iso
 from main.runtime.chat_backend import build_stable_prompt_cache_key
 from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
 from main.runtime.stage_budget import STAGE_TOOL_NAME, visible_tools_for_stage_iteration
+from main.runtime.stage_messages import build_execution_stage_overlay
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -609,6 +610,12 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
             stage_goal='第一阶段；优先派生：无；自行完成：整理上下文',
             tool_round_budget=3,
         )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:stage-one', 'name': 'filesystem', 'arguments': {'path': 'stage-one'}}],
+            created_at=now_iso(),
+        )
         second = service.log_service.submit_next_stage(
             record.task_id,
             record.root_node_id,
@@ -630,6 +637,111 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
         assert stages[1]['key_refs'] == []
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_next_stage_rejects_zero_progress_stage_switch(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        first = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第一阶段；优先派生：无；自行完成：整理上下文',
+            tool_round_budget=3,
+        )
+
+        with pytest.raises(ValueError, match='current active stage has no substantive progress yet'):
+            service.log_service.submit_next_stage(
+                record.task_id,
+                record.root_node_id,
+                stage_goal='第二阶段；优先派生：复杂验证；自行完成：整合结果',
+                tool_round_budget=4,
+            )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        assert detail is not None
+        stages = detail['item']['execution_trace']['stages']
+        assert len(stages) == 1
+        assert stages[0]['stage_id'] == first['stage_id']
+        assert stages[0]['status'] == '进行中'
+        assert stages[0]['tool_rounds_used'] == 0
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_next_stage_allows_switch_after_spawn_only_progress(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        first = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第一阶段；优先派生：并行采集；自行完成：整合上下文',
+            tool_round_budget=3,
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:spawn-only', 'name': 'spawn_child_nodes', 'arguments': {'children': []}}],
+            created_at=now_iso(),
+        )
+        second = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第二阶段；优先派生：复杂验证；自行完成：整合结果',
+            tool_round_budget=4,
+            completed_stage_summary='spawn-only progress is still substantive',
+        )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        assert detail is not None
+        stages = detail['item']['execution_trace']['stages']
+        assert [stage['stage_id'] for stage in stages] == [first['stage_id'], second['stage_id']]
+        assert [stage['status'] for stage in stages] == ['完成', '进行中']
+        assert stages[0]['tool_rounds_used'] == 0
+        assert len(stages[0]['rounds']) == 1
+        assert stages[0]['rounds'][0]['budget_counted'] is False
+        assert [item['tool_name'] for item in stages[0]['rounds'][0]['tools']] == ['spawn_child_nodes']
+    finally:
+        await service.close()
+
+
+def test_execution_stage_overlay_warns_before_zero_progress_stage_switch() -> None:
+    overlay = build_execution_stage_overlay(
+        node_kind='execution',
+        stage_gate={
+            'enabled': True,
+            'has_active_stage': True,
+            'transition_required': False,
+            'active_stage': {
+                'mode': '自主执行',
+                'status': '进行中',
+                'stage_goal': '整理上下文后继续推进',
+                'tool_round_budget': 3,
+                'tool_rounds_used': 0,
+                'rounds': [],
+            },
+        },
+    )
+
+    assert overlay is not None
+    assert '不要再次调用 `submit_next_stage`' in overlay
 
 
 @pytest.mark.asyncio
@@ -796,6 +908,12 @@ async def test_completed_stage_archives_oldest_ten_and_inserts_compression_stage
         )
         for index in range(2, 23):
             previous = index - 1
+            service.log_service.record_execution_stage_round(
+                record.task_id,
+                record.root_node_id,
+                tool_calls=[{'id': f'call:stage:{previous}', 'name': 'filesystem', 'arguments': {'path': f'stage-{previous}'}}],
+                created_at=now_iso(),
+            )
             service.log_service.submit_next_stage(
                 record.task_id,
                 record.root_node_id,
@@ -1135,9 +1253,10 @@ async def test_submit_next_stage_only_loop_fails_after_five_turns(tmp_path: Path
         await service.wait_for_task(record.task_id)
         task = service.store.get_task(record.task_id)
         assert task is not None
-        assert backend.turn == 5
+        assert backend.turn == 6
         assert task.status == 'failed'
-        assert 'Repeated stage switching without progress detected 5 consecutive times' in str(task.failure_reason or '')
+        assert 'Invalid submit_next_stage detected 5 consecutive times' in str(task.failure_reason or '')
+        assert 'no substantive progress yet' in str(task.failure_reason or '')
     finally:
         await service.close()
 
