@@ -21,7 +21,8 @@ from g3ku.providers.fallback import (
 )
 from g3ku.utils.api_keys import iter_api_key_retry_slots
 
-_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
+_STAGE_COMPACT_PREFIX = '[G3KU_STAGE_COMPACT_V1]'
+_STAGE_EXTERNALIZED_PREFIX = '[G3KU_STAGE_EXTERNALIZED_V1]'
 
 
 class ChatBackend(Protocol):
@@ -69,18 +70,21 @@ def _tool_signature(tools: list[dict] | None) -> list[dict[str, object]]:
     return signatures
 
 
-def _compact_history_digest(messages: list[dict]) -> str:
+def _stage_context_digest(messages: list[dict]) -> str:
+    found = False
+    digest = hashlib.sha256()
     for message in list(messages or []):
         if str(message.get('role') or '').strip().lower() != 'assistant':
             continue
         content = str(message.get('content') or '')
-        if not content.startswith(_COMPACT_HISTORY_PREFIX):
+        if not (
+            content.startswith(_STAGE_COMPACT_PREFIX)
+            or content.startswith(_STAGE_EXTERNALIZED_PREFIX)
+        ):
             continue
-        payload = content[len(_COMPACT_HISTORY_PREFIX) :].strip()
-        if not payload:
-            return ''
-        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
-    return ''
+        found = True
+        digest.update(content.encode('utf-8'))
+    return digest.hexdigest() if found else ''
 
 
 def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None, provider_model: str) -> str:
@@ -99,7 +103,7 @@ def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None
         'bootstrap_user': bootstrap_user,
         'tool_signatures': _tool_signature(tools),
         'provider_model': str(provider_model or '').strip(),
-        'compact_history_digest': _compact_history_digest(messages),
+        'stage_context_digest': _stage_context_digest(messages),
     }
     return hashlib.sha256(_json_compact(payload).encode('utf-8')).hexdigest()
 

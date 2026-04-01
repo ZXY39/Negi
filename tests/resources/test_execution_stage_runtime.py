@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.agent.tools.base import Tool
 from main.protocol import now_iso
+from main.runtime.chat_backend import build_stable_prompt_cache_key
 from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
 from main.runtime.stage_budget import STAGE_TOOL_NAME, visible_tools_for_stage_iteration
 from main.service.runtime_service import MainRuntimeService
@@ -612,6 +614,8 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
             record.root_node_id,
             stage_goal='第二阶段；优先派生：复杂验证；自行完成：整合结果',
             tool_round_budget=4,
+            completed_stage_summary='finished stage one summary',
+            key_refs=[{'ref': 'artifact:artifact:stage-one', 'note': 'stage one note'}],
         )
 
         detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
@@ -620,6 +624,10 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
         assert [stage['status'] for stage in stages] == ['完成', '进行中']
         assert stages[0]['stage_id'] == first['stage_id']
         assert stages[1]['stage_id'] == second['stage_id']
+        assert stages[0]['completed_stage_summary'] == 'finished stage one summary'
+        assert stages[0]['key_refs'] == [{'ref': 'artifact:artifact:stage-one', 'note': 'stage one note'}]
+        assert stages[1]['completed_stage_summary'] == ''
+        assert stages[1]['key_refs'] == []
     finally:
         await service.close()
 
@@ -656,13 +664,46 @@ async def test_stage_summary_is_exposed_in_live_runtime_frame(tmp_path: Path):
 
 
 def test_submit_next_stage_tool_schema_budget_max_is_ten() -> None:
-    async def _submit(stage_goal: str, tool_round_budget: int) -> dict[str, object]:
-        return {'stage_goal': stage_goal, 'tool_round_budget': tool_round_budget}
+    async def _submit(
+        stage_goal: str,
+        tool_round_budget: int,
+        completed_stage_summary: str,
+        key_refs: list[dict[str, object]],
+    ) -> dict[str, object]:
+        return {
+            'stage_goal': stage_goal,
+            'tool_round_budget': tool_round_budget,
+            'completed_stage_summary': completed_stage_summary,
+            'key_refs': key_refs,
+        }
 
     tool = SubmitNextStageTool(_submit)
 
     assert tool.parameters['properties']['tool_round_budget']['minimum'] == 1
     assert tool.parameters['properties']['tool_round_budget']['maximum'] == 10
+    assert 'completed_stage_summary' in tool.parameters['properties']
+    assert 'key_refs' in tool.parameters['properties']
+    assert tool.parameters['properties']['key_refs']['items']['required'] == ['ref', 'note']
+
+
+def test_prompt_cache_key_changes_when_stage_context_blocks_change() -> None:
+    base_messages = [
+        {'role': 'system', 'content': 'system'},
+        {'role': 'user', 'content': '{"task_id":"task-1","goal":"demo"}'},
+    ]
+    compact_a = {
+        'role': 'assistant',
+        'content': '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1,"completed_stage_summary":"alpha"}',
+    }
+    compact_b = {
+        'role': 'assistant',
+        'content': '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1,"completed_stage_summary":"beta"}',
+    }
+
+    first = build_stable_prompt_cache_key([*base_messages, compact_a], None, 'model-a')
+    second = build_stable_prompt_cache_key([*base_messages, compact_b], None, 'model-a')
+
+    assert first != second
 
 
 def test_submit_final_result_tool_schema_is_hard_switched_to_final_or_blocked() -> None:
@@ -699,6 +740,97 @@ async def test_submit_next_stage_rejects_budget_above_ten(tmp_path: Path):
                 stage_goal='预算校验；优先派生：无；自行完成：拒绝超出上限的阶段预算',
                 tool_round_budget=11,
             )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_next_stage_ignores_completed_recap_without_active_stage(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        first = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='first stage only',
+            tool_round_budget=2,
+            completed_stage_summary='ignored summary',
+            key_refs=[{'ref': 'artifact:artifact:ignored', 'note': 'ignored note'}],
+        )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        assert detail is not None
+        stages = detail['item']['execution_trace']['stages']
+        assert len(stages) == 1
+        assert stages[0]['stage_id'] == first['stage_id']
+        assert stages[0]['completed_stage_summary'] == ''
+        assert stages[0]['key_refs'] == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_stage_archives_oldest_ten_and_inserts_compression_stage(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='stage 1',
+            tool_round_budget=1,
+        )
+        for index in range(2, 23):
+            previous = index - 1
+            service.log_service.submit_next_stage(
+                record.task_id,
+                record.root_node_id,
+                stage_goal=f'stage {index}',
+                tool_round_budget=1,
+                completed_stage_summary=f'finished stage {previous}',
+                key_refs=[{'ref': f'artifact:artifact:stage-{previous}', 'note': f'note {previous}'}],
+            )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        assert detail is not None
+        stages = detail['item']['execution_trace']['stages']
+        compression_stages = [stage for stage in stages if stage['stage_kind'] == 'compression']
+        assert len(compression_stages) == 1
+        compression = compression_stages[0]
+        assert compression['archive_stage_index_start'] == 1
+        assert compression['archive_stage_index_end'] == 10
+        assert str(compression['archive_ref']).startswith('artifact:')
+
+        completed_normal = [
+            stage['stage_index']
+            for stage in stages
+            if stage['stage_kind'] == 'normal' and stage['status'] != '进行中'
+        ]
+        assert completed_normal == list(range(11, 22))
+        active_stage = next(stage for stage in stages if stage['status'] == '进行中')
+        assert active_stage['stage_index'] == 22
+
+        archive_artifact = service.get_artifact(str(compression['archive_ref']).split(':', 1)[1])
+        assert archive_artifact is not None
+        archive_payload = json.loads(Path(archive_artifact.path).read_text(encoding='utf-8'))
+        assert archive_payload['stage_index_start'] == 1
+        assert archive_payload['stage_index_end'] == 10
+        assert len(archive_payload['stages']) == 10
+        assert archive_payload['stages'][0]['key_refs'] == [{'ref': 'artifact:artifact:stage-1', 'note': 'note 1'}]
     finally:
         await service.close()
 

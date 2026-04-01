@@ -13,6 +13,7 @@ from g3ku.content import ContentNavigationService
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
+    ExecutionStageKeyRef,
     ExecutionStageRecord,
     ExecutionStageRound,
     ExecutionStageState,
@@ -60,6 +61,10 @@ _EXECUTION_STAGE_MODE_WITH_CHILDREN = '包含派生'
 _EXECUTION_STAGE_STATUS_ACTIVE = '进行中'
 _EXECUTION_STAGE_STATUS_COMPLETED = '完成'
 _EXECUTION_STAGE_STATUS_FAILED = '失败'
+_EXECUTION_STAGE_KIND_NORMAL = 'normal'
+_EXECUTION_STAGE_KIND_COMPRESSION = 'compression'
+_STAGE_ARCHIVE_RETAIN_COMPLETED = 20
+_STAGE_ARCHIVE_BATCH_SIZE = 10
 _NON_BUDGET_EXECUTION_TOOLS = {
     _EXECUTION_STAGE_TOOL_NAME,
     FINAL_RESULT_TOOL_NAME,
@@ -871,6 +876,107 @@ class TaskLogService:
             'stage_total_steps': int(active.tool_round_budget or 0),
         }
 
+    @staticmethod
+    def _normalize_stage_key_refs(value: Any) -> list[ExecutionStageKeyRef]:
+        refs: list[ExecutionStageKeyRef] = []
+        for item in list(value or []):
+            try:
+                key_ref = ExecutionStageKeyRef.model_validate(item)
+            except Exception:
+                continue
+            normalized_ref = str(key_ref.ref or '').strip()
+            normalized_note = str(key_ref.note or '').strip()
+            if not normalized_ref or not normalized_note:
+                continue
+            refs.append(
+                key_ref.model_copy(
+                    update={
+                        'ref': normalized_ref,
+                        'note': normalized_note,
+                    }
+                )
+            )
+        return refs
+
+    def _externalize_completed_stage_batches_locked(
+        self,
+        *,
+        task: TaskRecord,
+        node_id: str,
+        state: ExecutionStageState,
+    ) -> ExecutionStageState:
+        stages = list(state.stages or [])
+        if not stages:
+            return state
+        while True:
+            completed_normal = [
+                (index, stage)
+                for index, stage in enumerate(stages)
+                if str(stage.stage_kind or _EXECUTION_STAGE_KIND_NORMAL) == _EXECUTION_STAGE_KIND_NORMAL
+                and str(stage.status or '') != _EXECUTION_STAGE_STATUS_ACTIVE
+            ]
+            if len(completed_normal) <= _STAGE_ARCHIVE_RETAIN_COMPLETED:
+                break
+            batch = completed_normal[:_STAGE_ARCHIVE_BATCH_SIZE]
+            archive_stages = [stage.model_dump(mode='json') for _, stage in batch]
+            if not archive_stages:
+                break
+            stage_index_start = int(batch[0][1].stage_index or 0)
+            stage_index_end = int(batch[-1][1].stage_index or 0)
+            archive_payload = {
+                'task_id': str(task.task_id or ''),
+                'node_id': str(node_id or ''),
+                'stage_index_start': stage_index_start,
+                'stage_index_end': stage_index_end,
+                'stages': archive_stages,
+            }
+            archive_summary, archive_ref = self._summarize_content(
+                json.dumps(archive_payload, ensure_ascii=False, indent=2),
+                task_id=task.task_id,
+                node_id=node_id,
+                display_name=f'stage-history:{node_id}:{stage_index_start}-{stage_index_end}',
+                source_kind='stage_history_archive',
+                force=True,
+            )
+            compression_summary = (
+                archive_summary
+                or f'Archived completed stages {stage_index_start}-{stage_index_end} into stage history archive.'
+            )
+            compression_stage = ExecutionStageRecord(
+                stage_id=new_stage_id(),
+                stage_index=stage_index_end,
+                stage_kind=_EXECUTION_STAGE_KIND_COMPRESSION,
+                system_generated=True,
+                mode=_EXECUTION_STAGE_MODE_SELF,
+                status=_EXECUTION_STAGE_STATUS_COMPLETED,
+                stage_goal=f'Archive completed stage history {stage_index_start}-{stage_index_end}',
+                completed_stage_summary=compression_summary,
+                key_refs=[],
+                archive_ref=str(archive_ref or '').strip(),
+                archive_stage_index_start=stage_index_start,
+                archive_stage_index_end=stage_index_end,
+                tool_round_budget=0,
+                tool_rounds_used=0,
+                created_at=now_iso(),
+                finished_at=now_iso(),
+                rounds=[],
+            )
+            batch_indexes = {index for index, _stage in batch}
+            insert_at = min(batch_indexes)
+            next_stages: list[ExecutionStageRecord] = []
+            for index, stage in enumerate(stages):
+                if index == insert_at:
+                    next_stages.append(compression_stage)
+                if index in batch_indexes:
+                    continue
+                next_stages.append(stage)
+            stages = next_stages
+        return ExecutionStageState(
+            active_stage_id=str(state.active_stage_id or '').strip(),
+            transition_required=bool(state.transition_required),
+            stages=stages,
+        )
+
     def execution_stage_gate_snapshot(self, task_id: str, node_id: str) -> dict[str, Any]:
         with self._task_lock(task_id):
             node = self._store.get_node(node_id)
@@ -879,9 +985,16 @@ class TaskLogService:
             completed_stages = [
                 {
                     'stage_index': int(stage.stage_index or 0),
+                    'stage_kind': str(stage.stage_kind or _EXECUTION_STAGE_KIND_NORMAL),
+                    'system_generated': bool(stage.system_generated),
                     'mode': str(stage.mode or ''),
                     'status': str(stage.status or ''),
                     'stage_goal': str(stage.stage_goal or ''),
+                    'completed_stage_summary': str(stage.completed_stage_summary or ''),
+                    'key_refs': [item.model_dump(mode='json') for item in list(stage.key_refs or [])],
+                    'archive_ref': str(stage.archive_ref or ''),
+                    'archive_stage_index_start': int(stage.archive_stage_index_start or 0),
+                    'archive_stage_index_end': int(stage.archive_stage_index_end or 0),
                     'tool_round_budget': int(stage.tool_round_budget or 0),
                     'tool_rounds_used': int(stage.tool_rounds_used or 0),
                 }
@@ -898,27 +1011,10 @@ class TaskLogService:
     def execution_stage_prompt_payload(self, task_id: str, node_id: str) -> dict[str, Any]:
         snapshot = self.execution_stage_gate_snapshot(task_id, node_id)
         active = snapshot.get('active_stage') if isinstance(snapshot, dict) else None
-        completed_stages: list[dict[str, Any]] = []
-        record = self._store.get_node(node_id)
-        state = self._execution_stage_state(record)
-        for stage in list(state.stages or []):
-            if str(stage.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE:
-                continue
-            completed_stages.append(
-                {
-                    'stage_index': int(stage.stage_index or 0),
-                    'mode': str(stage.mode or ''),
-                    'status': str(stage.status or ''),
-                    'stage_goal': str(stage.stage_goal or ''),
-                    'tool_round_budget': int(stage.tool_round_budget or 0),
-                    'tool_rounds_used': int(stage.tool_rounds_used or 0),
-                }
-            )
         return {
             'has_active_stage': bool(snapshot.get('has_active_stage')) if isinstance(snapshot, dict) else False,
             'transition_required': bool(snapshot.get('transition_required')) if isinstance(snapshot, dict) else False,
             'active_stage': dict(active or {}) if isinstance(active, dict) else None,
-            'completed_stages': completed_stages,
         }
 
     def _persist_execution_stage_state_locked(
@@ -955,7 +1051,16 @@ class TaskLogService:
             publish_snapshot=True,
         )
 
-    def submit_next_stage(self, task_id: str, node_id: str, *, stage_goal: str, tool_round_budget: int) -> dict[str, Any]:
+    def submit_next_stage(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        stage_goal: str,
+        tool_round_budget: int,
+        completed_stage_summary: str = '',
+        key_refs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             node = self._store.get_node(node_id)
@@ -963,6 +1068,8 @@ class TaskLogService:
                 raise ValueError(f'node not found: {node_id}')
             normalized_goal = str(stage_goal or '').strip()
             normalized_budget = int(tool_round_budget or 0)
+            normalized_completed_summary = str(completed_stage_summary or '').strip()
+            normalized_key_refs = self._normalize_stage_key_refs(key_refs)
             if not normalized_goal:
                 raise ValueError('stage_goal must not be empty')
             if normalized_budget < 1 or normalized_budget > 10:
@@ -973,14 +1080,29 @@ class TaskLogService:
             for stage in list(state.stages or []):
                 current = stage
                 if str(stage.stage_id or '').strip() == str(state.active_stage_id or '').strip() and str(stage.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE:
-                    current = stage.model_copy(update={'status': _EXECUTION_STAGE_STATUS_COMPLETED, 'finished_at': now})
+                    current = stage.model_copy(
+                        update={
+                            'status': _EXECUTION_STAGE_STATUS_COMPLETED,
+                            'finished_at': now,
+                            'completed_stage_summary': normalized_completed_summary,
+                            'key_refs': normalized_key_refs,
+                        }
+                    )
                 stages.append(current)
+            next_stage_index = max((int(stage.stage_index or 0) for stage in stages), default=0) + 1
             next_stage = ExecutionStageRecord(
                 stage_id=new_stage_id(),
-                stage_index=len(stages) + 1,
+                stage_index=next_stage_index,
+                stage_kind=_EXECUTION_STAGE_KIND_NORMAL,
+                system_generated=False,
                 mode=_EXECUTION_STAGE_MODE_SELF,
                 status=_EXECUTION_STAGE_STATUS_ACTIVE,
                 stage_goal=normalized_goal,
+                completed_stage_summary='',
+                key_refs=[],
+                archive_ref='',
+                archive_stage_index_start=0,
+                archive_stage_index_end=0,
                 tool_round_budget=normalized_budget,
                 tool_rounds_used=0,
                 created_at=now,
@@ -992,6 +1114,7 @@ class TaskLogService:
                 transition_required=False,
                 stages=[*stages, next_stage],
             )
+            next_state = self._externalize_completed_stage_batches_locked(task=task, node_id=node_id, state=next_state)
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
             self.refresh_task_view(task_id, mark_unread=True)
@@ -1112,6 +1235,7 @@ class TaskLogService:
                 transition_required=False,
                 stages=stages,
             )
+            next_state = self._externalize_completed_stage_batches_locked(task=task, node_id=node_id, state=next_state)
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
             self.refresh_task_view(task_id, mark_unread=True)

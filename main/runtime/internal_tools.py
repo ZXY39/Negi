@@ -12,7 +12,7 @@ from main.runtime.stage_budget import FINAL_RESULT_TOOL_NAME, STAGE_TOOL_NAME
 class SubmitNextStageTool(Tool):
     def __init__(
         self,
-        submit_callback: Callable[[str, int], Awaitable[dict[str, Any]]],
+        submit_callback: Callable[[str, int, str, list[dict[str, Any]]], Awaitable[dict[str, Any]]],
     ) -> None:
         self._submit_callback = submit_callback
 
@@ -43,12 +43,67 @@ class SubmitNextStageTool(Tool):
                     'minimum': 1,
                     'maximum': 10,
                 },
+                'completed_stage_summary': {
+                    'type': 'string',
+                    'description': (
+                        'Optional summary of the stage that is ending now. '
+                        'Ignored when there is no active stage yet.'
+                    ),
+                },
+                'key_refs': {
+                    'type': 'array',
+                    'description': (
+                        'Optional stage-local reference annotations for the stage that is ending now. '
+                        'Ignored when there is no active stage yet.'
+                    ),
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'ref': {
+                                'type': 'string',
+                                'description': 'Durable content/artifact/path reference captured during the completed stage.',
+                                'minLength': 1,
+                            },
+                            'note': {
+                                'type': 'string',
+                                'description': 'Stage-local note explaining why this ref mattered in the completed stage.',
+                                'minLength': 1,
+                            },
+                        },
+                        'required': ['ref', 'note'],
+                    },
+                },
             },
             'required': ['stage_goal', 'tool_round_budget'],
         }
 
-    async def execute(self, stage_goal: str, tool_round_budget: int, **kwargs: Any) -> str:
-        result = await self._submit_callback(str(stage_goal or '').strip(), int(tool_round_budget or 0))
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        for index, item in enumerate(list((params or {}).get('key_refs') or [])):
+            if not isinstance(item, dict):
+                errors.append(f'key_refs[{index}] must be an object')
+                continue
+            if not str(item.get('ref') or '').strip():
+                errors.append(f'key_refs[{index}].ref must not be empty')
+            if not str(item.get('note') or '').strip():
+                errors.append(f'key_refs[{index}].note must not be empty')
+        return errors
+
+    async def execute(
+        self,
+        stage_goal: str,
+        tool_round_budget: int,
+        completed_stage_summary: str = '',
+        key_refs: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        _ = kwargs
+        result = await self._submit_callback(
+            str(stage_goal or '').strip(),
+            int(tool_round_budget or 0),
+            str(completed_stage_summary or '').strip(),
+            [dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
+        )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 

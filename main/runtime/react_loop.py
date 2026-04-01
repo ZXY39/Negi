@@ -15,7 +15,7 @@ from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.errors import TaskPausedError
-from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION
+from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_stable_prompt_cache_key
 from main.runtime.stage_budget import (
     FINAL_RESULT_TOOL_NAME,
@@ -27,11 +27,10 @@ from main.runtime.stage_messages import build_execution_stage_overlay
 from main.protocol import now_iso
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:artifact:[A-Za-z0-9_-]+')
-_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
-_COMPACT_HISTORY_MESSAGE_LIMIT = 30
-_COMPACT_HISTORY_CHAR_LIMIT = 60_000
-_COMPACT_HISTORY_KEEP_RECENT = 12
-_COMPACT_HISTORY_MAX_STEPS = 12
+_LEGACY_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
+_STAGE_COMPACT_PREFIX = '[G3KU_STAGE_COMPACT_V1]'
+_STAGE_EXTERNALIZED_PREFIX = '[G3KU_STAGE_EXTERNALIZED_V1]'
+_STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
@@ -159,7 +158,7 @@ class ReActToolLoop:
                     'depth': node.depth,
                     'node_kind': node.node_kind,
                     'phase': 'before_model',
-                    'messages': message_history,
+                    'messages': model_messages,
                     'pending_tool_calls': [],
                     'pending_child_specs': [],
                     'partial_child_results': [],
@@ -310,7 +309,7 @@ class ReActToolLoop:
                         'depth': node.depth,
                         'node_kind': node.node_kind,
                         'phase': 'waiting_tool_results',
-                        'messages': message_history,
+                        'messages': model_messages,
                         'pending_tool_calls': tool_calls,
                         'tool_calls': live_tool_calls,
                         **self._execution_stage_frame_payload(
@@ -372,7 +371,7 @@ class ReActToolLoop:
                         'depth': node.depth,
                         'node_kind': node.node_kind,
                         'phase': 'waiting_tool_results',
-                        'messages': message_history,
+                        'messages': prepared_history,
                         'pending_tool_calls': [],
                         'tool_calls': [item['live_state'] for item in results],
                         **self._execution_stage_frame_payload(
@@ -387,6 +386,7 @@ class ReActToolLoop:
                     },
                     publish_snapshot=True,
                 )
+                message_history = list(prepared_history)
                 if stage_only_transition_turn:
                     stage_only_transition_streak += 1
                     if stage_only_transition_streak >= _STAGE_ONLY_TRANSITION_LIMIT:
@@ -557,7 +557,7 @@ class ReActToolLoop:
                 'depth': node.depth,
                 'node_kind': node.node_kind,
                 'phase': 'waiting_tool_results',
-                'messages': resumed_history,
+                'messages': prepared_history,
                 'pending_tool_calls': [],
                 'tool_calls': [dict(item.get('live_state') or {}) for item in ordered_results if isinstance(item, dict)],
                 **self._execution_stage_frame_payload(
@@ -572,7 +572,7 @@ class ReActToolLoop:
             },
             publish_snapshot=True,
         )
-        return resumed_history
+        return prepared_history
 
     def _runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         frame = self._log_service.read_runtime_frame(task_id, node_id)
@@ -624,6 +624,7 @@ class ReActToolLoop:
         payload.setdefault('started_at', '')
         payload.setdefault('finished_at', '')
         payload.setdefault('elapsed_seconds', None)
+        payload['ephemeral'] = bool(payload.get('ephemeral'))
         return payload
 
     @staticmethod
@@ -646,6 +647,7 @@ class ReActToolLoop:
             'finished_at': str(payload.get('finished_at') or ''),
             'elapsed_seconds': payload.get('elapsed_seconds'),
             'status': message_status,
+            'ephemeral': bool(payload.get('ephemeral')),
         }
 
     def _execution_stage_gate(self, *, task_id: str, node_id: str, node_kind: str) -> dict[str, Any]:
@@ -792,7 +794,7 @@ class ReActToolLoop:
                     elapsed_seconds=None,
                 )
                 try:
-                    tool_content = await self._execute_tool(
+                    raw_result = await self._execute_tool_raw(
                         tools=tools,
                         tool_name=call.name,
                         arguments=dict(call.arguments or {}),
@@ -804,11 +806,17 @@ class ReActToolLoop:
                             'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
                         },
                     )
+                    tool_content = self._render_tool_message_content(
+                        raw_result,
+                        runtime_context=runtime_context,
+                        tool_name=str(call.name or ''),
+                    )
                 except TaskPausedError:
                     raise
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # pragma: no cover - defensive fallback
+                    raw_result = None
                     tool_content = f'Error executing {call.name}: {exc}'
                 finally:
                     if controller is not None:
@@ -816,6 +824,10 @@ class ReActToolLoop:
                 finished_at = now_iso()
                 elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
                 status = self._tool_message_status(tool_content)
+                ephemeral = self._is_ephemeral_tool_result(
+                    raw_result,
+                    tool_name=str(call.name or ''),
+                )
                 self._update_tool_live_state(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -825,6 +837,7 @@ class ReActToolLoop:
                     finished_at=finished_at,
                     elapsed_seconds=elapsed_seconds,
                     result_content=tool_content,
+                    ephemeral=ephemeral,
                 )
                 return {
                     'index': index,
@@ -835,6 +848,7 @@ class ReActToolLoop:
                         'started_at': started_at,
                         'finished_at': finished_at,
                         'elapsed_seconds': elapsed_seconds,
+                        'ephemeral': ephemeral,
                     },
                     'tool_message': {
                         'role': 'tool',
@@ -844,6 +858,7 @@ class ReActToolLoop:
                         'started_at': started_at,
                         'finished_at': finished_at,
                         'elapsed_seconds': elapsed_seconds,
+                        'ephemeral': ephemeral,
                     },
                 }
 
@@ -884,6 +899,7 @@ class ReActToolLoop:
         finished_at: str,
         elapsed_seconds: float | None,
         result_content: str | None = None,
+        ephemeral: bool | None = None,
     ) -> None:
         def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
             next_calls: list[dict[str, Any]] = []
@@ -902,6 +918,8 @@ class ReActToolLoop:
                     )
                     if result_content is not None:
                         payload['result_content'] = result_content
+                    if ephemeral is not None:
+                        payload['ephemeral'] = bool(ephemeral)
                 next_calls.append(payload)
             if not matched:
                 payload = {
@@ -914,6 +932,8 @@ class ReActToolLoop:
                 }
                 if result_content is not None:
                     payload['result_content'] = result_content
+                if ephemeral is not None:
+                    payload['ephemeral'] = bool(ephemeral)
                 next_calls.append(payload)
             frame['tool_calls'] = next_calls
             frame['phase'] = 'waiting_tool_results'
@@ -936,6 +956,16 @@ class ReActToolLoop:
     def _tool_message_status(tool_content: str) -> str:
         text = str(tool_content or '').strip()
         return 'error' if text.startswith('Error') else 'success'
+
+    @staticmethod
+    def _is_ephemeral_tool_result(result: Any, *, tool_name: str) -> bool:
+        if str(tool_name or '').strip() != 'content':
+            return False
+        if not isinstance(result, dict):
+            return False
+        handle = dict(result.get('handle') or {}) if isinstance(result.get('handle'), dict) else {}
+        source_kind = str(handle.get('source_kind') or result.get('source_kind') or '').strip().lower()
+        return source_kind == _STAGE_HISTORY_ARCHIVE_SOURCE_KIND
 
     async def _execute_tool_raw(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> Any:
         stage_gate_error = self._execution_tool_gate_error(tool_name=tool_name, runtime_context=runtime_context)
@@ -1305,7 +1335,7 @@ class ReActToolLoop:
                 'depth': node.depth,
                 'node_kind': node.node_kind,
                 'phase': 'waiting_tool_results',
-                'messages': message_history,
+                'messages': self._prepare_messages(message_history, runtime_context=runtime_context),
                 'pending_tool_calls': [tool_payload],
                 'tool_calls': [self._live_tool_entry(tool_call)],
                 **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
@@ -1397,7 +1427,7 @@ class ReActToolLoop:
                 'depth': node.depth,
                 'node_kind': node.node_kind,
                 'phase': 'waiting_tool_results',
-                'messages': next_history,
+                'messages': prepared_history,
                 'pending_tool_calls': [],
                 'tool_calls': [
                     {
@@ -1423,14 +1453,14 @@ class ReActToolLoop:
         )
 
         if isinstance(raw_result, str) and raw_result.startswith('Error:'):
-            return None, next_history, [], str(raw_result or '').strip()
+            return None, prepared_history, [], str(raw_result or '').strip()
 
         raw_payload = raw_result if isinstance(raw_result, dict) else None
         if raw_payload is None:
-            return None, next_history, [], f'{FINAL_RESULT_TOOL_NAME} must return an object payload'
+            return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} must return an object payload'
         result = self._coerce_final_result_payload(raw_payload)
         if result is None:
-            return None, next_history, [], f'{FINAL_RESULT_TOOL_NAME} returned an invalid payload'
+            return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} returned an invalid payload'
         violations = self._validate_final_result(
             result=result,
             raw_payload=raw_payload,
@@ -1438,8 +1468,8 @@ class ReActToolLoop:
             node_kind=node.node_kind,
         )
         if violations:
-            return None, next_history, violations, ''
-        return result, next_history, [], ''
+            return None, prepared_history, violations, ''
+        return result, prepared_history, [], ''
 
     def _record_exclusive_tool_turn_error(
         self,
@@ -1503,7 +1533,7 @@ class ReActToolLoop:
                 'depth': node.depth,
                 'node_kind': node.node_kind,
                 'phase': 'waiting_tool_results',
-                'messages': next_history,
+                'messages': prepared_history,
                 'pending_tool_calls': [],
                 'tool_calls': [
                     {
@@ -1528,7 +1558,7 @@ class ReActToolLoop:
             },
             publish_snapshot=True,
         )
-        return next_history
+        return prepared_history
 
     @staticmethod
     def _has_tool_results(messages: list[dict[str, Any]]) -> bool:
@@ -1726,6 +1756,16 @@ class ReActToolLoop:
                 return
             if isinstance(item, str):
                 text = str(item or '')
+                for prefix in (_STAGE_COMPACT_PREFIX, _STAGE_EXTERNALIZED_PREFIX, _LEGACY_COMPACT_HISTORY_PREFIX):
+                    if text.startswith(prefix):
+                        payload_text = text[len(prefix) :].strip()
+                        if payload_text.startswith('{') or payload_text.startswith('['):
+                            try:
+                                parsed = json.loads(payload_text)
+                            except Exception:
+                                parsed = None
+                            if parsed is not None:
+                                _visit(parsed)
                 for match in _ARTIFACT_REF_PATTERN.finditer(text):
                     found.add(match.group(0))
                 stripped = text.strip()
@@ -1772,131 +1812,6 @@ class ReActToolLoop:
         filtered = {key: value for key, value in kwargs.items() if key in signature.parameters}
         return await chat(**filtered)
 
-    def _compact_history(self, messages: list[dict[str, Any]], *, preserve_non_system: int) -> list[dict[str, Any]]:
-        message_list = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
-        existing_compact_count = sum(1 for item in message_list if self._is_compact_history_message(item))
-        try:
-            serialized = json.dumps(message_list, ensure_ascii=False, default=str)
-        except Exception:
-            serialized = str(message_list)
-        should_compact = (
-            len(message_list) > _COMPACT_HISTORY_MESSAGE_LIMIT
-            or len(serialized) > _COMPACT_HISTORY_CHAR_LIMIT
-            or existing_compact_count > 1
-        )
-        if not should_compact:
-            return message_list
-
-        preserved_prefix: list[dict[str, Any]] = []
-        remainder = list(message_list)
-        if remainder and str(remainder[0].get('role') or '').strip().lower() == 'system':
-            preserved_prefix.append(remainder.pop(0))
-        if remainder and str(remainder[0].get('role') or '').strip().lower() == 'user':
-            preserved_prefix.append(remainder.pop(0))
-
-        existing_payloads = [
-            payload
-            for payload in (self._parse_compact_history_payload(item) for item in remainder)
-            if payload is not None
-        ]
-        regular_messages = [item for item in remainder if not self._is_compact_history_message(item)]
-        if not regular_messages:
-            return preserved_prefix + ([self._make_compact_history_message(self._merge_compact_payloads(existing_payloads, []))] if existing_payloads else [])
-
-        keep_count = max(_COMPACT_HISTORY_KEEP_RECENT, int(preserve_non_system or 0))
-        segments = self._segment_history_for_compaction(regular_messages)
-        recent_segments: list[list[dict[str, Any]]] = []
-        recent_message_count = 0
-        for segment in reversed(segments):
-            if recent_segments and recent_message_count >= keep_count:
-                break
-            recent_segments.append(segment)
-            recent_message_count += len(segment)
-        recent_segments.reverse()
-        older_segment_count = max(0, len(segments) - len(recent_segments))
-        older_messages = [item for segment in segments[:older_segment_count] for item in segment]
-        recent_messages = [item for segment in recent_segments for item in segment]
-        if not older_messages and not existing_payloads:
-            return preserved_prefix + recent_messages
-
-        compact_payload = self._merge_compact_payloads(existing_payloads, older_messages)
-        compact_message = self._make_compact_history_message(compact_payload)
-        return preserved_prefix + [compact_message] + recent_messages
-
-    @staticmethod
-    def _segment_history_for_compaction(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-        segments: list[list[dict[str, Any]]] = []
-        index = 0
-        message_list = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
-        while index < len(message_list):
-            message = dict(message_list[index] or {})
-            role = str(message.get('role') or '').strip().lower()
-            if role == 'assistant' and list(message.get('tool_calls') or []):
-                segment = [message]
-                call_ids = {
-                    extract_call_id((tool_call or {}).get('id'))
-                    for tool_call in list(message.get('tool_calls') or [])
-                    if extract_call_id((tool_call or {}).get('id'))
-                }
-                index += 1
-                while index < len(message_list):
-                    tool_message = dict(message_list[index] or {})
-                    if str(tool_message.get('role') or '').strip().lower() != 'tool':
-                        break
-                    tool_call_id = extract_call_id(tool_message.get('tool_call_id'))
-                    if tool_call_id and tool_call_id in call_ids:
-                        segment.append(tool_message)
-                        index += 1
-                        continue
-                    break
-                segments.append(segment)
-                continue
-            segments.append([message])
-            index += 1
-        return segments
-
-    def _merge_compact_payloads(self, payloads: list[dict[str, Any]], older_messages: list[dict[str, Any]]) -> dict[str, Any]:
-        completed_steps: list[str] = []
-        durable_refs: set[str] = set()
-        open_threads: list[str] = []
-        repair_prompt_count = 0
-
-        for payload in list(payloads or []):
-            completed_steps.extend([
-                self._truncate_compact_text(item)
-                for item in list(payload.get('completed_steps') or [])
-                if self._truncate_compact_text(item)
-            ])
-            durable_refs.update(str(item or '').strip() for item in list(payload.get('durable_refs') or []) if str(item or '').strip())
-            open_threads.extend([
-                self._truncate_compact_text(item)
-                for item in list(payload.get('open_threads') or [])
-                if self._truncate_compact_text(item)
-            ])
-            contract_state = payload.get('result_contract_state') if isinstance(payload.get('result_contract_state'), dict) else {}
-            repair_prompt_count += int(contract_state.get('repair_prompt_count') or 0)
-
-        for message in list(older_messages or []):
-            step = self._compact_step_from_message(message)
-            if step:
-                completed_steps.append(step)
-            durable_refs.update(self._message_refs(message))
-            open_thread = self._open_thread_from_message(message)
-            if open_thread:
-                open_threads.append(open_thread)
-            if self._is_result_contract_prompt(message):
-                repair_prompt_count += 1
-
-        return {
-            'completed_steps': self._unique_compact_items(completed_steps, limit=_COMPACT_HISTORY_MAX_STEPS),
-            'durable_refs': sorted(durable_refs),
-            'open_threads': self._unique_compact_items(open_threads, limit=_COMPACT_HISTORY_MAX_STEPS),
-            'result_contract_state': {
-                'entered': bool(repair_prompt_count > 0),
-                'repair_prompt_count': repair_prompt_count,
-            },
-        }
-
     @staticmethod
     def _truncate_compact_text(value: Any) -> str:
         text = ' '.join(str(value or '').split())
@@ -1905,100 +1820,6 @@ class ReActToolLoop:
         if len(text) <= _COMPACT_HISTORY_STEP_MAX_CHARS:
             return text
         return text[: _COMPACT_HISTORY_STEP_MAX_CHARS - 3].rstrip() + '...'
-
-    @staticmethod
-    def _unique_compact_items(items: list[str], *, limit: int) -> list[str]:
-        seen: set[str] = set()
-        result: list[str] = []
-        for item in list(items or []):
-            text = str(item or '').strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            result.append(text)
-            if len(result) >= max(1, int(limit or 1)):
-                break
-        return result
-
-    @classmethod
-    def _is_compact_history_message(cls, message: dict[str, Any]) -> bool:
-        return (
-            str((message or {}).get('role') or '').strip().lower() == 'assistant'
-            and str((message or {}).get('content') or '').startswith(_COMPACT_HISTORY_PREFIX)
-        )
-
-    @classmethod
-    def _parse_compact_history_payload(cls, message: dict[str, Any]) -> dict[str, Any] | None:
-        if not cls._is_compact_history_message(message):
-            return None
-        text = str((message or {}).get('content') or '')[len(_COMPACT_HISTORY_PREFIX) :].strip()
-        if not text:
-            return None
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-
-    @staticmethod
-    def _make_compact_history_message(payload: dict[str, Any]) -> dict[str, Any]:
-        return {
-            'role': 'assistant',
-            'content': f'{_COMPACT_HISTORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}',
-        }
-
-    def _compact_step_from_message(self, message: dict[str, Any]) -> str:
-        role = str((message or {}).get('role') or '').strip().lower()
-        if role == 'assistant':
-            tool_calls = list((message or {}).get('tool_calls') or [])
-            if tool_calls:
-                names = ', '.join(
-                    str(((item or {}).get('function') or {}).get('name') or (item or {}).get('name') or '').strip()
-                    for item in tool_calls
-                    if str(((item or {}).get('function') or {}).get('name') or (item or {}).get('name') or '').strip()
-                )
-                if names:
-                    return self._truncate_compact_text(f'Assistant requested tools: {names}')
-            summary, _ref = content_summary_and_ref((message or {}).get('content'))
-            if summary:
-                return self._truncate_compact_text(f'Assistant: {summary}')
-            return ''
-        if role == 'tool':
-            tool_name = str((message or {}).get('name') or 'tool').strip() or 'tool'
-            summary, _ref = content_summary_and_ref((message or {}).get('content'))
-            return self._truncate_compact_text(f'{tool_name}: {summary}') if summary else ''
-        if role == 'user':
-            summary, _ref = content_summary_and_ref((message or {}).get('content'))
-            if summary and not self._is_result_contract_prompt(message):
-                return self._truncate_compact_text(f'User follow-up: {summary}')
-        return ''
-
-    def _open_thread_from_message(self, message: dict[str, Any]) -> str:
-        role = str((message or {}).get('role') or '').strip().lower()
-        if role == 'tool':
-            summary, _ref = content_summary_and_ref((message or {}).get('content'))
-            lowered = summary.lower()
-            if lowered.startswith('error') or '"status":"error"' in lowered or '"status": "error"' in lowered:
-                tool_name = str((message or {}).get('name') or 'tool').strip() or 'tool'
-                return self._truncate_compact_text(f'Investigate failed tool result: {tool_name}')
-        if role == 'user' and self._is_result_contract_prompt(message):
-            return f'Submit a valid `{FINAL_RESULT_TOOL_NAME}` payload once implementation is complete'
-        return ''
-
-    @staticmethod
-    def _message_refs(message: dict[str, Any]) -> set[str]:
-        refs = set(ReActToolLoop._collect_content_refs(message))
-        return {str(item or '').strip() for item in refs if str(item or '').strip()}
-
-    @classmethod
-    def _is_result_contract_prompt(cls, message: dict[str, Any]) -> bool:
-        if str((message or {}).get('role') or '').strip().lower() != 'user':
-            return False
-        content = str((message or {}).get('content') or '').strip()
-        return (
-            content.startswith('你上一条回复不符合结果 JSON 协议 v')
-            or content.startswith('你上一条回复虽然能解析成 JSON，但违反了结果协议 v')
-        )
 
     def _open_thread_from_message(self, message: dict[str, Any]) -> str:
         role = str((message or {}).get('role') or '').strip().lower()
@@ -2131,9 +1952,119 @@ class ReActToolLoop:
             blocking_reason=blocking_reason,
         )
 
+    def _execution_stage_state_for_runtime(self, *, runtime_context: dict[str, Any]):
+        store = getattr(self._log_service, '_store', None)
+        getter = getattr(store, 'get_node', None) if store is not None else None
+        if not callable(getter):
+            return normalize_execution_stage_metadata({})
+        node = getter(str(runtime_context.get('node_id') or '').strip())
+        if node is None:
+            return normalize_execution_stage_metadata({})
+        payload = (node.metadata or {}).get('execution_stages') if isinstance(node.metadata, dict) else {}
+        return normalize_execution_stage_metadata(payload)
+
+    @staticmethod
+    def _is_stage_context_message(message: dict[str, Any]) -> bool:
+        if str((message or {}).get('role') or '').strip().lower() != 'assistant':
+            return False
+        content = str((message or {}).get('content') or '')
+        return (
+            content.startswith(_STAGE_COMPACT_PREFIX)
+            or content.startswith(_STAGE_EXTERNALIZED_PREFIX)
+            or content.startswith(_LEGACY_COMPACT_HISTORY_PREFIX)
+        )
+
+    def _stage_prompt_prefix(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        cleaned = [dict(item) for item in list(messages or []) if isinstance(item, dict) and not self._is_stage_context_message(item)]
+        prefix: list[dict[str, Any]] = []
+        remainder = list(cleaned)
+        if remainder and str(remainder[0].get('role') or '').strip().lower() == 'system':
+            prefix.append(remainder.pop(0))
+        if remainder and str(remainder[0].get('role') or '').strip().lower() == 'user':
+            prefix.append(remainder.pop(0))
+        return prefix, remainder
+
+    @staticmethod
+    def _completed_stage_blocks(stage_state: Any) -> list[dict[str, Any]]:
+        externalized: list[dict[str, Any]] = []
+        compacted: list[dict[str, Any]] = []
+        active_stage_id = str(getattr(stage_state, 'active_stage_id', '') or '').strip()
+        for stage in list(getattr(stage_state, 'stages', []) or []):
+            if str(getattr(stage, 'stage_id', '') or '').strip() == active_stage_id:
+                continue
+            if str(getattr(stage, 'stage_kind', 'normal') or 'normal').strip() == 'compression':
+                payload = {
+                    'stage_index': int(getattr(stage, 'stage_index', 0) or 0),
+                    'stage_kind': 'compression',
+                    'system_generated': bool(getattr(stage, 'system_generated', False)),
+                    'stage_goal': str(getattr(stage, 'stage_goal', '') or ''),
+                    'completed_stage_summary': str(getattr(stage, 'completed_stage_summary', '') or ''),
+                    'archive_ref': str(getattr(stage, 'archive_ref', '') or ''),
+                    'archive_stage_index_start': int(getattr(stage, 'archive_stage_index_start', 0) or 0),
+                    'archive_stage_index_end': int(getattr(stage, 'archive_stage_index_end', 0) or 0),
+                }
+                externalized.append(
+                    {
+                        'role': 'assistant',
+                        'content': f'{_STAGE_EXTERNALIZED_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}',
+                    }
+                )
+                continue
+            payload = {
+                'stage_index': int(getattr(stage, 'stage_index', 0) or 0),
+                'stage_kind': 'normal',
+                'system_generated': bool(getattr(stage, 'system_generated', False)),
+                'mode': str(getattr(stage, 'mode', '') or ''),
+                'status': str(getattr(stage, 'status', '') or ''),
+                'stage_goal': str(getattr(stage, 'stage_goal', '') or ''),
+                'completed_stage_summary': str(getattr(stage, 'completed_stage_summary', '') or ''),
+                'key_refs': [item.model_dump(mode='json') for item in list(getattr(stage, 'key_refs', []) or [])],
+                'tool_round_budget': int(getattr(stage, 'tool_round_budget', 0) or 0),
+                'tool_rounds_used': int(getattr(stage, 'tool_rounds_used', 0) or 0),
+            }
+            compacted.append(
+                {
+                    'role': 'assistant',
+                    'content': f'{_STAGE_COMPACT_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}',
+                }
+            )
+        return [*externalized, *compacted]
+
+    @staticmethod
+    def _current_stage_active_window(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        stage_boundary = 0
+        pending_stage_call_ids: set[str] = set()
+        for index, message in enumerate(list(messages or [])):
+            role = str(message.get('role') or '').strip().lower()
+            if role == 'assistant':
+                for tool_call in list(message.get('tool_calls') or []):
+                    call_id = extract_call_id((tool_call or {}).get('id'))
+                    tool_name = str(((tool_call or {}).get('function') or {}).get('name') or (tool_call or {}).get('name') or '').strip()
+                    if call_id and tool_name == STAGE_TOOL_NAME:
+                        pending_stage_call_ids.add(call_id)
+                continue
+            if role != 'tool':
+                continue
+            tool_call_id = extract_call_id(message.get('tool_call_id'))
+            if (
+                tool_call_id
+                and tool_call_id in pending_stage_call_ids
+                and str(message.get('name') or '').strip() == STAGE_TOOL_NAME
+                and not str(message.get('content') or '').strip().startswith('Error:')
+            ):
+                stage_boundary = index + 1
+                pending_stage_call_ids.clear()
+        return [dict(item) for item in list(messages or [])[stage_boundary:]]
+
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
-        _ = runtime_context
-        return list(messages)
+        prefix, remainder = self._stage_prompt_prefix(messages)
+        stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
+        if not list(getattr(stage_state, 'stages', []) or []):
+            return [*prefix, *remainder]
+        completed_blocks = self._completed_stage_blocks(stage_state)
+        active_stage_id = str(getattr(stage_state, 'active_stage_id', '') or '').strip()
+        active_window = self._current_stage_active_window(remainder) if active_stage_id else list(remainder)
+        return [*prefix, *completed_blocks, *active_window]
 
     @staticmethod
     def _apply_temporary_system_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:

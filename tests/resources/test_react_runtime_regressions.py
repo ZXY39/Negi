@@ -19,10 +19,15 @@ from main.storage.sqlite_store import SQLiteTaskStore
 class _FakeTaskStore:
     def __init__(self) -> None:
         self._task = SimpleNamespace(cancel_requested=False, pause_requested=False)
+        self._node = None
 
     def get_task(self, task_id: str):
         _ = task_id
         return self._task
+
+    def get_node(self, node_id: str):
+        _ = node_id
+        return self._node
 
 
 class _FakeLogService:
@@ -87,73 +92,142 @@ class _DirectLoadTool(Tool):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def test_prepare_messages_passthrough_keeps_original_messages_even_with_content_store() -> None:
+def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    loop._log_service._store._node = SimpleNamespace(
+        metadata={
+            "execution_stages": {
+                "active_stage_id": "stage-2",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": "自主执行",
+                        "status": "完成",
+                        "stage_goal": "inspect the first stage",
+                        "completed_stage_summary": "finished stage one",
+                        "key_refs": [
+                            {
+                                "ref": "artifact:artifact:stage-one",
+                                "note": "stage one evidence summary",
+                            }
+                        ],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-2",
+                        "stage_index": 2,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": "自主执行",
+                        "status": "进行中",
+                        "stage_goal": "inspect the second stage",
+                        "tool_round_budget": 3,
+                        "tool_rounds_used": 0,
+                    },
+                ],
+            }
+        }
+    )
     original = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
-        {"role": "assistant", "content": "plain assistant summary"},
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": "tool output"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage one raw detail"},
+        {
+            "role": "tool",
+            "name": "content",
+            "tool_call_id": "call-stage-archive",
+            "content": "archived stage history excerpt",
+            "ephemeral": True,
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-2",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "current stage assistant detail"},
+        {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": "current stage tool output"},
     ]
 
     prepared = loop._prepare_messages(original, runtime_context={"task_id": "task-1", "node_id": "node-1"})
 
-    assert prepared == original
-    assert all("[[G3KU_COMPACT_HISTORY_V1]]" not in str(item.get("content") or "") for item in prepared)
+    assert prepared[0] == original[0]
+    assert prepared[1] == original[1]
+    compact_blocks = [item for item in prepared if str(item.get("content") or "").startswith("[G3KU_STAGE_COMPACT_V1]")]
+    assert len(compact_blocks) == 1
+    compact_payload = json.loads(str(compact_blocks[0]["content"]).split("\n", 1)[1])
+    assert compact_payload["completed_stage_summary"] == "finished stage one"
+    assert compact_payload["key_refs"] == [{"ref": "artifact:artifact:stage-one", "note": "stage one evidence summary"}]
+    rendered_contents = [str(item.get("content") or "") for item in prepared]
+    assert "stage one raw detail" not in rendered_contents
+    assert "archived stage history excerpt" not in rendered_contents
+    assert "current stage assistant detail" in rendered_contents
+    assert "current stage tool output" in rendered_contents
 
 
 @pytest.mark.asyncio
-async def test_react_loop_run_keeps_long_history_uncompacted() -> None:
-    calls: list[list[dict[str, object]]] = []
+async def test_execute_tool_calls_marks_stage_history_archive_reads_ephemeral() -> None:
+    class _ArchiveTool(Tool):
+        @property
+        def name(self) -> str:
+            return "content"
 
-    class _Backend:
-        async def chat(self, **kwargs):
-            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call:final",
-                        name="submit_final_result",
-                        arguments={
-                            "status": "failed",
-                            "delivery_status": "blocked",
-                            "summary": "done",
-                            "answer": "",
-                            "evidence": [],
-                            "remaining_work": [],
-                            "blocking_reason": "done",
-                        },
-                    )
-                ],
-                finish_reason="tool_calls",
-                usage={"input_tokens": 8, "output_tokens": 3},
-            )
+        @property
+        def description(self) -> str:
+            return "open archived stage history"
 
-    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
-    messages = [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
-    ]
-    for index in range(40):
-        messages.append({"role": "assistant", "content": f"assistant-{index}"})
-        messages.append({"role": "tool", "name": "filesystem", "tool_call_id": f"call-{index}", "content": f"tool-{index}"})
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}, "required": []}
 
-    result = await loop.run(
-        task=SimpleNamespace(task_id='task-1'),
-        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
-        messages=messages,
-        tools={"submit_final_result": _submit_final_result_tool()},
-        model_refs=['fake'],
-        runtime_context={'task_id': 'task-1', 'node_id': 'node-1'},
-        max_iterations=2,
+        async def execute(self, **kwargs):
+            _ = kwargs
+            return {
+                "ok": True,
+                "ref": "artifact:artifact:archive",
+                "handle": {
+                    "ref": "artifact:artifact:archive",
+                    "source_kind": "stage_history_archive",
+                },
+                "excerpt": "archived stage body",
+            }
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    results = await loop._execute_tool_calls(
+        task=SimpleNamespace(task_id="task-1"),
+        node=SimpleNamespace(node_id="node-1", depth=0, node_kind="execution"),
+        response_tool_calls=[ToolCallRequest(id="call-archive", name="content", arguments={})],
+        tools={"content": _ArchiveTool()},
+        allowed_content_refs=[],
+        runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
     )
 
-    assert result.status == "failed"
-    assert len(calls) == 1
-    sent_messages = calls[0]
-    assert len(sent_messages) == len(messages)
-    assert all("[[G3KU_COMPACT_HISTORY_V1]]" not in str(item.get("content") or "") for item in sent_messages)
+    assert len(results) == 1
+    assert results[0]["tool_message"]["ephemeral"] is True
+    assert results[0]["live_state"]["ephemeral"] is True
 
 
 @pytest.mark.asyncio

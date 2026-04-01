@@ -197,11 +197,13 @@ class NodeRunner:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             tools['submit_next_stage'] = SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget: self._submit_next_stage(
+                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs: self._submit_next_stage(
                     task_id=task.task_id,
                     node_id=node.node_id,
                     stage_goal=stage_goal,
                     tool_round_budget=tool_round_budget,
+                    completed_stage_summary=completed_stage_summary,
+                    key_refs=key_refs,
                 )
             )
             tools['submit_final_result'] = SubmitFinalResultTool(
@@ -1293,16 +1295,21 @@ class NodeRunner:
         node_id: str,
         stage_goal: str,
         tool_round_budget: int,
+        completed_stage_summary: str,
+        key_refs: list[dict[str, Any]],
     ) -> dict[str, Any]:
         stage = self._log_service.submit_next_stage(
             task_id,
             node_id,
             stage_goal=str(stage_goal or '').strip(),
             tool_round_budget=int(tool_round_budget or 0),
+            completed_stage_summary=str(completed_stage_summary or '').strip(),
+            key_refs=[dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
         )
         return {
             'stage_id': str(stage.get('stage_id') or ''),
             'stage_index': int(stage.get('stage_index') or 0),
+            'stage_kind': str(stage.get('stage_kind') or 'normal'),
             'mode': str(stage.get('mode') or ''),
             'status': str(stage.get('status') or ''),
             'stage_goal': str(stage.get('stage_goal') or ''),

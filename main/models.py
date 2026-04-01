@@ -92,12 +92,24 @@ class ExecutionStageRound(Model):
     budget_counted: bool = False
 
 
+class ExecutionStageKeyRef(Model):
+    ref: str = ''
+    note: str = ''
+
+
 class ExecutionStageRecord(Model):
     stage_id: str = ''
     stage_index: int = 0
+    stage_kind: Literal['normal', 'compression'] = 'normal'
+    system_generated: bool = False
     mode: Literal['自主执行', '包含派生'] = '自主执行'
     status: Literal['进行中', '完成', '失败'] = '进行中'
     stage_goal: str = ''
+    completed_stage_summary: str = ''
+    key_refs: list[ExecutionStageKeyRef] = Field(default_factory=list)
+    archive_ref: str = ''
+    archive_stage_index_start: int = 0
+    archive_stage_index_end: int = 0
     tool_round_budget: int = 0
     tool_rounds_used: int = 0
     created_at: str = ''
@@ -289,6 +301,13 @@ def normalize_execution_stage_metadata(value: Any) -> ExecutionStageState:
                 update={
                     'tool_round_budget': tool_round_budget,
                     'tool_rounds_used': tool_rounds_used,
+                    'archive_stage_index_start': max(0, int(stage.archive_stage_index_start or 0)),
+                    'archive_stage_index_end': max(0, int(stage.archive_stage_index_end or 0)),
+                    'completed_stage_summary': str(stage.completed_stage_summary or ''),
+                    'key_refs': [
+                        ExecutionStageKeyRef.model_validate(key_ref)
+                        for key_ref in list(stage.key_refs or [])
+                    ],
                 }
             )
         )
