@@ -39,7 +39,6 @@ from g3ku.llm_config.runtime_resolver import (
     resolve_memory_embedding_target,
     resolve_memory_rerank_target,
 )
-from g3ku.runtime.context.summarizer import summarize_l0, truncate_by_tokens
 from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.security.bootstrap import apply_config_secret_entries, get_bootstrap_security_service
 from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_status
@@ -612,21 +611,6 @@ class RetrievalTrace:
     timestamp: str = field(default_factory=_now_iso)
 
 
-@dataclass(slots=True)
-class CommitArtifact:
-    """Artifacts created by one session commit run."""
-
-    archive_id: str
-    archive_uri: str
-    overview_uri: str
-    abstract_uri: str
-    summary_version: int
-    extracted_count: int
-    merged_count: int
-    skipped_count: int
-    timestamp: str = field(default_factory=_now_iso)
-
-
 def _response_text(value: Any) -> str:
     raw = getattr(value, "content", value)
     if isinstance(raw, list):
@@ -640,134 +624,6 @@ def _response_text(value: Any) -> str:
                     parts.append(text_part)
         raw = "\n".join(parts)
     return str(raw or "").strip()
-
-
-def _format_commit_messages(messages: list[dict[str, Any]], *, max_lines: int = 80) -> str:
-    lines: list[str] = []
-    for msg in list(messages or []):
-        role = str(msg.get("role", "")).strip().lower()
-        content = msg.get("content")
-        if role not in {"user", "assistant"} or not isinstance(content, str):
-            continue
-        text = " ".join(content.split()).strip()
-        if not text or text.startswith("[Runtime Context"):
-            continue
-        lines.append(f"[{role}]: {text}")
-        if len(lines) >= max(1, int(max_lines or 80)):
-            break
-    return "\n".join(lines)
-
-
-def _fallback_archive_overview(messages: list[dict[str, Any]], latest_archive_overview: str = "") -> str:
-    user_lines: list[str] = []
-    assistant_lines: list[str] = []
-    for msg in list(messages or []):
-        role = str(msg.get("role", "")).strip().lower()
-        content = msg.get("content")
-        if not isinstance(content, str):
-            continue
-        text = " ".join(content.split()).strip()
-        if not text or text.startswith("[Runtime Context"):
-            continue
-        if role == "user":
-            user_lines.append(text)
-        elif role == "assistant":
-            assistant_lines.append(text)
-    carried_forward = summarize_l0(latest_archive_overview, limit=120) if latest_archive_overview else "None"
-    new_info = " | ".join(user_lines[-3:] or assistant_lines[-2:])[:360]
-    key_messages = "\n".join(f"- {truncate_by_tokens(item, 48)}" for item in user_lines[-3:])
-    next_step = truncate_by_tokens(assistant_lines[-1] if assistant_lines else new_info, 40)
-    return "\n".join(
-        [
-            "# Session Archive Overview",
-            "",
-            f"**One-line overview**: {summarize_l0(new_info or next_step, limit=160)}",
-            "",
-            "## Historical Context Carried Forward",
-            carried_forward or "None",
-            "",
-            "## New Information In This Archive",
-            new_info or "None",
-            "",
-            "## Key User Messages",
-            key_messages or "- None",
-            "",
-            "## Open Loops",
-            "- None",
-            "",
-            "## Next Step",
-            f"1. {next_step or 'Continue from the latest user intent.'}",
-        ]
-    ).strip()
-
-
-async def _generate_archive_overview_with_llm(
-    messages: list[dict[str, Any]],
-    *,
-    latest_archive_overview: str = "",
-) -> str:
-    transcript = _format_commit_messages(messages)
-    if not transcript:
-        return ""
-    try:
-        from g3ku.config.live_runtime import get_runtime_config
-        from g3ku.providers.chatmodels import build_chat_model
-
-        config, _revision, _changed = get_runtime_config(force=False)
-        model = build_chat_model(config, role="ceo")
-        prompt = (
-            "You are generating a continuity-aware archive overview for an agent session.\n"
-            "Write markdown only.\n"
-            "Use these sections exactly:\n"
-            "# Session Archive Overview\n"
-            "**One-line overview**: ...\n"
-            "## Historical Context Carried Forward\n"
-            "## New Information In This Archive\n"
-            "## Key User Messages\n"
-            "## Open Loops\n"
-            "## Next Step\n"
-            "Do not return JSON.\n"
-        )
-        body = (
-            f"Latest archive overview:\n{truncate_by_tokens(latest_archive_overview, 320)}\n\n"
-            f"Current archive transcript:\n{truncate_by_tokens(transcript, 1200)}"
-        )
-        response = await model.ainvoke(
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": body},
-            ]
-        )
-        text = _response_text(response)
-        if text:
-            return text
-    except Exception:
-        pass
-    return _fallback_archive_overview(messages, latest_archive_overview=latest_archive_overview)
-
-
-def _extract_archive_abstract_from_overview(overview: str) -> str:
-    text = str(overview or "").strip()
-    if not text:
-        return ""
-    for line in text.splitlines():
-        normalized = str(line or "").strip()
-        if normalized.lower().startswith("**one-line overview**:"):
-            return normalized.split(":", 1)[1].strip()
-    for line in text.splitlines():
-        normalized = str(line or "").strip()
-        if normalized and not normalized.startswith("#"):
-            return normalized
-    return text[:160].strip()
-
-
-def _session_archive_safe_key(session_key: str, channel: str, chat_id: str) -> str:
-    return (
-        str(session_key or f"{channel}:{chat_id}")
-        .replace("/", "_")
-        .replace("\\", "_")
-        .replace(":", "_")
-    )
 
 
 @dataclass(slots=True)
@@ -1860,11 +1716,8 @@ class _RagMemoryBackend:
         self.audit_file = mem_dir / "audit.jsonl"
         self.pending_file = mem_dir / "pending_facts.jsonl"
         self.trace_file = mem_dir / "retrieval_trace.jsonl"
-        self.context_assembly_trace_file = mem_dir / "context_assembly.jsonl"
         self.cost_file = mem_dir / "cost_metrics.json"
-        self.archive_dir = ensure_dir(mem_dir / "archives")
         self.context_store_dir = ensure_dir(mem_dir / "context_store")
-        self.commit_summary_dir = ensure_dir(mem_dir / "commit_summaries")
         self._cost_metrics = self._load_cost_metrics()
 
         sqlite_path = resolve_path_in_workspace(config.store.sqlite_path, self.workspace)
@@ -1974,29 +1827,8 @@ class _RagMemoryBackend:
             batch_size=getattr(self.store, 'embedding_batch_size', 32),
         )
 
-    async def write_context_assembly_trace(
-        self,
-        *,
-        session_key: str | None,
-        channel: str | None,
-        chat_id: str | None,
-        payload: dict[str, Any],
-    ) -> None:
-        event = {
-            'timestamp': _now_iso(),
-            'session_key': str(session_key or ''),
-            'channel': str(channel or ''),
-            'chat_id': str(chat_id or ''),
-            'payload': payload,
-        }
-        async with self._trace_lock:
-            await asyncio.to_thread(self._append_jsonl, self.context_assembly_trace_file, event)
-
     async def read_trace_file(self, *, trace_kind: str, limit: int = 20) -> list[dict[str, Any]]:
-        if trace_kind == 'context_assembly':
-            path = self.context_assembly_trace_file
-        else:
-            path = self.trace_file
+        path = self.trace_file
         if not path.exists():
             return []
 
@@ -3344,184 +3176,6 @@ class _RagMemoryBackend:
             await asyncio.to_thread(self.pending_file.write_text, content, "utf-8")
         return True
 
-    async def commit_session(
-        self,
-        *,
-        session_key: str,
-        channel: str,
-        chat_id: str,
-        messages: list[dict[str, Any]],
-        reason: str = "turn_trigger",
-        latest_archive_overview: str = "",
-    ) -> CommitArtifact:
-        archive_id = uuid.uuid4().hex[:12]
-        if not messages:
-            return CommitArtifact(
-                archive_id=archive_id,
-                archive_uri="",
-                overview_uri="",
-                abstract_uri="",
-                summary_version=2,
-                extracted_count=0,
-                merged_count=0,
-                skipped_count=0,
-            )
-
-        commit_time = _now_iso()
-        channel_safe = str(channel or "unknown")
-        chat_safe = str(chat_id or "unknown")
-        session_safe = _session_archive_safe_key(session_key, channel_safe, chat_safe)
-        archive_path = ensure_dir(self.archive_dir / session_safe) / f"{archive_id}.jsonl"
-        lines = [json.dumps(m, ensure_ascii=False) for m in messages]
-        await asyncio.to_thread(archive_path.write_text, ("\n".join(lines) + "\n"), "utf-8")
-
-        summary_dir = ensure_dir(self.commit_summary_dir / session_safe)
-        overview_path = summary_dir / f"{archive_id}.overview.md"
-        abstract_path = summary_dir / f"{archive_id}.abstract.md"
-
-        user_lines: list[str] = []
-        assistant_lines: list[str] = []
-        for msg in messages:
-            role = str(msg.get("role", "")).strip().lower()
-            content = msg.get("content")
-            if not isinstance(content, str):
-                continue
-            text = " ".join(content.split())
-            if not text or text.startswith("[Runtime Context"):
-                continue
-            if role == "user":
-                user_lines.append(text)
-            elif role == "assistant":
-                assistant_lines.append(text)
-
-        overview_text = await _generate_archive_overview_with_llm(
-            messages,
-            latest_archive_overview=latest_archive_overview,
-        )
-        abstract_text = _extract_archive_abstract_from_overview(overview_text)
-        await asyncio.to_thread(overview_path.write_text, overview_text, "utf-8")
-        await asyncio.to_thread(abstract_path.write_text, abstract_text, "utf-8")
-
-        extracted: list[tuple[str, list[str], float]] = []
-        category_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
-            ("profile", ("my name is", "我是", "我叫", "my role", "我的角色")),
-            ("preferences", ("prefer", "喜欢", "偏好", "不喜欢", "i like")),
-            ("entities", ("team", "公司", "project", "项目", "repo", "仓库")),
-            ("events", ("deadline", "due", "截至", "截止", "schedule", "日程")),
-            ("cases", ("issue", "bug", "问题", "案例", "故障")),
-            ("patterns", ("always", "never", "通常", "经常", "习惯")),
-        )
-        seen_text_hash: set[str] = set()
-        for text in user_lines[-20:]:
-            lower = text.lower()
-            tags = [name for name, markers in category_rules if any(m in lower or m in text for m in markers)]
-            if not tags:
-                continue
-            text_hash = self._stable_text_hash(text)
-            if text_hash in seen_text_hash:
-                continue
-            seen_text_hash.add(text_hash)
-            extracted.append((text, tags, self._score_fact_confidence(text)))
-
-        namespace = self.namespace_for(channel=channel, chat_id=chat_id)
-        created = 0
-        merged = 0
-        skipped = 0
-        for text, tags, conf in extracted:
-            existing = await asyncio.to_thread(
-                self.store.search_context_v2,
-                namespace,
-                query=text,
-                limit=3,
-                context_type="memory",
-            )
-            duplicate = False
-            for record, _score in existing:
-                if self._stable_text_hash(record.l1) == self._stable_text_hash(text):
-                    duplicate = True
-                    break
-            if duplicate:
-                skipped += 1
-                continue
-
-            record_id = uuid.uuid4().hex[:16]
-            l2_ref = None
-            if self._feature_enabled("split_store"):
-                l2_ref = await self._write_l2_payload(record_id=record_id, content=text)
-            record = ContextRecordV2(
-                record_id=record_id,
-                context_type="memory",
-                uri=self._context_uri(
-                    context_type="memory",
-                    channel=channel_safe,
-                    chat_id=chat_safe,
-                    record_id=record_id,
-                ),
-                l0=self._l0_summary(text),
-                l1=self._l1_summary(text),
-                l2_ref=l2_ref,
-                tags=tags + [f"commit:{reason}"],
-                source="commit",
-                confidence=conf,
-                session_key=session_key,
-                channel=channel_safe,
-                chat_id=chat_safe,
-            )
-            await asyncio.to_thread(self.store.put_context_v2, namespace, record)
-            created += 1
-
-            if tags:
-                for tag in tags[:2]:
-                    try:
-                        await asyncio.to_thread(
-                            self.store.add_context_relation_v2,
-                            from_uri=record.uri,
-                            to_uri=f"g3ku://taxonomy/{tag}",
-                            relation_type="tagged_as",
-                            source="commit",
-                            weight=1.0,
-                        )
-                        merged += 1
-                    except Exception:
-                        logger.debug("Skip relation write for commit record {}", record.record_id)
-
-        await self._audit(
-            AuditEvent(
-                action="commit",
-                reason=reason,
-                actor="memory_manager",
-                session_key=session_key,
-                trace_id=archive_id,
-                after={
-                    "archive_id": archive_id,
-                    "archive_uri": str(archive_path),
-                    "overview_uri": str(overview_path),
-                    "abstract_uri": str(abstract_path),
-                    "summary_version": 2,
-                    "extracted_count": len(extracted),
-                    "created_count": created,
-                    "merged_count": merged,
-                    "skipped_count": skipped,
-                    "commit_time": commit_time,
-                },
-            )
-        )
-        await self._bump_cost_metrics(
-            commit_calls=1,
-            token_in=self._estimate_tokens("\n".join(user_lines[-20:])),
-            token_out=self._estimate_tokens(overview_text),
-        )
-        return CommitArtifact(
-            archive_id=archive_id,
-            archive_uri=str(archive_path),
-            overview_uri=str(overview_path),
-            abstract_uri=str(abstract_path),
-            summary_version=2,
-            extracted_count=created,
-            merged_count=merged,
-            skipped_count=skipped,
-        )
-
     async def migrate_v2(self, *, dry_run: bool = False, limit: int = 100000) -> dict[str, Any]:
         all_items = await asyncio.to_thread(self.store.search, (), query=None, limit=limit, offset=0)
         migrated = 0
@@ -3669,13 +3323,10 @@ class MemoryManager:
         self.workspace = Path(workspace).expanduser().resolve()
         self.config = config
         self.mem_dir = ensure_dir(self.workspace / "memory")
-        self.archive_dir = self.mem_dir / "archives"
-        self.commit_summary_dir = self.mem_dir / "commit_summaries"
         self.context_store_dir = self.mem_dir / "context_store"
         self.pending_file = self.mem_dir / "pending_facts.jsonl"
         self.audit_file = self.mem_dir / "audit.jsonl"
         self.trace_file = self.mem_dir / "retrieval_trace.jsonl"
-        self.context_assembly_trace_file = self.mem_dir / "context_assembly.jsonl"
         self.cost_file = self.mem_dir / "cost_metrics.json"
         self.memory_file = self.mem_dir / "MEMORY.md"
         self.history_file = self.mem_dir / "HISTORY.md"
@@ -3754,8 +3405,6 @@ class MemoryManager:
         }
 
     def _ensure_runtime_layout(self) -> None:
-        ensure_dir(self.archive_dir)
-        ensure_dir(self.commit_summary_dir)
         ensure_dir(self.context_store_dir)
         self._ensure_managed_files()
         if not self.journal_file.exists():
@@ -3787,7 +3436,7 @@ class MemoryManager:
             if cp_cfg is not None
             else self.mem_dir / "checkpoints.sqlite3"
         )
-        for directory in (self.archive_dir, self.commit_summary_dir, self.context_store_dir, qdrant_path):
+        for directory in (self.context_store_dir, qdrant_path):
             try:
                 shutil.rmtree(directory, ignore_errors=True)
             except Exception:
@@ -3796,7 +3445,6 @@ class MemoryManager:
             self.pending_file,
             self.audit_file,
             self.trace_file,
-            self.context_assembly_trace_file,
             self.cost_file,
             self.memory_file,
             self.history_file,
@@ -4278,26 +3926,8 @@ class MemoryManager:
             self._mark_backend_failure(exc)
             return {"created": 0, "updated": 0, "removed": 0}
 
-    async def write_context_assembly_trace(
-        self,
-        *,
-        session_key: str | None,
-        channel: str | None,
-        chat_id: str | None,
-        payload: dict[str, Any],
-    ) -> None:
-        event = {
-            "timestamp": _now_iso(),
-            "session_key": str(session_key or ""),
-            "channel": str(channel or ""),
-            "chat_id": str(chat_id or ""),
-            "payload": payload,
-        }
-        async with self._trace_lock:
-            await asyncio.to_thread(self._append_jsonl, self.context_assembly_trace_file, event)
-
     async def read_trace_file(self, *, trace_kind: str, limit: int = 20) -> list[dict[str, Any]]:
-        path = self.context_assembly_trace_file if trace_kind == "context_assembly" else self.trace_file
+        path = self.trace_file
         if not path.exists():
             return []
 
@@ -4870,134 +4500,6 @@ class MemoryManager:
         async with self._io_lock:
             await asyncio.to_thread(self.pending_file.write_text, content, "utf-8")
         return True
-
-    async def commit_session(
-        self,
-        *,
-        session_key: str,
-        channel: str,
-        chat_id: str,
-        messages: list[dict[str, Any]],
-        reason: str = "turn_trigger",
-        latest_archive_overview: str = "",
-    ) -> CommitArtifact:
-        archive_id = uuid.uuid4().hex[:12]
-        if not messages:
-            return CommitArtifact(
-                archive_id=archive_id,
-                archive_uri="",
-                overview_uri="",
-                abstract_uri="",
-                summary_version=2,
-                extracted_count=0,
-                merged_count=0,
-                skipped_count=0,
-            )
-
-        channel_safe, chat_safe = self._safe_channel_chat(session_key, channel, chat_id)
-        commit_time = _now_iso()
-        session_safe = _session_archive_safe_key(session_key, channel_safe, chat_safe)
-        archive_path = ensure_dir(self.archive_dir / session_safe) / f"{archive_id}.jsonl"
-        lines = [json.dumps(m, ensure_ascii=False) for m in messages]
-        await asyncio.to_thread(archive_path.write_text, ("\n".join(lines) + "\n"), "utf-8")
-
-        summary_dir = ensure_dir(self.commit_summary_dir / session_safe)
-        overview_path = summary_dir / f"{archive_id}.overview.md"
-        abstract_path = summary_dir / f"{archive_id}.abstract.md"
-
-        user_lines: list[str] = []
-        assistant_lines: list[str] = []
-        for msg in messages:
-            role = str(msg.get("role", "")).strip().lower()
-            content = msg.get("content")
-            if not isinstance(content, str):
-                continue
-            text = " ".join(content.split())
-            if not text or text.startswith("[Runtime Context"):
-                continue
-            if role == "user":
-                user_lines.append(text)
-            elif role == "assistant":
-                assistant_lines.append(text)
-
-        overview_text = await _generate_archive_overview_with_llm(
-            messages,
-            latest_archive_overview=latest_archive_overview,
-        )
-        abstract_text = _extract_archive_abstract_from_overview(overview_text)
-        await asyncio.to_thread(overview_path.write_text, overview_text, "utf-8")
-        await asyncio.to_thread(abstract_path.write_text, abstract_text, "utf-8")
-
-        category_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
-            ("profile", ("my name is", "我是", "我叫", "my role", "我的角色")),
-            ("preferences", ("prefer", "喜欢", "偏好", "不喜欢", "i like")),
-            ("entities", ("team", "公司", "project", "项目", "repo", "仓库")),
-            ("events", ("deadline", "due", "截至", "截止", "schedule", "日程")),
-            ("cases", ("issue", "bug", "问题", "案例", "故障")),
-            ("patterns", ("always", "never", "通常", "经常", "习惯")),
-        )
-        extracted: list[tuple[str, list[str], float]] = []
-        seen_text_hash: set[str] = set()
-        for text in user_lines[-20:]:
-            lower = text.lower()
-            tags = [name for name, markers in category_rules if any(m in lower or m in text for m in markers)]
-            if not tags:
-                continue
-            text_hash = self._stable_text_hash(text)
-            if text_hash in seen_text_hash:
-                continue
-            seen_text_hash.add(text_hash)
-            extracted.append((text, tags, self._score_fact_confidence(text)))
-
-        rows_to_append: list[dict[str, Any]] = []
-        for text, tags, conf in extracted:
-            rows_to_append.append(
-                {
-                    "record_id": self._next_record_id(),
-                    "text": text,
-                    "source": "commit",
-                    "confidence": conf,
-                    "tags": tags + [f"commit:{reason}"],
-                    "session_key": session_key,
-                    "channel": channel_safe,
-                    "chat_id": chat_safe,
-                    "created_at": commit_time,
-                    "updated_at": commit_time,
-                }
-            )
-        events = await self._append_memory_events(rows=rows_to_append)
-
-        await self._append_audit(
-            AuditEvent(
-                action="commit",
-                reason=reason,
-                actor="memory_manager",
-                session_key=session_key,
-                trace_id=archive_id,
-                after={
-                    "archive_id": archive_id,
-                    "archive_uri": str(archive_path),
-                    "overview_uri": str(overview_path),
-                    "abstract_uri": str(abstract_path),
-                    "summary_version": 2,
-                    "extracted_count": len(extracted),
-                    "created_count": len(events),
-                    "merged_count": 0,
-                    "skipped_count": max(0, len(extracted) - len(events)),
-                    "commit_time": commit_time,
-                },
-            )
-        )
-        return CommitArtifact(
-            archive_id=archive_id,
-            archive_uri=str(archive_path),
-            overview_uri=str(overview_path),
-            abstract_uri=str(abstract_path),
-            summary_version=2,
-            extracted_count=len(events),
-            merged_count=0,
-            skipped_count=max(0, len(extracted) - len(events)),
-        )
 
     async def migrate_v2(self, *, dry_run: bool = False, limit: int = 100000) -> dict[str, Any]:
         backend = await self._ensure_backend(force_retry=True)

@@ -11,8 +11,8 @@ def ensure_chat_model(
     provider: Any,
     *,
     default_model: str,
-    default_temperature: float,
-    default_max_tokens: int,
+    default_temperature: float | None,
+    default_max_tokens: int | None,
     default_reasoning_effort: str | None,
 ) -> BaseChatModel:
     """Coerce legacy g3ku providers into BaseChatModel when needed."""

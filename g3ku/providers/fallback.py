@@ -202,8 +202,8 @@ class FallbackProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
@@ -244,12 +244,32 @@ class FallbackProvider(LLMProvider):
                         raise exhausted from exc
                     raise
 
-                effective_max_tokens = int(max_tokens)
-                if base_target.max_tokens_limit is not None:
-                    effective_max_tokens = max(1, min(effective_max_tokens, int(base_target.max_tokens_limit)))
-
-                effective_temperature = float(base_target.default_temperature if base_target.default_temperature is not None else temperature)
-                effective_reasoning = str(base_target.default_reasoning_effort) if base_target.default_reasoning_effort is not None else reasoning_effort
+                target_parameters = dict(getattr(base_target, "model_parameters", {}) or {})
+                if target_parameters.get("max_tokens") is None and getattr(base_target, "max_tokens_limit", None) is not None:
+                    target_parameters["max_tokens"] = getattr(base_target, "max_tokens_limit", None)
+                if target_parameters.get("temperature") is None and getattr(base_target, "default_temperature", None) is not None:
+                    target_parameters["temperature"] = getattr(base_target, "default_temperature", None)
+                if not str(target_parameters.get("reasoning_effort") or "").strip() and getattr(base_target, "default_reasoning_effort", None) is not None:
+                    target_parameters["reasoning_effort"] = getattr(base_target, "default_reasoning_effort", None)
+                effective_max_tokens = (
+                    max(1, int(max_tokens))
+                    if max_tokens is not None
+                    else max(1, int(target_parameters["max_tokens"]))
+                    if target_parameters.get("max_tokens") is not None
+                    else None
+                )
+                effective_temperature = (
+                    float(temperature)
+                    if temperature is not None
+                    else float(target_parameters["temperature"])
+                    if target_parameters.get("temperature") is not None
+                    else None
+                )
+                effective_reasoning = (
+                    str(reasoning_effort).strip()
+                    if reasoning_effort is not None and str(reasoning_effort).strip()
+                    else str(target_parameters.get("reasoning_effort") or "").strip() or None
+                )
                 retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
                 move_to_next_model = False
 
@@ -261,16 +281,22 @@ class FallbackProvider(LLMProvider):
                             model_key,
                             api_key_index=slot.key_index,
                         )
+                        provider_kwargs: dict[str, Any] = {
+                            "messages": messages,
+                            "tools": tools,
+                            "model": target.model_id,
+                            "tool_choice": tool_choice,
+                            "parallel_tool_calls": parallel_tool_calls,
+                            "prompt_cache_key": prompt_cache_key,
+                        }
+                        if effective_max_tokens is not None:
+                            provider_kwargs["max_tokens"] = effective_max_tokens
+                        if effective_temperature is not None:
+                            provider_kwargs["temperature"] = effective_temperature
+                        if effective_reasoning:
+                            provider_kwargs["reasoning_effort"] = effective_reasoning
                         response = await target.provider.chat(
-                            messages=messages,
-                            tools=tools,
-                            model=target.model_id,
-                            max_tokens=effective_max_tokens,
-                            temperature=effective_temperature,
-                            reasoning_effort=effective_reasoning,
-                            tool_choice=tool_choice,
-                            parallel_tool_calls=parallel_tool_calls,
-                            prompt_cache_key=prompt_cache_key,
+                            **provider_kwargs,
                         )
                     except Exception as exc:
                         last_error = round_last_error = exc

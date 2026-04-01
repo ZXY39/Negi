@@ -197,8 +197,6 @@ class ReActToolLoop:
                 messages=request_messages,
                 tools=tool_schemas or None,
                 model_refs=current_model_refs,
-                max_tokens=1200,
-                temperature=0.2,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
                 prompt_cache_key=turn_prompt_cache_key,
             )

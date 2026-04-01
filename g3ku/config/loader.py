@@ -327,9 +327,16 @@ def _normalize_inline_model_bindings(cfg: Config) -> bool:
             ).strip(),
             default_model=model_id,
             parameters={
-                "timeout_s": 8,
-                "temperature": float(item.temperature),
-                "max_tokens": int(item.max_tokens),
+                **(
+                    {"temperature": float(item.temperature)}
+                    if item.temperature is not None
+                    else {}
+                ),
+                **(
+                    {"max_tokens": int(item.max_tokens)}
+                    if item.max_tokens is not None
+                    else {}
+                ),
                 **(
                     {"reasoning_effort": str(item.reasoning_effort).strip()}
                     if item.reasoning_effort is not None and str(item.reasoning_effort).strip()

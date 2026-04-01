@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Protocol
+from typing import Any, Protocol
 
 from g3ku.config.schema import Config
 from g3ku.providers.provider_factory import build_provider_from_model_key
@@ -32,8 +32,8 @@ class ChatBackend(Protocol):
         messages: list[dict],
         tools: list[dict] | None,
         model_refs: list[str],
-        max_tokens: int = 1200,
-        temperature: float = 0.2,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         reasoning_effort: str | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
@@ -126,6 +126,39 @@ def _message_stats(messages: list[dict]) -> tuple[int, int]:
     return len(message_list), len(payload)
 
 
+def _resolve_model_request_parameters(
+    target,
+    *,
+    max_tokens: int | None,
+    temperature: float | None,
+    reasoning_effort: str | None,
+) -> dict[str, Any]:
+    configured = dict(getattr(target, 'model_parameters', {}) or {})
+    if configured.get('max_tokens') is None and getattr(target, 'max_tokens_limit', None) is not None:
+        configured['max_tokens'] = getattr(target, 'max_tokens_limit', None)
+    if configured.get('temperature') is None and getattr(target, 'default_temperature', None) is not None:
+        configured['temperature'] = getattr(target, 'default_temperature', None)
+    if not str(configured.get('reasoning_effort') or '').strip() and getattr(target, 'default_reasoning_effort', None) is not None:
+        configured['reasoning_effort'] = getattr(target, 'default_reasoning_effort', None)
+    resolved: dict[str, Any] = {}
+    if max_tokens is not None:
+        resolved['max_tokens'] = max(1, int(max_tokens))
+    elif configured.get('max_tokens') is not None:
+        resolved['max_tokens'] = max(1, int(configured['max_tokens']))
+    if temperature is not None:
+        resolved['temperature'] = float(temperature)
+    elif configured.get('temperature') is not None:
+        resolved['temperature'] = float(configured['temperature'])
+    explicit_reasoning = str(reasoning_effort or '').strip()
+    if explicit_reasoning:
+        resolved['reasoning_effort'] = explicit_reasoning
+    else:
+        configured_reasoning = str(configured.get('reasoning_effort') or '').strip()
+        if configured_reasoning:
+            resolved['reasoning_effort'] = configured_reasoning
+    return resolved
+
+
 class ConfigChatBackend:
     def __init__(self, config: Config):
         self._config = config
@@ -136,8 +169,8 @@ class ConfigChatBackend:
         messages: list[dict],
         tools: list[dict] | None,
         model_refs: list[str],
-        max_tokens: int = 1200,
-        temperature: float = 0.2,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         reasoning_effort: str | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
@@ -179,15 +212,22 @@ class ConfigChatBackend:
                             api_key_index=slot.key_index,
                         )
                         response = await target.provider.chat(
-                            messages=request_messages,
-                            tools=tools,
-                            model=target.model_id,
-                            max_tokens=max(1, min(int(max_tokens), int(target.max_tokens_limit))) if target.max_tokens_limit else max(1, int(max_tokens)),
-                            temperature=float(target.default_temperature) if target.default_temperature is not None else float(temperature),
-                            reasoning_effort=target.default_reasoning_effort or reasoning_effort,
-                            tool_choice='auto',
-                            parallel_tool_calls=parallel_tool_calls,
-                            prompt_cache_key=stable_prompt_cache_key,
+                            **{
+                                **{
+                                    'messages': request_messages,
+                                    'tools': tools,
+                                    'model': target.model_id,
+                                    'tool_choice': 'auto',
+                                    'parallel_tool_calls': parallel_tool_calls,
+                                    'prompt_cache_key': stable_prompt_cache_key,
+                                },
+                                **_resolve_model_request_parameters(
+                                    target,
+                                    max_tokens=max_tokens,
+                                    temperature=temperature,
+                                    reasoning_effort=reasoning_effort,
+                                ),
+                            },
                         )
                     except Exception as exc:
                         last_error = round_last_error = exc

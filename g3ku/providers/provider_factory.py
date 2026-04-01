@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from g3ku.config.schema import Config
 from g3ku.llm_config.enums import ProtocolAdapter
@@ -19,6 +20,7 @@ class ProviderTarget:
     provider_id: str
     model_id: str
     provider: LLMProvider
+    model_parameters: dict[str, Any] = field(default_factory=dict)
     max_tokens_limit: int | None = None
     default_temperature: float | None = None
     default_reasoning_effort: str | None = None
@@ -103,6 +105,7 @@ def build_provider_from_model_key(
     managed = config.get_model_runtime_profile(provider_ref)
     if managed is not None and not managed.enabled:
         raise ValueError(f'Managed model {provider_ref} is disabled')
+    model_parameters = dict(getattr(target, 'model_parameters', {}) or {})
     max_tokens_limit = target.max_tokens_limit
     default_temperature = target.default_temperature
     default_reasoning_effort = target.default_reasoning_effort
@@ -123,11 +126,11 @@ def build_provider_from_model_key(
             default_model=model_id,
             extra_headers=extra_headers,
         )
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
 
     if provider_id == 'openai_codex':
         provider = OpenAICodexProvider(default_model=f'openai_codex/{model_id}')
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
 
     if provider_id == 'custom' or _uses_openai_direct_chat_protocol(target):
         provider = CustomProvider(
@@ -141,6 +144,7 @@ def build_provider_from_model_key(
             provider_id=provider_id,
             model_id=model_id,
             provider=provider,
+            model_parameters=model_parameters,
             max_tokens_limit=max_tokens_limit,
             default_temperature=default_temperature,
             default_reasoning_effort=default_reasoning_effort,
@@ -157,4 +161,4 @@ def build_provider_from_model_key(
         extra_headers=extra_headers,
         provider_name=provider_id,
     )
-    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
+    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)

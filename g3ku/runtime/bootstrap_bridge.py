@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from loguru import logger
 
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
-from g3ku.agent.session_commit import SessionCommitService
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.tool_settings import (
     MemoryRuntimeSettings,
@@ -192,7 +191,6 @@ class RuntimeBootstrapBridge:
         self._reset_memory_runtime()
         fingerprints['memory_runtime'] = fingerprint
         self.init_memory_runtime(cfg)
-        self.init_commit_service(cfg)
         logger.info('memory runtime synced from resource settings (reason={})', reason)
         return True
 
@@ -308,20 +306,3 @@ class RuntimeBootstrapBridge:
             self._loop._checkpointer_path = None
             self._loop._checkpointer_backend = 'disabled'
             self._loop._checkpointer_enabled = False
-
-    def init_commit_service(self, cfg: MemoryRuntimeSettings | None = None) -> None:
-        cfg = cfg or getattr(self._loop, '_memory_runtime_settings', None)
-        if cfg is None or self._loop.memory_manager is None:
-            return
-        features = getattr(cfg, 'features', None)
-        commit_enabled = True if features is None else bool(getattr(features, 'commit_pipeline', False))
-        if not commit_enabled:
-            return
-        commit_cfg = getattr(cfg, 'commit', None)
-        turn_trigger = int(getattr(commit_cfg, 'turn_trigger', 20) if commit_cfg else 20)
-        idle_trigger = int(getattr(commit_cfg, 'idle_minutes_trigger', 360) if commit_cfg else 360)
-        self._loop.commit_service = SessionCommitService(
-            memory_manager=self._loop.memory_manager,
-            turn_trigger=turn_trigger,
-            idle_minutes_trigger=idle_trigger,
-        )

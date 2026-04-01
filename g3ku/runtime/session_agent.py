@@ -58,8 +58,6 @@ class RuntimeAgentSession:
         self._active_cancel_token: ToolCancellationToken | None = None
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
-        self._interaction_trace: dict[str, Any] | None = None
-        self._current_stage: dict[str, Any] | None = None
         self._active_turn_id: str | None = None
         self._turn_lock = asyncio.Lock()
 
@@ -81,30 +79,7 @@ class RuntimeAgentSession:
         data["pending_tool_calls"] = sorted(self._state.pending_tool_calls)
         if self._state.last_error is not None:
             data["last_error"] = asdict(self._state.last_error)
-        if isinstance(self._current_stage, dict) and self._current_stage:
-            data["stage"] = copy.deepcopy(self._current_stage)
         return data
-
-    def set_interaction_trace(self, trace: dict[str, Any] | None, *, stage: dict[str, Any] | None = None) -> None:
-        self._interaction_trace = copy.deepcopy(trace) if isinstance(trace, dict) and trace else None
-        self._current_stage = copy.deepcopy(stage) if isinstance(stage, dict) and stage else None
-        if self._interaction_trace is not None or self._current_stage is not None:
-            self.clear_paused_execution_context()
-        self._sync_persisted_inflight_turn()
-
-    def clear_interaction_trace(self) -> None:
-        self._interaction_trace = None
-        self._current_stage = None
-
-    def interaction_trace_snapshot(self) -> dict[str, Any] | None:
-        if not isinstance(self._interaction_trace, dict) or not self._interaction_trace:
-            return None
-        return copy.deepcopy(self._interaction_trace)
-
-    def current_stage_snapshot(self) -> dict[str, Any] | None:
-        if not isinstance(self._current_stage, dict) or not self._current_stage:
-            return None
-        return copy.deepcopy(self._current_stage)
 
     def paused_execution_context_snapshot(self) -> dict[str, Any] | None:
         if self._paused_execution_context is not None:
@@ -479,19 +454,11 @@ class RuntimeAgentSession:
             snapshot["assistant_text"] = str(self._state.latest_message)
         if self._state.last_error is not None:
             snapshot["last_error"] = asdict(self._state.last_error)
-        interaction_trace = self.interaction_trace_snapshot()
-        if interaction_trace is not None:
-            snapshot["interaction_trace"] = interaction_trace
-        stage = self.current_stage_snapshot()
-        if stage is not None:
-            snapshot["stage"] = stage
         if (
             not snapshot["tool_events"]
             and "user_message" not in snapshot
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
-            and "interaction_trace" not in snapshot
-            and "stage" not in snapshot
         ):
             return None
         return snapshot
@@ -593,7 +560,6 @@ class RuntimeAgentSession:
         user_text: str,
         assistant_text: str,
         interaction_flow: list[dict[str, Any]],
-        interaction_trace: dict[str, Any] | None,
         internal_source: str | None,
         route_kind: str,
         assistant_metadata: dict[str, Any] | None = None,
@@ -611,8 +577,6 @@ class RuntimeAgentSession:
             assistant_payload: dict[str, Any] = {}
             if interaction_flow:
                 assistant_payload["tool_events"] = interaction_flow
-            if interaction_trace is not None:
-                assistant_payload["interaction_trace"] = interaction_trace
             metadata_payload = dict(assistant_metadata or {})
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
@@ -926,8 +890,6 @@ class RuntimeAgentSession:
                 self._state.latest_message = ""
                 self._state.last_error = None
                 self._state.pending_tool_calls.clear()
-                if not heartbeat_internal:
-                    self.clear_interaction_trace()
                 if persist_transcript and internal_source is None:
                     await self._persist_pending_user_message(
                         user_input=user_input,
@@ -958,7 +920,6 @@ class RuntimeAgentSession:
                 error_reply = f"运行出错：{error.message}"
                 self._state.latest_message = error_reply
                 interaction_flow = self._interaction_flow_snapshot()
-                interaction_trace = self.interaction_trace_snapshot()
                 user_text = self._history_text(user_input.content)
                 if persist_transcript:
                     assistant_metadata = {
@@ -974,7 +935,6 @@ class RuntimeAgentSession:
                         user_text=user_text,
                         assistant_text=error_reply,
                         interaction_flow=interaction_flow,
-                        interaction_trace=interaction_trace,
                         internal_source=internal_source,
                         route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                         assistant_metadata=assistant_metadata,
@@ -998,7 +958,6 @@ class RuntimeAgentSession:
                 self._state.pending_tool_calls.clear()
                 user_text = self._history_text(user_input.content)
                 interaction_flow = self._interaction_flow_snapshot()
-                interaction_trace = self.interaction_trace_snapshot()
                 if getattr(self._loop, "prompt_trace", False):
                     logger.info(render_output_trace(output))
                 persisted_session = None
@@ -1014,7 +973,6 @@ class RuntimeAgentSession:
                         user_text=user_text,
                         assistant_text=output,
                         interaction_flow=interaction_flow,
-                        interaction_trace=interaction_trace,
                         internal_source=internal_source,
                         route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                         assistant_metadata=assistant_metadata,
@@ -1037,35 +995,15 @@ class RuntimeAgentSession:
                                 kind="persistence_warning",
                                 text="Memory ingest failed; turn history is still available in session transcript.",
                             )
-                    if persisted_session is not None and getattr(self._loop, "commit_service", None) is not None:
-                        try:
-                            artifact = await self._loop.commit_service.maybe_commit(
-                                session=persisted_session,
-                                channel=self._memory_channel,
-                                chat_id=self._memory_chat_id,
-                            )
-                            if artifact is not None:
-                                self._loop.sessions.save(persisted_session)
-                        except Exception:
-                            await self._emit(
-                                "message_delta",
-                                channel="analysis",
-                                kind="persistence_warning",
-                                text="Memory commit pipeline failed; new turns remain available in session transcript.",
-                            )
-                stage_snapshot = self.current_stage_snapshot()
                 await self._emit(
                     "message_end",
                     role="assistant",
                     text=output,
                     heartbeat_internal=heartbeat_internal,
                     source=internal_source or "user",
-                    interaction_trace=interaction_trace,
-                    stage=stage_snapshot,
                 )
-                if internal_source is None or interaction_trace is not None:
+                if internal_source is None:
                     self.clear_paused_execution_context()
-                self.clear_interaction_trace()
                 await self._emit("turn_end", session_key=self._state.session_key, status="completed")
                 await self._emit("agent_end", session_key=self._state.session_key, status="completed")
                 await self._emit_state_snapshot()
@@ -1128,8 +1066,6 @@ class RuntimeAgentSession:
             manual_pause_waiting_reason=manual,
         )
         await self._emit_state_snapshot()
-        if manual:
-            self.clear_interaction_trace()
 
     async def resume(self, *, replan: bool = False, additional_context: str | None = None) -> RunResult:
         self._set_manual_pause_waiting_reason(False)
@@ -1149,7 +1085,6 @@ class RuntimeAgentSession:
         self._set_manual_pause_waiting_reason(False)
         self._preserved_inflight_turn = None
         self.clear_paused_execution_context()
-        self.clear_interaction_trace()
         self._state.is_running = False
         self._state.paused = False
         self._state.status = "idle"

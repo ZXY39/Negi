@@ -104,13 +104,7 @@ class LoopRuntimeMiddleware(AgentMiddleware):
             except Exception:
                 logger.exception("Memory retrieval middleware failed")
 
-        model_settings = dict(request.model_settings or {})
-        model_settings.setdefault("temperature", self._loop.temperature)
-        model_settings.setdefault("max_tokens", self._loop.max_tokens)
-        if self._loop.reasoning_effort is not None:
-            model_settings.setdefault("reasoning_effort", self._loop.reasoning_effort)
-
-        patched = request.override(model_settings=model_settings)
+        patched = request.override(model_settings=dict(request.model_settings or {}))
         if memory_block:
             existing = request.system_message.text if request.system_message else ""
             merged = (existing + "\n\n" if existing else "") + memory_block

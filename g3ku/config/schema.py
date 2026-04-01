@@ -273,8 +273,8 @@ class ManagedModelConfig(Base):
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None
     enabled: bool = True
-    max_tokens: int = 4096
-    temperature: float = 0.1
+    max_tokens: int | None = None
+    temperature: float | None = None
     reasoning_effort: str | None = None
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
     retry_count: int = Field(default=0, ge=0)
@@ -631,21 +631,9 @@ class MemoryCostConfig(Base):
 
 
 class MemoryAssemblyConfig(Base):
-    """Prompt/context assembly controls for frontdoor orchestration."""
+    """Frontdoor dynamic tool and skill selection controls."""
 
-    max_prompt_tokens: int = 3200
-    live_raw_tail_turns: int = 4
-    task_continuity_max_tokens: int = 320
-    stage_context_max_tokens: int = 640
-    latest_archive_overview_max_tokens: int = 420
-    older_archive_abstracts_top_k: int = 4
-    older_archive_abstracts_max_tokens: int = 320
-    retrieved_context_max_tokens: int = 1200
-    recent_messages_limit: int = 24
-    archive_summary_top_k: int = 2
-    archive_summary_max_tokens: int = 320
     skill_inventory_top_k: int = 8
-    skill_inventory_max_tokens: int = 480
     extension_tool_top_k: int = 6
     core_tools: list[str] = Field(
         default_factory=lambda: [

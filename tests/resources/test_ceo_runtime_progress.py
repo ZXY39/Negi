@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
-from g3ku.runtime.context.assembly import ContextAssemblyService
+from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import websocket_ceo
 from g3ku.runtime.manager import SessionRuntimeManager
@@ -134,23 +134,6 @@ class _FakeErrorSession:
             "status": "error",
             "source": "user",
             "user_message": {"content": "Open bilibili"},
-            "interaction_trace": {
-                "stages": [
-                    {
-                        "stage_id": "ceo-stage-1",
-                        "stage_index": 1,
-                        "mode": "self_execute",
-                        "status": "failed",
-                        "stage_goal": "Open bilibili",
-                        "tool_round_budget": 3,
-                        "tool_rounds_used": 1,
-                        "created_at": "2026-03-18T12:00:00+08:00",
-                        "finished_at": "2026-03-18T12:00:05+08:00",
-                        "rounds": [],
-                    }
-                ],
-                "final_output": "",
-            },
             "last_error": {"message": "CEO frontdoor exceeded maximum iterations"},
         }
 
@@ -973,19 +956,6 @@ def test_runtime_agent_session_restores_paused_execution_context_from_disk(tmp_p
             "status": "paused",
             "user_message": {"content": "Resume the browser automation flow"},
             "assistant_text": "I already created task task:resume-1 and was about to query its next node.",
-            "interaction_trace": {
-                "stages": [
-                    {
-                        "stage_id": "ceo-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Continue the current browser automation stage",
-                        "status": "active",
-                        "tool_round_budget": 3,
-                        "tool_rounds_used": 1,
-                        "rounds": [],
-                    }
-                ]
-            },
         },
     )
     session = RuntimeAgentSession(
@@ -1002,7 +972,7 @@ def test_runtime_agent_session_restores_paused_execution_context_from_disk(tmp_p
     assert snapshot["user_message"]["content"] == "Resume the browser automation flow"
 
 
-def test_runtime_agent_session_clears_paused_execution_context_when_new_trace_arrives(
+def test_runtime_agent_session_can_clear_paused_execution_context_explicitly(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1023,22 +993,7 @@ def test_runtime_agent_session_clears_paused_execution_context_when_new_trace_ar
 
     assert session.paused_execution_context_snapshot() is not None
 
-    session.set_interaction_trace(
-        {
-            "stages": [
-                {
-                    "stage_id": "ceo-stage-2",
-                    "stage_index": 2,
-                    "stage_goal": "Continue from the restored pause point",
-                    "status": "active",
-                    "tool_round_budget": 3,
-                    "tool_rounds_used": 0,
-                    "rounds": [],
-                }
-            ]
-        },
-        stage={"stage_goal": "Continue from the restored pause point"},
-    )
+    session.clear_paused_execution_context()
 
     assert session.paused_execution_context_snapshot() is None
     assert web_ceo_sessions.read_paused_execution_context("web:shared") is None
@@ -1251,31 +1206,6 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
     class _FakeRunner:
         async def run_turn(self, *, user_input, session, on_progress):
             _ = user_input
-            session.set_interaction_trace(
-                {
-                    "stages": [
-                        {
-                            "stage_id": "ceo-stage-1",
-                            "stage_index": 1,
-                            "mode": "self_execute",
-                            "status": "failed",
-                            "stage_goal": "Open bilibili",
-                            "tool_round_budget": 3,
-                            "tool_rounds_used": 1,
-                            "created_at": "2026-03-18T12:00:00+08:00",
-                            "finished_at": "2026-03-18T12:00:05+08:00",
-                            "rounds": [],
-                        }
-                    ],
-                    "final_output": "",
-                },
-                stage={
-                    "stage_id": "ceo-stage-1",
-                    "stage_index": 1,
-                    "mode": "self_execute",
-                    "status": "failed",
-                },
-            )
             await on_progress(
                 "agent_browser started",
                 event_kind="tool_start",
@@ -1317,12 +1247,10 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
         "recoverable": True,
     }
     assert [item["status"] for item in reloaded_session.messages[1]["tool_events"]] == ["running"]
-    assert reloaded_session.messages[1]["interaction_trace"]["stages"][-1]["stage_goal"] == "Open bilibili"
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Open bilibili"}
     assert "运行出错：CEO frontdoor exceeded maximum iterations" in recent_history[-1]["content"]
-    assert "Stage snapshot:" in recent_history[-1]["content"]
 
 
 def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monkeypatch) -> None:
@@ -1362,7 +1290,7 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
 
 
-def test_ceo_websocket_error_payload_carries_interaction_trace(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_websocket_error_payload_omits_legacy_interaction_trace(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
     async def _ensure_services(_agent) -> None:
@@ -1398,7 +1326,7 @@ def test_ceo_websocket_error_payload_carries_interaction_trace(tmp_path: Path, m
     assert len(error_events) == 1
     assert error_events[0]["data"]["message"] == "CEO frontdoor exceeded maximum iterations"
     assert error_events[0]["data"]["source"] == "user"
-    assert error_events[0]["data"]["interaction_trace"]["stages"][0]["stage_goal"] == "Open bilibili"
+    assert "interaction_trace" not in error_events[0]["data"]
 
 
 def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_reply(tmp_path: Path, monkeypatch) -> None:
@@ -2184,7 +2112,7 @@ async def test_web_session_heartbeat_calls_reply_notifier_for_final_output(tmp_p
 
 
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:
-    service = ContextAssemblyService(
+    service = CeoMessageBuilder(
         loop=SimpleNamespace(),
         prompt_builder=SimpleNamespace(build=lambda **kwargs: ""),
     )

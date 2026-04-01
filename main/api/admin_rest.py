@@ -22,7 +22,7 @@ from g3ku.china_bridge.registry import (
 )
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.schema import Config
-from g3ku.config.model_manager import ModelManager, VALID_SCOPES
+from g3ku.config.model_manager import ModelManager, VALID_SCOPES, _UNSET
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
@@ -1588,22 +1588,43 @@ async def create_model(payload: dict = Body(...)):
 @router.put('/models/{model_key}')
 async def update_model(model_key: str, payload: dict = Body(...)):
     manager = ModelManager.load()
+    body = payload if isinstance(payload, dict) else {}
     raw_retry_count = payload.get('retry_count')
     if raw_retry_count is None and 'retryCount' in payload:
         raw_retry_count = payload.get('retryCount')
+
+    def _pick(snake_key: str, camel_key: str | None = None):
+        if snake_key in body:
+            return body.get(snake_key)
+        if camel_key and camel_key in body:
+            return body.get(camel_key)
+        return _UNSET
+
     try:
         item = manager.update_model(
             key=model_key,
-            provider_model=payload.get('provider_model'),
-            api_key=payload.get('api_key'),
-            api_base=payload.get('api_base'),
-            extra_headers=payload.get('extra_headers') if isinstance(payload.get('extra_headers'), dict) else None,
-            max_tokens=payload.get('max_tokens'),
-            temperature=payload.get('temperature'),
-            reasoning_effort=payload.get('reasoning_effort'),
-            retry_on=[str(item) for item in (payload.get('retry_on') or [])] if payload.get('retry_on') is not None else None,
-            retry_count=raw_retry_count,
-            description=payload.get('description'),
+            provider_model=_pick('provider_model', 'providerModel'),
+            api_key=_pick('api_key', 'apiKey'),
+            api_base=_pick('api_base', 'apiBase'),
+            extra_headers=(
+                body.get('extra_headers')
+                if 'extra_headers' in body and isinstance(body.get('extra_headers'), dict)
+                else body.get('extraHeaders')
+                if 'extraHeaders' in body and isinstance(body.get('extraHeaders'), dict)
+                else _UNSET
+            ),
+            max_tokens=_pick('max_tokens', 'maxTokens'),
+            temperature=_pick('temperature'),
+            reasoning_effort=_pick('reasoning_effort', 'reasoningEffort'),
+            retry_on=(
+                [str(item) for item in (body.get('retry_on') or [])]
+                if 'retry_on' in body
+                else [str(item) for item in (body.get('retryOn') or [])]
+                if 'retryOn' in body
+                else _UNSET
+            ),
+            retry_count=raw_retry_count if ('retry_count' in body or 'retryCount' in body) else _UNSET,
+            description=_pick('description'),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2252,13 +2273,6 @@ async def get_retrieval_traces(limit: int = Query(20, ge=1, le=200)):
     service = _service()
     await service.startup()
     return await service.get_context_traces(trace_kind='retrieval', limit=limit)
-
-
-@router.get('/memory/context-assembly-traces')
-async def get_context_assembly_traces(limit: int = Query(20, ge=1, le=200)):
-    service = _service()
-    await service.startup()
-    return await service.get_context_traces(trace_kind='context_assembly', limit=limit)
 
 
 @router.get('/memory/runtime-stats')

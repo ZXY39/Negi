@@ -1,65 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
-
-
-ContextBlockKind = Literal[
-    "task_continuity",
-    "stage_context",
-    "latest_archive_overview",
-    "older_archive_abstracts",
-    "retrieved_context",
-    "live_raw_tail",
-]
-
-
-@dataclass(slots=True)
-class ContextBlock:
-    kind: ContextBlockKind
-    content: str
-    source: str = ""
-    level: str = ""
-    tokens: int = 0
-    trimmed: bool = False
-    trim_reason: str = ""
-    degraded_from: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class ContextSnapshot:
-    blocks: list[ContextBlock] = field(default_factory=list)
-    total_tokens: int = 0
-    system_tokens: int = 0
-    user_tokens: int = 0
-
-
-@dataclass(slots=True)
-class ArchiveContextRecord:
-    archive_id: str
-    archive_uri: str
-    overview_uri: str
-    abstract_uri: str
-    overview: str = ""
-    abstract: str = ""
-    score: float = 0.0
-    created_at: str = ""
-    summary_version: int = 2
-
-
-@dataclass(slots=True)
-class StageContextRecord:
-    active_stage: dict[str, Any] | None = None
-    completed_abstracts: list[str] = field(default_factory=list)
-    source: str = ""
-
-
-@dataclass(slots=True)
-class TaskContinuityRecord:
-    active_tasks: list[dict[str, Any]] = field(default_factory=list)
-    last_task_memory: dict[str, Any] = field(default_factory=dict)
-    source: str = ""
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -76,8 +18,7 @@ class RetrievedContextBundle:
 class ContextAssemblyResult:
     model_messages: list[dict[str, Any]]
     tool_names: list[str]
-    trace: dict[str, Any] = field(default_factory=dict)
-    context_snapshot: ContextSnapshot = field(default_factory=ContextSnapshot)
+    trace: dict[str, Any]
 
     def __init__(
         self,
@@ -85,7 +26,6 @@ class ContextAssemblyResult:
         model_messages: list[dict[str, Any]] | None = None,
         tool_names: list[str] | None = None,
         trace: dict[str, Any] | None = None,
-        context_snapshot: ContextSnapshot | None = None,
         system_prompt: str | None = None,
         recent_history: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -99,7 +39,6 @@ class ContextAssemblyResult:
             self.model_messages = list(model_messages or [])
         self.tool_names = list(tool_names or [])
         self.trace = dict(trace or {})
-        self.context_snapshot = context_snapshot or ContextSnapshot()
 
     @property
     def system_prompt(self) -> str:

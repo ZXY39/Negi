@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 EMBEDDING_KEY = "memory_embedding_default"
 RERANK_KEY = "memory_rerank_default"
 _MEMORY_KEYS = {EMBEDDING_KEY, RERANK_KEY}
+_LEGACY_MAX_TOKENS_DEFAULT = 4096
+_LEGACY_TEMPERATURE_DEFAULTS = {0.1, 0.2}
+_LEGACY_TIMEOUT_DEFAULT = 8
 
 
 def _infer_auth_mode(provider_id: str) -> AuthMode:
@@ -54,6 +57,74 @@ def _record_provider_id(provider_id: str, capability: Capability) -> str:
     return provider_id
 
 
+def _optional_chat_parameters(
+    *,
+    max_tokens: Any = None,
+    temperature: Any = None,
+    reasoning_effort: Any = None,
+) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    if max_tokens not in (None, ""):
+        parameters["max_tokens"] = int(max_tokens)
+    if temperature not in (None, ""):
+        parameters["temperature"] = float(temperature)
+    if str(reasoning_effort or "").strip():
+        parameters["reasoning_effort"] = str(reasoning_effort).strip()
+    return parameters
+
+
+def _cleanup_legacy_default_parameters(parameters: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+    payload = dict(parameters or {})
+    changed = False
+    raw_max_tokens = payload.get("max_tokens")
+    if raw_max_tokens not in (None, ""):
+        try:
+            if int(raw_max_tokens) == _LEGACY_MAX_TOKENS_DEFAULT:
+                payload.pop("max_tokens", None)
+                changed = True
+        except Exception:
+            pass
+    raw_temperature = payload.get("temperature")
+    if raw_temperature not in (None, ""):
+        try:
+            if float(raw_temperature) in _LEGACY_TEMPERATURE_DEFAULTS:
+                payload.pop("temperature", None)
+                changed = True
+        except Exception:
+            pass
+    raw_timeout = payload.get("timeout_s")
+    if raw_timeout not in (None, ""):
+        try:
+            if int(raw_timeout) == _LEGACY_TIMEOUT_DEFAULT:
+                payload.pop("timeout_s", None)
+                changed = True
+        except Exception:
+            pass
+    return payload, changed
+
+
+def _cleanup_repository_legacy_default_parameters(facade: LLMConfigFacade) -> bool:
+    changed = False
+    for summary in list(facade.repository.list_summaries()):
+        try:
+            record = facade._hydrate_record_secrets(facade.repository.get(summary.config_id))
+        except Exception:
+            continue
+        cleaned_parameters, record_changed = _cleanup_legacy_default_parameters(record.parameters)
+        if not record_changed:
+            continue
+        updated_record = record.model_copy(
+            update={
+                "parameters": cleaned_parameters,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        facade.repository.save(updated_record, last_probe_status=summary.last_probe_status)
+        facade._store_record_secrets(updated_record)
+        changed = True
+    return changed
+
+
 def _build_record(
     facade: LLMConfigFacade,
     *,
@@ -86,12 +157,11 @@ def _build_record(
         base_url=str(api_base or template.default_base_url).rstrip("/"),
         default_model=model_id,
         auth={"type": auth_mode.value, "api_key": str(api_key or "").strip()},
-        parameters={
-            "timeout_s": 8,
-            "temperature": 0.1 if temperature is None else temperature,
-            "max_tokens": 4096 if max_tokens is None else max_tokens,
-            **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
-        },
+        parameters=_optional_chat_parameters(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        ),
         headers=dict(extra_headers or {}),
         extra_options={},
         template_version=template.template_version,
@@ -201,13 +271,14 @@ def _delete_orphaned_memory_records(
 def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | None = None) -> tuple[dict[str, Any], bool]:
     models = raw_data.get("models") if isinstance(raw_data.get("models"), dict) else None
     catalog = list((models or {}).get("catalog") or []) if isinstance(models, dict) else []
-    if not catalog:
-        return raw_data, False
 
     workspace = (workspace or Path.cwd()).resolve()
     from .facade import LLMConfigFacade
 
     facade = LLMConfigFacade(workspace)
+    repository_changed = _cleanup_repository_legacy_default_parameters(facade)
+    if not catalog:
+        return raw_data, repository_changed
     next_data = deepcopy(raw_data)
     next_catalog: list[dict[str, Any]] = []
     changed = False
@@ -377,4 +448,4 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
         retained_config_ids=retained_config_ids,
     )
 
-    return next_data, changed
+    return next_data, changed or repository_changed

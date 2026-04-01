@@ -11,28 +11,14 @@ from loguru import logger
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
-from g3ku.runtime.context import ContextAssemblyService
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
-from g3ku.runtime.frontdoor.interaction_trace import (
-    CEO_STAGE_STATUS_COMPLETED,
-    CEO_STAGE_STATUS_FAILED,
-    finalize_active_stage,
-    is_transition_required,
-    new_interaction_trace,
-    normalize_interaction_trace,
-    record_stage_round,
-    stage_summary,
-    submit_next_stage,
-    update_round_tool,
-)
+from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, build_session_prompt_cache_key
 from main.runtime.react_loop import RepeatedActionCircuitBreaker
-from main.runtime.stage_budget import STAGE_TOOL_NAME, stage_gate_error_for_tool, visible_tools_for_stage_iteration
-from main.runtime.stage_messages import build_ceo_stage_overlay, build_ceo_stage_result_block_message
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -52,87 +38,45 @@ class _DirectProviderChatBackend:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         model_refs: list[str],
-        max_tokens: int = 1200,
-        temperature: float = 0.2,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         reasoning_effort: str | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
     ):
         model = str(model_refs[0] if model_refs else "").strip() or None
-        return await self._provider.chat(
-            messages=messages,
-            tools=tools,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            reasoning_effort=reasoning_effort,
-            tool_choice="auto",
-            parallel_tool_calls=parallel_tool_calls,
-            prompt_cache_key=prompt_cache_key,
-        )
-
-
-class CeoSubmitNextStageTool(Tool):
-    def __init__(self, submit_callback) -> None:
-        self._submit_callback = submit_callback
-
-    @property
-    def name(self) -> str:
-        return STAGE_TOOL_NAME
-
-    @property
-    def description(self) -> str:
-        return (
-            "Create or switch to the next CEO execution stage. "
-            "Before using tools you must first create a stage; when the current stage budget is exhausted, "
-            "you must create the next stage before using more tools."
-        )
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "stage_goal": {
-                    "type": "string",
-                    "description": (
-                        "A concise goal for the current CEO stage. Describe what this stage will accomplish "
-                        "with the tools available to the CEO."
-                    ),
-                    "minLength": 1,
-                },
-                "tool_round_budget": {
-                    "type": "integer",
-                    "description": "How many ordinary tool rounds this stage may use. Must be between 1 and 10.",
-                    "minimum": 1,
-                    "maximum": 10,
-                },
-            },
-            "required": ["stage_goal", "tool_round_budget"],
+        kwargs: dict[str, Any] = {
+            "messages": messages,
+            "tools": tools,
+            "model": model,
+            "tool_choice": "auto",
+            "parallel_tool_calls": parallel_tool_calls,
+            "prompt_cache_key": prompt_cache_key,
         }
-
-    async def execute(self, stage_goal: str, tool_round_budget: int, **kwargs: Any) -> str:
-        result = await self._submit_callback(str(stage_goal or "").strip(), int(tool_round_budget or 0))
-        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
+        return await self._provider.chat(**kwargs)
 
 
 @dataclass(slots=True)
 class CeoTurnResult:
     output: str
     route_kind: str
-    interaction_trace: dict[str, Any] | None
 
 
 class CeoFrontDoorRunner:
     _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
-    _CEO_NON_BUDGET_TOOLS = {"create_async_task", "memory_write"}
     _EMPTY_RESPONSE_RETRY_LIMIT = 1
 
     def __init__(self, *, loop) -> None:
         self._loop = loop
         self._resolver = CeoExposureResolver(loop=loop)
         self._prompt_builder = CeoPromptBuilder(loop=loop)
-        self._assembly = ContextAssemblyService(loop=loop, prompt_builder=self._prompt_builder)
+        self._builder = CeoMessageBuilder(loop=loop, prompt_builder=self._prompt_builder)
 
     @staticmethod
     def _content_text(value: Any) -> str:
@@ -169,18 +113,18 @@ class CeoFrontDoorRunner:
     @staticmethod
     def _empty_reply_fallback(query_text: str) -> str:
         snippet = " ".join(str(query_text or "").split()).strip()
-        if len(snippet) > 32:
-            snippet = f"{snippet[:29].rstrip()}..."
+        if len(snippet) > 64:
+            snippet = f"{snippet[:61].rstrip()}..."
         if snippet:
-            return f"这次没有生成可展示的回复。请直接再发一次“{snippet}”，我会继续处理。"
-        return "这次没有生成可展示的回复。请直接再发一次你的请求，我会继续处理。"
+            return f"No visible reply was generated for: {snippet}"
+        return "No visible reply was generated."
 
     @staticmethod
     def _cron_internal_system_message(metadata: dict[str, Any]) -> dict[str, str] | None:
         if not bool(metadata.get("cron_internal")):
             return None
         job_id = str(metadata.get("cron_job_id") or "").strip()
-        stop_condition = str(metadata.get("cron_stop_condition") or "用户要求取消").strip() or "用户要求取消"
+        stop_condition = str(metadata.get("cron_stop_condition") or "user asked to stop").strip() or "user asked to stop"
         explicit = bool(metadata.get("cron_stop_condition_explicit"))
         lines = [
             "You are handling a cron-internal recurring job turn.",
@@ -194,9 +138,7 @@ class CeoFrontDoorRunner:
             "- Never call the message tool. Never create, update, list, or remove any other cron job.",
         ]
         if not explicit:
-            lines.append(
-                "- This is a legacy cron job with no stored explicit exit condition; only '用户要求取消' can end it."
-            )
+            lines.append("- This is a legacy cron job with no stored explicit exit condition; only 'user asked to stop' can end it.")
         return {"role": "system", "content": "\n".join(lines)}
 
     @staticmethod
@@ -248,7 +190,9 @@ class CeoFrontDoorRunner:
             if app_config is not None and hasattr(app_config, "get_role_max_concurrency")
             else None
         )
-        max_parallel = role_limit if role_limit is not None else (getattr(react_loop, "_max_parallel_tool_calls", 10) if react_loop is not None else 10)
+        max_parallel = role_limit if role_limit is not None else (
+            getattr(react_loop, "_max_parallel_tool_calls", 10) if react_loop is not None else 10
+        )
         return enabled, max_parallel
 
     def _registered_tools(self, tool_names: list[str]) -> dict[str, Tool]:
@@ -266,7 +210,6 @@ class CeoFrontDoorRunner:
             "id": str(getattr(call, "id", "") or ""),
             "name": str(getattr(call, "name", "") or "").strip(),
             "arguments": arguments,
-            "arguments_text": json.dumps(arguments, ensure_ascii=False, indent=2) if isinstance(arguments, dict) else str(arguments or ""),
         }
 
     @staticmethod
@@ -284,61 +227,51 @@ class CeoFrontDoorRunner:
         ]
 
     @staticmethod
-    def _route_kind_for_turn(*, used_tools: list[str], stage_created: bool, default: str) -> str:
-        normalized = [str(name or '').strip() for name in list(used_tools or []) if str(name or '').strip()]
-        if 'create_async_task' in normalized:
-            return 'task_dispatch'
+    def _route_kind_for_turn(*, used_tools: list[str], default: str) -> str:
+        normalized = [str(name or "").strip() for name in list(used_tools or []) if str(name or "").strip()]
+        if "create_async_task" in normalized:
+            return "task_dispatch"
         if normalized:
-            return 'self_execute'
-        if stage_created:
-            return 'stage_only'
-        return str(default or 'direct_reply')
+            return "self_execute"
+        return str(default or "direct_reply")
 
     @staticmethod
-    def _empty_response_retry_message(*, has_active_stage: bool, visible_tool_names: list[str]) -> str:
-        visible = ', '.join(f'`{name}`' for name in list(visible_tool_names or [])[:8]) or '(none)'
-        if has_active_stage:
-            return (
-                'System note: your previous model turn was empty: no visible text and no tool calls. '
-                'Continue the active CEO stage now. Do not return an empty reply. '
-                'Either call one visible tool for this stage or provide the final visible answer. '
-                f'Visible tools this turn: {visible}.'
-            )
+    def _empty_response_retry_message(*, visible_tool_names: list[str]) -> str:
+        visible = ", ".join(f"`{name}`" for name in list(visible_tool_names or [])[:8]) or "(none)"
         return (
-            'System note: your previous model turn was empty: no visible text and no tool calls. '
-            'Do not return an empty reply. '
-            'If tools are needed, call `submit_next_stage` first; otherwise provide the final visible answer. '
-            f'Visible tools this turn: {visible}.'
+            "System note: your previous model turn was empty: no visible text and no tool calls. "
+            "Do not return an empty reply. "
+            "Either call a visible tool or provide the final visible answer. "
+            f"Visible tools this turn: {visible}."
         )
 
     @staticmethod
-    def _empty_response_explanation(*, has_active_stage: bool, stage_created: bool, used_tools: list[str]) -> str:
-        created_task = 'create_async_task' in {
-            str(name or '').strip()
+    def _empty_response_explanation(*, used_tools: list[str]) -> str:
+        created_task = "create_async_task" in {
+            str(name or "").strip()
             for name in list(used_tools or [])
-            if str(name or '').strip()
+            if str(name or "").strip()
         }
-        parts = ['本轮内部执行遇到空响应：模型没有返回可展示文本，也没有继续调用工具。']
-        if has_active_stage or stage_created:
-            parts.append('当前 CEO 阶段已经创建，但后续动作没有成功推进。')
         if created_task:
-            parts.append('本轮已经触发创建异步任务，但最终确认文本未产出。')
-        else:
-            parts.append('本轮尚未创建异步任务。')
-        parts.append('系统已自动停止本轮，避免把空结果误显示为成功回复。')
-        return ''.join(parts)
+            return (
+                "The turn completed without any visible assistant text after creating an async task. "
+                "The system stopped instead of pretending a successful reply was produced."
+            )
+        return (
+            "The turn completed without visible assistant text and without additional tool calls. "
+            "The system stopped instead of pretending a successful reply was produced."
+        )
 
     @staticmethod
     def _xml_repair_explanation(*, count: int, tool_names: list[str], content_excerpt: str) -> str:
         reason = format_xml_repair_failure_reason(
             count=count,
             tool_names=tool_names,
-            content_excerpt='',
+            content_excerpt=content_excerpt,
         )
         return (
-            '本轮已停止，因为模型连续返回了无效的 XML 风格伪工具调用，'
-            '且在修复回合中仍未成功改写为合法工具调用或 JSON repair payload。'
-            f' {reason}'
+            "XML pseudo tool-call repair failed repeatedly and the turn was stopped. "
+            f"{reason}"
         )
 
     @staticmethod
@@ -375,39 +308,8 @@ class CeoFrontDoorRunner:
         if inspect.isawaitable(result):
             await result
 
-    def _stage_gate(self, trace: dict[str, Any] | None) -> dict[str, Any]:
-        normalized = normalize_interaction_trace(trace)
-        active = next(
-            (
-                stage
-                for stage in reversed(list(normalized.get("stages") or []))
-                if str(stage.get("status") or "").strip() == "active"
-            ),
-            None,
-        )
-        completed = [
-            dict(stage)
-            for stage in list(normalized.get("stages") or [])
-            if str(stage.get("status") or "").strip() != "active"
-        ]
-        return {
-            "has_active_stage": active is not None,
-            "transition_required": is_transition_required(normalized),
-            "active_stage": dict(active or {}) if isinstance(active, dict) else None,
-            "completed_stages": completed,
-        }
-
-    def _sync_session_trace(self, session: Any, trace: dict[str, Any] | None) -> None:
-        normalized = normalize_interaction_trace(trace)
-        summary = stage_summary(normalized, transition_required=is_transition_required(normalized))
-        if hasattr(session, "set_interaction_trace"):
-            session.set_interaction_trace(normalized if normalized.get("stages") else None, stage=summary)
-            return
-        setattr(session, "_interaction_trace", normalized if normalized.get("stages") else None)
-        setattr(session, "_current_stage", summary)
-
     @staticmethod
-    def _apply_stage_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:
+    def _apply_turn_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:
         text = str(overlay_text or "").strip()
         if not text:
             return list(messages or [])
@@ -426,33 +328,6 @@ class CeoFrontDoorRunner:
         return [*base_messages, {"role": "user", "content": overlay_block}]
 
     @staticmethod
-    def _externalize_message_content(value: Any, *, runtime_context: dict[str, Any]) -> Any:
-        service = getattr(runtime_context.get("loop"), "main_task_service", None)
-        store = getattr(getattr(service, "log_service", None), "_content_store", None)
-        if store is None:
-            return value
-        return store.externalize_for_message(
-            value,
-            runtime=runtime_context,
-            display_name=f"ceo:{runtime_context.get('session_key') or 'session'}",
-            source_kind="ceo_message",
-            compact=True,
-        )
-
-    def _externalize_tool_result(self, value: Any, *, runtime_context: dict[str, Any], tool_name: str) -> Any:
-        service = getattr(runtime_context.get("loop"), "main_task_service", None)
-        store = getattr(getattr(service, "log_service", None), "_content_store", None)
-        if store is None:
-            return value
-        return store.externalize_for_message(
-            value,
-            runtime=runtime_context,
-            display_name=f"tool:{tool_name}",
-            source_kind=f"tool_result:{tool_name}",
-            compact=True,
-        )
-
-    @staticmethod
     def _render_tool_result(result: Any) -> str:
         if isinstance(result, str):
             return result
@@ -464,9 +339,7 @@ class CeoFrontDoorRunner:
     @staticmethod
     def _tool_status(result_text: str) -> str:
         text = str(result_text or "").strip()
-        if text.startswith("Error"):
-            return "error"
-        return "success"
+        return "error" if text.startswith("Error") else "success"
 
     async def _emit_watchdog_progress(self, *, on_progress, tool_name: str, poll: dict[str, Any]) -> None:
         snapshot = poll.get("snapshot") if isinstance(poll, dict) else None
@@ -521,20 +394,6 @@ class CeoFrontDoorRunner:
         runtime_context: dict[str, Any],
         on_progress,
     ) -> tuple[str, str, str, str, float | None]:
-        if not bool(runtime_context.get("disable_stage_tool")):
-            if bool(runtime_context.get("stage_turn_granted")) and tool_name != STAGE_TOOL_NAME:
-                stage_gate = {"has_active_stage": True, "transition_required": False}
-            else:
-                stage_gate = self._stage_gate(runtime_context.get("interaction_trace"))
-            stage_gate_error = stage_gate_error_for_tool(
-                tool_name,
-                has_active_stage=bool(stage_gate.get("has_active_stage")),
-                transition_required=bool(stage_gate.get("transition_required")),
-                stage_tool_name=STAGE_TOOL_NAME,
-            )
-            if stage_gate_error:
-                return f"Error: {stage_gate_error}", "error", "", "", None
-
         errors = tool.validate_params(arguments)
         if errors:
             return f"Error: {'; '.join(errors)}", "error", "", "", None
@@ -598,8 +457,7 @@ class CeoFrontDoorRunner:
         finally:
             self._loop.tools.pop_runtime_context(token)
 
-        externalized = self._externalize_tool_result(result, runtime_context=runtime_context, tool_name=tool_name)
-        rendered = self._render_tool_result(externalized)
+        rendered = self._render_tool_result(result)
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
         status = self._tool_status(rendered)
@@ -608,7 +466,6 @@ class CeoFrontDoorRunner:
     async def _run_react_turn(
         self,
         *,
-        session: Any,
         messages: list[dict[str, Any]],
         tools: dict[str, Tool],
         model_refs: list[str],
@@ -618,70 +475,34 @@ class CeoFrontDoorRunner:
         configured_limit = getattr(self._loop, "max_iterations", 12)
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         message_history = list(messages or [])
-        interaction_trace = new_interaction_trace()
         route_kind = "direct_reply"
         used_tools: list[str] = []
-        stage_created = False
         empty_response_retries = 0
         repair_overlay_text: str | None = None
         xml_repair_attempt_count = 0
-        xml_repair_excerpt = ''
+        xml_repair_excerpt = ""
         xml_repair_tool_names: list[str] = []
-        xml_repair_last_issue = ''
+        xml_repair_last_issue = ""
         breaker = RepeatedActionCircuitBreaker()
-        stage_tool_enabled = not bool(runtime_context.get("disable_stage_tool"))
-
-        async def _submit_stage(stage_goal: str, tool_round_budget: int) -> dict[str, Any]:
-            nonlocal interaction_trace
-            interaction_trace, stage = submit_next_stage(
-                interaction_trace,
-                stage_goal=stage_goal,
-                tool_round_budget=tool_round_budget,
-            )
-            self._sync_session_trace(session, interaction_trace)
-            return dict(stage)
-
-        all_tools = dict(tools or {})
-        if stage_tool_enabled:
-            all_tools[STAGE_TOOL_NAME] = CeoSubmitNextStageTool(_submit_stage)
         chat_backend = self._resolve_chat_backend()
 
         attempt_index = 0
         while configured_limit is None or attempt_index < max(0, int(configured_limit)):
             attempt_index += 1
-            overlay_parts: list[str] = []
-            if stage_tool_enabled:
-                stage_gate = self._stage_gate(interaction_trace)
-                visible_tools = visible_tools_for_stage_iteration(
-                    all_tools,
-                    has_active_stage=bool(stage_gate.get("has_active_stage")),
-                    transition_required=bool(stage_gate.get("transition_required")),
-                    stage_tool_name=STAGE_TOOL_NAME,
-                )
-                overlay_parts.append(str(build_ceo_stage_overlay(self._stage_gate(interaction_trace)) or '').strip())
-            else:
-                stage_gate = {"has_active_stage": True, "transition_required": False, "active_stage": {}}
-                visible_tools = dict(all_tools)
-            overlay_parts.append(str(repair_overlay_text or '').strip())
-            request_messages = self._apply_stage_overlay(
-                message_history,
-                overlay_text='\n\n'.join(part for part in overlay_parts if part),
-            )
+            request_messages = self._apply_turn_overlay(message_history, overlay_text=repair_overlay_text)
             repair_overlay_text = None
-            tool_schemas = [tool.to_schema() for tool in visible_tools.values()]
+            tool_schemas = [tool.to_schema() for tool in tools.values()]
             response = await chat_backend.chat(
                 messages=request_messages,
                 tools=tool_schemas or None,
                 model_refs=model_refs,
-                max_tokens=1200,
-                temperature=0.2,
                 parallel_tool_calls=(parallel_enabled if tool_schemas else None),
                 prompt_cache_key=prompt_cache_key,
             )
             visible_tool_names = {
-                str(name or '').strip()
-                for name in visible_tools.keys()
-                if str(name or '').strip()
+                str(name or "").strip()
+                for name in tools.keys()
+                if str(name or "").strip()
             }
             response_tool_calls = list(response.tool_calls or [])
             synthetic_tool_calls_used = False
@@ -689,8 +510,8 @@ class CeoFrontDoorRunner:
             if not response_tool_calls and visible_tool_names:
                 xml_extraction = extract_tool_calls_from_xml_pseudo_content(
                     response.content,
-                    visible_tools=visible_tools,
-                    id_prefix='call:ceo-xml-direct',
+                    visible_tools=tools,
+                    id_prefix="call:ceo-xml-direct",
                 )
                 if xml_extraction.tool_calls:
                     response_tool_calls = xml_extraction.tool_calls
@@ -699,83 +520,45 @@ class CeoFrontDoorRunner:
                     repaired_tool_calls = recover_tool_calls_from_json_payload(
                         response.content,
                         allowed_tool_names=visible_tool_names,
-                        id_prefix='call:ceo-xml-repair',
+                        id_prefix="call:ceo-xml-repair",
                     )
                     if repaired_tool_calls:
                         response_tool_calls = repaired_tool_calls
                         synthetic_tool_calls_used = True
                 if not response_tool_calls and xml_extraction.matched:
                     xml_pseudo_call = {
-                        'excerpt': xml_extraction.excerpt,
-                        'tool_names': list(xml_extraction.tool_names or []),
-                        'issue': str(xml_extraction.issue or '').strip(),
+                        "excerpt": xml_extraction.excerpt,
+                        "tool_names": list(xml_extraction.tool_names or []),
+                        "issue": str(xml_extraction.issue or "").strip(),
                     }
             tool_call_payloads = [self._tool_call_payload(call) for call in response_tool_calls]
 
             if response_tool_calls:
                 if xml_repair_attempt_count > 0:
                     xml_repair_attempt_count = 0
-                    xml_repair_excerpt = ''
+                    xml_repair_excerpt = ""
                     xml_repair_tool_names = []
-                    xml_repair_last_issue = ''
-                analysis_text = '' if synthetic_tool_calls_used else self._content_text(getattr(response, "content", ""))
+                    xml_repair_last_issue = ""
+                analysis_text = "" if synthetic_tool_calls_used else self._content_text(getattr(response, "content", ""))
                 if analysis_text.strip():
                     await self._emit_progress(
                         runtime_context.get("on_progress"),
                         analysis_text.strip(),
                         event_kind="analysis",
                     )
-                if any(payload["name"] not in self._CONTROL_TOOL_NAMES for payload in tool_call_payloads):
-                    for payload in tool_call_payloads:
-                        signature = f"{payload['name']}:{json.dumps(payload['arguments'], ensure_ascii=False, sort_keys=True)}"
-                        if payload["name"] != STAGE_TOOL_NAME and payload["name"] not in self._CONTROL_TOOL_NAMES:
-                            breaker.register(signature)
-                if any(payload["name"] == STAGE_TOOL_NAME for payload in tool_call_payloads) and len(tool_call_payloads) != 1:
-                    assistant_message = {
-                        "role": "assistant",
-                        "content": self._externalize_message_content(
-                            None if synthetic_tool_calls_used else response.content,
-                            runtime_context=runtime_context,
-                        ),
-                        "tool_calls": self._assistant_tool_calls(response_tool_calls),
-                    }
-                    message_history.append(assistant_message)
-                    for payload in tool_call_payloads:
-                        message_history.append(
-                            self._tool_result_message(
-                                tool_call_id=str(payload.get("id") or ""),
-                                tool_name=str(payload.get("name") or "tool"),
-                                content="Error: submit_next_stage must be the only tool call in its turn",
-                                started_at="",
-                                finished_at="",
-                                elapsed_seconds=None,
-                            )
-                        )
-                    continue
-
-                round_payload = None
-                active_stage_id = str((stage_gate.get("active_stage") or {}).get("stage_id") or "")
-                if (
-                    stage_tool_enabled
-                    and bool(stage_gate.get("has_active_stage"))
-                    and not bool(stage_gate.get("transition_required"))
-                ):
-                    interaction_trace, round_payload = record_stage_round(
-                        interaction_trace,
-                        tool_calls=tool_call_payloads,
-                        extra_non_budget_tools=self._CEO_NON_BUDGET_TOOLS,
-                    )
-                    self._sync_session_trace(session, interaction_trace)
+                for payload in tool_call_payloads:
+                    signature = f"{payload['name']}:{json.dumps(payload['arguments'], ensure_ascii=False, sort_keys=True)}"
+                    if payload["name"] not in self._CONTROL_TOOL_NAMES:
+                        breaker.register(signature)
 
                 semaphore = asyncio.Semaphore(
                     self._parallel_slot_count(max_parallel_tool_calls, len(tool_call_payloads), enabled=parallel_enabled)
                 )
 
                 async def _run_single(index: int):
-                    nonlocal interaction_trace
                     payload = tool_call_payloads[index]
                     tool_name = str(payload.get("name") or "")
-                    tool = all_tools.get(tool_name)
+                    tool = tools.get(tool_name)
                     if tool is None:
                         result_text = f"Error: tool not available: {tool_name}"
                         status = "error"
@@ -788,29 +571,9 @@ class CeoFrontDoorRunner:
                                 tool=tool,
                                 tool_name=tool_name,
                                 arguments=dict(payload.get("arguments") or {}),
-                                runtime_context={
-                                    **runtime_context,
-                                    "interaction_trace": interaction_trace,
-                                    "disable_stage_tool": not stage_tool_enabled,
-                                    "stage_turn_granted": bool(
-                                        stage_gate.get("has_active_stage")
-                                        and not stage_gate.get("transition_required")
-                                    ),
-                                },
+                                runtime_context=runtime_context,
                                 on_progress=runtime_context.get("on_progress"),
                             )
-                    if isinstance(round_payload, dict):
-                        interaction_trace = update_round_tool(
-                            interaction_trace,
-                            stage_id=active_stage_id,
-                            round_id=str(round_payload.get("round_id") or ""),
-                            tool_call_id=str(payload.get("id") or ""),
-                            output_text=result_text,
-                            status=status,
-                            finished_at=finished_at,
-                            elapsed_seconds=elapsed_seconds,
-                        )
-                        self._sync_session_trace(session, interaction_trace)
                     await self._emit_progress(
                         runtime_context.get("on_progress"),
                         result_text,
@@ -826,62 +589,40 @@ class CeoFrontDoorRunner:
                         elapsed_seconds=elapsed_seconds,
                     )
 
-                tool_messages = await asyncio.gather(
-                    *[_run_single(index) for index in range(len(response_tool_calls))]
-                )
+                tool_messages = await asyncio.gather(*[_run_single(index) for index in range(len(response_tool_calls))])
                 assistant_message = {
                     "role": "assistant",
-                    "content": self._externalize_message_content(
-                        None if synthetic_tool_calls_used else response.content,
-                        runtime_context=runtime_context,
-                    ),
+                    "content": None if synthetic_tool_calls_used else self._model_content(getattr(response, "content", "")),
                     "tool_calls": self._assistant_tool_calls(response_tool_calls),
                 }
                 message_history.append(assistant_message)
                 message_history.extend(tool_messages)
-                stage_created = stage_created or any(
-                    str(payload.get('name') or '').strip() == STAGE_TOOL_NAME
-                    for payload in tool_call_payloads
-                )
                 used_tools.extend(
                     [
                         str(payload.get("name") or "").strip()
                         for payload in tool_call_payloads
-                        if str(payload.get("name") or "").strip() and str(payload.get("name") or "").strip() != STAGE_TOOL_NAME
+                        if str(payload.get("name") or "").strip() and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
                     ]
                 )
-                route_kind = self._route_kind_for_turn(
-                    used_tools=used_tools,
-                    stage_created=stage_created,
-                    default=route_kind,
-                )
+                route_kind = self._route_kind_for_turn(used_tools=used_tools, default=route_kind)
                 continue
 
             if xml_pseudo_call is not None:
                 xml_repair_attempt_count += 1
-                xml_repair_excerpt = str(xml_pseudo_call.get('excerpt') or '').strip()
-                xml_repair_tool_names = list(xml_pseudo_call.get('tool_names') or [])
+                xml_repair_excerpt = str(xml_pseudo_call.get("excerpt") or "").strip()
+                xml_repair_tool_names = list(xml_pseudo_call.get("tool_names") or [])
                 xml_repair_last_issue = (
-                    str(xml_pseudo_call.get('issue') or '').strip()
-                    or 'reply used XML-like pseudo tool syntax instead of a valid tool call'
+                    str(xml_pseudo_call.get("issue") or "").strip()
+                    or "reply used XML-like pseudo tool syntax instead of a valid tool call"
                 )
                 if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
-                    if interaction_trace.get('stages'):
-                        interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
-                        self._sync_session_trace(session, interaction_trace)
-                    route_kind = self._route_kind_for_turn(
-                        used_tools=used_tools,
-                        stage_created=stage_created,
-                        default=route_kind,
-                    )
                     return CeoTurnResult(
                         output=self._xml_repair_explanation(
                             count=xml_repair_attempt_count,
                             tool_names=xml_repair_tool_names,
                             content_excerpt=xml_repair_excerpt,
                         ),
-                        route_kind=route_kind,
-                        interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
+                        route_kind=self._route_kind_for_turn(used_tools=used_tools, default=route_kind),
                     )
                 repair_overlay_text = build_xml_tool_repair_message(
                     xml_excerpt=xml_repair_excerpt,
@@ -894,24 +635,15 @@ class CeoFrontDoorRunner:
 
             if xml_repair_attempt_count > 0:
                 xml_repair_attempt_count += 1
-                xml_repair_last_issue = 'reply still did not contain valid structured tool_calls or a valid JSON repair payload'
+                xml_repair_last_issue = "reply still did not contain valid structured tool_calls or a valid JSON repair payload"
                 if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
-                    if interaction_trace.get('stages'):
-                        interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
-                        self._sync_session_trace(session, interaction_trace)
-                    route_kind = self._route_kind_for_turn(
-                        used_tools=used_tools,
-                        stage_created=stage_created,
-                        default=route_kind,
-                    )
                     return CeoTurnResult(
                         output=self._xml_repair_explanation(
                             count=xml_repair_attempt_count,
                             tool_names=xml_repair_tool_names,
-                            content_excerpt=str(response.content or ''),
+                            content_excerpt=str(response.content or ""),
                         ),
-                        route_kind=route_kind,
-                        interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
+                        route_kind=self._route_kind_for_turn(used_tools=used_tools, default=route_kind),
                     )
                 repair_overlay_text = build_xml_tool_repair_message(
                     xml_excerpt=xml_repair_excerpt,
@@ -924,25 +656,9 @@ class CeoFrontDoorRunner:
 
             text = self._content_text(getattr(response, "content", ""))
             if text.strip():
-                stage_block_message = build_ceo_stage_result_block_message(self._stage_gate(interaction_trace))
-                if stage_block_message:
-                    message_history.append({"role": "user", "content": stage_block_message})
-                    continue
-                interaction_trace["final_output"] = text.strip()
-                interaction_trace = finalize_active_stage(
-                    interaction_trace,
-                    status=CEO_STAGE_STATUS_COMPLETED,
-                )
-                self._sync_session_trace(session, interaction_trace)
-                route_kind = self._route_kind_for_turn(
-                    used_tools=used_tools,
-                    stage_created=stage_created,
-                    default=route_kind,
-                )
                 return CeoTurnResult(
                     output=text.strip(),
-                    route_kind=route_kind,
-                    interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
+                    route_kind=self._route_kind_for_turn(used_tools=used_tools, default=route_kind),
                 )
 
             if str(getattr(response, "finish_reason", "") or "").strip().lower() == "error":
@@ -951,34 +667,18 @@ class CeoFrontDoorRunner:
                 empty_response_retries += 1
                 message_history.append(
                     {
-                        'role': 'user',
-                        'content': self._empty_response_retry_message(
-                            has_active_stage=bool(stage_gate.get('has_active_stage')),
-                            visible_tool_names=list(visible_tools.keys()),
+                        "role": "user",
+                        "content": self._empty_response_retry_message(
+                            visible_tool_names=list(tools.keys()),
                         ),
                     }
                 )
                 continue
-            if interaction_trace.get('stages'):
-                interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
-                self._sync_session_trace(session, interaction_trace)
-            route_kind = self._route_kind_for_turn(
-                used_tools=used_tools,
-                stage_created=stage_created,
-                default=route_kind,
-            )
             return CeoTurnResult(
-                output=self._empty_response_explanation(
-                    has_active_stage=bool(stage_gate.get('has_active_stage')),
-                    stage_created=stage_created,
-                    used_tools=used_tools,
-                ),
-                route_kind=route_kind,
-                interaction_trace=interaction_trace if interaction_trace.get("stages") else None,
+                output=self._empty_response_explanation(used_tools=used_tools),
+                route_kind=self._route_kind_for_turn(used_tools=used_tools, default=route_kind),
             )
 
-        interaction_trace = finalize_active_stage(interaction_trace, status=CEO_STAGE_STATUS_FAILED)
-        self._sync_session_trace(session, interaction_trace)
         raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
     @staticmethod
@@ -1014,21 +714,13 @@ class CeoFrontDoorRunner:
             message_tool.start_turn()
 
         exposure = await self._resolver.resolve_for_actor(actor_role="ceo", session_id=session.state.session_key)
-        assembly_kwargs = {
-            "session": session,
-            "query_text": query_text,
-            "exposure": exposure,
-            "persisted_session": persisted_session,
-        }
-        build_for_ceo = self._assembly.build_for_ceo
-        try:
-            build_sig = inspect.signature(build_for_ceo)
-        except Exception:
-            build_sig = None
-        if build_sig is None or "user_content" in build_sig.parameters:
-            assembly_kwargs["user_content"] = self._model_content(getattr(user_input, "content", ""))
-        assembly = await build_for_ceo(
-            **assembly_kwargs,
+        assembly = await self._builder.build_for_ceo(
+            session=session,
+            query_text=query_text,
+            exposure=exposure,
+            persisted_session=persisted_session,
+            user_content=self._model_content(getattr(user_input, "content", "")),
+            user_metadata=metadata,
         )
         tool_names = list(assembly.tool_names or list(exposure.get("tool_names") or []))
         if cron_internal:
@@ -1040,6 +732,7 @@ class CeoFrontDoorRunner:
             messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
         if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
             messages.append({"role": "user", "content": self._model_content(getattr(user_input, "content", ""))})
+
         project_environment = current_project_environment(workspace_root=getattr(self._loop, "workspace", None))
         session_task_defaults = self._session_task_defaults(runtime_session)
         model_refs = self._resolve_ceo_model_refs()
@@ -1073,14 +766,12 @@ class CeoFrontDoorRunner:
             "cron_internal": cron_internal,
             "cron_job_id": str(metadata.get("cron_job_id") or "").strip(),
             "cron_stop_condition": str(metadata.get("cron_stop_condition") or "").strip(),
-            "disable_stage_tool": cron_internal,
         }
 
         setattr(session, "_last_route_kind", "direct_reply")
         token = self._loop.tools.push_runtime_context(runtime_context)
         try:
             result = await self._run_react_turn(
-                session=session,
                 messages=messages,
                 tools=self._registered_tools(tool_names),
                 model_refs=model_refs,

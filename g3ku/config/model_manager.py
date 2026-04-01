@@ -31,6 +31,22 @@ def _infer_auth_mode(provider_id: str) -> AuthMode:
     return AuthMode.API_KEY
 
 
+def _optional_chat_parameters(
+    *,
+    max_tokens: Any = _UNSET,
+    temperature: Any = _UNSET,
+    reasoning_effort: Any = _UNSET,
+) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    if max_tokens is not _UNSET and max_tokens not in (None, ""):
+        parameters["max_tokens"] = int(max_tokens)
+    if temperature is not _UNSET and temperature not in (None, ""):
+        parameters["temperature"] = float(temperature)
+    if reasoning_effort is not _UNSET and str(reasoning_effort or "").strip():
+        parameters["reasoning_effort"] = str(reasoning_effort).strip()
+    return parameters
+
+
 def _chat_binding_draft(
     *,
     provider_model: str,
@@ -49,16 +65,11 @@ def _chat_binding_draft(
         "api_key": api_key,
         "base_url": api_base,
         "default_model": model_id,
-        "parameters": {
-            "timeout_s": 8,
-            "temperature": 0.1 if temperature is None else float(temperature),
-            "max_tokens": 4096 if max_tokens is None else int(max_tokens),
-            **(
-                {"reasoning_effort": str(reasoning_effort).strip()}
-                if reasoning_effort is not None and str(reasoning_effort).strip()
-                else {}
-            ),
-        },
+        "parameters": _optional_chat_parameters(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        ),
         "extra_headers": extra_headers or {},
         "extra_options": {},
     }
@@ -147,45 +158,46 @@ class ModelManager:
         self,
         *,
         key: str,
-        provider_model: str | None = None,
-        api_key: str | None = None,
-        api_base: str | None = None,
-        extra_headers: dict[str, str] | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        reasoning_effort: str | None = None,
-        retry_on: list[str] | None = None,
-        retry_count: int | None = None,
-        description: str | None = None,
+        provider_model: str | None | object = _UNSET,
+        api_key: str | None | object = _UNSET,
+        api_base: str | None | object = _UNSET,
+        extra_headers: dict[str, str] | None | object = _UNSET,
+        max_tokens: int | None | object = _UNSET,
+        temperature: float | None | object = _UNSET,
+        reasoning_effort: str | None | object = _UNSET,
+        retry_on: list[str] | None | object = _UNSET,
+        retry_count: int | None | object = _UNSET,
+        description: str | None | object = _UNSET,
     ) -> dict[str, Any]:
         item = self._require_model(key)
         patch: dict[str, Any] = {}
-        if provider_model is not None:
+        if provider_model is not _UNSET:
             provider_id, model_id = self.config.parse_provider_model(str(provider_model).strip())
             patch["provider_id"] = provider_id
             patch["default_model"] = model_id
-        if api_key is not None:
+        if api_key is not _UNSET:
             patch["api_key"] = str(api_key).strip()
-        if api_base is not None:
+        if api_base is not _UNSET:
             patch["base_url"] = str(api_base).strip()
+        parameters_present = any(value is not _UNSET for value in (max_tokens, temperature, reasoning_effort))
         parameters: dict[str, Any] = {}
-        if max_tokens is not None:
-            parameters["max_tokens"] = int(max_tokens)
-        if temperature is not None:
-            parameters["temperature"] = float(temperature)
-        if reasoning_effort is not None:
-            parameters["reasoning_effort"] = str(reasoning_effort).strip()
-        if parameters:
+        if max_tokens is not _UNSET:
+            parameters["max_tokens"] = None if max_tokens in (None, "") else int(max_tokens)
+        if temperature is not _UNSET:
+            parameters["temperature"] = None if temperature in (None, "") else float(temperature)
+        if reasoning_effort is not _UNSET:
+            parameters["reasoning_effort"] = str(reasoning_effort).strip() or None
+        if parameters_present:
             patch["parameters"] = parameters
-        if extra_headers is not None:
+        if extra_headers is not _UNSET:
             patch["extra_headers"] = extra_headers
         if patch:
             self.facade.update_binding(self.config, model_key=key, draft_payload=patch)
-        if retry_on is not None:
+        if retry_on is not _UNSET:
             item.retry_on = list(retry_on)
-        if retry_count is not None:
+        if retry_count is not _UNSET:
             item.retry_count = int(retry_count)
-        if description is not None:
+        if description is not _UNSET:
             item.description = str(description).strip()
         self._revalidate()
         self.save()

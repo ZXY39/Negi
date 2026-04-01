@@ -12,7 +12,6 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
-from g3ku.runtime.frontdoor.interaction_trace import normalize_interaction_trace
 from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
@@ -300,10 +299,6 @@ def _build_inflight_turn_snapshot(
                 snapshot = read_inflight_turn_snapshot(session_id)
     if not isinstance(snapshot, dict):
         return None
-    interaction_trace = snapshot.get('interaction_trace')
-    if isinstance(interaction_trace, dict):
-        snapshot = dict(snapshot)
-        snapshot['interaction_trace'] = normalize_interaction_trace(interaction_trace)
     return snapshot
 
 
@@ -416,13 +411,6 @@ def _normalize_snapshot_tool_events(raw_events: Any) -> list[dict[str, Any]]:
     return items
 
 
-def _normalize_snapshot_interaction_trace(raw_trace: Any) -> dict[str, Any] | None:
-    if not isinstance(raw_trace, dict):
-        return None
-    normalized = normalize_interaction_trace(raw_trace)
-    return normalized if normalized.get('stages') else None
-
-
 def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for raw in list(messages or []):
@@ -441,8 +429,7 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
                 content = raw_text.strip()
         attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
         tool_events = _normalize_snapshot_tool_events(raw.get('tool_events')) if role == 'assistant' else []
-        interaction_trace = _normalize_snapshot_interaction_trace(raw.get('interaction_trace')) if role == 'assistant' else None
-        if not content and not attachments and not tool_events and interaction_trace is None:
+        if not content and not attachments and not tool_events:
             continue
         item = {'role': role, 'content': content}
         timestamp = raw.get('timestamp')
@@ -452,8 +439,6 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             item['attachments'] = attachments
         if tool_events:
             item['tool_events'] = tool_events
-        if interaction_trace is not None:
-            item['interaction_trace'] = interaction_trace
         items.append(item)
     return items
 
@@ -510,13 +495,6 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
     if not text:
         return False
     return text != _HEARTBEAT_OK
-
-
-def _serialize_interaction_trace(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    normalized = normalize_interaction_trace(value)
-    return normalized if normalized.get('stages') else None
 
 
 @router.websocket('/ws/ceo')
@@ -684,7 +662,6 @@ async def ceo_websocket(websocket: WebSocket):
                 {
                     'code': 'turn_failed',
                     'message': str(exc),
-                    'interaction_trace': _serialize_interaction_trace((snapshot or {}).get('interaction_trace')),
                     'source': str((snapshot or {}).get('source') or 'user').strip().lower() or 'user',
                 },
             )
@@ -738,8 +715,6 @@ async def ceo_websocket(websocket: WebSocket):
                 {
                     'text': text,
                     'source': str(payload.get('source') or 'user').strip().lower() or 'user',
-                    'interaction_trace': _serialize_interaction_trace(payload.get('interaction_trace')),
-                    'stage': dict(payload.get('stage') or {}) if isinstance(payload.get('stage'), dict) else None,
                 },
             )
             persisted = transcript_store.get_or_create(session_id)

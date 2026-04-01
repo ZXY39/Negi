@@ -151,6 +151,7 @@ class RuntimeTarget(StrictModel):
     base_url: str
     resolved_model: str
     headers: dict[str, str] = Field(default_factory=dict)
+    model_parameters: dict[str, Any] = Field(default_factory=dict)
     max_tokens_limit: int | None = None
     default_temperature: float | None = None
     default_reasoning_effort: str | None = None

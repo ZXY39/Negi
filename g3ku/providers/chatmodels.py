@@ -48,9 +48,9 @@ def build_chat_model(
     return ProviderChatModelAdapter(
         provider=provider,
         default_model=default_key,
-        default_temperature=config.agents.defaults.temperature,
-        default_max_tokens=config.agents.defaults.max_tokens,
-        default_reasoning_effort=config.agents.defaults.reasoning_effort,
+        default_temperature=None,
+        default_max_tokens=None,
+        default_reasoning_effort=None,
     )
 
 
@@ -98,9 +98,9 @@ def _build_special_provider_bridge(
     return ProviderChatModelAdapter(
         provider=provider,
         default_model=provider.get_default_model(),
-        default_temperature=config.agents.defaults.temperature,
-        default_max_tokens=config.agents.defaults.max_tokens,
-        default_reasoning_effort=config.agents.defaults.reasoning_effort,
+        default_temperature=None,
+        default_max_tokens=None,
+        default_reasoning_effort=None,
     )
 
 

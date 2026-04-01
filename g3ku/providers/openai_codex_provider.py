@@ -38,8 +38,8 @@ class OpenAICodexProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
@@ -61,6 +61,12 @@ class OpenAICodexProvider(LLMProvider):
             "include": ["reasoning.encrypted_content"],
             "prompt_cache_key": str(prompt_cache_key or _prompt_cache_key(messages)),
         }
+        if max_tokens is not None:
+            body["max_output_tokens"] = max(1, int(max_tokens))
+        if temperature is not None:
+            body["temperature"] = float(temperature)
+        if reasoning_effort:
+            body["reasoning"] = {"effort": str(reasoning_effort).strip()}
 
         if tools:
             body["tools"] = _convert_tools(tools)

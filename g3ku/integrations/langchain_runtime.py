@@ -246,8 +246,8 @@ class ProviderChatModelAdapter(BaseChatModel):
 
     provider: Any
     default_model: str
-    default_temperature: float
-    default_max_tokens: int
+    default_temperature: float | None = None
+    default_max_tokens: int | None = None
     default_reasoning_effort: str | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -306,25 +306,32 @@ class ProviderChatModelAdapter(BaseChatModel):
         prompt_cache_key = kwargs.get("prompt_cache_key")
 
         model = str(kwargs.get("model") or self.default_model)
-        temperature = float(kwargs.get("temperature", self.default_temperature))
-        max_tokens = int(kwargs.get("max_tokens", self.default_max_tokens))
+        raw_temperature = kwargs.get("temperature", self.default_temperature)
+        temperature = float(raw_temperature) if raw_temperature is not None else None
+        raw_max_tokens = kwargs.get("max_tokens", self.default_max_tokens)
+        max_tokens = int(raw_max_tokens) if raw_max_tokens is not None else None
         reasoning_effort = kwargs.get("reasoning_effort", self.default_reasoning_effort)
         if reasoning_effort is not None:
             reasoning_effort = str(reasoning_effort)
 
-        response = await self.provider.chat(
-            messages=openai_messages,
-            tools=openai_tools,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort,
-            tool_choice=normalized_tool_choice,
-            parallel_tool_calls=(
+        provider_kwargs: dict[str, Any] = {
+            "messages": openai_messages,
+            "tools": openai_tools,
+            "model": model,
+            "tool_choice": normalized_tool_choice,
+            "parallel_tool_calls": (
                 bool(parallel_tool_calls) if isinstance(parallel_tool_calls, bool) else None
             ),
-            prompt_cache_key=(str(prompt_cache_key).strip() or None) if prompt_cache_key is not None else None,
-        )
+            "prompt_cache_key": (str(prompt_cache_key).strip() or None) if prompt_cache_key is not None else None,
+        }
+        if temperature is not None:
+            provider_kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            provider_kwargs["max_tokens"] = max_tokens
+        if reasoning_effort is not None:
+            provider_kwargs["reasoning_effort"] = reasoning_effort
+
+        response = await self.provider.chat(**provider_kwargs)
 
         additional_kwargs: dict[str, Any] = {}
         if response.reasoning_content:

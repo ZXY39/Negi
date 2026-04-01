@@ -4456,15 +4456,15 @@ function renderModelDetail() {
                         <div class="model-form-grid">
                             <label class="resource-field">
                                 <span class="resource-field-label">Max Tokens</span>
-                                <input class="resource-search" type="number" min="1" step="1" name="maxTokens" value="${esc(String(current?.max_tokens ?? ""))}" placeholder="留空使用默认值">
+                                <input class="resource-search" type="number" min="1" step="1" name="maxTokens" value="${esc(String(current?.max_tokens ?? ""))}" placeholder="留空则不下发">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Temperature</span>
-                                <input class="resource-search" type="number" min="0" max="2" step="0.1" name="temperature" value="${esc(String(current?.temperature ?? ""))}" placeholder="留空使用默认值">
+                                <input class="resource-search" type="number" min="0" max="2" step="0.1" name="temperature" value="${esc(String(current?.temperature ?? ""))}" placeholder="留空则不下发">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Reasoning Effort</span>
-                                <input class="resource-search" name="reasoningEffort" value="${esc(current?.reasoning_effort || "")}" placeholder="如 low / medium / high">
+                                <input class="resource-search" name="reasoningEffort" value="${esc(current?.reasoning_effort || "")}" placeholder="留空则不下发">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Retry On</span>
@@ -5023,7 +5023,8 @@ function collectModelFormData(form, current) {
     const apiBase = String(formData.get("apiBase") || "").trim();
     const maxTokensText = String(formData.get("maxTokens") || "").trim();
     const temperatureText = String(formData.get("temperature") || "").trim();
-    const reasoningEffort = String(formData.get("reasoningEffort") || "").trim();
+    const reasoningEffortText = String(formData.get("reasoningEffort") || "").trim();
+    const reasoningEffort = reasoningEffortText || null;
     const retryOnRaw = String(formData.get("retryOn") || "").trim();
     const retryCountText = String(formData.get("retryCount") || "").trim();
     const description = String(formData.get("description") || "").trim();
@@ -5065,7 +5066,7 @@ function collectModelFormData(form, current) {
         };
         if (maxTokens !== null) payload.maxTokens = maxTokens;
         if (temperature !== null) payload.temperature = temperature;
-        if (reasoningEffort) payload.reasoningEffort = reasoningEffort;
+        if (reasoningEffort !== null) payload.reasoningEffort = reasoningEffort;
         if (retryOn !== null) payload.retryOn = retryOn;
         payload.retryCount = retryCount;
         if (extraHeaders !== null) payload.extraHeaders = extraHeaders;
@@ -5076,9 +5077,17 @@ function collectModelFormData(form, current) {
     if (providerModel !== String(current?.provider_model || "")) patch.providerModel = providerModel;
     if (apiKey !== String(current?.api_key || "")) patch.apiKey = apiKey;
     if (apiBase !== String(current?.api_base || "")) patch.apiBase = apiBase;
-    if (maxTokens !== null && maxTokens !== Number(current?.max_tokens ?? NaN)) patch.maxTokens = maxTokens;
-    if (temperature !== null && temperature !== Number(current?.temperature ?? NaN)) patch.temperature = temperature;
-    if (reasoningEffort !== String(current?.reasoning_effort || "")) patch.reasoningEffort = reasoningEffort;
+    if (maxTokensText) {
+        if (maxTokens !== Number(current?.max_tokens ?? NaN)) patch.maxTokens = maxTokens;
+    } else if (current?.max_tokens != null) {
+        patch.maxTokens = null;
+    }
+    if (temperatureText) {
+        if (temperature !== Number(current?.temperature ?? NaN)) patch.temperature = temperature;
+    } else if (current?.temperature != null) {
+        patch.temperature = null;
+    }
+    if (reasoningEffort !== (String(current?.reasoning_effort || "").trim() || null)) patch.reasoningEffort = reasoningEffort;
     if (retryOn !== null && JSON.stringify(retryOn) !== JSON.stringify(current?.retry_on || [])) patch.retryOn = retryOn;
     if (retryCount !== Number.parseInt(String(current?.retry_count ?? 0), 10)) patch.retryCount = retryCount;
     if (description !== String(current?.description || "")) patch.description = description;

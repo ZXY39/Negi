@@ -1783,10 +1783,6 @@ def test_admin_memory_trace_endpoints_return_payload():
     assert retrieval.status_code == 200
     assert retrieval.json()['items'][0]['trace_kind'] == 'retrieval'
 
-    assembly = client.get('/api/memory/context-assembly-traces?limit=2')
-    assert assembly.status_code == 200
-    assert assembly.json()['items'][0]['trace_kind'] == 'context_assembly'
-
 
 def _write_runtime_config(workspace: Path) -> None:
     (workspace / '.g3ku').mkdir(parents=True, exist_ok=True)
