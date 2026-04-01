@@ -443,7 +443,7 @@ class ReActToolLoop:
                 xml_repair_excerpt = str(xml_pseudo_call.get('excerpt') or '').strip()
                 xml_repair_tool_names = list(xml_pseudo_call.get('tool_names') or [])
                 xml_repair_last_issue = 'reply used XML-like pseudo tool syntax instead of a valid tool call'
-                if xml_repair_attempt_count >= _XML_REPAIR_ATTEMPT_LIMIT:
+                if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
                     return self._xml_repair_failure(
                         count=xml_repair_attempt_count,
                         tool_names=xml_repair_tool_names,
@@ -453,7 +453,7 @@ class ReActToolLoop:
                     xml_excerpt=xml_repair_excerpt,
                     tool_names=xml_repair_tool_names,
                     attempt_count=xml_repair_attempt_count,
-                    attempt_limit=_XML_REPAIR_ATTEMPT_LIMIT,
+                    attempt_limit=XML_REPAIR_ATTEMPT_LIMIT,
                     latest_issue=xml_repair_last_issue,
                 )
                 continue
@@ -461,7 +461,7 @@ class ReActToolLoop:
             if xml_repair_attempt_count > 0:
                 xml_repair_attempt_count += 1
                 xml_repair_last_issue = 'reply still did not contain valid structured tool_calls or a valid JSON repair payload'
-                if xml_repair_attempt_count >= _XML_REPAIR_ATTEMPT_LIMIT:
+                if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
                     return self._xml_repair_failure(
                         count=xml_repair_attempt_count,
                         tool_names=xml_repair_tool_names,
@@ -471,7 +471,7 @@ class ReActToolLoop:
                     xml_excerpt=xml_repair_excerpt,
                     tool_names=xml_repair_tool_names,
                     attempt_count=xml_repair_attempt_count,
-                    attempt_limit=_XML_REPAIR_ATTEMPT_LIMIT,
+                    attempt_limit=XML_REPAIR_ATTEMPT_LIMIT,
                     latest_issue=xml_repair_last_issue,
                 )
                 continue

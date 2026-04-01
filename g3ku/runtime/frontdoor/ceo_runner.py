@@ -333,7 +333,7 @@ class CeoFrontDoorRunner:
         reason = format_xml_repair_failure_reason(
             count=count,
             tool_names=tool_names,
-            content_excerpt=content_excerpt,
+            content_excerpt='',
         )
         return (
             '本轮已停止，因为模型连续返回了无效的 XML 风格伪工具调用，'
