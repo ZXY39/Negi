@@ -1248,7 +1248,7 @@ async def test_submit_next_stage_only_loop_fails_after_five_turns(tmp_path: Path
         assert task is not None
         assert backend.turn == 6
         assert task.status == 'failed'
-        assert 'Invalid submit_next_stage detected 5 consecutive times' in str(task.failure_reason or '')
+        assert 'Invalid stage progression detected 5 consecutive times' in str(task.failure_reason or '')
         assert 'no substantive progress yet' in str(task.failure_reason or '')
     finally:
         await service.close()

@@ -12,6 +12,7 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
+from g3ku.providers.base import ToolCallRequest
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.errors import TaskPausedError
@@ -23,7 +24,7 @@ from main.runtime.stage_budget import (
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
 )
-from main.runtime.stage_messages import build_execution_stage_overlay
+from main.runtime.stage_messages import build_execution_stage_overlay, build_execution_stage_result_block_message
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -197,6 +198,12 @@ class ReActToolLoop:
                 messages=request_messages,
                 tools=tool_schemas or None,
                 model_refs=current_model_refs,
+                tool_choice=self._repair_tool_choice(
+                    visible_tools=visible_tools,
+                    stage_gate=stage_gate,
+                    invalid_final_submission_count=invalid_final_submission_count,
+                    invalid_stage_submission_count=invalid_stage_submission_count,
+                ),
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
                 prompt_cache_key=turn_prompt_cache_key,
             )
@@ -208,6 +215,7 @@ class ReActToolLoop:
             response_tool_calls = list(response.tool_calls or [])
             synthetic_tool_calls_used = False
             xml_pseudo_call = None
+            matched_raw_final_result_payload = False
             if not response_tool_calls and visible_tool_names:
                 xml_extraction = self._extract_tool_calls_from_xml_pseudo_content(
                     response.content,
@@ -230,6 +238,14 @@ class ReActToolLoop:
                         'tool_names': list(xml_extraction.tool_names or []),
                         'issue': str(xml_extraction.issue or '').strip(),
                     }
+                if not response_tool_calls and FINAL_RESULT_TOOL_NAME in visible_tool_names:
+                    repaired_final_call, matched_raw_final_result_payload = self._recover_final_result_tool_call_from_raw_json(
+                        response.content,
+                        attempt_auto_repair=invalid_final_submission_count > 0,
+                    )
+                    if repaired_final_call is not None:
+                        response_tool_calls = [repaired_final_call]
+                        synthetic_tool_calls_used = True
             tool_calls = [
                 {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
                 for call in response_tool_calls
@@ -510,6 +526,33 @@ class ReActToolLoop:
                     attempt_count=xml_repair_attempt_count,
                     attempt_limit=XML_REPAIR_ATTEMPT_LIMIT,
                     latest_issue=xml_repair_last_issue,
+                )
+                continue
+
+            stage_protocol_message = (
+                build_execution_stage_result_block_message(
+                    node_kind=node.node_kind,
+                    stage_gate=stage_gate,
+                )
+                if bool(stage_gate.get('enabled'))
+                else ''
+            )
+            if bool(stage_gate.get('enabled')) and (stage_protocol_message or not matched_raw_final_result_payload):
+                invalid_stage_submission_count += 1
+                last_invalid_stage_submission_reason = (
+                    str(stage_protocol_message or '').strip()
+                    or 'reply did not use tools, submit_next_stage, or submit_final_result'
+                )
+                if invalid_stage_submission_count >= _INVALID_STAGE_SUBMISSION_LIMIT:
+                    active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
+                    return self._invalid_stage_submission_failure(
+                        reason=last_invalid_stage_submission_reason,
+                        count=invalid_stage_submission_count,
+                        stage_goal=str((active_stage or {}).get('stage_goal') or ''),
+                    )
+                repair_overlay_text = stage_protocol_message or build_execution_stage_overlay(
+                    node_kind=node.node_kind,
+                    stage_gate=stage_gate,
                 )
                 continue
 
@@ -1390,7 +1433,7 @@ class ReActToolLoop:
             evidence=[],
             remaining_work=[],
             blocking_reason=(
-                f'Invalid {STAGE_TOOL_NAME} detected {int(count or 0)} consecutive times. '
+                f'Invalid stage progression detected {int(count or 0)} consecutive times. '
                 f'Latest issue: {text}.{suffix}'
             ),
         )
@@ -1972,6 +2015,79 @@ class ReActToolLoop:
             f'Execution nodes must end through `{FINAL_RESULT_TOOL_NAME}`. '
             'Use success+final on completion, and use failed+blocked only when the node is genuinely blocked. '
             'If work remains, continue with tools or `submit_next_stage` instead of finalizing.'
+        )
+
+    @staticmethod
+    def _repair_tool_choice(
+        *,
+        visible_tools: dict[str, Tool],
+        stage_gate: dict[str, Any],
+        invalid_final_submission_count: int,
+        invalid_stage_submission_count: int,
+    ) -> dict[str, Any] | None:
+        visible_tool_names = {
+            str(name or '').strip()
+            for name in dict(visible_tools or {}).keys()
+            if str(name or '').strip()
+        }
+        if invalid_final_submission_count > 0 and FINAL_RESULT_TOOL_NAME in visible_tool_names:
+            return {
+                'type': 'function',
+                'function': {'name': FINAL_RESULT_TOOL_NAME},
+            }
+        if (
+            invalid_stage_submission_count > 0
+            and STAGE_TOOL_NAME in visible_tool_names
+            and bool(stage_gate.get('enabled'))
+            and (
+                not bool(stage_gate.get('has_active_stage'))
+                or bool(stage_gate.get('transition_required'))
+            )
+        ):
+            return {
+                'type': 'function',
+                'function': {'name': STAGE_TOOL_NAME},
+            }
+        return None
+
+    @classmethod
+    def _recover_final_result_tool_call_from_raw_json(
+        cls,
+        content: Any,
+        *,
+        attempt_auto_repair: bool,
+    ) -> tuple[ToolCallRequest | None, bool]:
+        for candidate in cls._extract_json_object_candidates(str(content or '')):
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if not cls._looks_like_final_result_payload(payload):
+                continue
+            if not attempt_auto_repair:
+                return None, True
+            return (
+                ToolCallRequest(
+                    id='call:raw-final-result:1',
+                    name=FINAL_RESULT_TOOL_NAME,
+                    arguments=dict(payload),
+                ),
+                True,
+            )
+        return None, False
+
+    @staticmethod
+    def _looks_like_final_result_payload(payload: dict[str, Any]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        status = str(payload.get('status') or '').strip().lower()
+        if status not in {'success', 'failed'}:
+            return False
+        return any(
+            key in payload
+            for key in ('delivery_status', 'summary', 'answer', 'evidence', 'remaining_work', 'blocking_reason')
         )
 
     @staticmethod

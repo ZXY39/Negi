@@ -1247,7 +1247,56 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
     assert len(calls) == 2
     second_request = calls[1]
     assert second_request[0]['role'] == 'system'
-    overlay_carrier = second_request[-1]
-    assert overlay_carrier['role'] == 'user'
-    assert 'If you are ending the node now' in str(overlay_carrier['content'])
-    assert 'submit_final_result' in str(overlay_carrier['content'])
+    assert any(item.get('role') == 'user' for item in second_request)
+    merged_user_content = '\n'.join(str(item.get('content') or '') for item in second_request if item.get('role') == 'user')
+    assert 'If you are ending the node now' in merged_user_content
+    assert 'submit_final_result' in merged_user_content
+
+
+@pytest.mark.asyncio
+async def test_react_loop_recovers_raw_final_result_json_after_protocol_repair() -> None:
+    requests: list[dict[str, object]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._responses = [
+                LLMResponse(
+                    content='{"status":"success","delivery_status":"final","summary":"done","answer":"done","evidence":[],"remaining_work":[],"blocking_reason":""}',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+                LLMResponse(
+                    content='{"status":"success","delivery_status":"final","summary":"done","answer":"done","evidence":[],"remaining_work":[],"blocking_reason":""}',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                ),
+            ]
+
+        async def chat(self, **kwargs):
+            requests.append(dict(kwargs))
+            return self._responses.pop(0)
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-raw-final-json'),
+        node=SimpleNamespace(node_id='node-raw-final-json', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-raw-final-json","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-raw-final-json', 'node_id': 'node-raw-final-json'},
+        max_iterations=3,
+    )
+
+    assert result.status == 'success'
+    assert result.answer == 'done'
+    assert len(requests) == 2
+    assert requests[0].get('tool_choice') is None
+    assert requests[1].get('tool_choice') == {
+        'type': 'function',
+        'function': {'name': 'submit_final_result'},
+    }
