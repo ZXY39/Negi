@@ -945,6 +945,8 @@ function resetTaskView() {
     S.currentNodeDetail = null;
     S.taskNodeDetails = {};
     S.taskNodeDetailRequests = {};
+    S.taskNodeLatestContexts = {};
+    S.taskNodeLatestContextRequests = {};
     if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();
     S.taskNodeBusy = false;
     S.taskArtifacts = [];
@@ -983,9 +985,9 @@ function resetTaskView() {
     if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
     if (U.adRoundSummary) U.adRoundSummary.textContent = "默认显示：最新树";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
-    if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
-    if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
-    if (U.artifactApply) U.artifactApply.hidden = true;
+    if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No file changes yet.</div>';
+    if (U.artifactContent) U.artifactContent.textContent = "展开后查看节点完整上下文。";
+    if (U.nodeContextDisclosure) U.nodeContextDisclosure.open = false;
     renderFlowHeading(0);
     renderArtifactHeading(0);
     syncTaskTreeHeaderState(null);

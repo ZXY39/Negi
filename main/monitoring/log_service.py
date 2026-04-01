@@ -17,11 +17,13 @@ from main.models import (
     ExecutionStageRecord,
     ExecutionStageRound,
     ExecutionStageState,
+    NodeToolFileChange,
     NodeOutputEntry,
     NodeRecord,
     TaskRecord,
     normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
+    normalize_tool_file_changes,
 )
 from main.runtime.stage_budget import (
     CONTROL_STAGE_TOOL_NAMES,
@@ -581,6 +583,47 @@ class TaskLogService:
             self.refresh_task_view(task_id, mark_unread=True)
             return updated
 
+    def record_node_file_change(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        path: str,
+        change_type: str,
+    ) -> NodeRecord | None:
+        normalized_path = str(path or '').strip()
+        normalized_change_type = str(change_type or 'modified').strip().lower()
+        if not normalized_path:
+            return None
+        if normalized_change_type not in {'created', 'modified'}:
+            normalized_change_type = 'modified'
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            if task is None:
+                return None
+
+            def _mutate(record: NodeRecord) -> NodeRecord:
+                metadata = dict(record.metadata or {})
+                current_changes = normalize_tool_file_changes(metadata.get('tool_file_changes'))
+                next_changes = self._merge_tool_file_changes(
+                    current_changes,
+                    path=normalized_path,
+                    change_type=normalized_change_type,
+                )
+                current_payload = [item.model_dump(mode='json') for item in current_changes]
+                next_payload = [item.model_dump(mode='json') for item in next_changes]
+                if current_payload == next_payload:
+                    return record
+                metadata['tool_file_changes'] = next_payload
+                return record.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
+
+            updated = self._store.update_node(node_id, _mutate)
+            if updated is not None:
+                self._sync_node_read_models_locked(updated)
+                self._publish_task_node_patch_locked(task=task, node=updated)
+                self.refresh_task_view(task_id, mark_unread=True)
+            return updated
+
     @staticmethod
     def _acceptance_failure_text(node: NodeRecord) -> str:
         for candidate in (node.failure_reason, node.final_output, node.check_result):
@@ -679,6 +722,36 @@ class TaskLogService:
                 }
             ),
         )
+
+    @staticmethod
+    def _merge_tool_file_changes(
+        current_changes: list[NodeToolFileChange],
+        *,
+        path: str,
+        change_type: str,
+    ) -> list[NodeToolFileChange]:
+        normalized_path = str(path or '').strip()
+        normalized_change_type = 'created' if str(change_type or '').strip().lower() == 'created' else 'modified'
+        merged: list[NodeToolFileChange] = []
+        found = False
+        for item in list(current_changes or []):
+            if str(item.path or '').strip() != normalized_path:
+                merged.append(item)
+                continue
+            found = True
+            merged.append(
+                item.model_copy(
+                    update={
+                        'path': normalized_path,
+                        'change_type': 'created'
+                        if str(item.change_type or '').strip().lower() == 'created' or normalized_change_type == 'created'
+                        else 'modified',
+                    }
+                )
+            )
+        if not found:
+            merged.append(NodeToolFileChange(path=normalized_path, change_type=normalized_change_type))
+        return merged
 
     def mark_task_read(self, task_id: str) -> TaskRecord | None:
         with self._task_lock(task_id):
@@ -1588,6 +1661,29 @@ class TaskLogService:
     def remove_frame(self, task_id: str, node_id: str, *, publish_snapshot: bool = False) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
+            current = self._store.get_task_runtime_frame(task_id, node_id)
+            latest_messages_ref = ''
+            if current is not None:
+                payload = dict(current.payload or {})
+                latest_messages_ref = str(payload.get('messages_ref') or '').strip()
+            if latest_messages_ref:
+                node = self._store.get_node(node_id)
+                if node is not None and str(node.task_id or '').strip() == str(task.task_id or '').strip():
+                    updated_node = self._store.update_node(
+                        node_id,
+                        lambda record: record.model_copy(
+                            update={
+                                'metadata': {
+                                    **dict(record.metadata or {}),
+                                    'latest_runtime_messages_ref': latest_messages_ref,
+                                },
+                                'updated_at': now_iso(),
+                            }
+                        ),
+                    )
+                    if updated_node is not None:
+                        self._sync_node_read_models_locked(updated_node)
+                        self._publish_task_node_patch_locked(task=task, node=updated_node)
             self._store.delete_task_runtime_frame(task_id, node_id)
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task, removed_node_id=node_id)
@@ -1805,6 +1901,7 @@ class TaskLogService:
 
     def _task_projection_node_detail_record(self, node: NodeRecord) -> TaskProjectionNodeDetailRecord:
         prompt_summary = _single_line_text(node.prompt or node.goal or '', max_chars=400)
+        tool_file_changes = normalize_tool_file_changes((node.metadata or {}).get('tool_file_changes'))
         return TaskProjectionNodeDetailRecord(
             node_id=node.node_id,
             task_id=node.task_id,
@@ -1840,6 +1937,7 @@ class TaskLogService:
                 'failure_reason': str(node.failure_reason or ''),
                 'updated_at': str(node.updated_at or ''),
                 'execution_trace': build_execution_trace(node),
+                'tool_file_changes': [item.model_dump(mode='json') for item in list(tool_file_changes or [])],
                 'token_usage': node.token_usage.model_dump(mode='json'),
                 'token_usage_by_model': [item.model_dump(mode='json') for item in list(node.token_usage_by_model or [])],
             },
@@ -2005,6 +2103,9 @@ class TaskLogService:
         except Exception:
             return ''
         return str(text or '')
+
+    def resolve_content_ref(self, ref: str) -> str:
+        return self._resolve_content_ref(ref)
 
     @classmethod
     def _task_summary_fingerprint(cls, task: TaskRecord) -> str:

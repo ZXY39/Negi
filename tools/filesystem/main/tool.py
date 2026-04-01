@@ -128,7 +128,7 @@ class FilesystemTool:
             if operation == 'list':
                 return self._list(path)
             if operation == 'write':
-                return await self._write(path, content)
+                return await self._write(path, content, runtime=runtime)
             if operation == 'edit':
                 return await self._edit(path, old_text, new_text, runtime=runtime, **kwargs)
             if operation == 'delete':
@@ -382,7 +382,7 @@ class FilesystemTool:
             return f'Directory {path} is empty'
         return '\n'.join(items)
 
-    async def _write(self, path: str, content: str | None) -> str:
+    async def _write(self, path: str, content: str | None, *, runtime: dict[str, Any]) -> str:
         if content is None:
             return 'Error: content is required when action=write'
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
@@ -406,6 +406,11 @@ class FilesystemTool:
         )
         if validation_result is not None:
             return validation_result
+        self._record_node_file_change(
+            runtime=runtime,
+            path=file_path,
+            change_type='modified' if existed_before else 'created',
+        )
         self._notify_resource_change(file_path, trigger='tool:filesystem.write')
         validated_count = int(self._validation_success_count(
             enabled=bool(self._settings.write_validation_enabled),
@@ -473,6 +478,11 @@ class FilesystemTool:
         )
         if validation_result is not None:
             return validation_result
+        self._record_node_file_change(
+            runtime=runtime,
+            path=file_path,
+            change_type='modified',
+        )
         self._notify_resource_change(file_path, trigger='tool:filesystem.edit')
         validated_count = int(self._validation_success_count(
             enabled=bool(self._settings.edit_validation_enabled),
@@ -1002,6 +1012,19 @@ class FilesystemTool:
         session_id = 'web:shared'
         try:
             service.refresh_resource_paths([path], trigger=trigger, session_id=session_id)
+        except Exception:
+            return
+
+    def _record_node_file_change(self, *, runtime: dict[str, Any], path: Path, change_type: str) -> None:
+        service = self._main_task_service
+        if service is None or not hasattr(service, 'record_node_file_change'):
+            return
+        task_id = _runtime_task_id(runtime)
+        node_id = _runtime_node_id(runtime)
+        if not task_id or not node_id:
+            return
+        try:
+            service.record_node_file_change(task_id, node_id, path=str(path), change_type=change_type)
         except Exception:
             return
 

@@ -258,6 +258,7 @@ async def test_task_node_dispatcher_runs_final_acceptance_via_inspection_role(tm
 
     acceptance_nodes = [node for node in service.list_nodes(record.task_id) if node.node_kind == "acceptance"]
     assert len(acceptance_nodes) == 1
+    assert acceptance_nodes[0].goal == f"最终验收:{root.goal}"
     assert call_order[0] == root.node_id
     assert call_order[1] == acceptance_nodes[0].node_id
     assert roles == ["execution", "inspection"]

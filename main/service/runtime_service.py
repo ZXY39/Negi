@@ -1783,16 +1783,16 @@ class MainRuntimeService:
             candidate = detail_payload.get('item') if isinstance(detail_payload.get('item'), dict) else candidate
         if not candidate:
             return ''
-        title = str(candidate.get('goal') or candidate.get('title') or candidate.get('node_id') or 'node').strip() or 'node'
+        title = str(self._repair_legacy_display_text(candidate.get('goal') or candidate.get('title') or candidate.get('node_id') or 'node')).strip() or 'node'
         status = str(candidate.get('status') or 'in_progress').strip() or 'in_progress'
-        output = str(
+        output = str(self._repair_legacy_display_text(
             candidate.get('final_output')
             or candidate.get('output')
             or candidate.get('failure_reason')
             or ''
-        ).strip()
+        )).strip()
         if not output and frontier:
-            output = str(frontier[0].get('stage_goal') or frontier[0].get('phase') or '').strip()
+            output = str(self._repair_legacy_display_text(frontier[0].get('stage_goal') or frontier[0].get('phase') or '')).strip()
         text = f'{title} [{status}]'
         if output:
             text = f'{text}: {output}'
@@ -2407,6 +2407,36 @@ class MainRuntimeService:
             'process_cpu_warn_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_warn_ratio', 0.85) or 0.85)),
             'process_cpu_safe_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_safe_ratio', 0.50) or 0.50)),
         }
+
+    @staticmethod
+    def _repair_legacy_display_text(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        text = str(value or '')
+        if not text:
+            return text
+        text = re.sub(r'^鏈€缁堥獙鏀(?:讹細|:|：|\?)?', '最终验收:', text)
+        replacements = (
+            ('鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?', '核对最终结果是否满足要求。'),
+            ('妫€鏌ユ渶缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?', '检查最终结果是否满足要求。'),
+            ('妫€鏌?child 杈撳嚭銆?', '检查 child 输出。'),
+            ('妫€鏌ュ叕鍛婅崏绋挎槸鍚︽弧瓒充氦浠樿姹傘€?', '检查公告草稿是否满足交付要求。'),
+            ('楠屾敹閫氳繃', '验收通过'),
+            ('鑷富鎵ц', '自主执行'),
+            ('杩涜涓?', '进行中'),
+            ('鏈€鏂伴樁娈电洰鏍?', '最新阶段目标'),
+        )
+        for source, target in replacements:
+            text = text.replace(source, target)
+        return text
+
+    @classmethod
+    def _repair_legacy_display_payload(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: cls._repair_legacy_display_payload(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._repair_legacy_display_payload(item) for item in value]
+        return cls._repair_legacy_display_text(value)
 
     @staticmethod
     def _normalize_optional_parallel_limit(value: Any) -> int | None:
@@ -3744,12 +3774,49 @@ class MainRuntimeService:
         detail = self.query_service.get_node_detail(normalized_task_id, node_id)
         if detail is None:
             return None
+        item = self._repair_legacy_display_payload(detail.model_dump(mode='json'))
         return {
             'ok': True,
             'task_id': normalized_task_id,
             'node_id': node_id,
-            'item': detail.model_dump(mode='json'),
+            'item': item,
         }
+
+    def get_node_latest_context_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        node = self.store.get_node(node_id)
+        if task is None or node is None or str(node.task_id or '').strip() != normalized_task_id:
+            return None
+        frame = self.store.get_task_runtime_frame(normalized_task_id, node_id)
+        ref = ''
+        if frame is not None:
+            ref = str((frame.payload or {}).get('messages_ref') or '').strip()
+        if not ref:
+            metadata = dict(node.metadata or {})
+            ref = str(metadata.get('latest_runtime_messages_ref') or '').strip()
+        resolver = getattr(self.log_service, 'resolve_content_ref', None)
+        content = str(resolver(ref) or '') if callable(resolver) and ref else ''
+        return {
+            'ok': True,
+            'task_id': normalized_task_id,
+            'node_id': node_id,
+            'title': str(self._repair_legacy_display_text(node.goal or node.node_id)),
+            'node_kind': str(node.node_kind or 'execution'),
+            'status': str(node.status or 'in_progress'),
+            'updated_at': str(node.updated_at or ''),
+            'ref': ref,
+            'content': content,
+        }
+
+    def record_node_file_change(self, task_id: str, node_id: str, *, path: str, change_type: str) -> None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        self.log_service.record_node_file_change(
+            normalized_task_id,
+            node_id,
+            path=path,
+            change_type=change_type,
+        )
 
     def node_detail(self, task_id: str, node_id: str) -> dict[str, Any] | str:
         normalized_task_id = self.normalize_task_id(task_id)

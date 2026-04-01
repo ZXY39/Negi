@@ -6685,9 +6685,34 @@ textarea {
     background: var(--bg-hover);
 }
 
+.artifact-context-disclosure {
+    margin-top: var(--space-3);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-app);
+    overflow: hidden;
+}
+
+.artifact-context-disclosure summary {
+    cursor: pointer;
+    padding: var(--space-3) var(--space-4);
+    font-weight: 600;
+    color: var(--text-primary);
+    user-select: none;
+}
+
+.artifact-context-disclosure[open] summary {
+    border-bottom: 1px solid var(--border-color);
+}
+
 #artifact-content {
     white-space: pre-wrap;
     min-height: 120px;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    max-height: min(42dvh, 420px);
+    overflow: auto;
 }
 
 .task-token-modal {

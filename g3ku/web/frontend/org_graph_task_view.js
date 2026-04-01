@@ -669,10 +669,16 @@ function truncateNodeTitle(text, maxChars = 20) {
     return `${chars.slice(0, maxChars).join("")}...`;
 }
 
+function repairAcceptanceTitle(text) {
+    const raw = String(text || "").trim();
+    if (!raw) return "";
+    return raw.replace(/^鏈€缁堥獙鏀(?:讹細|:|：|\?)?/, "最终验收:");
+}
+
 function resolveNodeTitle(node, detail) {
     const nodeKind = String(detail?.node_kind || node?.node_kind || "").trim().toLowerCase();
-    const goal = String(detail?.goal || "").trim();
-    const rawTitle = goal || String(node?.title || node?.node_id || "").trim() || String(node?.node_id || "");
+    const goal = repairAcceptanceTitle(String(detail?.goal || "").trim());
+    const rawTitle = goal || repairAcceptanceTitle(String(node?.title || node?.node_id || "").trim()) || String(node?.node_id || "");
     const acceptanceTitle = rawTitle.replace(/^accept\s*:\s*/i, "").trim();
     const fullTitle = nodeKind === "acceptance"
         ? (acceptanceTitle ? `检验 · ${acceptanceTitle}` : "检验")
@@ -711,7 +717,7 @@ function treeViewChildren(node) {
 }
 
 function compactNodeHeading(node, maxChars = 72) {
-    const raw = String(node?.goal || node?.fullTitle || node?.title || node?.node_id || "Node");
+    const raw = repairAcceptanceTitle(String(node?.goal || node?.fullTitle || node?.title || node?.node_id || "Node"));
     const singleLine = raw
         .replace(/\r\n|\r|\n/g, " ")
         .replace(/\s+/g, " ")
@@ -1463,69 +1469,47 @@ function renderTree() {
 }
 function renderArtifacts() {
     if (!U.artifactList) return;
-    const visibleArtifacts = getArtifactsForSelectedNode();
-    const emptyText = S.selectedNodeId ? "No artifacts for this node yet." : "Select a node to view artifacts.";
+    const visibleFiles = getFileChangesForSelectedNode();
+    const emptyText = S.selectedNodeId ? "This node has no tracked file changes yet." : "Select a node to view file changes.";
     U.artifactList.innerHTML = "";
-    if (!visibleArtifacts.length) {
+    if (!visibleFiles.length) {
         U.artifactList.innerHTML = `<div class="empty-state" style="padding: 10px;">${esc(emptyText)}</div>`;
-        if (U.artifactContent) U.artifactContent.textContent = emptyText;
-        if (U.artifactApply) U.artifactApply.hidden = true;
         renderArtifactHeading(0);
         refreshTaskDetailScrollRegions();
         return;
     }
-    visibleArtifacts.forEach((artifact) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = `artifact-item${S.selectedArtifactId === artifact.artifact_id ? " active" : ""}`;
-        button.innerHTML = `<strong>${esc(artifact.title || artifact.artifact_id)}</strong><span>${esc(artifact.kind || "artifact")}</span><small>${esc(artifact.preview_text || artifact.created_at || "")}</small>`;
-        button.addEventListener("click", () => void selectArtifact(artifact.artifact_id));
-        U.artifactList.appendChild(button);
+    visibleFiles.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "artifact-item";
+        const changeLabel = String(item?.change_type || "modified") === "created" ? "created" : "modified";
+        row.innerHTML = `<strong>${esc(item?.path || "")}</strong><span>${esc(changeLabel)}</span>`;
+        U.artifactList.appendChild(row);
     });
-    renderArtifactHeading(visibleArtifacts.length);
+    renderArtifactHeading(visibleFiles.length);
     refreshTaskDetailScrollRegions();
 }
 
-function getArtifactsForSelectedNode() {
-    if (!Array.isArray(S.taskArtifacts) || !S.taskArtifacts.length) return [];
+function getFileChangesForSelectedNode() {
     const nodeId = String(S.selectedNodeId || "").trim();
     if (!nodeId) return [];
-    return S.taskArtifacts.filter((artifact) => String(artifact?.node_id || "").trim() === nodeId);
-}
-
-function getSelectedVisibleArtifact(artifacts = getArtifactsForSelectedNode()) {
-    if (!Array.isArray(artifacts) || !artifacts.length) return null;
-    const artifactId = String(S.selectedArtifactId || "").trim();
-    if (!artifactId) return null;
-    return artifacts.find((item) => String(item?.artifact_id || "").trim() === artifactId) || null;
+    const currentDetailNodeId = String(S.currentNodeDetail?.node_id || "").trim();
+    const source = currentDetailNodeId === nodeId
+        ? S.currentNodeDetail
+        : ((S.taskNodeDetails || {})[nodeId] || null);
+    const items = Array.isArray(source?.tool_file_changes) ? source.tool_file_changes : [];
+    return items.map((item) => ({
+        path: String(item?.path || "").trim(),
+        change_type: String(item?.change_type || "modified").trim().toLowerCase() === "created" ? "created" : "modified",
+    })).filter((item) => item.path);
 }
 
 async function syncArtifactsForSelectedNode({ preserveViewState = true, autoSelect = true } = {}) {
     const viewState = preserveViewState ? captureTaskDetailViewState() : null;
-    const visibleArtifacts = getArtifactsForSelectedNode();
-    const selectedArtifact = getSelectedVisibleArtifact(visibleArtifacts);
-    if (!selectedArtifact) {
-        S.selectedArtifactId = "";
-        S.artifactContent = "";
-    }
+    const visibleFiles = getFileChangesForSelectedNode();
+    void autoSelect;
     renderArtifacts();
     try {
-        if (selectedArtifact && U.artifactContent) {
-            U.artifactContent.textContent = artifactDisplayText(selectedArtifact, S.artifactContent);
-            if (U.artifactApply) U.artifactApply.hidden = selectedArtifact.kind !== "patch";
-            return visibleArtifacts;
-        }
-        if (!visibleArtifacts.length) {
-            if (U.artifactContent) U.artifactContent.textContent = S.selectedNodeId ? "This node has no artifacts yet." : "Select a node to view artifacts.";
-            if (U.artifactApply) U.artifactApply.hidden = true;
-            return visibleArtifacts;
-        }
-        if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
-        if (U.artifactApply) U.artifactApply.hidden = true;
-        if (autoSelect) {
-            await selectArtifact(visibleArtifacts[0].artifact_id, { preserveViewState: false });
-        }
-        return visibleArtifacts;
+        return visibleFiles;
     } finally {
         restoreTaskDetailViewState(viewState);
         scheduleTaskDetailSessionPersist();
@@ -1533,35 +1517,69 @@ async function syncArtifactsForSelectedNode({ preserveViewState = true, autoSele
 }
 
 async function loadTaskArtifacts() {
-    if (!S.currentTaskId) return [];
-    const artifacts = await ApiClient.getTaskArtifacts(S.currentTaskId);
-    S.taskArtifacts = artifacts;
     return syncArtifactsForSelectedNode();
 }
 
 async function selectArtifact(artifactId, { preserveViewState = true } = {}) {
-    if (!S.currentTaskId || !artifactId) return;
-    const viewState = preserveViewState ? captureTaskDetailViewState() : null;
-    S.selectedArtifactId = artifactId;
-    renderArtifacts();
+    void artifactId;
+    void preserveViewState;
+}
+
+function renderNodeContextPlaceholder(text = "展开后查看节点完整上下文。") {
+    if (U.artifactContent) U.artifactContent.textContent = String(text || "").trim();
+}
+
+async function ensureTaskNodeLatestContext(nodeId, { force = false } = {}) {
+    const key = String(nodeId || "").trim();
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!taskId || !key) return null;
+    if (!force && S.taskNodeLatestContexts[key]) return S.taskNodeLatestContexts[key];
+    if (!force && S.taskNodeLatestContextRequests[key]) return S.taskNodeLatestContextRequests[key];
+    const request = (async () => {
+        try {
+            const payload = await ApiClient.getTaskNodeLatestContext(taskId, key);
+            if (!payload) return null;
+            if (String(S.currentTaskId || "").trim() !== taskId) return null;
+            S.taskNodeLatestContexts = { ...(S.taskNodeLatestContexts || {}), [key]: payload };
+            return payload;
+        } catch (error) {
+            if (!isAbortLike(error)) throw error;
+            return null;
+        } finally {
+            const nextRequests = { ...(S.taskNodeLatestContextRequests || {}) };
+            delete nextRequests[key];
+            S.taskNodeLatestContextRequests = nextRequests;
+        }
+    })();
+    S.taskNodeLatestContextRequests = { ...(S.taskNodeLatestContextRequests || {}), [key]: request };
+    return request;
+}
+
+async function loadSelectedNodeLatestContext({ force = false } = {}) {
+    const taskId = String(S.currentTaskId || "").trim();
+    const nodeId = String(S.selectedNodeId || "").trim();
+    if (!taskId || !nodeId) return null;
+    renderNodeContextPlaceholder("正在加载节点完整上下文...");
     try {
-        const data = await ApiClient.getTaskArtifact(S.currentTaskId, artifactId);
-        if (String(S.selectedArtifactId || "") !== String(artifactId || "")) return;
-        S.artifactContent = String(data.content || "");
-        const artifact = getSelectedVisibleArtifact() || null;
-        if (U.artifactContent) U.artifactContent.textContent = artifactDisplayText(artifact, S.artifactContent);
-        if (U.artifactApply) U.artifactApply.hidden = !(artifact && artifact.kind === "patch");
-    } finally {
-        restoreTaskDetailViewState(viewState);
-        scheduleTaskDetailSessionPersist();
+        const payload = await ensureTaskNodeLatestContext(nodeId, { force });
+        if (String(S.currentTaskId || "").trim() !== taskId) return null;
+        if (String(S.selectedNodeId || "").trim() !== nodeId) return null;
+        const content = String(payload?.content || "");
+        renderNodeContextPlaceholder(content.trim() || "当前节点暂无可用上下文快照。");
+        return payload;
+    } catch (error) {
+        renderNodeContextPlaceholder(`加载完整上下文失败：${error?.message || error || "未知错误"}`);
+        return null;
     }
 }
 
-async function applySelectedArtifact() {
-    if (!S.currentTaskId || !S.selectedArtifactId) return;
-    await ApiClient.applyTaskArtifact(S.currentTaskId, S.selectedArtifactId);
-    showToast({ title: "Patch applied", text: S.selectedArtifactId, kind: "success" });
-    await loadTaskArtifacts();
+async function handleNodeContextDisclosureToggle() {
+    if (!U.nodeContextDisclosure) return;
+    if (!U.nodeContextDisclosure.open) {
+        renderNodeContextPlaceholder();
+        return;
+    }
+    await loadSelectedNodeLatestContext({ force: true });
 }
 
 function showTaskNodeLoadingState(node) {
@@ -1578,6 +1596,8 @@ function showTaskNodeLoadingState(node) {
     renderFlowHeading(0);
     renderFinalOutput("Loading node output...");
     renderAcceptanceResult("Loading acceptance result...");
+    if (U.nodeContextDisclosure) U.nodeContextDisclosure.open = false;
+    renderNodeContextPlaceholder();
     U.feedTitle.textContent = `Node: ${compactHeading}`;
     U.feedTitle.title = compactHeading;
     setTaskDetailOpen(true);
@@ -1717,13 +1737,22 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     U.feedTitle.title = compactHeading;
     setTaskDetailOpen(true);
     icons();
+    const nodeChanged = !hadVisibleCurrentDetail || previousDetailNodeId !== nodeId;
+    if (U.nodeContextDisclosure) {
+        if (nodeChanged) {
+            U.nodeContextDisclosure.open = false;
+            renderNodeContextPlaceholder();
+        } else if (forceRefresh && U.nodeContextDisclosure.open) {
+            void loadSelectedNodeLatestContext({ force: true });
+        }
+    }
     if (!hadVisibleCurrentDetail || traceChanged || outputChanged || acceptanceChanged) {
         restoreTaskDetailViewState(viewState);
         stashTaskDetailViewState({ nodeId, viewState });
     } else {
         stashTaskDetailViewState({ nodeId });
     }
-    if (!hadVisibleCurrentDetail || previousDetailNodeId !== nodeId) {
+    if (nodeChanged || forceRefresh) {
         void syncArtifactsForSelectedNode();
     }
 }

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from g3ku.content import content_summary_and_ref
-from main.models import ModelTokenUsageRecord, NodeRecord, TokenUsageSummary
+from main.models import ModelTokenUsageRecord, NodeRecord, TokenUsageSummary, normalize_tool_file_changes
 from main.monitoring.execution_trace import build_execution_trace
 from main.token_usage import aggregate_node_token_usage
 from main.monitoring.models import (
@@ -247,6 +247,7 @@ class TaskQueryService:
             updated_at=str(payload.get('updated_at') or node_payload.get('updated_at') or detail_record.updated_at or ''),
             children_fingerprint=str(payload.get('children_fingerprint') or node_payload.get('children_fingerprint') or ''),
             execution_trace=dict(payload.get('execution_trace') or {}),
+            tool_file_changes=normalize_tool_file_changes(payload.get('tool_file_changes')),
             token_usage=TokenUsageSummary.model_validate(payload.get('token_usage') or {}),
             token_usage_by_model=[
                 ModelTokenUsageRecord.model_validate(item)
@@ -254,6 +255,14 @@ class TaskQueryService:
                 if isinstance(item, dict)
             ],
         )
+        final_output_full = self._resolve_detail_text(detail.final_output, detail.final_output_ref)
+        if final_output_full:
+            detail.final_output = final_output_full
+            detail.execution_trace['final_output'] = final_output_full
+        acceptance_result_full = self._resolve_detail_text(detail.check_result, detail.check_result_ref)
+        if acceptance_result_full:
+            detail.check_result = acceptance_result_full
+            detail.execution_trace['acceptance_result'] = acceptance_result_full
         return detail
 
     def get_tree_snapshot(self, task_id: str) -> TaskTreeSnapshot | None:
@@ -312,6 +321,16 @@ class TaskQueryService:
                 ),
             )
         return node_map, rounds_by_parent, direct_children
+
+    def _resolve_detail_text(self, text: str, ref: str) -> str:
+        normalized_ref = str(ref or '').strip()
+        if normalized_ref:
+            resolver = getattr(self._log_service, 'resolve_content_ref', None)
+            if callable(resolver):
+                resolved = str(resolver(normalized_ref) or '')
+                if resolved:
+                    return resolved
+        return str(text or '')
 
     @staticmethod
     def _projection_default_round_id(record: Any, rounds: list[Any]) -> str:

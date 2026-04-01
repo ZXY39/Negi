@@ -405,6 +405,12 @@ class ApiClient {
         return data.item || null;
     }
 
+    static async getTaskNodeLatestContext(taskId, nodeId) {
+        return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/latest-context`, {
+            requestKey: `tasks:node-context:${taskId}:${nodeId}`,
+        });
+    }
+
     static async getTaskTreeSnapshot(taskId) {
         return this._request("GET", `/api/tasks/${taskId}/tree-snapshot`, {
             requestKey: `tasks:tree-snapshot:${taskId}`,

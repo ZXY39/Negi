@@ -68,6 +68,60 @@ class TaskArtifactStore:
                 pass
         return persisted
 
+    def create_or_replace_singleton_text_artifact(
+        self,
+        *,
+        task_id: str,
+        node_id: str | None,
+        kind: str,
+        title: str,
+        content: str,
+        extension: str = '.md',
+        mime_type: str = 'text/markdown',
+    ) -> TaskArtifactRecord:
+        normalized_task_id = str(task_id or '').strip()
+        normalized_node_id = str(node_id or '').strip() or None
+        normalized_kind = str(kind or '').strip()
+        existing = self._find_singleton_text_artifact(
+            task_id=normalized_task_id,
+            node_id=normalized_node_id,
+            kind=normalized_kind,
+        )
+        if existing is None:
+            return self.create_text_artifact(
+                task_id=normalized_task_id,
+                node_id=normalized_node_id,
+                kind=normalized_kind,
+                title=title,
+                content=content,
+                extension=extension,
+                mime_type=mime_type,
+            )
+
+        path = Path(existing.path)
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.suffix and extension:
+            safe_artifact_id = existing.artifact_id.replace(':', '_').replace('/', '_').replace('\\', '_')
+            path = path.parent / f'{safe_artifact_id}{extension}'
+        path.write_text(content, encoding='utf-8')
+        updated = existing.model_copy(
+            update={
+                'node_id': normalized_node_id,
+                'kind': normalized_kind,
+                'title': title,
+                'path': str(path),
+                'mime_type': mime_type,
+                'preview_text': content[:400],
+                'created_at': now_iso(),
+            }
+        )
+        persisted = self._store.upsert_artifact(updated)
+        self._drop_content_index_entries(existing.artifact_id)
+        content_hash = hashlib.sha256(str(content or '').encode('utf-8')).hexdigest()
+        self._content_index[(normalized_task_id, content_hash)] = persisted
+        return persisted
+
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
         return self._store.list_artifacts(task_id)
 
@@ -104,6 +158,34 @@ class TaskArtifactStore:
                 self._content_index[(task_id, content_hash)] = artifact
                 return artifact
         return None
+
+    def _find_singleton_text_artifact(
+        self,
+        *,
+        task_id: str,
+        node_id: str | None,
+        kind: str,
+    ) -> TaskArtifactRecord | None:
+        normalized_node_id = str(node_id or '').strip() or None
+        normalized_kind = str(kind or '').strip()
+        for artifact in self.list_artifacts(task_id):
+            if str(getattr(artifact, 'kind', '') or '').strip() != normalized_kind:
+                continue
+            artifact_node_id = str(getattr(artifact, 'node_id', '') or '').strip() or None
+            if artifact_node_id != normalized_node_id:
+                continue
+            return artifact
+        return None
+
+    def _drop_content_index_entries(self, artifact_id: str) -> None:
+        normalized_artifact_id = str(artifact_id or '').strip()
+        if not normalized_artifact_id:
+            return
+        self._content_index = {
+            key: value
+            for key, value in self._content_index.items()
+            if str(getattr(value, 'artifact_id', '') or '').strip() != normalized_artifact_id
+        }
 
     @staticmethod
     def _artifact_matches_content(artifact: TaskArtifactRecord, *, content: str, content_hash: str) -> bool:

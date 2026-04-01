@@ -643,16 +643,28 @@ class ContentNavigationService:
         origin_ref: str,
     ) -> ContentHandle:
         artifact = None
-        if self._artifact_store is not None and hasattr(self._artifact_store, "create_text_artifact"):
-            artifact = self._artifact_store.create_text_artifact(
-                task_id=_runtime_task_id(runtime),
-                node_id=_runtime_node_id(runtime),
-                kind=source_kind,
-                title=display_name,
-                content=text,
-                extension=".txt",
-                mime_type=mime_type,
-            )
+        if self._artifact_store is not None:
+            create_singleton = getattr(self._artifact_store, "create_or_replace_singleton_text_artifact", None)
+            if source_kind == "task_runtime_messages" and callable(create_singleton):
+                artifact = create_singleton(
+                    task_id=_runtime_task_id(runtime),
+                    node_id=_runtime_node_id(runtime),
+                    kind=source_kind,
+                    title=display_name,
+                    content=text,
+                    extension=".txt",
+                    mime_type=mime_type,
+                )
+            elif hasattr(self._artifact_store, "create_text_artifact"):
+                artifact = self._artifact_store.create_text_artifact(
+                    task_id=_runtime_task_id(runtime),
+                    node_id=_runtime_node_id(runtime),
+                    kind=source_kind,
+                    title=display_name,
+                    content=text,
+                    extension=".txt",
+                    mime_type=mime_type,
+                )
         ref = f"artifact:{artifact.artifact_id}" if artifact is not None else ""
         uri = str(getattr(artifact, "path", "") or "")
         artifact_id = str(getattr(artifact, "artifact_id", "") or "")

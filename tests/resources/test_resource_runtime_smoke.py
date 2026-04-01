@@ -437,8 +437,9 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
 
-    target_file = workspace / 'target.txt'
-    written_file = workspace / 'written.txt'
+    target_file = workspace / 'temp' / 'target.txt'
+    written_file = workspace / 'temp' / 'written.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
     target_file.write_text('before value\n', encoding='utf-8')
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
@@ -452,7 +453,7 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
-        assert 'target.txt' in await tool.execute(action='list', path=str(workspace))
+        assert 'target.txt' in await tool.execute(action='list', path=str(target_file.parent))
         described = json.loads(await tool.execute(action='describe', path=str(target_file)))
         assert described['handle']['line_count'] == 1
         opened = json.loads(await tool.execute(action='open', path=str(target_file), start_line=1, end_line=5))
@@ -520,6 +521,75 @@ async def test_filesystem_tool_rejects_relative_paths(tmp_path: Path):
         assert 'relative path is not allowed; provide absolute path' in result
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_tool_reports_reliable_file_changes_only(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'temp' / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('before\n', encoding='utf-8')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+
+    class _RecordingService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str, str]] = []
+
+        def refresh_resource_paths(self, paths, *, trigger: str = 'path-change', session_id: str = 'web:shared'):
+            _ = paths, trigger, session_id
+            return {'ok': True}
+
+        def record_node_file_change(self, task_id: str, node_id: str, *, path: str, change_type: str) -> None:
+            self.calls.append((task_id, node_id, path, change_type))
+
+    service = _RecordingService()
+    tool = FilesystemTool(
+        workspace=workspace,
+        artifact_store=artifact_store,
+        main_task_service=service,
+        settings=FilesystemToolSettings(),
+    )
+    runtime = {
+        'task_id': 'task:test',
+        'node_id': 'node:test',
+        'session_key': 'web:shared',
+    }
+
+    created_file = workspace / 'temp' / 'created.txt'
+    result = await tool.execute(action='write', path=str(created_file), content='hello\n', _FilesystemTool__g3ku_runtime=runtime)
+    assert 'Successfully wrote' in result
+
+    result = await tool.execute(
+        action='edit',
+        path=str(target_file),
+        old_text='before',
+        new_text='after',
+        _FilesystemTool__g3ku_runtime=runtime,
+    )
+    assert 'Successfully edited' in result
+
+    result = await tool.execute(action='delete', path=str(created_file), _FilesystemTool__g3ku_runtime=runtime)
+    assert 'Successfully deleted' in result
+
+    result = json.loads(
+        await tool.execute(
+            action='propose_patch',
+            path=str(target_file),
+            old_text='after',
+            new_text='patched',
+            summary='Patch target',
+            _FilesystemTool__g3ku_runtime=runtime,
+        )
+    )
+    assert result['success'] is True
+
+    assert service.calls == [
+        ('task:test', 'node:test', str(created_file.resolve()), 'created'),
+        ('task:test', 'node:test', str(target_file.resolve()), 'modified'),
+    ]
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -1461,6 +1531,41 @@ def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp
     assert wrapped is not None
     assert wrapped.handle is not None
     assert wrapped.handle.origin_ref == first.ref
+
+    store.close()
+
+
+def test_content_navigation_uses_singleton_runtime_frame_message_artifact(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+
+    first = navigator.maybe_externalize_text(
+        json.dumps([{'role': 'user', 'content': 'first'}], ensure_ascii=False, indent=2),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='runtime-frame-messages:node:test',
+        source_kind='task_runtime_messages',
+        force=True,
+    )
+    second = navigator.maybe_externalize_text(
+        json.dumps([{'role': 'user', 'content': 'second'}], ensure_ascii=False, indent=2),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='runtime-frame-messages:node:test',
+        source_kind='task_runtime_messages',
+        force=True,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.ref == second.ref
+    artifacts = store.list_artifacts('task:test')
+    runtime_artifacts = [item for item in artifacts if item.kind == 'task_runtime_messages']
+    assert len(runtime_artifacts) == 1
+    assert 'second' in Path(runtime_artifacts[0].path).read_text(encoding='utf-8')
 
     store.close()
 

@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>节点完整最新上下文</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f4f7fb;
+            --panel: #ffffff;
+            --text: #162033;
+            --muted: #5d6b82;
+            --border: #d7dfeb;
+            --accent: #1f6feb;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: linear-gradient(180deg, #eef4ff 0%, var(--bg) 100%);
+            color: var(--text);
+        }
+
+        .shell {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .card {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            box-shadow: 0 18px 50px rgba(23, 38, 67, 0.08);
+            overflow: hidden;
+        }
+
+        .header {
+            padding: 20px 24px 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .title {
+            margin: 0;
+            font-size: 1.35rem;
+            line-height: 1.35;
+        }
+
+        .meta {
+            margin-top: 10px;
+            color: var(--muted);
+            font-size: 0.95rem;
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .body {
+            padding: 20px 24px 24px;
+        }
+
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            border-radius: 999px;
+            padding: 4px 10px;
+            background: #edf4ff;
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        pre {
+            margin: 0;
+            padding: 18px;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: #f8fbff;
+            color: var(--text);
+            white-space: pre-wrap;
+            word-break: break-word;
+            overflow: auto;
+            min-height: 320px;
+            font: 13px/1.65 Consolas, "SFMono-Regular", Menlo, Monaco, monospace;
+        }
+
+        .empty {
+            color: var(--muted);
+        }
+
+        .error {
+            color: #b42318;
+        }
+    </style>
+</head>
+<body>
+    <main class="shell">
+        <section class="card">
+            <header class="header">
+                <h1 class="title" id="title">节点完整最新上下文</h1>
+                <div class="meta">
+                    <span id="task-id">task: -</span>
+                    <span id="node-id">node: -</span>
+                    <span class="status" id="status">loading</span>
+                </div>
+            </header>
+            <div class="body">
+                <pre id="content">正在加载上下文...</pre>
+            </div>
+        </section>
+    </main>
+    <script>
+        function repairLegacyDisplayText(value) {
+            let text = String(value ?? "");
+            if (!text) return text;
+            text = text.replace(/^鏈€缁堥獙鏀(?:讹細|:|：|\?)?/, "最终验收:");
+            [
+                ["鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?", "核对最终结果是否满足要求。"],
+                ["妫€鏌ユ渶缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?", "检查最终结果是否满足要求。"],
+                ["妫€鏌?child 杈撳嚭銆?", "检查 child 输出。"],
+                ["妫€鏌ュ叕鍛婅崏绋挎槸鍚︽弧瓒充氦浠樿姹傘€?", "检查公告草稿是否满足交付要求。"],
+                ["楠屾敹閫氳繃", "验收通过"],
+                ["鑷富鎵ц", "自主执行"],
+                ["杩涜涓?", "进行中"],
+                ["鏈€鏂伴樁娈电洰鏍?", "最新阶段目标"],
+            ].forEach(([source, target]) => {
+                text = text.split(source).join(target);
+            });
+            return text;
+        }
+
+        function queryParam(name) {
+            const value = new URLSearchParams(window.location.search).get(name);
+            return String(value || "").trim();
+        }
+
+        async function loadContext() {
+            const taskId = queryParam("task_id");
+            const nodeId = queryParam("node_id");
+            const titleEl = document.getElementById("title");
+            const taskEl = document.getElementById("task-id");
+            const nodeEl = document.getElementById("node-id");
+            const statusEl = document.getElementById("status");
+            const contentEl = document.getElementById("content");
+
+            taskEl.textContent = `task: ${taskId || "-"}`;
+            nodeEl.textContent = `node: ${nodeId || "-"}`;
+
+            if (!taskId || !nodeId) {
+                statusEl.textContent = "invalid";
+                contentEl.textContent = "缺少 task_id 或 node_id。";
+                contentEl.className = "error";
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/nodes/${encodeURIComponent(nodeId)}/latest-context`, {
+                    method: "GET",
+                    headers: { "Accept": "application/json" },
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload?.detail || payload?.message || `HTTP ${response.status}`);
+                }
+                const pageTitle = repairLegacyDisplayText(String(payload?.title || "节点完整最新上下文"));
+                document.title = pageTitle;
+                titleEl.textContent = pageTitle;
+                statusEl.textContent = String(payload?.status || "unknown");
+                const content = String(payload?.content || "");
+                if (content) {
+                    contentEl.textContent = content;
+                    contentEl.className = "";
+                } else {
+                    contentEl.textContent = "当前节点暂无可用上下文快照。";
+                    contentEl.className = "empty";
+                }
+            } catch (error) {
+                statusEl.textContent = "error";
+                contentEl.textContent = String(error?.message || error || "加载失败");
+                contentEl.className = "error";
+            }
+        }
+
+        void loadContext();
+    </script>
+</body>
+</html>

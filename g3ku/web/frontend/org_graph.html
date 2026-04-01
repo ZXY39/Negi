@@ -515,13 +515,14 @@
                             <div class="agent-detail-section">
                                 <div class="agent-detail-section-header">
                                     <h4><i data-lucide="package"></i> 工件</h4>
-                                    <button id="artifact-apply-btn" class="toolbar-btn success" type="button"
-                                        hidden>应用补丁</button>
                                 </div>
                                 <div id="artifact-list" class="artifact-list">
                                     <div class="empty-state" style="padding: 10px;">暂无工件。</div>
                                 </div>
-                                <div class="code-block" id="artifact-content">选择一个工件查看详情。</div>
+                                <details id="node-context-disclosure" class="artifact-context-disclosure">
+                                    <summary>完整上下文</summary>
+                                    <div class="code-block" id="artifact-content">展开后查看节点完整上下文。</div>
+                                </details>
                             </div>
                         </div>
 

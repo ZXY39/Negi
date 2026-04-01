@@ -94,6 +94,18 @@ async def get_task_node_detail(task_id: str, node_id: str):
     return payload
 
 
+@router.get('/tasks/{task_id}/nodes/{node_id}/latest-context')
+async def get_task_node_latest_context(task_id: str, node_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = service.get_node_latest_context_payload(task_id, node_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return payload
+
+
 @router.get('/tasks/{task_id}/nodes/{node_id}/tree-subtree')
 async def get_task_node_tree_subtree(
     task_id: str,

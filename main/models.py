@@ -179,6 +179,11 @@ class TaskArtifactRecord(Model):
     created_at: str
 
 
+class NodeToolFileChange(Model):
+    path: str = ''
+    change_type: Literal['created', 'modified'] = 'modified'
+
+
 class TaskRecord(Model):
     task_id: str
     session_id: str = 'web:shared'
@@ -318,6 +323,32 @@ def normalize_execution_stage_metadata(value: Any) -> ExecutionStageState:
         transition_required=transition_required,
         stages=stages,
     )
+
+
+def normalize_tool_file_changes(value: Any) -> list[NodeToolFileChange]:
+    changes: list[NodeToolFileChange] = []
+    for item in list(value or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            change = NodeToolFileChange.model_validate(item)
+        except Exception:
+            continue
+        path = str(change.path or '').strip()
+        change_type = str(change.change_type or 'modified').strip().lower()
+        if not path:
+            continue
+        if change_type not in {'created', 'modified'}:
+            change_type = 'modified'
+        changes.append(
+            change.model_copy(
+                update={
+                    'path': path,
+                    'change_type': change_type,
+                }
+            )
+        )
+    return changes
 
 
 def normalize_result_payload(value: Any) -> NodeFinalResult | None:

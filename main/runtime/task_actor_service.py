@@ -523,7 +523,7 @@ class TaskActorService:
             acceptance = self._node_runner.create_acceptance_node(
                 task=task,
                 accepted_node=root,
-                goal=f'鏈€缁堥獙鏀?{root.goal}',
+                goal=f'最终验收:{root.goal}',
                 acceptance_prompt=final_acceptance.prompt,
                 parent_node_id=root.node_id,
                 metadata={'final_acceptance': True},

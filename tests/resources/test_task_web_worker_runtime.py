@@ -1805,7 +1805,7 @@ def test_task_snapshot_preserves_auxiliary_acceptance_children(tmp_path: Path):
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
         accepted_node=root,
-        goal=f"鏈€缁堥獙鏀?{root.goal}",
+        goal=f"最终验收:{root.goal}",
         acceptance_prompt="鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
         parent_node_id=root.node_id,
         metadata={"final_acceptance": True},
@@ -2698,6 +2698,78 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
         await service.close()
 
 
+@pytest.mark.asyncio
+async def test_duplicate_successful_spawn_reuses_completed_operation_without_new_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="child succeeded",
+                    answer="child succeeded",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        specs = [
+            SpawnChildSpec(
+                goal="same child",
+                prompt="same prompt",
+                execution_policy=_execution_policy(),
+            )
+        ]
+        first_results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=specs,
+            call_id="round-1",
+        )
+        second_results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=specs,
+            call_id="round-2",
+        )
+
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        spawn_operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+
+        assert list(spawn_operations) == ["round-1"]
+        assert "round-2" not in spawn_operations
+        assert [item.model_dump(mode="json") for item in first_results] == [
+            item.model_dump(mode="json") for item in second_results
+        ]
+
+        subtree = service.get_task_tree_subtree_payload(record.task_id, root.node_id)
+        assert subtree is not None
+        subtree_root = subtree["nodes_by_id"][root.node_id]
+        assert [item["round_id"] for item in subtree_root["rounds"]] == ["round-1"]
+        assert subtree_root["default_round_id"] == "round-1"
+    finally:
+        await service.close()
+
+
 def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -2739,6 +2811,207 @@ def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
     assert payload["artifacts"][0]["artifact_id"] == matching.artifact_id
     assert payload["artifacts"][0]["node_id"] == root.node_id
     assert payload["artifacts"][0]["ref"] == f'artifact:{matching.artifact_id}'
+
+
+def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    final_output = "\n".join(f"final line {index:03d}" for index in range(200))
+    acceptance_result = "\n".join(f"acceptance line {index:03d}" for index in range(180))
+
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="success",
+        final_output=final_output,
+    )
+    service.log_service.update_node_check_result(
+        record.task_id,
+        root.node_id,
+        acceptance_result,
+    )
+    service.record_node_file_change(record.task_id, root.node_id, path=str((tmp_path / "created.txt").resolve()), change_type="created")
+
+    payload = service.get_node_detail_payload(record.task_id, root.node_id)
+
+    assert payload is not None
+    item = payload["item"]
+    assert item["final_output"] == final_output
+    assert item["check_result"] == acceptance_result
+    assert item["execution_trace"]["final_output"] == final_output
+    assert item["execution_trace"]["acceptance_result"] == acceptance_result
+    assert item["final_output_ref"].startswith("artifact:")
+    assert item["check_result_ref"].startswith("artifact:")
+    assert item["tool_file_changes"] == [
+        {
+            "path": str((tmp_path / "created.txt").resolve()),
+            "change_type": "created",
+        }
+    ]
+
+
+def test_node_latest_context_uses_singleton_runtime_frame_artifact_and_freezes_on_remove(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    service.log_service.upsert_frame(
+        record.task_id,
+        {
+            "node_id": root.node_id,
+            "depth": root.depth,
+            "node_kind": root.node_kind,
+            "phase": "before_model",
+            "messages": [{"role": "user", "content": "first context"}],
+        },
+        publish_snapshot=False,
+    )
+    first_frame = service.store.get_task_runtime_frame(record.task_id, root.node_id)
+    assert first_frame is not None
+    first_ref = str((first_frame.payload or {}).get("messages_ref") or "")
+    assert first_ref.startswith("artifact:")
+
+    service.log_service.update_frame(
+        record.task_id,
+        root.node_id,
+        lambda frame: {
+            **frame,
+            "messages": [{"role": "user", "content": "second context"}],
+        },
+        publish_snapshot=False,
+    )
+    second_frame = service.store.get_task_runtime_frame(record.task_id, root.node_id)
+    assert second_frame is not None
+    second_ref = str((second_frame.payload or {}).get("messages_ref") or "")
+    assert second_ref == first_ref
+
+    runtime_artifacts = [
+        artifact
+        for artifact in service.list_artifacts(record.task_id)
+        if artifact.kind == "task_runtime_messages" and artifact.node_id == root.node_id
+    ]
+    assert len(runtime_artifacts) == 1
+    assert "second context" in Path(runtime_artifacts[0].path).read_text(encoding="utf-8")
+
+    service.log_service.remove_frame(record.task_id, root.node_id, publish_snapshot=False)
+    assert service.store.get_task_runtime_frame(record.task_id, root.node_id) is None
+
+    payload = service.get_node_latest_context_payload(record.task_id, root.node_id)
+
+    assert payload is not None
+    assert payload["ref"] == second_ref
+    assert "second context" in payload["content"]
+
+
+def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    service.log_service.upsert_frame(
+        record.task_id,
+        {
+            "node_id": root.node_id,
+            "depth": root.depth,
+            "node_kind": root.node_kind,
+            "phase": "before_model",
+            "messages": [{"role": "user", "content": "route context"}],
+        },
+        publish_snapshot=False,
+    )
+
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    client = TestClient(_build_app())
+
+    response = client.get(f"/api/tasks/{record.task_id}/nodes/{root.node_id}/latest-context")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["task_id"] == record.task_id
+    assert payload["node_id"] == root.node_id
+    assert payload["ref"].startswith("artifact:")
+    assert "route context" in payload["content"]
+
+
+def test_node_detail_and_latest_context_repair_legacy_mojibake(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    acceptance = service.node_runner.create_acceptance_node(
+        task=task,
+        accepted_node=root,
+        goal=f"鏈€缁堥獙鏀?{root.goal}",
+        acceptance_prompt="鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
+        parent_node_id=root.node_id,
+        metadata={"final_acceptance": True},
+    )
+    service.log_service.update_node_check_result(record.task_id, acceptance.node_id, "楠屾敹閫氳繃")
+    service.log_service.upsert_frame(
+        record.task_id,
+        {
+            "node_id": acceptance.node_id,
+            "depth": acceptance.depth,
+            "node_kind": acceptance.node_kind,
+            "phase": "before_model",
+            "messages": [{"role": "user", "content": "legacy context"}],
+        },
+        publish_snapshot=False,
+    )
+
+    detail_payload = service.get_node_detail_payload(record.task_id, acceptance.node_id)
+    latest_context = service.get_node_latest_context_payload(record.task_id, acceptance.node_id)
+
+    assert detail_payload is not None
+    assert latest_context is not None
+    assert detail_payload["item"]["goal"] == f"最终验收:{root.goal}"
+    assert detail_payload["item"]["check_result"] == "验收通过"
+    assert latest_context["title"] == f"最终验收:{root.goal}"
 
 
 def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_path: Path):
@@ -2787,7 +3060,7 @@ def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_p
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
         accepted_node=root,
-        goal=f"鏈€缁堥獙鏀?{root.goal}",
+        goal=f"最终验收:{root.goal}",
         acceptance_prompt="鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
         parent_node_id=root.node_id,
         metadata={"final_acceptance": True},
@@ -2839,7 +3112,7 @@ def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
         accepted_node=root,
-        goal=f"鏈€缁堥獙鏀?{root.goal}",
+        goal=f"最终验收:{root.goal}",
         acceptance_prompt="妫€鏌ユ渶缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
         parent_node_id=root.node_id,
         metadata={"final_acceptance": True},

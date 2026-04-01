@@ -118,6 +118,8 @@ const S = {
     taskDetailRenderToken: 0,
     taskNodeDetails: {},
     taskNodeDetailRequests: {},
+    taskNodeLatestContexts: {},
+    taskNodeLatestContextRequests: {},
     treeRootNodeId: "",
     treeNodesById: {},
     treeSnapshotVersion: "",
@@ -317,7 +319,7 @@ const U = {
     taskTokenClose: null,
     artifactList: document.getElementById("artifact-list"),
     artifactContent: document.getElementById("artifact-content"),
-    artifactApply: document.getElementById("artifact-apply-btn"),
+    nodeContextDisclosure: document.getElementById("node-context-disclosure"),
     feedTitle: document.getElementById("feed-target-name"),
     detail: document.getElementById("agent-detail-view"),
     adRole: document.getElementById("ad-role"),
@@ -1446,7 +1448,7 @@ function renderFlowHeading(count = 0) {
 }
 
 function renderArtifactHeading(count = 0) {
-    renderTaskSectionHeading(U.artifactHeading, { icon: "package", label: "工件", count });
+    renderTaskSectionHeading(U.artifactHeading, { icon: "files", label: "文件", count });
     icons();
 }
 
@@ -6008,7 +6010,7 @@ function bind() {
     U.taskTokenButton?.addEventListener("click", () => setTaskTokenStatsOpen(true));
     U.taskTokenClose?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.taskTokenBackdrop?.addEventListener("click", () => setTaskTokenStatsOpen(false));
-    U.artifactApply?.addEventListener("click", () => void applySelectedArtifact());
+    U.nodeContextDisclosure?.addEventListener("toggle", () => void handleNodeContextDisclosureToggle());
     U.ceoSessionPanelToggle?.addEventListener("click", () => setCeoSessionPanelExpanded(!S.ceoSessionPanelExpanded));
     U.ceoNewSession?.addEventListener("click", () => void createNewCeoSession());
     U.ceoSessionTabLocal?.addEventListener("click", () => setCeoSessionTab("local"));

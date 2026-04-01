@@ -112,6 +112,70 @@ class NodeRunner:
             failure_info=self._runtime_spawn_failure_info(error_text),
         )
 
+    def _spawn_spec_payload(self, spec: SpawnChildSpec | dict[str, Any] | Any) -> dict[str, Any] | None:
+        try:
+            normalized_spec = spec if isinstance(spec, SpawnChildSpec) else SpawnChildSpec.model_validate(spec)
+        except Exception:
+            return None
+        normalized_policy = normalize_execution_policy_metadata(
+            normalized_spec.execution_policy.model_dump(mode='json')
+        ).model_dump(mode='json')
+        return {
+            'goal': str(normalized_spec.goal or ''),
+            'prompt': str(normalized_spec.prompt or ''),
+            'execution_policy': normalized_policy,
+            'acceptance_prompt': str(normalized_spec.acceptance_prompt or ''),
+            'requires_acceptance': bool(self._requires_acceptance(normalized_spec)),
+        }
+
+    def _spawn_specs_fingerprint(self, specs: list[SpawnChildSpec] | list[dict[str, Any]] | Any) -> str:
+        normalized_specs: list[dict[str, Any]] = []
+        for item in list(specs or []):
+            payload = self._spawn_spec_payload(item)
+            if payload is None:
+                return ''
+            normalized_specs.append(payload)
+        if not normalized_specs:
+            return ''
+        return json.dumps(normalized_specs, ensure_ascii=False, sort_keys=True)
+
+    def _completed_successful_spawn_results(
+        self,
+        *,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        exclude_cache_key: str = '',
+    ) -> list[SpawnChildResult] | None:
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return None
+        target_fingerprint = self._spawn_specs_fingerprint(specs)
+        if not target_fingerprint:
+            return None
+        for cache_key, payload in reversed(list(operations.items())):
+            if str(cache_key or '').strip() == str(exclude_cache_key or '').strip():
+                continue
+            if not isinstance(payload, dict) or not bool(payload.get('completed')):
+                continue
+            if self._spawn_specs_fingerprint(payload.get('specs') or []) != target_fingerprint:
+                continue
+            entries = [item for item in list(payload.get('entries') or []) if isinstance(item, dict)]
+            if len(entries) != len(specs):
+                continue
+            if any(self._normalized_status(item.get('status')) != 'success' for item in entries):
+                continue
+            raw_results = list(payload.get('results') or [])
+            if len(raw_results) != len(specs):
+                continue
+            try:
+                results = [SpawnChildResult.model_validate(item) for item in raw_results]
+            except Exception:
+                continue
+            if any(result.failure_info is not None for result in results):
+                continue
+            return results
+        return None
+
     async def run_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         task = self._store.get_task(task_id)
         node = self._store.get_node(node_id)
@@ -421,6 +485,13 @@ class NodeRunner:
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
             return [SpawnChildResult.model_validate(item) for item in list(cached.get('results') or [])]
+        reused_results = self._completed_successful_spawn_results(
+            parent=parent,
+            specs=specs,
+            exclude_cache_key=cache_key,
+        )
+        if reused_results is not None:
+            return reused_results
 
         cached_payload = copy.deepcopy(cached) if isinstance(cached, dict) else {
             'specs': [item.model_dump(mode='json') for item in specs],

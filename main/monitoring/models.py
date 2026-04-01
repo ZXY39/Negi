@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import Field
 
-from main.models import Model, ModelTokenUsageRecord, TokenUsageSummary
+from main.models import Model, ModelTokenUsageRecord, NodeToolFileChange, TokenUsageSummary
 from main.types import NodeStatus, TaskStatus
 
 
@@ -152,6 +152,7 @@ class TaskNodeDetail(Model):
     updated_at: str = ''
     children_fingerprint: str = ''
     execution_trace: dict[str, Any] = Field(default_factory=dict)
+    tool_file_changes: list[NodeToolFileChange] = Field(default_factory=list)
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
 
