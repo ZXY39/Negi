@@ -58,9 +58,9 @@ class WorkerPressureMonitor:
         controller,
         store,
         sample_seconds: float = 1.0,
-        recover_window_seconds: float = 10.0,
+        recover_window_seconds: float = 1.0,
         warn_consecutive_samples: int = 3,
-        safe_consecutive_samples: int = 5,
+        safe_consecutive_samples: int = 3,
         pressure_snapshot_stale_after_seconds: float = 3.0,
         event_loop_warn_ms: float = 250.0,
         event_loop_safe_ms: float = 100.0,
@@ -92,7 +92,7 @@ class WorkerPressureMonitor:
         self._system_metrics_sampler = system_metrics_sampler
         self._lock = threading.RLock()
         self._sample_seconds = max(0.1, float(sample_seconds or 1.0))
-        self._recover_window_seconds = max(0.1, float(recover_window_seconds or 10.0))
+        self._recover_window_seconds = 1.0
         self._warn_consecutive_samples = max(1, int(warn_consecutive_samples or 1))
         self._safe_consecutive_samples = max(1, int(safe_consecutive_samples or 1))
         self._pressure_snapshot_stale_after_seconds = max(0.1, float(pressure_snapshot_stale_after_seconds or 3.0))
@@ -188,7 +188,7 @@ class WorkerPressureMonitor:
     ) -> None:
         with self._lock:
             self._sample_seconds = max(0.1, float(sample_seconds or 1.0))
-            self._recover_window_seconds = max(0.1, float(recover_window_seconds or 10.0))
+            self._recover_window_seconds = 1.0
             self._warn_consecutive_samples = max(1, int(warn_consecutive_samples or 1))
             self._safe_consecutive_samples = max(1, int(safe_consecutive_samples or 1))
             self._pressure_snapshot_stale_after_seconds = max(0.1, float(pressure_snapshot_stale_after_seconds or 3.0))
@@ -347,59 +347,30 @@ class WorkerPressureMonitor:
                 self._consecutive_local_critical = 0
 
             current_state = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
-            should_critical = (
-                (machine_critical and self._consecutive_machine_warn >= self._warn_consecutive_samples)
-                or (self._consecutive_local_critical >= self._warn_consecutive_samples and waiting_count > 0)
-            )
+            should_critical = bool(machine_critical or local_critical)
             should_throttle = machine_warn and self._consecutive_machine_warn >= self._warn_consecutive_samples
+            should_ease = machine_safe and self._consecutive_machine_safe >= self._safe_consecutive_samples
 
-            next_state = current_state
-            if current_state == 'critical':
-                if should_critical:
-                    next_state = 'critical'
-                elif machine_safe and self._consecutive_machine_safe >= self._safe_consecutive_samples:
-                    self._controller.begin_recovery(at=timestamp)
-                    if current_mono - self._last_recovery_step_at >= self._recover_window_seconds or self._last_recovery_step_at <= 0.0:
-                        self._controller.step_recovery(at=timestamp)
-                        self._last_recovery_step_at = current_mono
-                    next_state = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
-                else:
-                    next_state = 'critical'
-            elif current_state in {'throttled', 'recovering'}:
-                if should_critical:
-                    next_state = 'critical'
-                elif should_throttle:
-                    next_state = 'throttled'
-                elif machine_safe and self._consecutive_machine_safe >= self._safe_consecutive_samples:
-                    was_recovering = current_state == 'recovering'
-                    self._controller.begin_recovery(at=timestamp)
-                    if was_recovering and (
-                        current_mono - self._last_recovery_step_at >= self._recover_window_seconds
-                        or self._last_recovery_step_at <= 0.0
-                    ):
-                        self._controller.step_recovery(at=timestamp)
-                        self._last_recovery_step_at = current_mono
-                    next_state = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
-                else:
-                    next_state = current_state
-            else:
-                if should_critical:
-                    next_state = 'critical'
-                elif should_throttle:
-                    next_state = 'throttled'
-                else:
-                    next_state = 'normal'
-
-            if next_state == 'critical':
+            if should_critical:
                 self._controller.critical(at=timestamp)
-                if current_state != 'critical':
-                    self._last_recovery_step_at = current_mono
-            elif next_state == 'throttled':
+                self._last_recovery_step_at = current_mono
+            elif should_throttle:
                 self._controller.throttle(at=timestamp)
-                if current_state != 'throttled':
-                    self._last_recovery_step_at = current_mono
-            elif next_state == 'normal' and current_state != 'normal' and machine_safe:
+                self._last_recovery_step_at = current_mono
+            elif should_ease:
+                if waiting_count > 0:
+                    if current_state != 'easing':
+                        self._controller.begin_easing(at=timestamp)
+                        self._last_recovery_step_at = current_mono
+                    elif current_mono - self._last_recovery_step_at >= self._recover_window_seconds:
+                        self._controller.step_easing(at=timestamp)
+                        self._last_recovery_step_at = current_mono
+                elif current_state != 'normal':
+                    self._controller.set_budget_state('normal', at=timestamp)
+                    self._last_recovery_step_at = 0.0
+            elif current_state == 'easing' and waiting_count <= 0:
                 self._controller.set_budget_state('normal', at=timestamp)
+                self._last_recovery_step_at = 0.0
             self._snapshot['budget_state'] = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
             self._last_waiting_count = waiting_count
         return self.snapshot()

@@ -6185,7 +6185,7 @@ textarea {
     background: color-mix(in srgb, var(--status-success-bg) 18%, var(--bg-panel));
 }
 
-.task-performance-item--state[data-state="recovering"] {
+.task-performance-item--state[data-state="easing"] {
     border-color: color-mix(in srgb, var(--brand-primary) 28%, var(--border-color));
     background: color-mix(in srgb, var(--brand-primary) 12%, var(--bg-panel));
 }

@@ -427,9 +427,9 @@ class NodeParallelismConfig(Base):
     adaptive_total_tool_budget_critical_limit: int = 1
     adaptive_total_tool_budget_step_up: int = 1
     adaptive_total_tool_budget_sample_seconds: float = 1.0
-    adaptive_total_tool_budget_recover_window_seconds: float = 5.0
+    adaptive_total_tool_budget_recover_window_seconds: float = 1.0
     adaptive_total_tool_budget_warn_consecutive_samples: int = 3
-    adaptive_total_tool_budget_safe_consecutive_samples: int = 5
+    adaptive_total_tool_budget_safe_consecutive_samples: int = 3
     adaptive_event_loop_warn_ms: float = 250.0
     adaptive_event_loop_safe_ms: float = 100.0
     adaptive_event_loop_critical_ms: float = 1500.0

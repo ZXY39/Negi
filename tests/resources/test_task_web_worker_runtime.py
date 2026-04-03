@@ -1294,6 +1294,46 @@ def test_worker_status_payload_surfaces_tool_pressure_diagnostics(tmp_path: Path
     assert float(payload["sqlite_query_latency_ms"]) == 18.0
 
 
+def test_worker_status_payload_preserves_easing_state_and_zero_target_limit(tmp_path: Path):
+    sample_at = now_iso()
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    service.store.upsert_worker_status(
+        worker_id="worker:test",
+        role="task_worker",
+        status="running",
+        updated_at=now_iso(),
+        payload={
+            "execution_mode": "worker",
+            "tool_pressure_state": "easing",
+            "tool_pressure_target_limit": 0,
+            "worker_execution_state": "easing",
+            "worker_execution_target_limit": 0,
+            "machine_pressure_available": True,
+            "pressure_sample_at": sample_at,
+        },
+    )
+
+    payload = service.worker_status_payload()
+
+    assert payload["tool_pressure_state"] == "easing"
+    assert payload["tool_pressure_target_limit"] == 0
+    assert payload["worker_execution_state"] == "easing"
+    assert payload["worker_execution_target_limit"] == 0
+
+
+def test_adaptive_tool_budget_settings_default_safe_window_is_three() -> None:
+    settings = MainRuntimeService._adaptive_tool_budget_settings(None)
+    assert settings["safe_consecutive_samples"] == 3
+
+
 def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

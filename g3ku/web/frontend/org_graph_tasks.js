@@ -426,7 +426,7 @@ function taskWorkerPressureStateMeta(metrics = taskWorkerStatusMetrics()) {
     const state = String(metrics?.budget_state || metrics?.tool_pressure_state || metrics?.worker_execution_state || "normal").trim().toLowerCase();
     if (state === "critical") return { key: "critical", label: "强收紧" };
     if (state === "throttled") return { key: "throttled", label: "收紧中" };
-    if (state === "recovering") return { key: "recovering", label: "恢复中" };
+    if (state === "easing") return { key: "easing", label: "放宽中" };
     return { key: "normal", label: "正常" };
 }
 
