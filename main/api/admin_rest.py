@@ -813,6 +813,60 @@ def _model_role_concurrency(manager: ModelManager) -> dict[str, int | None]:
     return {scope: manager.config.get_role_max_concurrency(scope) for scope in VALID_SCOPES}
 
 
+def _model_roles_payload(manager: ModelManager) -> dict[str, Any]:
+    return {
+        'roles': _model_roles(manager),
+        'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
+    }
+
+
+def _llm_routes_payload(manager: ModelManager) -> dict[str, Any]:
+    return {
+        'routes': manager.facade.get_routes(manager.config),
+        'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
+    }
+
+
+def _scope_route_update_kwargs(payload: dict[str, Any] | None) -> dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    raw_model_keys = body.get('model_keys')
+    if raw_model_keys is None and 'modelKeys' in body:
+        raw_model_keys = body.get('modelKeys')
+    raw_max_iterations = body.get('max_iterations')
+    if raw_max_iterations is None and 'maxIterations' in body:
+        raw_max_iterations = body.get('maxIterations')
+    raw_max_concurrency = body.get('max_concurrency')
+    if raw_max_concurrency is None and 'maxConcurrency' in body and 'max_concurrency' not in body:
+        raw_max_concurrency = body.get('maxConcurrency')
+
+    update_kwargs: dict[str, Any] = {}
+    if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
+        update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
+    if 'max_iterations' in body or 'maxIterations' in body:
+        update_kwargs['max_iterations'] = raw_max_iterations
+    if 'max_concurrency' in body or 'maxConcurrency' in body:
+        update_kwargs['max_concurrency'] = raw_max_concurrency
+    return update_kwargs
+
+
+def _bulk_scope_route_updates(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    body = payload if isinstance(payload, dict) else {}
+    raw_updates = body.get('updates')
+    if not isinstance(raw_updates, dict) or not raw_updates:
+        raise ValueError('updates must be a non-empty object')
+    updates: dict[str, dict[str, Any]] = {}
+    for raw_scope, raw_item in raw_updates.items():
+        scope = str(raw_scope or '').strip()
+        if not scope:
+            raise ValueError('scope key must not be empty')
+        if not isinstance(raw_item, dict):
+            raise ValueError(f'updates.{scope} must be an object')
+        updates[scope] = _scope_route_update_kwargs(raw_item)
+    return updates
+
+
 def _main_runtime_settings_payload(cfg: Config) -> dict[str, Any]:
     default_max_depth = max(0, int(getattr(cfg.main_runtime, 'default_max_depth', 1) or 0))
     hard_max_depth = max(default_max_depth, int(getattr(cfg.main_runtime, 'hard_max_depth', default_max_depth) or default_max_depth))
@@ -1551,9 +1605,7 @@ async def list_models():
     return {
         'ok': True,
         'items': manager.list_models(),
-        'roles': _model_roles(manager),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
+        **_model_roles_payload(manager),
     }
 
 
@@ -1668,24 +1720,8 @@ async def delete_model(model_key: str):
 @router.put('/models/roles/{scope}')
 async def update_model_roles(scope: str, payload: dict = Body(...)):
     manager = ModelManager.load()
-    body = payload if isinstance(payload, dict) else {}
-    raw_model_keys = payload.get('model_keys')
-    if raw_model_keys is None and 'modelKeys' in payload:
-        raw_model_keys = payload.get('modelKeys')
-    raw_max_iterations = payload.get('max_iterations')
-    if raw_max_iterations is None and 'maxIterations' in payload:
-        raw_max_iterations = payload.get('maxIterations')
-    raw_max_concurrency = payload.get('max_concurrency')
-    if raw_max_concurrency is None and 'maxConcurrency' in payload and 'max_concurrency' not in payload:
-        raw_max_concurrency = payload.get('maxConcurrency')
     try:
-        update_kwargs: dict[str, Any] = {}
-        if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
-            update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
-        if 'max_iterations' in body or 'maxIterations' in body:
-            update_kwargs['max_iterations'] = raw_max_iterations
-        if 'max_concurrency' in body or 'maxConcurrency' in body:
-            update_kwargs['max_concurrency'] = raw_max_concurrency
+        update_kwargs = _scope_route_update_kwargs(payload)
         roles = manager.update_scope_route(
             scope,
             **update_kwargs,
@@ -1700,6 +1736,20 @@ async def update_model_roles(scope: str, payload: dict = Body(...)):
         'all_roles': _model_roles(manager),
         'role_iterations': _model_role_iterations(manager),
         'role_concurrency': _model_role_concurrency(manager),
+    }
+
+
+@router.put('/models/routes/batch')
+async def update_model_roles_bulk(payload: dict = Body(...)):
+    manager = ModelManager.load()
+    try:
+        result = manager.update_scope_routes_bulk(_bulk_scope_route_updates(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _refresh_runtime('admin_model_roles')
+    return {
+        'ok': True,
+        **result,
     }
 
 
@@ -1792,9 +1842,7 @@ async def list_llm_bindings():
     return {
         'ok': True,
         'items': manager.list_models(),
-        'routes': manager.facade.get_routes(manager.config),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
+        **_llm_routes_payload(manager),
     }
 
 
@@ -1862,33 +1910,15 @@ async def get_llm_routes():
     manager = ModelManager.load()
     return {
         'ok': True,
-        'routes': manager.facade.get_routes(manager.config),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
+        **_llm_routes_payload(manager),
     }
 
 
 @router.put('/llm/routes/{scope}')
 async def update_llm_route(scope: str, payload: dict = Body(...)):
     manager = ModelManager.load()
-    body = payload if isinstance(payload, dict) else {}
-    raw_model_keys = payload.get('model_keys')
-    if raw_model_keys is None and 'modelKeys' in payload:
-        raw_model_keys = payload.get('modelKeys')
-    raw_max_iterations = payload.get('max_iterations')
-    if raw_max_iterations is None and 'maxIterations' in payload:
-        raw_max_iterations = payload.get('maxIterations')
-    raw_max_concurrency = payload.get('max_concurrency')
-    if raw_max_concurrency is None and 'maxConcurrency' in payload and 'max_concurrency' not in payload:
-        raw_max_concurrency = payload.get('maxConcurrency')
     try:
-        update_kwargs: dict[str, Any] = {}
-        if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
-            update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
-        if 'max_iterations' in body or 'maxIterations' in body:
-            update_kwargs['max_iterations'] = raw_max_iterations
-        if 'max_concurrency' in body or 'maxConcurrency' in body:
-            update_kwargs['max_concurrency'] = raw_max_concurrency
+        update_kwargs = _scope_route_update_kwargs(payload)
         route = manager.update_scope_route(
             scope,
             **update_kwargs,
@@ -1899,9 +1929,24 @@ async def update_llm_route(scope: str, payload: dict = Body(...)):
     return {
         'ok': True,
         'route': route,
-        'routes': manager.facade.get_routes(manager.config),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
+        **_llm_routes_payload(manager),
+    }
+
+
+@router.put('/llm/routes')
+async def update_llm_routes_bulk(payload: dict = Body(...)):
+    manager = ModelManager.load()
+    try:
+        result = manager.update_scope_routes_bulk(_bulk_scope_route_updates(payload))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _refresh_runtime('admin_llm_route_update')
+    return {
+        'ok': True,
+        'updated_scopes': result.get('updated_scopes', []),
+        'routes': result.get('roles', {}),
+        'role_iterations': result.get('role_iterations', {}),
+        'role_concurrency': result.get('role_concurrency', {}),
     }
 
 

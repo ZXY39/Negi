@@ -233,20 +233,20 @@ class ModelManager:
     def set_scope_max_concurrency(self, scope: str, max_concurrency: int | None) -> dict[str, Any]:
         return self.update_scope_route(scope, max_concurrency=max_concurrency)
 
-    def update_scope_route(
+    def _prepare_scope_route_update(
         self,
         scope: str,
         *,
-        model_keys: list[str] | None = None,
+        model_keys: list[str] | None | object = _UNSET,
         max_iterations: Any = _UNSET,
         max_concurrency: Any = _UNSET,
-    ) -> dict[str, Any]:
+    ) -> tuple[str, dict[str, Any]]:
         normalized_scope = _normalize_scope(scope)
-        updated = False
-        if model_keys is not None:
+        prepared: dict[str, Any] = {}
+        if model_keys is not _UNSET:
             cleaned: list[str] = []
             seen: set[str] = set()
-            for ref in model_keys:
+            for ref in list(model_keys or []):
                 key = str(ref or "").strip()
                 if not key or key in seen:
                     continue
@@ -257,18 +257,38 @@ class ModelManager:
                 cleaned.append(key)
             if not cleaned:
                 raise ValueError("model_keys must not be empty")
-            setattr(self.config.models.roles, normalized_scope, cleaned)
-            updated = True
+            prepared["model_keys"] = cleaned
         if max_iterations is not _UNSET:
-            clean_iterations = self._normalize_optional_limit(max_iterations, field_name="max_iterations")
-            setattr(self.config.agents.role_iterations, normalized_scope, clean_iterations)
-            updated = True
+            prepared["max_iterations"] = self._normalize_optional_limit(max_iterations, field_name="max_iterations")
         if max_concurrency is not _UNSET:
-            clean_concurrency = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
-            setattr(self.config.agents.role_concurrency, normalized_scope, clean_concurrency)
-            updated = True
-        if not updated:
+            prepared["max_concurrency"] = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
+        if not prepared:
             raise ValueError("model_keys, max_iterations, or max_concurrency must be provided")
+        return normalized_scope, prepared
+
+    def _apply_scope_route_update(self, normalized_scope: str, prepared: dict[str, Any]) -> None:
+        if "model_keys" in prepared:
+            setattr(self.config.models.roles, normalized_scope, list(prepared["model_keys"]))
+        if "max_iterations" in prepared:
+            setattr(self.config.agents.role_iterations, normalized_scope, prepared["max_iterations"])
+        if "max_concurrency" in prepared:
+            setattr(self.config.agents.role_concurrency, normalized_scope, prepared["max_concurrency"])
+
+    def update_scope_route(
+        self,
+        scope: str,
+        *,
+        model_keys: list[str] | None | object = _UNSET,
+        max_iterations: Any = _UNSET,
+        max_concurrency: Any = _UNSET,
+    ) -> dict[str, Any]:
+        normalized_scope, prepared = self._prepare_scope_route_update(
+            scope,
+            model_keys=model_keys,
+            max_iterations=max_iterations,
+            max_concurrency=max_concurrency,
+        )
+        self._apply_scope_route_update(normalized_scope, prepared)
         self._revalidate()
         self.save()
         return {
@@ -276,6 +296,34 @@ class ModelManager:
             "model_keys": list(getattr(self.config.models.roles, normalized_scope)),
             "max_iterations": self.config.get_role_max_iterations(normalized_scope),
             "max_concurrency": self.config.get_role_max_concurrency(normalized_scope),
+        }
+
+    def update_scope_routes_bulk(self, updates: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(updates, dict) or not updates:
+            raise ValueError("updates must not be empty")
+        prepared_updates: list[tuple[str, dict[str, Any]]] = []
+        seen_scopes: set[str] = set()
+        for scope, payload in updates.items():
+            body = payload if isinstance(payload, dict) else {}
+            normalized_scope, prepared = self._prepare_scope_route_update(
+                str(scope or ""),
+                model_keys=body.get("model_keys", _UNSET),
+                max_iterations=body.get("max_iterations", _UNSET),
+                max_concurrency=body.get("max_concurrency", _UNSET),
+            )
+            if normalized_scope in seen_scopes:
+                raise ValueError(f"Duplicate scope update: {normalized_scope}")
+            seen_scopes.add(normalized_scope)
+            prepared_updates.append((normalized_scope, prepared))
+        for normalized_scope, prepared in prepared_updates:
+            self._apply_scope_route_update(normalized_scope, prepared)
+        self._revalidate()
+        self.save()
+        return {
+            "roles": {scope: list(getattr(self.config.models.roles, scope)) for scope in VALID_SCOPES},
+            "role_iterations": {scope: self.config.get_role_max_iterations(scope) for scope in VALID_SCOPES},
+            "role_concurrency": {scope: self.config.get_role_max_concurrency(scope) for scope in VALID_SCOPES},
+            "updated_scopes": [scope for scope, _prepared in prepared_updates],
         }
 
     def add_model_to_scope(self, key: str, scope: str) -> None:

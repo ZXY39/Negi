@@ -2167,6 +2167,86 @@ def test_llm_routes_endpoint_updates_role_concurrency(tmp_path: Path, monkeypatc
     assert saved['agents']['roleConcurrency']['execution'] == 3
 
 
+def test_llm_routes_bulk_endpoint_updates_multiple_scopes_with_single_refresh(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    refresh_calls: list[str] = []
+
+    async def _fake_refresh(reason: str):
+        refresh_calls.append(reason)
+
+    monkeypatch.setattr(admin_rest, '_refresh_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/llm/routes',
+        json={
+            'updates': {
+                'execution': {'model_keys': ['m'], 'max_iterations': 22},
+                'inspection': {'model_keys': ['m'], 'max_concurrency': 3},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['routes']['execution'] == ['m']
+    assert payload['routes']['inspection'] == ['m']
+    assert payload['role_iterations']['execution'] == 22
+    assert payload['role_concurrency']['inspection'] == 3
+    assert refresh_calls == ['admin_llm_route_update']
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['agents']['roleIterations']['execution'] == 22
+    assert saved['agents']['roleConcurrency']['inspection'] == 3
+
+
+def test_model_roles_bulk_endpoint_updates_multiple_scopes_with_single_refresh(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    refresh_calls: list[str] = []
+
+    async def _fake_refresh(reason: str):
+        refresh_calls.append(reason)
+
+    monkeypatch.setattr(admin_rest, '_refresh_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/models/routes/batch',
+        json={
+            'updates': {
+                'execution': {'model_keys': ['m'], 'max_iterations': 11},
+                'inspection': {'model_keys': ['m'], 'max_concurrency': 2},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['roles']['execution'] == ['m']
+    assert payload['roles']['inspection'] == ['m']
+    assert payload['role_iterations']['execution'] == 11
+    assert payload['role_concurrency']['inspection'] == 2
+    assert refresh_calls == ['admin_model_roles']
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['agents']['roleIterations']['execution'] == 11
+    assert saved['agents']['roleConcurrency']['inspection'] == 2
+
+
 def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

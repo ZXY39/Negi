@@ -1464,14 +1464,16 @@
         kind: "success",
         persistent: true,
       });
-      let routes = null;
-      for (const scope of MODEL_SCOPES.map((item) => item.key)) {
-        routes = await ApiClient.updateLlmRoute(scope, {
-          modelKeys: normalizeModelRoleChain(S.modelCatalog.roleDrafts[scope] || []),
-          maxIterations: modelScopeIterations(scope, "draft"),
-          maxConcurrency: modelScopeConcurrency(scope, "draft"),
-        });
-      }
+      const routes = await ApiClient.updateLlmRoutes(Object.fromEntries(
+        MODEL_SCOPES.map((item) => [
+          item.key,
+          {
+            modelKeys: normalizeModelRoleChain(S.modelCatalog.roleDrafts[item.key] || []),
+            maxIterations: modelScopeIterations(item.key, "draft"),
+            maxConcurrency: modelScopeConcurrency(item.key, "draft"),
+          },
+        ])
+      ));
       llmState().routes = normalizeAllModelRoles(routes?.routes || EMPTY_MODEL_ROLES());
       llmState().roleIterations = normalizeRoleIterations(routes?.roleIterations || DEFAULT_ROLE_ITERATIONS());
       llmState().roleConcurrency = normalizeRoleConcurrency(routes?.roleConcurrency || routes?.role_concurrency || DEFAULT_ROLE_CONCURRENCY());

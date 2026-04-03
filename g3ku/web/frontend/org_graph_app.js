@@ -4648,20 +4648,12 @@ function cancelModelRoleEditing() {
 }
 
 async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
-    const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
-    if (!targets.length) return;
-    const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
-    const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
+    const updates = buildModelRoleChainUpdates(scopes, { useDrafts });
+    if (!Object.keys(updates).length) return;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {
-        let payload = null;
-        for (const scope of targets) {
-            payload = await ApiClient.updateModelRoleChain(scope, {
-                modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
-                maxIterations: iterationSource[scope],
-            });
-        }
+        const payload = await ApiClient.updateModelRoleChains(updates);
         if (payload) applyModelCatalog(payload);
         hint(successText);
     } catch (e) {
@@ -4773,22 +4765,12 @@ function cancelModelRoleEditing() {
 }
 
 async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
-    const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
-    if (!targets.length) return;
-    const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
-    const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
-    const concurrencySource = useDrafts ? S.modelCatalog.roleConcurrencyDrafts : S.modelCatalog.roleConcurrency;
+    const updates = buildModelRoleChainUpdates(scopes, { useDrafts });
+    if (!Object.keys(updates).length) return;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {
-        let payload = null;
-        for (const scope of targets) {
-            payload = await ApiClient.updateModelRoleChain(scope, {
-                modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
-                maxIterations: iterationSource[scope],
-                maxConcurrency: concurrencySource[scope],
-            });
-        }
+        const payload = await ApiClient.updateModelRoleChains(updates);
         if (payload) applyModelCatalog(payload);
         hint(successText);
     } catch (e) {
@@ -4799,6 +4781,23 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
         S.modelCatalog.saving = false;
         renderModelCatalog();
     }
+}
+
+function buildModelRoleChainUpdates(scopes = MODEL_SCOPES.map((item) => item.key), { useDrafts = false } = {}) {
+    const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!targets.length) return {};
+    const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
+    const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
+    const draftConcurrencySource = S.modelCatalog.roleConcurrencyDrafts || DEFAULT_ROLE_CONCURRENCY();
+    const concurrencySource = useDrafts ? draftConcurrencySource : S.modelCatalog.roleConcurrency;
+    return Object.fromEntries(targets.map((scope) => [
+        scope,
+        {
+            modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
+            maxIterations: iterationSource[scope],
+            maxConcurrency: concurrencySource[scope],
+        },
+    ]));
 }
 
 async function handleModelRoleEditorAction() {

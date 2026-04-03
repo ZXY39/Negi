@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, HTTPException
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_ceo_session_catalog,
+    ceo_session_family,
     create_web_ceo_session,
     delete_web_ceo_session_artifacts,
     ensure_ceo_session_metadata,
@@ -142,7 +143,7 @@ def _publish_ceo_sessions_snapshot(
                 'items': snapshot_catalog.get('items') or [],
                 'channel_groups': snapshot_catalog.get('channel_groups') or [],
                 'active_session_id': resolved_active_session_id,
-                'active_session_family': snapshot_catalog.get('active_session_family') or 'local',
+                'active_session_family': snapshot_catalog.get('active_session_family') or ceo_session_family(resolved_active_session_id),
             },
         )
     )
@@ -225,7 +226,6 @@ async def list_ceo_sessions():
 @router.post("/ceo/sessions")
 async def create_ceo_session(payload: dict | None = Body(default=None)):
     agent, session_manager, runtime_manager, state_store = _sessions()
-    resolve_active_ceo_session_id(session_manager, state_store)
     session = create_web_ceo_session(session_manager, title=str((payload or {}).get("title") or "").strip() or None)
     state_store.set_active_session_id(session.key)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=session.key)

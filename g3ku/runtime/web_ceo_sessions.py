@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from g3ku.china_bridge.session_keys import build_session_key, parse_china_session_key
-from g3ku.config.loader import load_config
+from g3ku.config.loader import get_config_path, load_config
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
@@ -28,6 +29,107 @@ _RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
 _RECENT_HISTORY_TOOL_TEXT_MAX_CHARS = 96
 _TASK_RESULT_OUTPUT_MAX_CHARS = 480
 _TASK_RESULT_REASON_MAX_CHARS = 180
+_CEO_CONFIG_CACHE_LOCK = threading.RLock()
+_CEO_CONFIG_CACHE: dict[str, Any] = {
+    'token': None,
+    'workspace_path': None,
+    'depth_limits': None,
+    'enabled_channel_accounts': None,
+}
+
+
+def _channel_accounts_from_config(cfg: Any) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    channels_cfg = getattr(getattr(cfg, "china_bridge", None), "channels", None)
+    if channels_cfg is None:
+        return rows
+    for spec in CHINA_SESSION_CHANNEL_SPECS:
+        channel_cfg = getattr(channels_cfg, spec["attr"], None)
+        payload = _top_level_channel_payload(channel_cfg)
+        if not bool(payload.get("enabled")):
+            continue
+        accounts = payload.get("accounts") if isinstance(payload.get("accounts"), dict) else {}
+        seen_accounts: set[str] = set()
+        if _has_base_channel_account(channel_cfg):
+            rows.append(
+                {
+                    "channel_id": spec["channel_id"],
+                    "label": spec["label"],
+                    "account_id": "default",
+                }
+            )
+            seen_accounts.add("default")
+        for account_id, account_payload in sorted(accounts.items()):
+            if not isinstance(account_payload, dict):
+                continue
+            normalized_account_id = str(account_id or "").strip() or "default"
+            if normalized_account_id in seen_accounts:
+                continue
+            if account_payload.get("enabled") is False:
+                continue
+            rows.append(
+                {
+                    "channel_id": spec["channel_id"],
+                    "label": spec["label"],
+                    "account_id": normalized_account_id,
+                }
+            )
+            seen_accounts.add(normalized_account_id)
+        if not rows or rows[-1]["channel_id"] != spec["channel_id"]:
+            if not accounts:
+                rows.append(
+                    {
+                        "channel_id": spec["channel_id"],
+                        "label": spec["label"],
+                        "account_id": "default",
+                    }
+                )
+    return rows
+
+
+def _ceo_config_snapshot() -> dict[str, Any]:
+    config_path = get_config_path()
+    try:
+        token = (str(config_path.resolve()), config_path.stat().st_mtime_ns, id(load_config))
+    except FileNotFoundError:
+        token = (str(config_path.resolve()), None, id(load_config))
+    with _CEO_CONFIG_CACHE_LOCK:
+        cached_token = _CEO_CONFIG_CACHE.get('token')
+        if cached_token == token:
+            return {
+                'workspace_path': _CEO_CONFIG_CACHE.get('workspace_path'),
+                'depth_limits': dict(_CEO_CONFIG_CACHE.get('depth_limits') or {}),
+                'enabled_channel_accounts': list(_CEO_CONFIG_CACHE.get('enabled_channel_accounts') or []),
+            }
+    try:
+        cfg = load_config()
+        workspace = Path(getattr(cfg, 'workspace_path', Path.cwd())).resolve()
+        default_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH)
+        hard_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH)
+        enabled_channel_accounts = _channel_accounts_from_config(cfg)
+    except Exception:
+        workspace = Path.cwd().resolve()
+        default_max_depth = DEFAULT_TASK_MAX_DEPTH
+        hard_max_depth = DEFAULT_TASK_HARD_MAX_DEPTH
+        enabled_channel_accounts = []
+    snapshot = {
+        'workspace_path': workspace,
+        'depth_limits': {
+            'default_max_depth': max(0, default_max_depth),
+            'hard_max_depth': max(max(0, default_max_depth), hard_max_depth),
+        },
+        'enabled_channel_accounts': enabled_channel_accounts,
+    }
+    with _CEO_CONFIG_CACHE_LOCK:
+        _CEO_CONFIG_CACHE['token'] = token
+        _CEO_CONFIG_CACHE['workspace_path'] = snapshot['workspace_path']
+        _CEO_CONFIG_CACHE['depth_limits'] = dict(snapshot['depth_limits'])
+        _CEO_CONFIG_CACHE['enabled_channel_accounts'] = list(snapshot['enabled_channel_accounts'])
+    return {
+        'workspace_path': snapshot['workspace_path'],
+        'depth_limits': dict(snapshot['depth_limits']),
+        'enabled_channel_accounts': list(snapshot['enabled_channel_accounts']),
+    }
 
 
 def _normalize_task_ids(values: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[str]:
@@ -462,10 +564,7 @@ def count_frontdoor_turns(session: Any) -> int:
 
 
 def workspace_path() -> Path:
-    try:
-        return Path(load_config().workspace_path).resolve()
-    except Exception:
-        return Path.cwd().resolve()
+    return Path(_ceo_config_snapshot().get('workspace_path') or Path.cwd()).resolve()
 
 
 def new_web_ceo_session_id() -> str:
@@ -513,19 +612,10 @@ def latest_llm_output_at(session: Any) -> str:
 
 
 def main_runtime_depth_limits() -> dict[str, int]:
-    try:
-        cfg = load_config()
-        default_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH)
-        hard_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH)
-    except Exception:
-        default_max_depth = DEFAULT_TASK_MAX_DEPTH
-        hard_max_depth = DEFAULT_TASK_HARD_MAX_DEPTH
-    default_max_depth = max(0, default_max_depth)
-    hard_max_depth = max(default_max_depth, hard_max_depth)
-    return {
-        "default_max_depth": default_max_depth,
-        "hard_max_depth": hard_max_depth,
-    }
+    return dict(_ceo_config_snapshot().get('depth_limits') or {
+        "default_max_depth": DEFAULT_TASK_MAX_DEPTH,
+        "hard_max_depth": DEFAULT_TASK_HARD_MAX_DEPTH,
+    })
 
 
 def normalize_task_defaults(
@@ -544,13 +634,18 @@ def normalize_task_defaults(
     return {"max_depth": max_depth}
 
 
-def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]:
+def normalize_ceo_metadata(
+    metadata: Any,
+    *,
+    session_key: str,
+    depth_limits: dict[str, int] | None = None,
+) -> dict[str, Any]:
     payload = dict(metadata or {}) if isinstance(metadata, dict) else {}
     payload.pop("frontdoor_context", None)
     title = str(payload.get("title") or "").strip() or DEFAULT_CEO_SESSION_TITLE
     preview_text = summarize_preview_text(payload.get("last_preview_text") or payload.get("preview_text") or "")
     manual_pause_waiting_reason = bool(payload.get("manual_pause_waiting_reason"))
-    depth_limits = main_runtime_depth_limits()
+    resolved_depth_limits = dict(depth_limits or main_runtime_depth_limits())
     if str(session_key or "").startswith("web:"):
         memory_scope = normalize_memory_scope(
             payload.get("memory_scope"),
@@ -561,8 +656,8 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
         memory_scope = normalize_memory_scope(payload.get("memory_scope"), fallback_session_key=session_key)
     task_defaults = normalize_task_defaults(
         payload.get("task_defaults", payload.get("taskDefaults")),
-        default_max_depth=depth_limits["default_max_depth"],
-        hard_max_depth=depth_limits["hard_max_depth"],
+        default_max_depth=int(resolved_depth_limits.get("default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH),
+        hard_max_depth=int(resolved_depth_limits.get("hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH),
     )
     last_task_memory = normalize_task_memory(payload.get('last_task_memory', payload.get('lastTaskMemory')))
     return {
@@ -577,7 +672,10 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
 
 
 def ensure_ceo_session_metadata(session: Any) -> bool:
-    normalized = normalize_ceo_metadata(getattr(session, "metadata", None), session_key=str(getattr(session, "key", "") or ""))
+    normalized = normalize_ceo_metadata(
+        getattr(session, "metadata", None),
+        session_key=str(getattr(session, "key", "") or ""),
+    )
     current = getattr(session, "metadata", None)
     if current == normalized:
         return False
@@ -787,14 +885,20 @@ def build_session_summary(
     is_active: bool,
     is_running: bool = False,
     inflight_turn: dict[str, Any] | None = None,
+    normalized_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    ensure_ceo_session_metadata(session)
+    session_key = str(getattr(session, "key", "") or "")
+    metadata = (
+        dict(normalized_metadata)
+        if isinstance(normalized_metadata, dict)
+        else normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session_key)
+    )
     messages = [
         item
         for item in list(getattr(session, "messages", []) or [])
         if isinstance(item, dict) and not is_internal_ceo_user_message(item)
     ]
-    preview_text = str(session.metadata.get("last_preview_text") or "").strip()
+    preview_text = str(metadata.get("last_preview_text") or "").strip()
     if not preview_text:
         for item in reversed(messages):
             content = item.get("content")
@@ -810,7 +914,7 @@ def build_session_summary(
     updated_at_text = updated_at.isoformat() if isinstance(updated_at, datetime) else str(updated_at or "")
     if inflight_updated_at and inflight_updated_at > updated_at_text:
         updated_at_text = inflight_updated_at
-    title = str(session.metadata.get("title") or DEFAULT_CEO_SESSION_TITLE)
+    title = str(metadata.get("title") or DEFAULT_CEO_SESSION_TITLE)
     if title == DEFAULT_CEO_SESSION_TITLE:
         user_message = _inflight_user_message(inflight_turn)
         if user_message is not None:
@@ -822,7 +926,7 @@ def build_session_summary(
         message_count += 1
     last_llm_output = latest_llm_output_at(session)
     return {
-        "session_id": str(getattr(session, "key", "") or ""),
+        "session_id": session_key,
         "title": title,
         "preview_text": preview_text,
         "message_count": message_count,
@@ -831,13 +935,47 @@ def build_session_summary(
         "last_llm_output_at": last_llm_output,
         "is_active": bool(is_active),
         "is_running": bool(is_running),
-        "task_defaults": dict(session.metadata.get("task_defaults") or {}),
+        "task_defaults": dict(metadata.get("task_defaults") or {}),
         "session_family": "local",
         "session_origin": "web",
         "is_readonly": False,
         "can_rename": True,
         "can_delete": True,
     }
+
+
+def ceo_session_family(session_id: str) -> str:
+    return "channel" if str(session_id or "").strip().startswith("china:") else "local"
+
+
+def build_local_ceo_session_item(
+    session_manager: Any,
+    session_id: str,
+    *,
+    active_session_id: str,
+    is_running: bool = False,
+    inflight_turn: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    key = str(session_id or "").strip()
+    if not key.startswith("web:") or not _local_session_exists(session_manager, key):
+        return None
+    try:
+        session = session_manager.get_or_create(key)
+    except Exception:
+        return None
+    resolved_inflight_turn = inflight_turn if isinstance(inflight_turn, dict) else read_inflight_turn_snapshot(key)
+    normalized_metadata = normalize_ceo_metadata(
+        getattr(session, "metadata", None),
+        session_key=key,
+        depth_limits=main_runtime_depth_limits(),
+    )
+    return build_session_summary(
+        session,
+        is_active=key == str(active_session_id or "").strip(),
+        is_running=bool(is_running),
+        inflight_turn=resolved_inflight_turn,
+        normalized_metadata=normalized_metadata,
+    )
 
 
 CHINA_SESSION_CHANNEL_SPECS = (
@@ -957,53 +1095,7 @@ def _has_base_channel_account(channel_cfg: Any) -> bool:
 
 
 def _iter_enabled_channel_accounts() -> list[dict[str, str]]:
-    cfg = load_config()
-    rows: list[dict[str, str]] = []
-    channels_cfg = getattr(getattr(cfg, "china_bridge", None), "channels", None)
-    if channels_cfg is None:
-        return rows
-    for spec in CHINA_SESSION_CHANNEL_SPECS:
-        channel_cfg = getattr(channels_cfg, spec["attr"], None)
-        payload = _top_level_channel_payload(channel_cfg)
-        if not bool(payload.get("enabled")):
-            continue
-        accounts = payload.get("accounts") if isinstance(payload.get("accounts"), dict) else {}
-        seen_accounts: set[str] = set()
-        if _has_base_channel_account(channel_cfg):
-            rows.append(
-                {
-                    "channel_id": spec["channel_id"],
-                    "label": spec["label"],
-                    "account_id": "default",
-                }
-            )
-            seen_accounts.add("default")
-        for account_id, account_payload in sorted(accounts.items()):
-            if not isinstance(account_payload, dict):
-                continue
-            normalized_account_id = str(account_id or "").strip() or "default"
-            if normalized_account_id in seen_accounts:
-                continue
-            if account_payload.get("enabled") is False:
-                continue
-            rows.append(
-                {
-                    "channel_id": spec["channel_id"],
-                    "label": spec["label"],
-                    "account_id": normalized_account_id,
-                }
-            )
-            seen_accounts.add(normalized_account_id)
-        if not rows or rows[-1]["channel_id"] != spec["channel_id"]:
-            if not accounts:
-                rows.append(
-                    {
-                        "channel_id": spec["channel_id"],
-                        "label": spec["label"],
-                        "account_id": "default",
-                    }
-                )
-    return rows
+    return list(_ceo_config_snapshot().get('enabled_channel_accounts') or [])
 
 
 def _channel_session_summary_from_entry(
@@ -1051,7 +1143,7 @@ def list_local_ceo_sessions(
     is_running_resolver: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    changed_keys: list[str] = []
+    depth_limits = main_runtime_depth_limits()
     persisted_keys = {
         str(item.get("key") or "").strip()
         for item in session_manager.list_sessions()
@@ -1066,9 +1158,11 @@ def list_local_ceo_sessions(
             session = session_manager.get_or_create(key)
         except Exception:
             continue
-        if ensure_ceo_session_metadata(session):
-            if key in persisted_keys:
-                changed_keys.append(key)
+        normalized_metadata = normalize_ceo_metadata(
+            getattr(session, "metadata", None),
+            session_key=key,
+            depth_limits=depth_limits,
+        )
         is_running = False
         if callable(is_running_resolver):
             try:
@@ -1081,10 +1175,9 @@ def list_local_ceo_sessions(
                 is_active=key == active_session_id,
                 is_running=is_running,
                 inflight_turn=inflight_by_session.get(key),
+                normalized_metadata=normalized_metadata,
             )
         )
-    for key in changed_keys:
-        session_manager.save(session_manager.get_or_create(key))
     rows.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("session_id") or "")), reverse=True)
     return rows
 
@@ -1297,14 +1390,82 @@ def list_web_ceo_sessions(
     )
 
 
+def _local_session_exists(session_manager: Any, session_id: str) -> bool:
+    key = str(session_id or "").strip()
+    if not key.startswith("web:"):
+        return False
+    if hasattr(session_manager, '_cache') and isinstance(getattr(session_manager, '_cache', None), dict):
+        if key in getattr(session_manager, '_cache'):
+            return True
+    path_getter = getattr(session_manager, 'get_path', None)
+    if callable(path_getter):
+        try:
+            if path_getter(key).exists():
+                return True
+        except Exception:
+            pass
+    return (
+        read_inflight_turn_snapshot(key) is not None
+        or read_paused_execution_context(key) is not None
+    )
+
+
+def _recent_local_session_keys(session_manager: Any) -> list[str]:
+    persisted_keys = [
+        str(item.get("key") or "").strip()
+        for item in session_manager.list_sessions()
+        if str(item.get("key") or "").strip().startswith("web:")
+    ]
+    if persisted_keys:
+        return persisted_keys
+    inflight_by_session = list_inflight_web_ceo_sessions()
+    if not inflight_by_session:
+        return []
+    return sorted(
+        inflight_by_session.keys(),
+        key=lambda key: (_inflight_updated_at(inflight_by_session.get(key)), key),
+        reverse=True,
+    )
+
+
+def _channel_session_exists(session_manager: Any, session_id: str) -> bool:
+    target = str(session_id or "").strip()
+    if not target.startswith("china:"):
+        return False
+    try:
+        parsed = parse_china_session_key(target)
+    except Exception:
+        parsed = None
+    if parsed is None:
+        return False
+    if parsed.chat_type == 'dm':
+        for account in _iter_enabled_channel_accounts():
+            if (
+                str(account.get('channel_id') or '').strip() == str(parsed.channel or '').strip()
+                and str(account.get('account_id') or '').strip() == str(parsed.account_id or '').strip()
+            ):
+                return True
+    for item in session_manager.list_sessions():
+        key = str(item.get("key") or "").strip()
+        if not key.startswith("china:"):
+            continue
+        if key == target:
+            return True
+        candidate = parse_china_session_key(key)
+        if candidate is None:
+            continue
+        if _canonical_china_session_id(candidate) == target:
+            return True
+    return False
+
+
 def resolve_active_ceo_session_id(session_manager: Any, state_store: WebCeoStateStore) -> str:
     requested = state_store.get_active_session_id()
-    catalog = build_ceo_session_catalog(session_manager, active_session_id=requested)
-    if find_ceo_session_catalog_item(catalog, requested) is not None:
+    if _local_session_exists(session_manager, requested) or _channel_session_exists(session_manager, requested):
         return requested
-    local_items = list(catalog.get("items") or [])
-    if local_items:
-        fallback = str(local_items[0].get("session_id") or "").strip()
+    local_session_keys = _recent_local_session_keys(session_manager)
+    if local_session_keys:
+        fallback = str(local_session_keys[0] or "").strip()
         state_store.set_active_session_id(fallback)
         return fallback
     created = create_web_ceo_session(session_manager)
@@ -1314,13 +1475,11 @@ def resolve_active_ceo_session_id(session_manager: Any, state_store: WebCeoState
 
 def ensure_active_web_ceo_session(session_manager: Any, state_store: WebCeoStateStore) -> str:
     active_session_id = state_store.get_active_session_id()
-    catalog = build_ceo_session_catalog(session_manager, active_session_id=active_session_id)
-    local_items = list(catalog.get("items") or [])
-    available_ids = [str(item.get("session_id") or "").strip() for item in local_items if str(item.get("session_id") or "").strip()]
-    if active_session_id and active_session_id in available_ids:
+    if _local_session_exists(session_manager, active_session_id):
         return active_session_id
-    if available_ids:
-        fallback = available_ids[0]
+    local_session_keys = _recent_local_session_keys(session_manager)
+    if local_session_keys:
+        fallback = str(local_session_keys[0] or "").strip()
         state_store.set_active_session_id(fallback)
         return fallback
     created = create_web_ceo_session(session_manager)

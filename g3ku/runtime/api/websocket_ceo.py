@@ -16,7 +16,9 @@ from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_ceo_session_catalog,
+    build_local_ceo_session_item,
     build_session_summary,
+    ceo_session_family,
     create_web_ceo_session,
     ensure_active_web_ceo_session,
     ensure_ceo_session_metadata,
@@ -92,7 +94,7 @@ def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, 
                 'items': catalog.get('items') or [],
                 'channel_groups': catalog.get('channel_groups') or [],
                 'active_session_id': active_session_id,
-                'active_session_family': catalog.get('active_session_family') or 'local',
+                'active_session_family': catalog.get('active_session_family') or ceo_session_family(active_session_id),
             },
         )
     )
@@ -115,15 +117,15 @@ def _publish_ceo_session_patch(
     key = str(session_id or '').strip()
     if not key:
         return
-    session = transcript_store.get_or_create(key)
     active_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
-    catalog = build_ceo_session_catalog(
+    item = build_local_ceo_session_item(
         transcript_store,
+        key,
         active_session_id=active_session_id,
-        is_running_resolver=lambda session_key: _session_is_running(runtime_manager, session_key),
+        is_running=_session_is_running(runtime_manager, key) if is_running is None else bool(is_running),
     )
-    item = find_ceo_session_catalog_item(catalog, key)
     if item is None:
+        session = transcript_store.get_or_create(key)
         item = build_session_summary(
             session,
             is_active=key == active_session_id,
@@ -142,7 +144,7 @@ def _publish_ceo_session_patch(
             data={
                 'item': item,
                 'active_session_id': active_session_id,
-                'active_session_family': catalog.get('active_session_family') or 'local',
+                'active_session_family': ceo_session_family(active_session_id),
             },
         )
     )
@@ -766,7 +768,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'items': initial_catalog.get('items', []),
                     'channel_groups': initial_catalog.get('channel_groups', []),
                     'active_session_id': initial_catalog.get('active_session_id') or session_id,
-                    'active_session_family': initial_catalog.get('active_session_family') or ('channel' if is_channel_session else 'local'),
+                    'active_session_family': initial_catalog.get('active_session_family') or ceo_session_family(initial_catalog.get('active_session_id') or session_id),
                 },
             )
         )

@@ -552,7 +552,7 @@ class ApiClient {
         return this._refreshModelsAfter(this.delete(`/api/models/${modelKey}`));
     }
 
-    static async updateModelRoleChain(scope, payload) {
+    static _toRoleRouteBody(payload = {}) {
         const source = Array.isArray(payload) ? { modelKeys: payload } : (payload && typeof payload === "object" ? payload : {});
         const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
         const modelKeys = Array.isArray(source.modelKeys)
@@ -575,7 +575,30 @@ class ApiClient {
             body.max_concurrency = maxConcurrency;
             body.maxConcurrency = maxConcurrency;
         }
-        return this._refreshModelsAfter(this.put(`/api/models/roles/${scope}`, body));
+        return body;
+    }
+
+    static _toRoleRouteUpdatesBody(updates = {}) {
+        const entries = Object.entries(updates && typeof updates === "object" ? updates : {});
+        return {
+            updates: Object.fromEntries(
+                entries.map(([scope, payload]) => [String(scope || "").trim(), this._toRoleRouteBody(payload)])
+            ),
+        };
+    }
+
+    static async updateModelRoleChain(scope, payload) {
+        return this._refreshModelsAfter(this._request("PUT", `/api/models/roles/${scope}`, {
+            body: this._toRoleRouteBody(payload),
+            timeoutMs: 20000,
+        }));
+    }
+
+    static async updateModelRoleChains(updates) {
+        return this._refreshModelsAfter(this._request("PUT", "/api/models/routes/batch", {
+            body: this._toRoleRouteUpdatesBody(updates),
+            timeoutMs: 20000,
+        }));
     }
 
     static async getLlmTemplates() {
@@ -666,29 +689,22 @@ class ApiClient {
     }
 
     static async updateLlmRoute(scope, payload) {
-        const source = Array.isArray(payload) ? { modelKeys: payload } : (payload && typeof payload === "object" ? payload : {});
-        const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
-        const modelKeys = Array.isArray(source.modelKeys)
-            ? source.modelKeys
-            : Array.isArray(source.model_keys)
-                ? source.model_keys
-                : undefined;
-        const body = {};
-        if (modelKeys !== undefined) {
-            body.model_keys = modelKeys;
-            body.modelKeys = modelKeys;
-        }
-        if (has("maxIterations") || has("max_iterations")) {
-            const maxIterations = has("maxIterations") ? source.maxIterations : source.max_iterations;
-            body.max_iterations = maxIterations;
-            body.maxIterations = maxIterations;
-        }
-        if (has("maxConcurrency") || has("max_concurrency")) {
-            const maxConcurrency = has("maxConcurrency") ? source.maxConcurrency : source.max_concurrency;
-            body.max_concurrency = maxConcurrency;
-            body.maxConcurrency = maxConcurrency;
-        }
-        const data = await this.put(`/api/llm/routes/${encodeURIComponent(scope)}`, body);
+        const data = await this._request("PUT", `/api/llm/routes/${encodeURIComponent(scope)}`, {
+            body: this._toRoleRouteBody(payload),
+            timeoutMs: 20000,
+        });
+        return {
+            routes: data.routes || {},
+            roleIterations: data.roleIterations || data.role_iterations || {},
+            roleConcurrency: data.roleConcurrency || data.role_concurrency || {},
+        };
+    }
+
+    static async updateLlmRoutes(updates) {
+        const data = await this._request("PUT", "/api/llm/routes", {
+            body: this._toRoleRouteUpdatesBody(updates),
+            timeoutMs: 20000,
+        });
         return {
             routes: data.routes || {},
             roleIterations: data.roleIterations || data.role_iterations || {},
