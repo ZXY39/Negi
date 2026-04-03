@@ -1,0 +1,50 @@
+schema_version: 1
+kind: skill
+name: context-strategy
+description: >
+  统一上下文策略：指导 G3KU 在长会话中执行上下文保存、恢复、预算控制、
+  范围标注、裁剪压缩与会话连续性管理。与 memory skill 和 stage 机制协作，
+  防止上下文溢出和信息丢失。
+trigger:
+  keywords:
+    - context strategy
+    - 上下文策略
+    - context save
+    - context restore
+    - context budget
+    - context checkpoint
+    - context recovery
+    - context compaction
+    - 上下文保存
+    - 上下文恢复
+    - 上下文预算
+    - context scope
+    - context trimming
+    - session continuity
+  descriptions:
+    - 当会话上下文接近容量限制时需要管理
+    - 在执行高风险操作前需要保存上下文状态
+    - 会话压缩后需要恢复工作上下文
+    - 需要跨会话保持项目连续性
+    - 需要控制上下文大小以优化 token 成本
+requires:
+  tools:
+    - memory
+    - submit_next_stage
+    - spawn_child_nodes
+  bins: []
+  env: []
+exposure:
+  agent: true
+  main_runtime: true
+governance:
+  maintainer: G3KU
+  origin: integrated-from-clawhub-candidates
+  upstream_skills:
+    - context-management-context-save
+    - context-recovery
+    - context-budgeting
+    - context-scope-tags
+    - context-driven-development
+  created_at: "2025-01-26"
+  updated_at: "2025-01-26"

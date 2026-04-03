@@ -1,0 +1,24 @@
+name: context-management-strategy
+display_name: "Context Management Strategy"
+version: 1.0.0
+type: skill
+description: "统一的上下文管理策略，指导 G3KU Agent 在复杂任务中管理上下文窗口：保存、恢复、预算控制、范围标注、上下文驱动开发等。"
+author: G3KU Team
+tags:
+  - context
+  - memory
+  - strategy
+  - budgeting
+  - checkpoint
+  - recovery
+workflow: "见 references/ 下各专题文件"
+governance:
+  maintainer: G3KU Team
+  review_required_for:
+    - 结构变更（新增/删除references文件）
+    - 策略级别变更（预算阈值调整、裁剪规则变更）
+    - 协作策略变更（memory系统接口变动）
+  minor_tuning_allowed:
+    - 措辞优化（不改变规则实质）
+    - 示例补充
+    - 格式调整
