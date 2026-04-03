@@ -465,6 +465,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             query_text=query_text,
             exposure=exposure,
             persisted_session=runtime_session,
+            checkpoint_messages=list(state.get("messages") or []),
             user_content=self._model_content(user_content),
             user_metadata=metadata,
         )

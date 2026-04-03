@@ -213,3 +213,79 @@ async def test_ceo_frontdoor_prepare_turn_keeps_runtime_only_objects_out_of_chec
     checkpoint_state = {"user_input": user_input}
     checkpoint_state.update(state_update)
     json.dumps(checkpoint_state)
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_passes_checkpoint_messages_to_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_langgraph_impl, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+    captured: dict[str, object] = {}
+
+    runtime_session = loop.sessions.get_or_create("web:shared")
+    runtime_session.add_message("user", "bootstrap transcript question")
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+
+    async def _build_for_ceo(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            tool_names=["message"],
+            model_messages=[{"role": "system", "content": "SYSTEM PROMPT"}],
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    user_input = SimpleNamespace(content="new question", metadata={"_transcript_turn_id": "turn-2"})
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {"role": "user", "content": "checkpoint question"},
+        {"role": "assistant", "content": "checkpoint answer"},
+    ]
+
+    await runner._graph_prepare_turn(
+        {"user_input": user_input, "messages": checkpoint_messages},
+        runtime=runtime,
+    )
+
+    assert captured["persisted_session"] is runtime_session
+    assert captured["checkpoint_messages"] == checkpoint_messages
