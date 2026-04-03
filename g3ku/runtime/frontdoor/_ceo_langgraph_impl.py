@@ -44,7 +44,6 @@ class CeoGraphState(TypedDict, total=False):
     empty_response_retry_count: int
     heartbeat_internal: bool
     cron_internal: bool
-    runtime_context: dict[str, Any]
     final_output: str
     error_message: str
     model_refs: list[str]
@@ -53,9 +52,6 @@ class CeoGraphState(TypedDict, total=False):
     max_parallel_tool_calls: int | None
     max_iterations: int | None
     iteration: int
-    visible_tools: dict[str, Any]
-    langchain_tools: list[Any]
-    langchain_tool_map: dict[str, Any]
     response_message: Any
     response_content: Any
     synthetic_tool_calls_used: bool
@@ -74,6 +70,46 @@ class VisibleToolBundle:
     native_tools: dict[str, Tool]
     langchain_tools: list[BaseTool]
     langchain_tool_map: dict[str, BaseTool]
+
+def _checkpoint_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _checkpoint_safe_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple | set):
+        return [_checkpoint_safe_value(item) for item in value]
+    return str(value)
+
+
+def _persistent_user_input_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        content = value.get("content", "")
+        metadata = value.get("metadata", {})
+    else:
+        content = getattr(value, "content", "")
+        metadata = getattr(value, "metadata", {})
+    return {
+        "content": _checkpoint_safe_value(content),
+        "metadata": (
+            _checkpoint_safe_value(metadata)
+            if isinstance(metadata, dict)
+            else {}
+        ),
+    }
+
+
+def _user_input_content(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value.get("content", "")
+    return getattr(value, "content", "")
+
+
+def _user_input_metadata(value: Any) -> dict[str, Any]:
+    metadata = value.get("metadata", {}) if isinstance(value, dict) else getattr(value, "metadata", {})
+    return dict(metadata) if isinstance(metadata, dict) else {}
 
 
 def _json_schema_annotation(schema: dict[str, Any] | None) -> Any:
@@ -197,6 +233,92 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             self._compiled_graph = _build_langgraph_ceo_graph(self)
         return self._compiled_graph
 
+    def _build_tool_runtime_context(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: Runtime[CeoRuntimeContext],
+    ) -> dict[str, Any]:
+        session = runtime.context.session
+        runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
+        project_environment = current_project_environment(workspace_root=getattr(self._loop, "workspace", None))
+        metadata = _user_input_metadata(state.get("user_input"))
+        heartbeat_internal = bool(state.get("heartbeat_internal", metadata.get("heartbeat_internal")))
+        cron_internal = bool(state.get("cron_internal", metadata.get("cron_internal")))
+        return {
+            "on_progress": runtime.context.on_progress,
+            "emit_lifecycle": True,
+            "actor_role": "ceo",
+            "session_key": session.state.session_key,
+            "channel": getattr(session, "_channel", "cli"),
+            "chat_id": getattr(session, "_chat_id", session.state.session_key),
+            "memory_channel": getattr(session, "_memory_channel", getattr(session, "_channel", "cli")),
+            "memory_chat_id": getattr(
+                session,
+                "_memory_chat_id",
+                getattr(session, "_chat_id", session.state.session_key),
+            ),
+            "cancel_token": getattr(session, "_active_cancel_token", None),
+            "tool_snapshot_supplier": getattr(session, "inflight_turn_snapshot", None),
+            "temp_dir": str(getattr(self._loop, "temp_dir", "") or ""),
+            "loop": self._loop,
+            "task_defaults": self._session_task_defaults(runtime_session),
+            "project_python": str(project_environment.get("project_python") or ""),
+            "project_python_dir": str(project_environment.get("project_python_dir") or ""),
+            "project_scripts_dir": str(project_environment.get("project_scripts_dir") or ""),
+            "project_path_entries": list(project_environment.get("project_path_entries") or []),
+            "project_virtual_env": str(project_environment.get("project_virtual_env") or ""),
+            "project_python_hint": str(project_environment.get("project_python_hint") or ""),
+            "heartbeat_internal": heartbeat_internal,
+            "cron_internal": cron_internal,
+            "cron_job_id": str(metadata.get("cron_job_id") or "").strip(),
+            "cron_stop_condition": str(metadata.get("cron_stop_condition") or "").strip(),
+        }
+
+    def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
+        return self._registered_tools(list(state.get("tool_names") or []))
+
+    def _build_langchain_tools_for_state(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: Runtime[CeoRuntimeContext],
+    ) -> list[BaseTool]:
+        registered_tools = self._registered_tools_for_state(state)
+        runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
+        on_progress = runtime_context.get("on_progress")
+
+        async def _tool_executor(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            tool = registered_tools.get(tool_name)
+            if tool is None:
+                return {
+                    "result_text": f"Error: tool not available: {tool_name}",
+                    "status": "error",
+                    "started_at": "",
+                    "finished_at": "",
+                    "elapsed_seconds": None,
+                }
+            result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call(
+                tool=tool,
+                tool_name=tool_name,
+                arguments=arguments,
+                runtime_context=runtime_context,
+                on_progress=on_progress,
+            )
+            return {
+                "result_text": result_text,
+                "status": status,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "elapsed_seconds": elapsed_seconds,
+            }
+
+        tool_bundle = _build_visible_tool_bundle(
+            tools=registered_tools,
+            executor=_tool_executor,
+        )
+        return list(tool_bundle.langchain_tools)
+
     @staticmethod
     def _model_response_view(message: AIMessage) -> Any:
         response_metadata = dict(getattr(message, "response_metadata", {}) or {})
@@ -301,11 +423,12 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         *,
         runtime: Runtime[CeoRuntimeContext],
     ) -> dict[str, Any]:
-        user_input = state["user_input"]
+        user_input = _persistent_user_input_payload(state.get("user_input"))
+        user_content = _user_input_content(user_input)
         session = runtime.context.session
         on_progress = runtime.context.on_progress
-        query_text = self._content_text(getattr(user_input, "content", ""))
-        metadata = dict(getattr(user_input, "metadata", None) or {})
+        query_text = self._content_text(user_content)
+        metadata = _user_input_metadata(user_input)
         heartbeat_internal = bool(metadata.get("heartbeat_internal"))
         cron_internal = bool(metadata.get("cron_internal"))
         runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
@@ -342,7 +465,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             query_text=query_text,
             exposure=exposure,
             persisted_session=runtime_session,
-            user_content=self._model_content(getattr(user_input, "content", "")),
+            user_content=self._model_content(user_content),
             user_metadata=metadata,
         )
         tool_names = list(assembly.tool_names or list(exposure.get("tool_names") or []))
@@ -354,10 +477,8 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             insert_at = 1 if messages and str(messages[0].get("role") or "").strip().lower() == "system" else 0
             messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
         if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
-            messages.append({"role": "user", "content": self._model_content(getattr(user_input, "content", ""))})
+            messages.append({"role": "user", "content": self._model_content(user_content)})
 
-        project_environment = current_project_environment(workspace_root=getattr(self._loop, "workspace", None))
-        session_task_defaults = self._session_task_defaults(runtime_session)
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
         prompt_cache_key = build_session_prompt_cache_key(
@@ -365,64 +486,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             provider_model=provider_model,
             scope="ceo_frontdoor",
         )
-        runtime_context = {
-            "on_progress": on_progress,
-            "emit_lifecycle": True,
-            "actor_role": "ceo",
-            "session_key": session.state.session_key,
-            "channel": getattr(session, "_channel", "cli"),
-            "chat_id": getattr(session, "_chat_id", session.state.session_key),
-            "memory_channel": memory_channel,
-            "memory_chat_id": memory_chat_id,
-            "cancel_token": getattr(session, "_active_cancel_token", None),
-            "tool_snapshot_supplier": getattr(session, "inflight_turn_snapshot", None),
-            "temp_dir": str(getattr(self._loop, "temp_dir", "") or ""),
-            "loop": self._loop,
-            "task_defaults": session_task_defaults,
-            "project_python": str(project_environment.get("project_python") or ""),
-            "project_python_dir": str(project_environment.get("project_python_dir") or ""),
-            "project_scripts_dir": str(project_environment.get("project_scripts_dir") or ""),
-            "project_path_entries": list(project_environment.get("project_path_entries") or []),
-            "project_virtual_env": str(project_environment.get("project_virtual_env") or ""),
-            "project_python_hint": str(project_environment.get("project_python_hint") or ""),
-            "heartbeat_internal": heartbeat_internal,
-            "cron_internal": cron_internal,
-            "cron_job_id": str(metadata.get("cron_job_id") or "").strip(),
-            "cron_stop_condition": str(metadata.get("cron_stop_condition") or "").strip(),
-        }
-        registered_tools = self._registered_tools(tool_names)
-
-        async def _tool_executor(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            tool = registered_tools.get(tool_name)
-            if tool is None:
-                return {
-                    "result_text": f"Error: tool not available: {tool_name}",
-                    "status": "error",
-                    "started_at": "",
-                    "finished_at": "",
-                    "elapsed_seconds": None,
-                }
-            result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call(
-                tool=tool,
-                tool_name=tool_name,
-                arguments=arguments,
-                runtime_context=runtime_context,
-                on_progress=on_progress,
-            )
-            return {
-                "result_text": result_text,
-                "status": status,
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "elapsed_seconds": elapsed_seconds,
-            }
-
-        tool_bundle = _build_visible_tool_bundle(
-            tools=registered_tools,
-            executor=_tool_executor,
-        )
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
+            "user_input": user_input,
             "query_text": query_text,
             "messages": messages,
             "tool_names": list(tool_names),
@@ -436,27 +502,29 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             "empty_response_retry_count": 0,
             "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
-            "runtime_context": runtime_context,
             "model_refs": model_refs,
             "prompt_cache_key": prompt_cache_key,
             "parallel_enabled": parallel_enabled,
             "max_parallel_tool_calls": max_parallel_tool_calls,
             "max_iterations": getattr(self._loop, "max_iterations", 12),
             "iteration": 0,
-            "visible_tools": registered_tools,
-            "langchain_tools": list(tool_bundle.langchain_tools),
-            "langchain_tool_map": dict(tool_bundle.langchain_tool_map),
             "final_output": "",
             "error_message": "",
             "next_step": "call_model",
         }
 
-    async def _graph_call_model(self, state: CeoGraphState) -> dict[str, Any]:
+    async def _graph_call_model(
+        self,
+        state: CeoGraphState,
+        *,
+        runtime: Runtime[CeoRuntimeContext],
+    ) -> dict[str, Any]:
         iteration = int(state.get("iteration", 0) or 0) + 1
         configured_limit = state.get("max_iterations")
         if configured_limit is not None and iteration > max(0, int(configured_limit)):
             raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
+        langchain_tools = self._build_langchain_tools_for_state(state=state, runtime=runtime)
         request_messages = self._apply_turn_overlay(
             list(state.get("messages") or []),
             overlay_text=state.get("repair_overlay_text"),
@@ -467,11 +535,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             try:
                 message = await self._call_model_with_tools(
                     messages=request_messages,
-                    langchain_tools=list(state.get("langchain_tools") or []),
+                    langchain_tools=langchain_tools,
                     model_refs=list(state.get("model_refs") or []),
-                    parallel_tool_calls=(
-                        bool(state.get("parallel_enabled")) if state.get("langchain_tools") else None
-                    ),
+                    parallel_tool_calls=(bool(state.get("parallel_enabled")) if langchain_tools else None),
                     prompt_cache_key=str(state.get("prompt_cache_key") or ""),
                 )
             except Exception as exc:
@@ -494,10 +560,15 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             "empty_response_retry_count": empty_response_retry_count,
         }
 
-    async def _graph_normalize_model_output(self, state: CeoGraphState) -> dict[str, Any]:
+    async def _graph_normalize_model_output(
+        self,
+        state: CeoGraphState,
+        *,
+        runtime: Runtime[CeoRuntimeContext],
+    ) -> dict[str, Any]:
         response_message = state["response_message"]
         response_view = self._model_response_view(response_message)
-        visible_tools = dict(state.get("visible_tools") or {})
+        visible_tools = self._registered_tools_for_state(state)
         visible_tool_names = {
             str(name or "").strip()
             for name in visible_tools.keys()
@@ -631,22 +702,27 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             "next_step": "finalize",
         }
 
-    async def _graph_execute_tools(self, state: CeoGraphState) -> dict[str, Any]:
+    async def _graph_execute_tools(
+        self,
+        state: CeoGraphState,
+        *,
+        runtime: Runtime[CeoRuntimeContext],
+    ) -> dict[str, Any]:
         tool_call_payloads = list(state.get("tool_call_payloads") or [])
         if not tool_call_payloads:
             return {"next_step": "call_model"}
 
+        runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
+        on_progress = runtime_context.get("on_progress")
         analysis_text = str(state.get("analysis_text") or "").strip()
         if analysis_text:
             await self._emit_progress(
-                state.get("runtime_context", {}).get("on_progress"),
+                on_progress,
                 analysis_text,
                 event_kind="analysis",
             )
 
-        visible_tools = dict(state.get("visible_tools") or {})
-        runtime_context = dict(state.get("runtime_context") or {})
-        on_progress = runtime_context.get("on_progress")
+        visible_tools = self._registered_tools_for_state(state)
         semaphore = asyncio.Semaphore(
             self._parallel_slot_count(
                 state.get("max_parallel_tool_calls"),
@@ -787,7 +863,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         await self._loop._ensure_checkpointer_ready()
         setattr(session, "_last_route_kind", "direct_reply")
         result = await self._get_compiled_graph().ainvoke(
-            initial_persistent_state(user_input=user_input),
+            initial_persistent_state(user_input=_persistent_user_input_payload(user_input)),
             config={"configurable": {"thread_id": session.state.session_key}},
             context=CeoRuntimeContext(
                 loop=self._loop,
