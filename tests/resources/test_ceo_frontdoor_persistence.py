@@ -19,8 +19,13 @@ if "litellm" not in sys.modules:
     litellm_stub.drop_params = True
     sys.modules["litellm"] = litellm_stub
 
+from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor import _ceo_langgraph_impl as ceo_langgraph_impl
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
+from g3ku.runtime.frontdoor.history_compaction import (
+    FRONTDOOR_HISTORY_SUMMARY_MARKER,
+    compact_frontdoor_history,
+)
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
 from g3ku.session.manager import SessionManager
 
@@ -316,4 +321,124 @@ async def test_ceo_frontdoor_finalize_turn_persists_direct_reply_into_checkpoint
         {"role": "system", "content": "SYSTEM PROMPT"},
         {"role": "user", "content": "plain question"},
         {"role": "assistant", "content": "plain answer"},
+    ]
+
+
+def test_memory_assembly_config_exposes_frontdoor_compaction_defaults() -> None:
+    config = MemoryAssemblyConfig()
+
+    assert config.frontdoor_recent_message_count == 8
+    assert config.frontdoor_summary_trigger_message_count == 24
+
+
+def test_frontdoor_history_compaction_inserts_summary_marker_and_keeps_recent_tail() -> None:
+    messages = [
+        {"role": "system", "content": "SYSTEM PROMPT"},
+        {"role": "assistant", "content": "## Retrieved Context\n- prior memory"},
+        {"role": "user", "content": "question one"},
+        {"role": "assistant", "content": "answer one"},
+        {"role": "user", "content": "question two"},
+        {"role": "assistant", "content": "answer two"},
+        {"role": "user", "content": "question three"},
+    ]
+
+    compacted = compact_frontdoor_history(
+        messages,
+        recent_message_count=3,
+        summary_trigger_message_count=4,
+    )
+
+    assert compacted[:2] == messages[:2]
+    assert compacted[-3:] == messages[-3:]
+    assert len(compacted) == 6
+
+    summary_message = compacted[2]
+    assert summary_message["role"] == "assistant"
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(summary_message["content"])
+    assert "question one" in str(summary_message["content"])
+    assert "answer one" in str(summary_message["content"])
+    assert "question two" not in str(summary_message["content"])
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_compacts_history_into_summary_block(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_langgraph_impl, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_recent_message_count=3,
+                frontdoor_summary_trigger_message_count=4,
+            )
+        ),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["message"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM PROMPT"},
+                {"role": "user", "content": "question one"},
+                {"role": "assistant", "content": "answer one"},
+                {"role": "user", "content": "question two"},
+                {"role": "assistant", "content": "answer two"},
+            ],
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    state_update = await runner._graph_prepare_turn(
+        {"user_input": SimpleNamespace(content="question three", metadata={})},
+        runtime=runtime,
+    )
+
+    messages = list(state_update["messages"] or [])
+    assert messages[0] == {"role": "system", "content": "SYSTEM PROMPT"}
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(messages[1]["content"])
+    assert messages[-3:] == [
+        {"role": "user", "content": "question two"},
+        {"role": "assistant", "content": "answer two"},
+        {"role": "user", "content": "question three"},
     ]
