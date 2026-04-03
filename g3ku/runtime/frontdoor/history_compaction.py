@@ -69,8 +69,6 @@ def _tail_start_index(messages: list[dict[str, Any]], *, recent_message_count: i
 
 def _render_summary_line(message: dict[str, Any]) -> str:
     role = _message_role(message) or "message"
-    if is_frontdoor_history_summary_message(message):
-        return "- summary: prior frontdoor history was already compacted."
     content = " ".join(_message_text(message.get("content")).split())
     if not content and role == "assistant" and message.get("tool_calls"):
         tool_names = [
@@ -86,13 +84,35 @@ def _render_summary_line(message: dict[str, Any]) -> str:
     return f"- {role}: {content}"
 
 
+def _summary_effective_message_count(message: dict[str, Any]) -> int:
+    if not is_frontdoor_history_summary_message(message):
+        return 1
+    metadata = message.get("metadata")
+    if isinstance(metadata, dict):
+        value = metadata.get("compacted_message_count")
+        if isinstance(value, int | float):
+            return max(1, int(value))
+        text = str(value or "").strip()
+        if text.isdigit():
+            return max(1, int(text))
+    return 1
+
+
 def _build_summary_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    rendered = [_render_summary_line(message) for message in messages]
+    rendered: list[str] = []
+    total_compacted_count = 0
+    for message in messages:
+        total_compacted_count += _summary_effective_message_count(message)
+        if is_frontdoor_history_summary_message(message):
+            rendered.append("### Preserved Prior Summary")
+            rendered.extend(_message_text(message.get("content")).splitlines())
+            continue
+        rendered.append(_render_summary_line(message))
     content = "\n".join(
         [
             _SUMMARY_HEADER,
             "",
-            f"Compacted {len(messages)} earlier frontdoor messages. Keep using this block as durable prior context.",
+            f"Compacted {total_compacted_count} earlier frontdoor messages. Keep using this block as durable prior context.",
             *rendered,
         ]
     ).strip()
@@ -101,7 +121,7 @@ def _build_summary_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
         "content": content,
         "metadata": {
             _SUMMARY_METADATA_KEY: True,
-            "compacted_message_count": len(messages),
+            "compacted_message_count": total_compacted_count,
         },
     }
 
