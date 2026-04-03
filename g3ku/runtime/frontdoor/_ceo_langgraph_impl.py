@@ -178,7 +178,11 @@ def _build_langgraph_ceo_graph(runner):
         },
     )
     graph.add_edge("finalize_turn", END)
-    return graph.compile(name="ceo-frontdoor")
+    return graph.compile(
+        name="ceo-frontdoor",
+        checkpointer=getattr(runner._loop, "_checkpointer", None),
+        store=getattr(runner._loop, "_store", None),
+    )
 
 
 class CeoFrontDoorRunner(CeoFrontDoorSupport):
