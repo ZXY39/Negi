@@ -102,12 +102,46 @@ async def post_task_terminal_callback(
         payload=normalized,
     )
     if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
-        return {'ok': True, 'duplicate': True, 'dedupe_key': dedupe_key}
+        return {
+            'ok': True,
+            'duplicate': True,
+            'accepted': False,
+            'dedupe_key': dedupe_key,
+            'rejected_reason': 'already_delivered',
+        }
 
     accepted = heartbeat.enqueue_task_terminal_payload(normalized)
+    rejected_reason = ''
     if not accepted:
-        return {'ok': True, 'duplicate': True, 'dedupe_key': dedupe_key}
-    return {'ok': True, 'duplicate': False, 'dedupe_key': dedupe_key}
+        reason_getter = getattr(heartbeat, 'task_terminal_rejection_reason', None)
+        if callable(reason_getter):
+            try:
+                rejected_reason = str(reason_getter(dedupe_key) or '').strip()
+            except Exception:
+                rejected_reason = ''
+    mark_enqueue_result = getattr(service.store, 'mark_task_terminal_outbox_enqueue_result', None)
+    if callable(mark_enqueue_result) and dedupe_key:
+        mark_enqueue_result(
+            dedupe_key,
+            accepted=accepted,
+            rejected_reason=rejected_reason,
+            updated_at=now_iso(),
+        )
+    if not accepted:
+        return {
+            'ok': True,
+            'duplicate': True,
+            'accepted': False,
+            'dedupe_key': dedupe_key,
+            'rejected_reason': rejected_reason,
+        }
+    return {
+        'ok': True,
+        'duplicate': False,
+        'accepted': True,
+        'dedupe_key': dedupe_key,
+        'rejected_reason': '',
+    }
 
 
 @router.post('/internal/task-stall')

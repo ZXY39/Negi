@@ -231,6 +231,16 @@ class _HeartbeatController:
         self.clear_calls.append(str(session_id or ""))
 
 
+class _HeartbeatReplayRecorder:
+    def __init__(self) -> None:
+        self.replay_calls: list[str] = []
+
+    def replay_pending_outbox(self, *, session_id: str | None = None, limit: int = 500) -> dict[str, int]:
+        _ = limit
+        self.replay_calls.append(str(session_id or ""))
+        return {"task_terminal": 0, "task_stall": 0}
+
+
 class _FakeToolExecutionManager:
     def __init__(self, results: list[dict[str, object]]) -> None:
         self._results = [dict(item) for item in results]
@@ -933,6 +943,64 @@ async def test_runtime_agent_session_follow_up_after_manual_pause_uses_new_trans
     assert first_turn_id
     assert second_turn_id
     assert first_turn_id != second_turn_id
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_new_user_turn_clears_persisted_manual_pause_and_replays_pending_outbox(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _AnswerRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session, on_progress
+            return "Manual pause state was cleared before this turn."
+
+    session_id = "web:pause-cleared-by-user-turn"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    persisted.metadata = web_ceo_sessions.normalize_ceo_metadata(
+        {"manual_pause_waiting_reason": True},
+        session_key=session_id,
+    )
+    session_manager.save(persisted)
+
+    heartbeat = _HeartbeatReplayRecorder()
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=session_manager,
+        multi_agent_runner=_AnswerRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        web_session_heartbeat=heartbeat,
+        main_task_service=SimpleNamespace(store=SimpleNamespace()),
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=lambda _session_key: 0,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key=session_id, channel="web", chat_id="pause-cleared")
+
+    result = await session.prompt("User resumed the conversation")
+
+    assert result.output == "Manual pause state was cleared before this turn."
+    assert heartbeat.replay_calls == [session_id]
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    normalized_metadata = web_ceo_sessions.normalize_ceo_metadata(reloaded.metadata, session_key=session_id)
+    assert normalized_metadata["manual_pause_waiting_reason"] is False
 
 
 def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: Path, monkeypatch) -> None:
@@ -1839,6 +1907,64 @@ def test_web_session_heartbeat_skips_enqueues_while_waiting_for_manual_pause_rea
     assert accepted_terminal is False
     assert accepted_stall is False
     assert service._events.peek(session_id) == []
+
+
+def test_web_session_heartbeat_replays_pending_terminal_outbox_and_records_enqueue_result(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-replay-outbox"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+
+    payload = {
+        "task_id": "task:replay-demo",
+        "session_id": session_id,
+        "status": "failed",
+        "finished_at": "2026-03-28T01:34:32+08:00",
+        "dedupe_key": "task-terminal:task:replay-demo:failed:2026-03-28T01:34:32+08:00",
+    }
+    enqueue_results: list[tuple[str, bool | None, str]] = []
+
+    class _Store:
+        @staticmethod
+        def list_pending_task_terminal_outbox(*, limit: int = 500):
+            _ = limit
+            return [{"dedupe_key": payload["dedupe_key"], "session_id": session_id, "payload": dict(payload)}]
+
+        @staticmethod
+        def list_pending_task_stall_outbox(*, limit: int = 500):
+            _ = limit
+            return []
+
+        @staticmethod
+        def mark_task_terminal_outbox_enqueue_result(
+            dedupe_key: str,
+            *,
+            accepted: bool | None,
+            rejected_reason: str,
+            updated_at: str,
+        ) -> None:
+            _ = updated_at
+            enqueue_results.append((str(dedupe_key or ""), accepted, str(rejected_reason or "")))
+
+    task_service = SimpleNamespace(
+        store=_Store(),
+        registry=_Registry(),
+        get_task=lambda _task_id: None,
+        get_node_detail_payload=lambda _task_id, _node_id: None,
+    )
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=SimpleNamespace(get=lambda _key: None),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+
+    counts = service.replay_pending_outbox(session_id=session_id)
+
+    assert counts == {"task_terminal": 1, "task_stall": 0}
+    assert len(service._events.peek(session_id)) == 1
+    assert enqueue_results == [(payload["dedupe_key"], True, "")]
 
 
 @pytest.mark.asyncio

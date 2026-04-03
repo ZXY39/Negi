@@ -43,11 +43,13 @@ def _build_app() -> FastAPI:
 
 
 class _HeartbeatRecorder:
-    def __init__(self) -> None:
+    def __init__(self, *, reject_task_terminal_reason: str = "") -> None:
         self.payloads: list[dict[str, object]] = []
         self.stall_payloads: list[dict[str, object]] = []
         self.started = 0
         self._dedupe_keys: set[str] = set()
+        self._reject_task_terminal_reason = str(reject_task_terminal_reason or "").strip()
+        self._task_terminal_rejection_reasons: dict[str, str] = {}
 
     async def start(self) -> None:
         self.started += 1
@@ -55,12 +57,19 @@ class _HeartbeatRecorder:
     def enqueue_task_terminal_payload(self, payload: dict[str, object] | None) -> bool:
         normalized = dict(payload or {})
         dedupe_key = str(normalized.get("dedupe_key") or "").strip()
+        if self._reject_task_terminal_reason:
+            if dedupe_key:
+                self._task_terminal_rejection_reasons[dedupe_key] = self._reject_task_terminal_reason
+            return False
         if dedupe_key and dedupe_key in self._dedupe_keys:
             return False
         if dedupe_key:
             self._dedupe_keys.add(dedupe_key)
         self.payloads.append(normalized)
         return True
+
+    def task_terminal_rejection_reason(self, dedupe_key: str) -> str:
+        return self._task_terminal_rejection_reasons.get(str(dedupe_key or "").strip(), "")
 
     def enqueue_task_stall_payload(self, payload: dict[str, object] | None) -> bool:
         normalized = dict(payload or {})
@@ -193,6 +202,52 @@ def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp
     assert entry is not None
     assert entry["delivery_state"] == "pending"
     assert len(heartbeat.payloads) == 1
+
+
+def test_internal_task_terminal_callback_records_rejected_enqueue_reason(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    heartbeat = _HeartbeatRecorder(reject_task_terminal_reason="manual_pause_waiting_reason")
+    payload = normalize_task_terminal_payload(
+        {
+            "task_id": "task:demo-rejected",
+            "session_id": "web:demo",
+            "title": "demo",
+            "status": "failed",
+            "brief_text": "done",
+            "finished_at": now_iso(),
+        }
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.internal_rest.get_web_heartbeat_service", lambda _agent=None: heartbeat)
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+
+    client = TestClient(_build_app())
+    response = client.post(
+        "/api/internal/task-terminal",
+        json=payload,
+        headers={"x-g3ku-internal-token": "secret-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["accepted"] is False
+    assert response.json()["rejected_reason"] == "manual_pause_waiting_reason"
+
+    entry = service.store.get_task_terminal_outbox(str(payload.get("dedupe_key") or ""))
+    assert entry is not None
+    assert entry["accepted"] is False
+    assert entry["rejected_reason"] == "manual_pause_waiting_reason"
+    assert heartbeat.payloads == []
 
 
 def test_internal_task_stall_callback_persists_pending_outbox_and_dedupes(tmp_path: Path, monkeypatch):

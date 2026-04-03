@@ -68,6 +68,7 @@ class WebSessionHeartbeatService:
         self._started = False
         self._start_lock = asyncio.Lock()
         self._prompt_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_terminal_rejection_reasons: dict[str, str] = {}
 
     async def start(self) -> None:
         if self._started:
@@ -112,20 +113,25 @@ class WebSessionHeartbeatService:
         session_id = str(normalized_payload.get("session_id") or "").strip()
         task_id = str(normalized_payload.get("task_id") or "").strip()
         status = str(normalized_payload.get("status") or "").strip().lower()
+        dedupe_key = str(normalized_payload.get("dedupe_key") or f"task-terminal:{task_id}:{status}").strip()
         if not session_id or not task_id or status not in {"success", "failed"}:
+            self._set_task_terminal_rejection_reason(dedupe_key, "invalid_payload")
             return False
         if self._session_manual_pause_waiting_reason(session_id):
+            self._set_task_terminal_rejection_reason(dedupe_key, "manual_pause_waiting_reason")
             return False
         event = self._events.enqueue(
             session_id=session_id,
             source="main_runtime",
             reason="task_terminal",
-            dedupe_key=str(normalized_payload.get("dedupe_key") or f"task-terminal:{task_id}:{status}").strip(),
+            dedupe_key=dedupe_key,
             payload=dict(normalized_payload),
             delay_seconds=0.0,
         )
         if event is None:
+            self._set_task_terminal_rejection_reason(dedupe_key, "duplicate_event")
             return False
+        self._set_task_terminal_rejection_reason(dedupe_key, "")
         if self._started:
             self._wake.request(session_id, delay_s=0.25)
         return True
@@ -436,6 +442,68 @@ class WebSessionHeartbeatService:
         task = self._prompt_tasks.pop(key, None)
         if task is not None:
             task.cancel()
+
+    def _set_task_terminal_rejection_reason(self, dedupe_key: str, reason: str) -> None:
+        key = str(dedupe_key or "").strip()
+        if not key:
+            return
+        normalized_reason = str(reason or "").strip()
+        if normalized_reason:
+            self._task_terminal_rejection_reasons[key] = normalized_reason
+            return
+        self._task_terminal_rejection_reasons.pop(key, None)
+
+    def task_terminal_rejection_reason(self, dedupe_key: str) -> str:
+        key = str(dedupe_key or "").strip()
+        if not key:
+            return ""
+        return str(self._task_terminal_rejection_reasons.get(key) or "").strip()
+
+    def replay_pending_outbox(self, *, session_id: str | None = None, limit: int = 500) -> dict[str, int]:
+        store = getattr(self._main_task_service, "store", None)
+        if store is None:
+            return {"task_terminal": 0, "task_stall": 0}
+
+        normalized_session_id = str(session_id or "").strip()
+        replayed_terminal = 0
+        replayed_stall = 0
+        max_items = max(1, int(limit or 500))
+
+        list_task_terminal = getattr(store, "list_pending_task_terminal_outbox", None)
+        mark_enqueue_result = getattr(store, "mark_task_terminal_outbox_enqueue_result", None)
+        if callable(list_task_terminal):
+            for entry in list_task_terminal(limit=max_items):
+                payload = dict(entry.get("payload") or {})
+                payload_session_id = str(payload.get("session_id") or entry.get("session_id") or "").strip()
+                if normalized_session_id and payload_session_id != normalized_session_id:
+                    continue
+                dedupe_key = str(payload.get("dedupe_key") or entry.get("dedupe_key") or "").strip()
+                accepted = self.enqueue_task_terminal_payload(payload)
+                rejected_reason = self.task_terminal_rejection_reason(dedupe_key)
+                if callable(mark_enqueue_result) and dedupe_key:
+                    try:
+                        mark_enqueue_result(
+                            dedupe_key,
+                            accepted=accepted,
+                            rejected_reason=rejected_reason,
+                            updated_at=now_iso(),
+                        )
+                    except Exception:
+                        logger.debug("task terminal enqueue result mark skipped for {}", dedupe_key)
+                if accepted:
+                    replayed_terminal += 1
+
+        list_task_stall = getattr(store, "list_pending_task_stall_outbox", None)
+        if callable(list_task_stall):
+            for entry in list_task_stall(limit=max_items):
+                payload = dict(entry.get("payload") or {})
+                payload_session_id = str(payload.get("session_id") or entry.get("session_id") or "").strip()
+                if normalized_session_id and payload_session_id != normalized_session_id:
+                    continue
+                if self.enqueue_task_stall_payload(payload):
+                    replayed_stall += 1
+
+        return {"task_terminal": replayed_terminal, "task_stall": replayed_stall}
 
     def _session_manual_pause_waiting_reason(
         self,

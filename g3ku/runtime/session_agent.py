@@ -387,6 +387,34 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("manual pause metadata sync skipped for {}", session_key)
 
+    def _persisted_manual_pause_waiting_reason(self) -> bool:
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return False
+        try:
+            from g3ku.runtime.web_ceo_sessions import normalize_ceo_metadata
+
+            persisted_session = self._loop.sessions.get_or_create(session_key)
+            metadata = normalize_ceo_metadata(getattr(persisted_session, "metadata", None), session_key=session_key)
+        except Exception:
+            logger.debug("manual pause persisted metadata read skipped for {}", session_key)
+            return False
+        return bool(metadata.get("manual_pause_waiting_reason"))
+
+    def _clear_manual_pause_waiting_reason_for_user_turn(self) -> None:
+        session_key = str(self._state.session_key or "").strip()
+        if not (self.manual_pause_waiting_reason() or self._persisted_manual_pause_waiting_reason()):
+            return
+        self._set_manual_pause_waiting_reason(False)
+        heartbeat = getattr(self._loop, "web_session_heartbeat", None)
+        replay = getattr(heartbeat, "replay_pending_outbox", None) if heartbeat is not None else None
+        if not callable(replay):
+            return
+        try:
+            replay(session_id=session_key)
+        except Exception:
+            logger.debug("heartbeat pending outbox replay skipped for {}", session_key)
+
     def _resolve_progress_tool_target(self, data: dict[str, Any]) -> tuple[str, str]:
         tool_name = str(data.get("tool_name") or "").strip()
         tool_call_id = str(data.get("tool_call_id") or "").strip()
@@ -868,8 +896,8 @@ class RuntimeAgentSession:
             internal_source = self._internal_prompt_source(user_input)
             heartbeat_internal = internal_source == "heartbeat"
             cron_internal = internal_source == "cron"
-            if internal_source is None and self.manual_pause_waiting_reason():
-                self._set_manual_pause_waiting_reason(False)
+            if internal_source is None:
+                self._clear_manual_pause_waiting_reason_for_user_turn()
             if internal_source is not None:
                 current_snapshot = self._current_inflight_turn_snapshot()
                 current_source = str((current_snapshot or {}).get("source") or "").strip().lower()

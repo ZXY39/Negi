@@ -303,6 +303,8 @@ class SQLiteTaskStore:
                 attempts INTEGER NOT NULL,
                 last_attempt_at TEXT NOT NULL,
                 last_error TEXT NOT NULL,
+                accepted INTEGER,
+                rejected_reason TEXT NOT NULL DEFAULT '',
                 payload_json TEXT NOT NULL
             )
             ''',
@@ -378,6 +380,8 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_events', 'payload_archive_encoding', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_events', 'payload_hash', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_commands', 'result_json', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'task_terminal_outbox', 'accepted', "INTEGER")
+            self._ensure_column(self._conn, 'task_terminal_outbox', 'rejected_reason', "TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -1087,19 +1091,19 @@ class SQLiteTaskStore:
             raise ValueError('dedupe_key_required')
         def operation(conn: sqlite3.Connection) -> dict[str, object]:
             row = conn.execute(
-                'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+                'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
                 'FROM task_terminal_outbox WHERE dedupe_key = ?',
                 (key,),
             ).fetchone()
             if row is None:
                 payload_json = json.dumps(payload, ensure_ascii=False)
                 conn.execute(
-                    'INSERT INTO task_terminal_outbox (dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (key, task_id, session_id, 'pending', created_at, created_at, '', 0, '', '', payload_json),
+                    'INSERT INTO task_terminal_outbox (dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (key, task_id, session_id, 'pending', created_at, created_at, '', 0, '', '', None, '', payload_json),
                 )
                 row = conn.execute(
-                    'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+                    'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
                     'FROM task_terminal_outbox WHERE dedupe_key = ?',
                     (key,),
                 ).fetchone()
@@ -1108,7 +1112,7 @@ class SQLiteTaskStore:
 
     def get_task_terminal_outbox(self, dedupe_key: str) -> dict[str, object] | None:
         row = self._fetchone(
-            'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+            'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
             'FROM task_terminal_outbox WHERE dedupe_key = ?',
             (str(dedupe_key or '').strip(),),
         )
@@ -1116,11 +1120,47 @@ class SQLiteTaskStore:
 
     def list_pending_task_terminal_outbox(self, *, limit: int = 200) -> list[dict[str, object]]:
         rows = self._fetchall(
-            'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+            'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
             'FROM task_terminal_outbox WHERE delivery_state != ? ORDER BY created_at ASC LIMIT ?',
             ('delivered', max(1, int(limit or 200))),
         )
         return [self._task_terminal_outbox_row(row) for row in rows]
+
+    def mark_task_terminal_outbox_enqueue_result(
+        self,
+        dedupe_key: str,
+        *,
+        accepted: bool | None,
+        rejected_reason: str,
+        updated_at: str,
+    ) -> None:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            return
+
+        def operation(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                'SELECT accepted FROM task_terminal_outbox WHERE dedupe_key = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                return
+            current_accepted_raw = row['accepted']
+            current_accepted = None if current_accepted_raw is None else bool(int(current_accepted_raw))
+            next_accepted = None if accepted is None else bool(accepted)
+            if current_accepted is True and next_accepted is False:
+                return
+            conn.execute(
+                'UPDATE task_terminal_outbox SET updated_at = ?, accepted = ?, rejected_reason = ? WHERE dedupe_key = ?',
+                (
+                    str(updated_at or ''),
+                    None if next_accepted is None else (1 if next_accepted else 0),
+                    '' if next_accepted is True else str(rejected_reason or ''),
+                    key,
+                ),
+            )
+
+        self._run_write(operation)
 
     def mark_task_terminal_outbox_attempt(self, dedupe_key: str, *, attempted_at: str, error_text: str) -> None:
         key = str(dedupe_key or '').strip()
@@ -1145,8 +1185,8 @@ class SQLiteTaskStore:
         if not key:
             return
         self._execute_write(
-            'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ? WHERE dedupe_key = ?',
-            ('delivered', delivered_at, delivered_at, '', key),
+            'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ?, accepted = ?, rejected_reason = ? WHERE dedupe_key = ?',
+            ('delivered', delivered_at, delivered_at, '', 1, '', key),
         )
 
     def put_task_stall_outbox(
@@ -1906,6 +1946,7 @@ class SQLiteTaskStore:
         if row is None:
             return {}
         payload = json.loads(row['payload_json'])
+        accepted_raw = row['accepted']
         return {
             'dedupe_key': row['dedupe_key'],
             'task_id': row['task_id'],
@@ -1917,6 +1958,8 @@ class SQLiteTaskStore:
             'attempts': int(row['attempts'] or 0),
             'last_attempt_at': row['last_attempt_at'],
             'last_error': row['last_error'],
+            'accepted': None if accepted_raw is None else bool(int(accepted_raw)),
+            'rejected_reason': row['rejected_reason'],
             'payload': payload if isinstance(payload, dict) else {},
         }
 

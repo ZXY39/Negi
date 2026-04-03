@@ -318,7 +318,11 @@ class ReActToolLoop:
                         response_tool_calls = [repaired_stage_call]
                         synthetic_tool_calls_used = True
             tool_calls = [
-                {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
+                {
+                    'id': call.id,
+                    'name': call.name,
+                    'arguments': self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+                }
                 for call in response_tool_calls
             ]
             updated_node = self._log_service.append_node_output(
@@ -724,7 +728,7 @@ class ReActToolLoop:
                 'type': 'function',
                 'function': {
                     'name': str(item.get('name') or ''),
-                    'arguments': json.dumps(dict(item.get('arguments') or {}), ensure_ascii=False),
+                    'arguments': json.dumps(self._normalize_tool_call_arguments(item.get('arguments')), ensure_ascii=False),
                 },
             }
             for item in pending_tool_calls
@@ -759,7 +763,7 @@ class ReActToolLoop:
                 SimpleNamespace(
                     id=call_id,
                     name=tool_name,
-                    arguments=dict(item.get('arguments') or {}),
+                    arguments=self._normalize_tool_call_arguments(item.get('arguments')),
                 )
             )
 
@@ -811,7 +815,7 @@ class ReActToolLoop:
                 SimpleNamespace(
                     id=str(item.get('id') or ''),
                     name=str(item.get('name') or ''),
-                    arguments=dict(item.get('arguments') or {}),
+                    arguments=self._normalize_tool_call_arguments(item.get('arguments')),
                 )
                 for item in pending_tool_calls
             ]
@@ -1087,7 +1091,7 @@ class ReActToolLoop:
                     raw_result = await self._execute_tool_raw(
                         tools=tools,
                         tool_name=call.name,
-                        arguments=dict(call.arguments or {}),
+                        arguments=self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
                         runtime_context={
                             **runtime_context,
                             'current_tool_call_id': call.id,
@@ -1275,7 +1279,7 @@ class ReActToolLoop:
         errors = tool.validate_params(arguments)
         if errors:
             return 'Error: ' + '; '.join(errors)
-        execute_kwargs = dict(arguments)
+        execute_kwargs = self._normalize_tool_call_arguments(arguments)
         runtime_param_name = self._runtime_context_parameter_name(tool)
         if runtime_param_name is not None:
             execute_kwargs[runtime_param_name] = runtime_context
@@ -1379,7 +1383,7 @@ class ReActToolLoop:
         normalized_tool = str(tool_name or '').strip()
         if normalized_tool not in {'filesystem', 'content'}:
             return ''
-        payload = dict(arguments or {})
+        payload = ReActToolLoop._normalize_tool_call_arguments(arguments)
         if str(payload.get('action') or '').strip().lower() != 'search':
             return ''
         query = str(payload.get('query') or '').strip()
@@ -1387,6 +1391,38 @@ class ReActToolLoop:
         if not query or not scope:
             return ''
         return f'{normalized_tool}|{scope}|{query}'
+
+    @staticmethod
+    def _normalize_tool_call_arguments(arguments: Any) -> dict[str, Any]:
+        if isinstance(arguments, dict):
+            source = arguments
+        elif isinstance(arguments, str):
+            text = str(arguments or '').strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return {}
+            if not isinstance(parsed, dict):
+                return {}
+            source = parsed
+        elif arguments is None:
+            return {}
+        else:
+            try:
+                parsed = dict(arguments)
+            except Exception:
+                return {}
+            if not isinstance(parsed, dict):
+                return {}
+            source = parsed
+        normalized: dict[str, Any] = {}
+        for key, value in source.items():
+            key_text = str(key or '').strip()
+            if key_text:
+                normalized[key_text] = value
+        return normalized
 
     async def _on_tool_watchdog_poll(self, runtime_context: dict[str, Any]) -> None:
         task_id = str(runtime_context.get('task_id') or '').strip()
@@ -1733,7 +1769,7 @@ class ReActToolLoop:
         tool_payload = {
             'id': str(getattr(tool_call, 'id', '') or ''),
             'name': str(getattr(tool_call, 'name', '') or ''),
-            'arguments': dict(getattr(tool_call, 'arguments', {}) or {}),
+            'arguments': self._normalize_tool_call_arguments(getattr(tool_call, 'arguments', {})),
         }
         assistant_tool_calls = [
             {
@@ -1937,7 +1973,7 @@ class ReActToolLoop:
                 'type': 'function',
                 'function': {
                     'name': str(getattr(call, 'name', '') or ''),
-                    'arguments': json.dumps(dict(getattr(call, 'arguments', {}) or {}), ensure_ascii=False),
+                    'arguments': json.dumps(self._normalize_tool_call_arguments(getattr(call, 'arguments', {})), ensure_ascii=False),
                 },
             }
             for call in list(response_tool_calls or [])

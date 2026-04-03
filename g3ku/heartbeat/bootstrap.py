@@ -67,6 +67,11 @@ def build_web_session_heartbeat(
 
 
 def _replay_pending_outbox(main_task_service: Any, heartbeat: WebSessionHeartbeatService) -> None:
+    replay = getattr(heartbeat, "replay_pending_outbox", None)
+    if callable(replay):
+        replay()
+        return
+
     store = getattr(main_task_service, "store", None)
     if store is None:
         return
