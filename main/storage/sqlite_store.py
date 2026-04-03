@@ -20,6 +20,7 @@ from main.monitoring.models import (
     TaskProjectionNodeRecord,
     TaskProjectionRoundRecord,
     TaskProjectionRuntimeFrameRecord,
+    TaskProjectionToolResultRecord,
 )
 
 T = TypeVar('T', bound=BaseModel)
@@ -244,6 +245,25 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            CREATE TABLE IF NOT EXISTS task_node_tool_results (
+                task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                order_index INTEGER NOT NULL,
+                tool_name TEXT NOT NULL,
+                arguments_text TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                elapsed_seconds REAL,
+                output_preview_text TEXT NOT NULL,
+                output_ref TEXT NOT NULL,
+                ephemeral INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (task_id, node_id, tool_call_id)
+            )
+            ''',
+            '''
             CREATE TABLE IF NOT EXISTS task_node_rounds (
                 task_id TEXT NOT NULL,
                 parent_node_id TEXT NOT NULL,
@@ -341,6 +361,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_parent_node_id ON task_nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_details_task_id ON task_node_details(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_runtime_frames_task_id ON task_runtime_frames(task_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_tool_results_task_node_order ON task_node_tool_results(task_id, node_id, order_index)',
             'CREATE INDEX IF NOT EXISTS idx_task_runtime_meta_updated_at ON task_runtime_meta(updated_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_rounds_task_parent ON task_node_rounds(task_id, parent_node_id, round_index)',
             'CREATE INDEX IF NOT EXISTS idx_task_model_calls_task_id_seq ON task_model_calls(task_id, seq)',
@@ -561,6 +582,7 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_projection_meta WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_node_rounds WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_runtime_frames WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_node_tool_results WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_node_details WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_model_calls WHERE task_id = ?', (task_id,))
@@ -1659,6 +1681,51 @@ class SQLiteTaskStore:
             )
         self._run_write(operation)
         return record
+
+    def upsert_task_node_tool_result(self, record: TaskProjectionToolResultRecord) -> TaskProjectionToolResultRecord:
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                'INSERT INTO task_node_tool_results (task_id, node_id, tool_call_id, order_index, tool_name, arguments_text, status, started_at, finished_at, elapsed_seconds, output_preview_text, output_ref, ephemeral, payload_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(task_id, node_id, tool_call_id) DO UPDATE SET '
+                'order_index=excluded.order_index, '
+                'tool_name=excluded.tool_name, '
+                'arguments_text=excluded.arguments_text, '
+                'status=excluded.status, '
+                'started_at=excluded.started_at, '
+                'finished_at=excluded.finished_at, '
+                'elapsed_seconds=excluded.elapsed_seconds, '
+                'output_preview_text=excluded.output_preview_text, '
+                'output_ref=excluded.output_ref, '
+                'ephemeral=excluded.ephemeral, '
+                'payload_json=excluded.payload_json',
+                (
+                    record.task_id,
+                    record.node_id,
+                    record.tool_call_id,
+                    int(record.order_index or 0),
+                    record.tool_name,
+                    record.arguments_text,
+                    record.status,
+                    record.started_at,
+                    record.finished_at,
+                    record.elapsed_seconds,
+                    record.output_preview_text,
+                    record.output_ref,
+                    1 if record.ephemeral else 0,
+                    record.model_dump_json(),
+                ),
+            )
+
+        self._run_write(operation)
+        return record
+
+    def list_task_node_tool_results(self, task_id: str, node_id: str) -> list[TaskProjectionToolResultRecord]:
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_node_tool_results WHERE task_id = ? AND node_id = ? ORDER BY order_index ASC, tool_call_id ASC',
+            (task_id, node_id),
+        )
+        return [self._parse(row['payload_json'], TaskProjectionToolResultRecord) for row in rows]
 
     def get_task_runtime_frame(self, task_id: str, node_id: str) -> TaskProjectionRuntimeFrameRecord | None:
         row = self._fetchone(

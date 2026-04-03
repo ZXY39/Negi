@@ -220,6 +220,23 @@ class TaskProjectionRuntimeFrameRecord(Model):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class TaskProjectionToolResultRecord(Model):
+    task_id: str
+    node_id: str
+    tool_call_id: str
+    order_index: int = 0
+    tool_name: str = ''
+    arguments_text: str = ''
+    status: str = 'queued'
+    started_at: str = ''
+    finished_at: str = ''
+    elapsed_seconds: float | None = None
+    output_preview_text: str = ''
+    output_ref: str = ''
+    ephemeral: bool = False
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskModelCallRecord(Model):
     call_index: int = 0
     created_at: str = ''

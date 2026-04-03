@@ -471,6 +471,14 @@ class ReActToolLoop:
                     ),
                     'tool_calls': assistant_tool_calls,
                 }
+                record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
+                if callable(record_tool_results):
+                    record_tool_results(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        response_tool_calls=response_tool_calls,
+                        results=results,
+                    )
                 message_history.append(assistant_message)
                 tool_messages = self._dedupe_tool_messages(
                     [item['tool_message'] for item in results],
@@ -781,6 +789,22 @@ class ReActToolLoop:
             }
 
         resumed_history = list(message_history)
+        record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
+        if callable(record_tool_results):
+            replay_source_calls = [
+                SimpleNamespace(
+                    id=str(item.get('id') or ''),
+                    name=str(item.get('name') or ''),
+                    arguments=dict(item.get('arguments') or {}),
+                )
+                for item in pending_tool_calls
+            ]
+            record_tool_results(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                response_tool_calls=replay_source_calls,
+                results=[item for item in ordered_results if isinstance(item, dict)],
+            )
         resumed_history.append(
             {
                 'role': 'assistant',
@@ -1767,6 +1791,35 @@ class ReActToolLoop:
             elapsed_seconds=elapsed_seconds,
             result_content=tool_content,
         )
+        record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
+        if callable(record_tool_results):
+            record_tool_results(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                response_tool_calls=[tool_call],
+                results=[
+                    {
+                        'live_state': {
+                            'tool_call_id': tool_payload['id'],
+                            'tool_name': tool_payload['name'],
+                            'status': status,
+                            'started_at': started_at,
+                            'finished_at': finished_at,
+                            'elapsed_seconds': elapsed_seconds,
+                        },
+                        'tool_message': {
+                            'role': 'tool',
+                            'tool_call_id': tool_payload['id'],
+                            'name': tool_payload['name'],
+                            'content': tool_content,
+                            'started_at': started_at,
+                            'finished_at': finished_at,
+                            'elapsed_seconds': elapsed_seconds,
+                            'status': status,
+                        },
+                    }
+                ],
+            )
 
         assistant_message = {
             'role': 'assistant',
@@ -1844,7 +1897,7 @@ class ReActToolLoop:
         violations = self._validate_final_result(
             result=result,
             raw_payload=raw_payload,
-            has_tool_results=self._has_tool_results(next_history),
+            has_tool_results=self._node_has_meaningful_tool_results(task_id=task.task_id, node_id=node.node_id),
             node_kind=node.node_kind,
         )
         if violations:
@@ -1940,25 +1993,15 @@ class ReActToolLoop:
         )
         return prepared_history
 
-    @staticmethod
-    def _has_tool_results(messages: list[dict[str, Any]]) -> bool:
+    def _node_has_meaningful_tool_results(self, *, task_id: str, node_id: str) -> bool:
+        store = getattr(self._log_service, '_store', None)
+        lister = getattr(store, 'list_task_node_tool_results', None) if store is not None else None
+        if not callable(lister):
+            return False
         ignored_tool_names = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *ReActToolLoop._CONTROL_TOOL_NAMES}
-        for message in list(messages or []):
-            role = str(message.get('role') or '').strip().lower()
-            if role == 'tool':
-                tool_name = str(message.get('name') or '').strip()
-                if tool_name in ignored_tool_names:
-                    continue
-                return True
-            if role == 'assistant':
-                names = {
-                    str(((item or {}).get('function') or {}).get('name') or (item or {}).get('name') or '').strip()
-                    for item in list(message.get('tool_calls') or [])
-                    if str(((item or {}).get('function') or {}).get('name') or (item or {}).get('name') or '').strip()
-                }
-                if any(name not in ignored_tool_names for name in names):
-                    return True
-            if role != 'assistant' and list(message.get('tool_calls') or []):
+        for item in list(lister(task_id, node_id) or []):
+            tool_name = str(getattr(item, 'tool_name', '') or '').strip()
+            if tool_name and tool_name not in ignored_tool_names:
                 return True
         return False
 

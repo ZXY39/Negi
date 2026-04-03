@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from g3ku.content import ContentNavigationService
+from g3ku.content import ContentNavigationService, content_summary_and_ref
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
@@ -33,12 +33,12 @@ from main.runtime.stage_budget import (
     tool_call_counts_against_stage_budget,
 )
 from main.monitoring.file_store import TaskFileStore
-from main.monitoring.execution_trace import build_execution_trace
 from main.monitoring.models import (
     TaskProjectionNodeDetailRecord,
     TaskProjectionNodeRecord,
     TaskProjectionRoundRecord,
     TaskProjectionRuntimeFrameRecord,
+    TaskProjectionToolResultRecord,
 )
 from main.monitoring.task_event_writer import TaskEventWriter
 from main.monitoring.task_projector import TaskProjector
@@ -403,6 +403,82 @@ class TaskLogService:
                 self._sync_node_read_models_locked(updated)
                 self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
+
+    def record_tool_result_batch(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        response_tool_calls: list[Any],
+        results: list[dict[str, Any]],
+    ) -> list[TaskProjectionToolResultRecord]:
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            node = self._store.get_node(node_id)
+            if task is None or node is None:
+                return []
+            if str(node.task_id or '').strip() != str(task_id or '').strip():
+                return []
+
+            existing_records = list(self._store.list_task_node_tool_results(task_id, node_id) or [])
+            order_by_call_id = {
+                str(item.tool_call_id or '').strip(): int(item.order_index or 0)
+                for item in existing_records
+                if str(item.tool_call_id or '').strip()
+            }
+            next_order_index = max([int(item.order_index or 0) for item in existing_records], default=0) + 1
+            persisted: list[TaskProjectionToolResultRecord] = []
+
+            for index, call in enumerate(list(response_tool_calls or [])):
+                tool_message = dict((results[index] or {}).get('tool_message') or {}) if index < len(results) else {}
+                live_state = dict((results[index] or {}).get('live_state') or {}) if index < len(results) else {}
+                tool_call_id = str(
+                    tool_message.get('tool_call_id')
+                    or getattr(call, 'id', '')
+                    or live_state.get('tool_call_id')
+                    or ''
+                ).strip()
+                if not tool_call_id:
+                    continue
+                order_index = order_by_call_id.get(tool_call_id)
+                if not order_index:
+                    order_index = next_order_index
+                    next_order_index += 1
+                    order_by_call_id[tool_call_id] = order_index
+
+                arguments = dict(getattr(call, 'arguments', {}) or {})
+                arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else ''
+                content = tool_message.get('content')
+                preview_text, output_ref = content_summary_and_ref(content)
+                record = TaskProjectionToolResultRecord(
+                    task_id=task_id,
+                    node_id=node_id,
+                    tool_call_id=tool_call_id,
+                    order_index=order_index,
+                    tool_name=str(
+                        tool_message.get('name')
+                        or getattr(call, 'name', '')
+                        or live_state.get('tool_name')
+                        or 'tool'
+                    ),
+                    arguments_text=arguments_text,
+                    status=str(live_state.get('status') or tool_message.get('status') or 'success'),
+                    started_at=str(tool_message.get('started_at') or live_state.get('started_at') or ''),
+                    finished_at=str(tool_message.get('finished_at') or live_state.get('finished_at') or ''),
+                    elapsed_seconds=self._coerce_elapsed_seconds(
+                        live_state.get('elapsed_seconds', tool_message.get('elapsed_seconds'))
+                    ),
+                    output_preview_text=str(preview_text or ''),
+                    output_ref=str(output_ref or ''),
+                    ephemeral=bool(tool_message.get('ephemeral') or live_state.get('ephemeral')),
+                    payload={
+                        'parsed_payload': self._parse_tool_result_payload(content),
+                    },
+                )
+                self._store.upsert_task_node_tool_result(record)
+                persisted.append(record)
+
+            return persisted
 
     def append_node_output(
         self,
@@ -842,6 +918,28 @@ class TaskLogService:
             display_name=f'node-input:{node_id}',
             source_kind='node_input',
         )
+
+    @staticmethod
+    def _parse_tool_result_payload(content: Any) -> dict[str, Any]:
+        if not isinstance(content, str):
+            return {}
+        text = content.strip()
+        if not text or text[:1] not in {'{', '['}:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _coerce_elapsed_seconds(value: Any) -> float | None:
+        try:
+            if value is None or value == '':
+                return None
+            return round(max(0.0, float(value)), 1)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _model_call_payload(
@@ -1936,7 +2034,6 @@ class TaskLogService:
                 'final_output_ref': str(node.final_output_ref or ''),
                 'failure_reason': str(node.failure_reason or ''),
                 'updated_at': str(node.updated_at or ''),
-                'execution_trace': build_execution_trace(node),
                 'tool_file_changes': [item.model_dump(mode='json') for item in list(tool_file_changes or [])],
                 'token_usage': node.token_usage.model_dump(mode='json'),
                 'token_usage_by_model': [item.model_dump(mode='json') for item in list(node.token_usage_by_model or [])],

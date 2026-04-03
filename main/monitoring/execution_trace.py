@@ -5,16 +5,20 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from g3ku.content import content_summary_and_ref
 from main.models import NodeRecord, normalize_execution_stage_metadata
+from main.monitoring.models import TaskProjectionToolResultRecord
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
 
 
-def build_execution_trace(node: NodeRecord) -> dict[str, object]:
-    tool_message_map = _tool_message_map(node)
-    tool_output_map = _tool_output_map(node)
-    tool_ref_map = _tool_output_ref_map(node)
+def build_execution_trace(
+    node: NodeRecord,
+    *,
+    tool_results: list[TaskProjectionToolResultRecord] | None = None,
+    live_tool_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, object]:
+    tool_result_map = _tool_result_map(tool_results)
+    live_tool_call_map = _live_tool_call_map(live_tool_calls)
     tool_steps: list[dict[str, Any]] = []
     step_by_call_id: dict[str, dict[str, Any]] = {}
     seen_ids: set[str] = set()
@@ -27,15 +31,16 @@ def build_execution_trace(node: NodeRecord) -> dict[str, object]:
                 continue
             seen_ids.add(tool_call_id)
             tool_name = str(call.get('name') or 'tool')
-            output_text = str(tool_output_map.get(tool_call_id) or '')
-            output_ref = str(tool_ref_map.get(tool_call_id) or '')
-            message_meta = dict(tool_message_map.get(tool_call_id) or {})
-            payload = _parse_tool_payload(message_meta.get('content'))
+            record = tool_result_map.get(tool_call_id)
+            live_state = dict(live_tool_call_map.get(tool_call_id) or {})
+            payload = dict(record.payload.get('parsed_payload') or {}) if record is not None else {}
             arguments = call.get('arguments')
             if isinstance(arguments, (dict, list)):
                 arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2)
             else:
                 arguments_text = str(arguments or '')
+            output_text = str(record.output_preview_text or '') if record is not None else ''
+            output_ref = str(record.output_ref or '') if record is not None else ''
 
             if tool_name in _CONTROL_TOOL_NAMES:
                 execution_id = str((payload or {}).get('execution_id') or '').strip()
@@ -43,7 +48,8 @@ def build_execution_trace(node: NodeRecord) -> dict[str, object]:
                     _merge_background_execution_update(
                         background_steps[execution_id],
                         payload=payload or {},
-                        message_meta=message_meta,
+                        record=record,
+                        live_state=live_state,
                         output_text=output_text,
                         output_ref=output_ref,
                     )
@@ -55,14 +61,28 @@ def build_execution_trace(node: NodeRecord) -> dict[str, object]:
                 'arguments_text': arguments_text,
                 'output_text': output_text,
                 'output_ref': output_ref,
-                'status': _tool_step_status(output_text, node.status, payload=payload),
-                'started_at': str(entry.created_at or ''),
-                'finished_at': str(message_meta.get('finished_at') or ''),
+                'status': _tool_step_status(
+                    output_text,
+                    node.status,
+                    payload=payload,
+                    recorded_status=str(record.status or '') if record is not None else '',
+                    live_status=str(live_state.get('status') or ''),
+                ),
+                'started_at': str(
+                    (record.started_at if record is not None else '')
+                    or str(live_state.get('started_at') or '')
+                    or str(entry.created_at or '')
+                ),
+                'finished_at': str(
+                    (record.finished_at if record is not None else '')
+                    or str(live_state.get('finished_at') or '')
+                    or ''
+                ),
             }
             step['elapsed_seconds'] = _resolve_tool_elapsed_seconds(
-                message_meta=message_meta,
-                payload=payload,
-                started_at=str(entry.created_at or ''),
+                raw_elapsed=record.elapsed_seconds if record is not None else live_state.get('elapsed_seconds'),
+                started_at=str(step.get('started_at') or entry.created_at or ''),
+                finished_at=str(step.get('finished_at') or ''),
                 is_running=step['status'] == 'running',
             )
             execution_id = str((payload or {}).get('execution_id') or '').strip()
@@ -88,10 +108,21 @@ def build_execution_trace(node: NodeRecord) -> dict[str, object]:
                         'arguments_text': '',
                         'output_text': '',
                         'output_ref': '',
-                        'status': 'info',
+                        'status': _tool_step_status(
+                            '',
+                            node.status,
+                            payload={},
+                            recorded_status='',
+                            live_status=str((live_tool_call_map.get(str(call_id or '').strip()) or {}).get('status') or ''),
+                        ),
                         'started_at': str(round_item.created_at or ''),
-                        'finished_at': '',
-                        'elapsed_seconds': None,
+                        'finished_at': str((live_tool_call_map.get(str(call_id or '').strip()) or {}).get('finished_at') or ''),
+                        'elapsed_seconds': _resolve_tool_elapsed_seconds(
+                            raw_elapsed=(live_tool_call_map.get(str(call_id or '').strip()) or {}).get('elapsed_seconds'),
+                            started_at=str((live_tool_call_map.get(str(call_id or '').strip()) or {}).get('started_at') or round_item.created_at or ''),
+                            finished_at=str((live_tool_call_map.get(str(call_id or '').strip()) or {}).get('finished_at') or ''),
+                            is_running=str((live_tool_call_map.get(str(call_id or '').strip()) or {}).get('status') or '').strip().lower() in {'queued', 'running'},
+                        ),
                     }
                 round_tools.append(step)
             rounds.append(
@@ -129,7 +160,7 @@ def build_execution_trace(node: NodeRecord) -> dict[str, object]:
         'initial_prompt': str(node.prompt or node.goal or ''),
         'tool_steps': tool_steps,
         'stages': stages,
-        'live_tool_calls': [],
+        'live_tool_calls': [dict(item) for item in list(live_tool_calls or []) if isinstance(item, dict)],
         'live_child_pipelines': [],
         'final_output': str(node.final_output or ''),
         'final_output_ref': str(getattr(node, 'final_output_ref', '') or ''),
@@ -138,90 +169,33 @@ def build_execution_trace(node: NodeRecord) -> dict[str, object]:
     }
 
 
-def _parse_input_messages(raw: str) -> list[dict[str, object]]:
-    text = str(raw or '').strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return []
-    return parsed if isinstance(parsed, list) else []
+def _tool_result_map(tool_results: list[TaskProjectionToolResultRecord] | None) -> dict[str, TaskProjectionToolResultRecord]:
+    result: dict[str, TaskProjectionToolResultRecord] = {}
+    for item in list(tool_results or []):
+        tool_call_id = str(getattr(item, 'tool_call_id', '') or '').strip()
+        if tool_call_id:
+            result[tool_call_id] = item
+    return result
 
 
-def _tool_message_map(node: NodeRecord) -> dict[str, dict[str, Any]]:
-    messages = _parse_input_messages(node.input)
+def _live_tool_call_map(live_tool_calls: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    for item in messages:
+    for item in list(live_tool_calls or []):
         if not isinstance(item, dict):
             continue
-        if str(item.get('role') or '').strip().lower() != 'tool':
-            continue
         tool_call_id = str(item.get('tool_call_id') or '').strip()
-        if not tool_call_id:
-            continue
-        result[tool_call_id] = dict(item)
+        if tool_call_id:
+            result[tool_call_id] = dict(item)
     return result
-
-
-def _tool_output_map(node: NodeRecord) -> dict[str, str]:
-    messages = _parse_input_messages(node.input)
-    result: dict[str, str] = {}
-    for item in messages:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get('role') or '').strip().lower() != 'tool':
-            continue
-        tool_call_id = str(item.get('tool_call_id') or '').strip()
-        if not tool_call_id:
-            continue
-        content = item.get('content')
-        summary, _ref = content_summary_and_ref(content)
-        result[tool_call_id] = summary
-    return result
-
-
-def _tool_output_ref_map(node: NodeRecord) -> dict[str, str]:
-    messages = _parse_input_messages(node.input)
-    result: dict[str, str] = {}
-    for item in messages:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get('role') or '').strip().lower() != 'tool':
-            continue
-        tool_call_id = str(item.get('tool_call_id') or '').strip()
-        if not tool_call_id:
-            continue
-        _summary, ref = content_summary_and_ref(item.get('content'))
-        result[tool_call_id] = ref
-    return result
-
-
-def _parse_tool_payload(content: object) -> dict[str, object] | None:
-    if not isinstance(content, str):
-        return None
-    text = content.strip()
-    if not text or text[:1] not in {'{', '['}:
-        return None
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _resolve_tool_elapsed_seconds(
     *,
-    message_meta: dict[str, Any],
-    payload: dict[str, Any] | None,
+    raw_elapsed: Any,
     started_at: str,
+    finished_at: str,
     is_running: bool,
 ) -> float | None:
-    raw_elapsed = None
-    if isinstance(payload, dict):
-        raw_elapsed = payload.get('elapsed_seconds')
-    if raw_elapsed is None:
-        raw_elapsed = message_meta.get('elapsed_seconds')
     try:
         if raw_elapsed is not None:
             return round(max(0.0, float(raw_elapsed)), 1)
@@ -230,7 +204,7 @@ def _resolve_tool_elapsed_seconds(
     started_ts = _iso_to_epoch_seconds(started_at)
     if started_ts is None:
         return None
-    finished_ts = _iso_to_epoch_seconds(str(message_meta.get('finished_at') or ''))
+    finished_ts = _iso_to_epoch_seconds(finished_at)
     if finished_ts is not None:
         return round(max(0.0, finished_ts - started_ts), 1)
     if is_running:
@@ -256,34 +230,56 @@ def _merge_background_execution_update(
     step: dict[str, Any],
     *,
     payload: dict[str, Any],
-    message_meta: dict[str, Any],
+    record: TaskProjectionToolResultRecord | None,
+    live_state: dict[str, Any],
     output_text: str,
     output_ref: str,
 ) -> None:
-    status = str(payload.get('status') or '').strip().lower()
+    status = str(payload.get('status') or live_state.get('status') or '').strip().lower()
     if status == 'completed':
         step['status'] = 'success'
     elif status in {'stopped', 'failed', 'error', 'not_found', 'unavailable'}:
         step['status'] = 'error'
-    elif status == 'background_running':
+    elif status in {'background_running', 'queued', 'running'}:
         step['status'] = 'running'
     if output_text:
         step['output_text'] = output_text
     if output_ref:
         step['output_ref'] = output_ref
-    if str(message_meta.get('finished_at') or '').strip():
-        step['finished_at'] = str(message_meta.get('finished_at') or '')
+    if str((record.finished_at if record is not None else '') or live_state.get('finished_at') or '').strip():
+        step['finished_at'] = str((record.finished_at if record is not None else '') or live_state.get('finished_at') or '')
     elapsed = _resolve_tool_elapsed_seconds(
-        message_meta=message_meta,
-        payload=payload,
+        raw_elapsed=(record.elapsed_seconds if record is not None else live_state.get('elapsed_seconds')),
         started_at=str(step.get('started_at') or ''),
+        finished_at=str(step.get('finished_at') or ''),
         is_running=str(step.get('status') or '') == 'running',
     )
     if elapsed is not None:
         step['elapsed_seconds'] = elapsed
 
 
-def _tool_step_status(output_text: str, node_status: str, *, payload: dict[str, Any] | None = None) -> str:
+def _tool_step_status(
+    output_text: str,
+    node_status: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    recorded_status: str = '',
+    live_status: str = '',
+) -> str:
+    normalized_live_status = str(live_status or '').strip().lower()
+    if normalized_live_status in {'queued', 'running'}:
+        return 'running'
+    if normalized_live_status == 'success':
+        return 'success'
+    if normalized_live_status == 'error':
+        return 'error'
+    normalized_recorded_status = str(recorded_status or '').strip().lower()
+    if normalized_recorded_status in {'queued', 'running'}:
+        return 'running'
+    if normalized_recorded_status == 'success':
+        return 'success'
+    if normalized_recorded_status == 'error':
+        return 'error'
     payload_status = str((payload or {}).get('status') or '').strip().lower()
     if payload_status == 'background_running':
         return 'running'

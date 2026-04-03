@@ -29,6 +29,7 @@ _EXPORTS = {
     'AgentRuntimeEngine': ('g3ku.runtime.engine', 'AgentRuntimeEngine'),
     'CeoExposureResolver': ('g3ku.runtime.frontdoor', 'CeoExposureResolver'),
     'CeoFrontDoorRunner': ('g3ku.runtime.frontdoor', 'CeoFrontDoorRunner'),
+    'LangGraphCeoRunner': ('g3ku.runtime.langgraph_ceo', 'LangGraphCeoRunner'),
     'CeoPromptBuilder': ('g3ku.runtime.frontdoor', 'CeoPromptBuilder'),
     'RuntimeAgentSession': ('g3ku.runtime.session_agent', 'RuntimeAgentSession'),
     'RunTurnRequest': ('g3ku.runtime.turns', 'RunTurnRequest'),

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime, timezone
 from typing import Any
 
-from g3ku.content import content_summary_and_ref
 from main.models import ModelTokenUsageRecord, NodeRecord, TokenUsageSummary, normalize_tool_file_changes
 from main.monitoring.execution_trace import build_execution_trace
 from main.token_usage import aggregate_node_token_usage
@@ -220,10 +218,13 @@ class TaskQueryService:
         task = self._store.get_task(task_id)
         detail_record = self._store.get_task_node_detail(node_id)
         node_record = self._store.get_task_node(node_id)
+        runtime_node = self._store.get_node(node_id)
         if task is None or detail_record is None or detail_record.task_id != task.task_id:
             return None
         if node_record is not None and str(node_record.task_id or '').strip() != task.task_id:
             node_record = None
+        if runtime_node is not None and str(runtime_node.task_id or '').strip() != task.task_id:
+            runtime_node = None
         payload = dict(detail_record.payload or {})
         node_payload = dict(getattr(node_record, 'payload', None) or {}) if node_record is not None else {}
         detail = TaskNodeDetail(
@@ -244,9 +245,15 @@ class TaskQueryService:
             final_output=str(payload.get('final_output') or detail_record.final_output or ''),
             final_output_ref=str(payload.get('final_output_ref') or detail_record.final_output_ref or ''),
             failure_reason=str(payload.get('failure_reason') or detail_record.failure_reason or ''),
-            updated_at=str(payload.get('updated_at') or node_payload.get('updated_at') or detail_record.updated_at or ''),
+            updated_at=str(
+                payload.get('updated_at')
+                or (str(runtime_node.updated_at or '') if runtime_node is not None else '')
+                or node_payload.get('updated_at')
+                or detail_record.updated_at
+                or ''
+            ),
             children_fingerprint=str(payload.get('children_fingerprint') or node_payload.get('children_fingerprint') or ''),
-            execution_trace=dict(payload.get('execution_trace') or {}),
+            execution_trace=self._execution_trace(runtime_node) if runtime_node is not None else dict(payload.get('execution_trace') or {}),
             tool_file_changes=normalize_tool_file_changes(payload.get('tool_file_changes')),
             token_usage=TokenUsageSummary.model_validate(payload.get('token_usage') or {}),
             token_usage_by_model=[
@@ -827,13 +834,6 @@ class TaskQueryService:
             selected_detail = next((item for item in details if str(item.node_id or '').strip() == preferred), None)
         if selected_detail is None and details:
             selected_detail = max(details, key=lambda item: (str(item.updated_at or ''), str(item.node_id or '')))
-        if selected_detail is not None:
-            payload = dict(selected_detail.payload or {})
-            execution_trace = payload.get('execution_trace') if isinstance(payload.get('execution_trace'), dict) else None
-            if isinstance(execution_trace, dict):
-                tool_steps = [item for item in list(execution_trace.get('tool_steps') or []) if isinstance(item, dict)]
-                if tool_steps:
-                    return tool_steps
         node_id = preferred or str(getattr(selected_detail, 'node_id', '') or '').strip()
         if not node_id:
             return []
@@ -1031,7 +1031,10 @@ class TaskQueryService:
         }
 
     def _execution_trace(self, node: NodeRecord) -> dict[str, object]:
-        return build_execution_trace(node)
+        frame = self._log_service.read_runtime_frame(node.task_id, node.node_id)
+        live_tool_calls = [dict(item) for item in list((frame or {}).get('tool_calls') or []) if isinstance(item, dict)]
+        tool_results = list(self._store.list_task_node_tool_results(node.task_id, node.node_id) or [])
+        return build_execution_trace(node, tool_results=tool_results, live_tool_calls=live_tool_calls)
 
     @staticmethod
     def _live_state(runtime_state: dict[str, Any]) -> TaskLiveState | None:
@@ -1129,163 +1132,3 @@ class TaskQueryService:
             return []
         return ['Active parallel work:', *lines]
 
-    @staticmethod
-    def _merge_background_execution_update(
-        step: dict[str, Any],
-        *,
-        payload: dict[str, Any],
-        message_meta: dict[str, Any],
-        output_text: str,
-        output_ref: str,
-    ) -> None:
-        status = str(payload.get('status') or '').strip().lower()
-        if status == 'completed':
-            step['status'] = 'success'
-        elif status in {'stopped', 'failed', 'error', 'not_found', 'unavailable'}:
-            step['status'] = 'error'
-        elif status == 'background_running':
-            step['status'] = 'running'
-        if output_text:
-            step['output_text'] = output_text
-        if output_ref:
-            step['output_ref'] = output_ref
-        if str(message_meta.get('finished_at') or '').strip():
-            step['finished_at'] = str(message_meta.get('finished_at') or '')
-        elapsed = TaskQueryService._resolve_tool_elapsed_seconds(
-            message_meta=message_meta,
-            payload=payload,
-            started_at=str(step.get('started_at') or ''),
-            is_running=str(step.get('status') or '') == 'running',
-        )
-        if elapsed is not None:
-            step['elapsed_seconds'] = elapsed
-
-    def _tool_message_map(self, node: NodeRecord) -> dict[str, dict[str, Any]]:
-        messages = self._parse_input_messages(node.input)
-        result: dict[str, dict[str, Any]] = {}
-        for item in messages:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get('role') or '').strip().lower() != 'tool':
-                continue
-            tool_call_id = str(item.get('tool_call_id') or '').strip()
-            if not tool_call_id:
-                continue
-            result[tool_call_id] = dict(item)
-        return result
-
-    def _tool_output_map(self, node: NodeRecord) -> dict[str, str]:
-        messages = self._parse_input_messages(node.input)
-        result: dict[str, str] = {}
-        for item in messages:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get('role') or '').strip().lower() != 'tool':
-                continue
-            tool_call_id = str(item.get('tool_call_id') or '').strip()
-            if not tool_call_id:
-                continue
-            content = item.get('content')
-            summary, _ref = content_summary_and_ref(content)
-            result[tool_call_id] = summary
-        return result
-
-    def _tool_output_ref_map(self, node: NodeRecord) -> dict[str, str]:
-        messages = self._parse_input_messages(node.input)
-        result: dict[str, str] = {}
-        for item in messages:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get('role') or '').strip().lower() != 'tool':
-                continue
-            tool_call_id = str(item.get('tool_call_id') or '').strip()
-            if not tool_call_id:
-                continue
-            _summary, ref = content_summary_and_ref(item.get('content'))
-            result[tool_call_id] = ref
-        return result
-
-    @staticmethod
-    def _parse_input_messages(raw: str) -> list[dict[str, object]]:
-        text = str(raw or '').strip()
-        if not text:
-            return []
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return []
-        return parsed if isinstance(parsed, list) else []
-
-    @staticmethod
-    def _parse_tool_payload(content: object) -> dict[str, object] | None:
-        if not isinstance(content, str):
-            return None
-        text = content.strip()
-        if not text or text[:1] not in {'{', '['}:
-            return None
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-
-    @staticmethod
-    def _resolve_tool_elapsed_seconds(
-        *,
-        message_meta: dict[str, Any],
-        payload: dict[str, Any] | None,
-        started_at: str,
-        is_running: bool,
-    ) -> float | None:
-        raw_elapsed = None
-        if isinstance(payload, dict):
-            raw_elapsed = payload.get('elapsed_seconds')
-        if raw_elapsed is None:
-            raw_elapsed = message_meta.get('elapsed_seconds')
-        try:
-            if raw_elapsed is not None:
-                return round(max(0.0, float(raw_elapsed)), 1)
-        except (TypeError, ValueError):
-            pass
-        started_ts = TaskQueryService._iso_to_epoch_seconds(started_at)
-        if started_ts is None:
-            return None
-        finished_ts = TaskQueryService._iso_to_epoch_seconds(str(message_meta.get('finished_at') or ''))
-        if finished_ts is not None:
-            return round(max(0.0, finished_ts - started_ts), 1)
-        if is_running:
-            return round(max(0.0, datetime.now(timezone.utc).timestamp() - started_ts), 1)
-        return None
-
-    @staticmethod
-    def _iso_to_epoch_seconds(value: str) -> float | None:
-        text = str(value or '').strip()
-        if not text:
-            return None
-        normalized = text.replace('Z', '+00:00')
-        try:
-            parsed = datetime.fromisoformat(normalized)
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return parsed.timestamp()
-        return parsed.astimezone(timezone.utc).timestamp()
-
-    @staticmethod
-    def _tool_step_status(output_text: str, node_status: str, *, payload: dict[str, Any] | None = None) -> str:
-        payload_status = str((payload or {}).get('status') or '').strip().lower()
-        if payload_status == 'background_running':
-            return 'running'
-        if payload_status in {'completed'}:
-            return 'success'
-        if payload_status in {'stopped', 'failed', 'error', 'not_found', 'unavailable'}:
-            return 'error'
-        text = str(output_text or '').strip()
-        if text:
-            lowered = text.lower()
-            if text.startswith('Error:') or '"status":"error"' in lowered or '"status": "error"' in lowered:
-                return 'error'
-            return 'success'
-        if str(node_status or '').strip().lower() == 'in_progress':
-            return 'running'
-        return 'success'

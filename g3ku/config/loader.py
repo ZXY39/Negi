@@ -421,6 +421,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "multiAgent": {
                 "orchestratorModelKey": cfg.agents.multi_agent.orchestrator_model_key,
             },
+            "ceoFrontdoorImplementation": cfg.get_ceo_frontdoor_implementation(),
         },
         "models": {
             "catalog": catalog,
@@ -570,6 +571,17 @@ def _ensure_role_concurrency_defaults(raw_data: dict[str, Any]) -> bool:
     )
 
 
+def _ensure_ceo_frontdoor_implementation_default(raw_data: dict[str, Any]) -> bool:
+    agents = raw_data.get("agents")
+    if not isinstance(agents, dict):
+        return False
+    current = agents.get("ceoFrontdoorImplementation")
+    if isinstance(current, str) and current.strip().lower() in {"legacy", "langgraph"}:
+        return False
+    agents["ceoFrontdoorImplementation"] = "langgraph"
+    return True
+
+
 def build_project_config_from_example(example_path: Path | None = None) -> Config:
     """Build a strict project config from a project-local or bundled example file."""
     raw, source = _read_example_config_text(example_path)
@@ -595,6 +607,7 @@ def load_config(config_path: Path | None = None) -> Config:
     changed = changed or llm_changed
     changed = _ensure_role_iterations_defaults(raw_data) or changed
     changed = _ensure_role_concurrency_defaults(raw_data) or changed
+    changed = _ensure_ceo_frontdoor_implementation_default(raw_data) or changed
     security = get_bootstrap_security_service(Path.cwd())
     migrated = _migrate_config(
         apply_config_secret_entries(deepcopy(raw_data), security.current_overlay())

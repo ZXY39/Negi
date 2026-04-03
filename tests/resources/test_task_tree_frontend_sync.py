@@ -322,3 +322,38 @@ def test_sync_task_tree_header_counts_non_terminal_non_waiting_nodes() -> None:
     assert result["activeCountText"] == "2"
     assert result["activeCountSummary"] == 2
     assert result["rootActiveNodeCount"] == 2
+
+
+def test_format_node_detail_heading_prefixes_node_id_before_title() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const sample = {
+          node_id: "node:pressure:0001:root",
+          title: "Analyze local path `D:\\\\NewProjects\\\\G3KU` flow",
+        };
+
+        console.log(JSON.stringify({
+          heading: formatNodeDetailHeading(sample),
+          tooltip: formatNodeDetailHeading(sample, { compact: false }),
+          fallback: formatNodeDetailHeading({ node_id: "node:root" }),
+        }));
+        """
+    )
+
+    assert result["heading"] == "node:pressure:0001:root | Analyze local path `D:\\NewProjects\\G3KU` flow"
+    assert result["tooltip"] == "node:pressure:0001:root | Analyze local path `D:\\NewProjects\\G3KU` flow"
+    assert result["fallback"] == "node:root"

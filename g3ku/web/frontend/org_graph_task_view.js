@@ -565,6 +565,7 @@ function clearAgentSelection({ rerender = true } = {}) {
     S.selectedNodeId = null;
     S.pendingTaskDetailRestore = null;
     U.feedTitle.textContent = "Node Details";
+    U.feedTitle.title = "";
     hideAgent();
     setTaskSelectionEmptyVisible(true);
     scheduleTaskDetailSessionPersist();
@@ -716,16 +717,27 @@ function treeViewChildren(node) {
     ];
 }
 
-function compactNodeHeading(node, maxChars = 72) {
+function singleLineNodeHeading(node) {
     const raw = repairAcceptanceTitle(String(node?.goal || node?.fullTitle || node?.title || node?.node_id || "Node"));
-    const singleLine = raw
+    return raw
         .replace(/\r\n|\r|\n/g, " ")
         .replace(/\s+/g, " ")
-        .trim();
-    if (!singleLine) return "Node";
+        .trim() || "Node";
+}
+
+function compactNodeHeading(node, maxChars = 72) {
+    const singleLine = singleLineNodeHeading(node);
     const chars = Array.from(singleLine);
     if (chars.length <= maxChars) return singleLine;
     return `${chars.slice(0, maxChars).join("")}...`;
+}
+
+function formatNodeDetailHeading(node, { maxChars = 72, compact = true } = {}) {
+    const nodeId = String(node?.node_id || "").trim();
+    const heading = compact ? compactNodeHeading(node, maxChars) : singleLineNodeHeading(node);
+    if (!nodeId) return compact ? `Node: ${heading}` : heading;
+    if (!heading || heading === nodeId) return nodeId;
+    return `${nodeId} | ${heading}`;
 }
 
 function indexTaskLiveFrames(frames) {
@@ -1583,7 +1595,6 @@ async function handleNodeContextDisclosureToggle() {
 }
 
 function showTaskNodeLoadingState(node) {
-    const compactHeading = compactNodeHeading(node);
     S.currentNodeDetail = { ...node };
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
@@ -1598,8 +1609,8 @@ function showTaskNodeLoadingState(node) {
     renderAcceptanceResult("Loading acceptance result...");
     if (U.nodeContextDisclosure) U.nodeContextDisclosure.open = false;
     renderNodeContextPlaceholder();
-    U.feedTitle.textContent = `Node: ${compactHeading}`;
-    U.feedTitle.title = compactHeading;
+    U.feedTitle.textContent = formatNodeDetailHeading(node);
+    U.feedTitle.title = formatNodeDetailHeading(node, { compact: false });
     setTaskDetailOpen(true);
     icons();
     refreshTaskDetailScrollRegions();
@@ -1721,7 +1732,6 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
         executionTrace: buildNodeExecutionTrace(node, detail || {}, liveFrameMap.get(nodeId) || null),
     };
     S.currentNodeDetail = mergedNode;
-    const compactHeading = compactNodeHeading(mergedNode);
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
@@ -1733,8 +1743,8 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     const traceChanged = !!renderExecutionTrace(mergedNode, { viewState });
     const outputChanged = !!renderFinalOutput(mergedNode.executionTrace?.final_output || "");
     const acceptanceChanged = !!renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
-    U.feedTitle.textContent = `Node: ${compactHeading}`;
-    U.feedTitle.title = compactHeading;
+    U.feedTitle.textContent = formatNodeDetailHeading(mergedNode);
+    U.feedTitle.title = formatNodeDetailHeading(mergedNode, { compact: false });
     setTaskDetailOpen(true);
     icons();
     const nodeChanged = !hadVisibleCurrentDetail || previousDetailNodeId !== nodeId;

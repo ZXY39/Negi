@@ -90,6 +90,37 @@ async def _create_web_task(service: MainRuntimeService):
     return await service.create_task('stage test task', session_id='web:shared')
 
 
+def _tool_result_payload(
+    *,
+    call_id: str,
+    tool_name: str,
+    content: str,
+    status: str = 'success',
+) -> dict[str, dict[str, object]]:
+    started_at = now_iso()
+    finished_at = now_iso()
+    return {
+        'live_state': {
+            'tool_call_id': call_id,
+            'tool_name': tool_name,
+            'status': status,
+            'started_at': started_at,
+            'finished_at': finished_at,
+            'elapsed_seconds': 0.1,
+        },
+        'tool_message': {
+            'role': 'tool',
+            'tool_call_id': call_id,
+            'name': tool_name,
+            'content': content,
+            'started_at': started_at,
+            'finished_at': finished_at,
+            'elapsed_seconds': 0.1,
+            'status': status,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(tmp_path: Path):
     service = MainRuntimeService(
@@ -346,6 +377,96 @@ async def test_stage_round_counts_once_and_spawn_promotes_stage_mode_in_trace(tm
         assert stages[0]['tool_rounds_used'] == 1
         assert len(stages[0]['rounds']) == 1
         assert [item['tool_name'] for item in stages[0]['rounds'][0]['tools']] == ['filesystem', 'spawn_child_nodes']
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_trace_uses_tool_result_records_for_completed_stage_steps(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='load skills first',
+            tool_round_budget=3,
+        )
+        tool_calls = [
+            ToolCallRequest(
+                id='call:skill:batch',
+                name='load_skill_context',
+                arguments={'skill_id': 'batch-web-planning'},
+            ),
+            ToolCallRequest(
+                id='call:skill:memory',
+                name='load_skill_context',
+                arguments={'skill_id': 'memory'},
+            ),
+        ]
+        service.log_service.append_node_output(
+            record.task_id,
+            record.root_node_id,
+            content='',
+            tool_calls=[
+                {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
+                for call in tool_calls
+            ],
+        )
+        service.log_service.record_tool_result_batch(
+            task_id=record.task_id,
+            node_id=record.root_node_id,
+            response_tool_calls=tool_calls,
+            results=[
+                _tool_result_payload(
+                    call_id='call:skill:batch',
+                    tool_name='load_skill_context',
+                    content='loaded batch-web-planning skill body',
+                ),
+                _tool_result_payload(
+                    call_id='call:skill:memory',
+                    tool_name='load_skill_context',
+                    content='loaded memory skill body',
+                ),
+            ],
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[
+                {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
+                for call in tool_calls
+            ],
+            created_at=now_iso(),
+        )
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='plan child collection',
+            tool_round_budget=2,
+            completed_stage_summary='skills loaded',
+        )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+        assert detail is not None
+        stages = detail['item']['execution_trace']['stages']
+        assert len(stages) == 2
+        first_round_tools = stages[0]['rounds'][0]['tools']
+        assert [item['tool_name'] for item in first_round_tools] == ['load_skill_context', 'load_skill_context']
+        assert [item['status'] for item in first_round_tools] == ['success', 'success']
+        assert [item['output_text'] for item in first_round_tools] == [
+            'loaded batch-web-planning skill body',
+            'loaded memory skill body',
+        ]
+        assert all(str(item['finished_at'] or '').strip() for item in first_round_tools)
     finally:
         await service.close()
 
@@ -635,6 +756,47 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
         assert stages[0]['key_refs'] == [{'ref': 'artifact:artifact:stage-one', 'note': 'stage one note'}]
         assert stages[1]['completed_stage_summary'] == ''
         assert stages[1]['key_refs'] == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_react_loop_counts_meaningful_tool_results_from_tool_result_store(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        service.log_service.record_tool_result_batch(
+            task_id=record.task_id,
+            node_id=record.root_node_id,
+            response_tool_calls=[
+                ToolCallRequest(id='call:filesystem', name='filesystem', arguments={'path': str(tmp_path)}),
+                ToolCallRequest(id='call:stage', name='submit_next_stage', arguments={'stage_goal': 'ignored'}),
+            ],
+            results=[
+                _tool_result_payload(
+                    call_id='call:filesystem',
+                    tool_name='filesystem',
+                    content='filesystem listed files',
+                ),
+                _tool_result_payload(
+                    call_id='call:stage',
+                    tool_name='submit_next_stage',
+                    content='{"status":"ok"}',
+                ),
+            ],
+        )
+
+        assert service._react_loop._node_has_meaningful_tool_results(
+            task_id=record.task_id,
+            node_id=record.root_node_id,
+        ) is True
     finally:
         await service.close()
 
