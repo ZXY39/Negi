@@ -298,3 +298,48 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     assert "Stage Context" not in rendered
     assert "Archive Overview" not in rendered
     assert "live_raw_tail" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_message_builder_prefers_checkpoint_history_over_transcript_once_available() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "bootstrap transcript question")
+    persisted_session.add_message("assistant", "bootstrap transcript answer")
+    persisted_session.add_message(
+        "user",
+        "latest question from transcript",
+        metadata={"_transcript_turn_id": "turn-2", "_transcript_state": "pending"},
+    )
+
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {"role": "assistant", "content": "## Retrieved Context\n- stale memory"},
+        {"role": "user", "content": "checkpoint question"},
+        {"role": "assistant", "content": "checkpoint answer"},
+        {"role": "user", "content": "follow up question"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="follow up question",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        checkpoint_messages=checkpoint_messages,
+        user_content="follow up question",
+        user_metadata={"_transcript_turn_id": "turn-2"},
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert contents[0] == "BASE PROMPT"
+    assert "OLD SYSTEM" not in contents
+    assert "## Retrieved Context\n- stale memory" not in contents
+    assert "checkpoint question" in contents
+    assert "checkpoint answer" in contents
+    assert "bootstrap transcript question" not in contents
+    assert "bootstrap transcript answer" not in contents
+    assert contents.count("follow up question") == 1
+    assert contents[-1] == "follow up question"
+    assert result.trace["current_user_in_transcript"] is True

@@ -119,10 +119,14 @@ class CeoMessageBuilder:
 
     @staticmethod
     def _history_message(message: dict[str, Any]) -> dict[str, Any]:
-        return {
+        entry = {
             'role': str(message.get('role') or '').strip().lower(),
             'content': message.get('content'),
         }
+        for key in ('tool_calls', 'tool_call_id', 'name', 'metadata'):
+            if key in message:
+                entry[key] = message[key]
+        return entry
 
     def _transcript_history(self, persisted_session: Any | None) -> list[dict[str, Any]]:
         if persisted_session is None:
@@ -131,6 +135,43 @@ class CeoMessageBuilder:
             self._history_message(message)
             for message in transcript_messages(persisted_session)
         ]
+
+    def _checkpoint_history(self, checkpoint_messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        history = [
+            self._history_message(message)
+            for message in list(checkpoint_messages or [])
+            if isinstance(message, dict)
+            and str(message.get('role') or '').strip().lower() in {'user', 'assistant', 'tool'}
+        ]
+        while history:
+            first = history[0]
+            if str(first.get('role') or '').strip().lower() != 'assistant':
+                break
+            if '## Retrieved Context' not in self._content_text(first.get('content')):
+                break
+            history.pop(0)
+        return history
+
+    def _history_has_current_user(
+        self,
+        *,
+        history_messages: list[dict[str, Any]] | None,
+        query_text: str,
+        user_metadata: dict[str, Any] | None,
+    ) -> bool:
+        messages = [
+            message
+            for message in list(history_messages or [])
+            if isinstance(message, dict) and str(message.get('role') or '').strip().lower() == 'user'
+        ]
+        if not messages:
+            return False
+        last = dict(messages[-1])
+        last_metadata = last.get('metadata') if isinstance(last.get('metadata'), dict) else {}
+        turn_id = str((user_metadata or {}).get('_transcript_turn_id') or '').strip()
+        if turn_id and str(last_metadata.get('_transcript_turn_id') or '').strip() == turn_id:
+            return True
+        return self._content_text(last.get('content')).strip() == str(query_text or '').strip()
 
     def _transcript_has_current_user(
         self,
@@ -463,6 +504,7 @@ class CeoMessageBuilder:
         query_text: str,
         exposure: dict[str, Any],
         persisted_session: Any | None,
+        checkpoint_messages: list[dict[str, Any]] | None = None,
         user_content: Any | None = None,
         user_metadata: dict[str, Any] | None = None,
     ) -> ContextAssemblyResult:
@@ -559,7 +601,14 @@ class CeoMessageBuilder:
         if memory_write_terms and retrieved_markdown:
             retrieved_markdown = f"{self._retrieved_memory_resolution_hint_block()}\n\n{retrieved_markdown}"
 
-        history_messages = self._transcript_history(persisted_session)
+        checkpoint_history = self._checkpoint_history(checkpoint_messages)
+        transcript_history = self._transcript_history(persisted_session)
+        history_messages = checkpoint_history or transcript_history
+        current_user_in_history = self._history_has_current_user(
+            history_messages=history_messages,
+            query_text=query_text,
+            user_metadata=user_metadata,
+        )
         current_user_in_transcript = self._transcript_has_current_user(
             persisted_session=persisted_session,
             query_text=query_text,
@@ -569,7 +618,7 @@ class CeoMessageBuilder:
         if retrieved_markdown:
             model_messages.append({"role": "assistant", "content": retrieved_markdown})
         model_messages.extend(history_messages)
-        if not current_user_in_transcript:
+        if not current_user_in_history:
             model_messages.append({"role": "user", "content": user_content if user_content is not None else query_text})
 
         trace = {
@@ -589,7 +638,10 @@ class CeoMessageBuilder:
                 'matched_terms': list(memory_write_terms),
                 'visible': memory_write_visible,
             },
-            'transcript_message_count': len(history_messages),
+            'history_source': 'checkpoint' if checkpoint_history else 'transcript',
+            'checkpoint_message_count': len(checkpoint_history),
+            'transcript_message_count': len(transcript_history),
+            'current_user_in_history': current_user_in_history,
             'current_user_in_transcript': current_user_in_transcript,
             'retrieved_record_count': len(list(retrieved_bundle.records or [])),
             'model_messages_count': len(model_messages),
