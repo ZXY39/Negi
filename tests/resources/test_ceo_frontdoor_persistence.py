@@ -360,6 +360,54 @@ def test_frontdoor_history_compaction_inserts_summary_marker_and_keeps_recent_ta
     assert "question two" not in str(summary_message["content"])
 
 
+def test_frontdoor_history_compaction_preserves_existing_summary_content_on_repeated_passes() -> None:
+    first_messages = [
+        {"role": "system", "content": "SYSTEM PROMPT"},
+        {"role": "user", "content": "question one"},
+        {"role": "assistant", "content": "answer one"},
+        {"role": "user", "content": "question two"},
+        {"role": "assistant", "content": "answer two"},
+        {"role": "user", "content": "question three"},
+    ]
+    first_compacted = compact_frontdoor_history(
+        first_messages,
+        recent_message_count=3,
+        summary_trigger_message_count=4,
+    )
+    first_summary = dict(first_compacted[1])
+    first_summary_text = str(first_summary["content"])
+    assert "question one" in first_summary_text
+    assert "answer one" in first_summary_text
+    assert first_summary["metadata"]["compacted_message_count"] == 2
+
+    second_messages = [
+        *first_compacted,
+        {"role": "assistant", "content": "answer three"},
+        {"role": "user", "content": "question four"},
+        {"role": "assistant", "content": "answer four"},
+    ]
+
+    second_compacted = compact_frontdoor_history(
+        second_messages,
+        recent_message_count=3,
+        summary_trigger_message_count=4,
+    )
+
+    second_summary = dict(second_compacted[1])
+    second_summary_text = str(second_summary["content"])
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in second_summary_text
+    assert "prior frontdoor history was already compacted" not in second_summary_text
+    assert first_summary_text in second_summary_text
+    assert "question two" in second_summary_text
+    assert "answer three" not in second_summary_text
+    assert second_summary["metadata"]["compacted_message_count"] == 5
+    assert second_compacted[-3:] == [
+        {"role": "assistant", "content": "answer three"},
+        {"role": "user", "content": "question four"},
+        {"role": "assistant", "content": "answer four"},
+    ]
+
+
 @pytest.mark.asyncio
 async def test_ceo_frontdoor_prepare_turn_compacts_history_into_summary_block(
     monkeypatch: pytest.MonkeyPatch,
