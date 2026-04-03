@@ -13,8 +13,10 @@ from urllib.parse import urlparse
 from loguru import logger
 
 from g3ku.agent.loop import AgentLoop
+from g3ku.bus.events import OutboundMessage
 from g3ku.bus.queue import MessageBus
 from g3ku.china_bridge import CHINA_CHANNELS, ChinaBridgeSupervisor, ChinaBridgeTransport
+from g3ku.china_bridge.session_keys import build_chat_id, parse_china_session_key
 from g3ku.config.loader import get_data_dir
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.cron.runtime_dispatch import dispatch_cron_job
@@ -226,12 +228,24 @@ def get_agent() -> AgentLoop:
         _global_agent._runtime_model_revision = revision
         _global_agent._runtime_default_model_key = config.resolve_role_model_key('ceo')
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
-        _global_web_heartbeat = build_web_session_heartbeat(_global_agent, _global_runtime_manager)
+        _global_web_heartbeat = build_web_session_heartbeat(
+            _global_agent,
+            _global_runtime_manager,
+            reply_notifier=_make_heartbeat_reply_notifier(_global_agent, _global_runtime_manager),
+        )
     elif _global_runtime_manager is None or _global_runtime_manager.loop is not _global_agent:
         _global_runtime_manager = SessionRuntimeManager(_global_agent)
-        _global_web_heartbeat = build_web_session_heartbeat(_global_agent, _global_runtime_manager)
+        _global_web_heartbeat = build_web_session_heartbeat(
+            _global_agent,
+            _global_runtime_manager,
+            reply_notifier=_make_heartbeat_reply_notifier(_global_agent, _global_runtime_manager),
+        )
     elif _global_web_heartbeat is None:
-        _global_web_heartbeat = build_web_session_heartbeat(_global_agent, _global_runtime_manager)
+        _global_web_heartbeat = build_web_session_heartbeat(
+            _global_agent,
+            _global_runtime_manager,
+            reply_notifier=_make_heartbeat_reply_notifier(_global_agent, _global_runtime_manager),
+        )
     return _global_agent
 
 
@@ -313,6 +327,185 @@ def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager
     return _global_runtime_manager
 
 
+def _parse_runtime_chat_target(chat_id: str) -> dict[str, str] | None:
+    raw = str(chat_id or '').strip()
+    if not raw:
+        return None
+    parts = raw.split(':')
+    if len(parts) < 3:
+        return None
+    account_id = str(parts[0] or '').strip() or 'default'
+    scope = str(parts[1] or '').strip().lower()
+    peer_id = str(parts[2] or '').strip()
+    if not peer_id:
+        return None
+    thread_id = ''
+    if len(parts) >= 5 and parts[3] == 'thread':
+        thread_id = ':'.join(parts[4:]).strip()
+    return {
+        'account_id': account_id,
+        'peer_kind': 'group' if scope == 'group' else 'user',
+        'peer_id': peer_id,
+        'thread_id': thread_id,
+    }
+
+
+def _route_from_session_message(message: object) -> dict[str, str] | None:
+    if not isinstance(message, dict):
+        return None
+    metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
+    peer_id = str(metadata.get('_china_peer_id') or '').strip()
+    if not peer_id:
+        return None
+    return {
+        'account_id': str(metadata.get('_china_account_id') or 'default').strip() or 'default',
+        'peer_kind': str(metadata.get('_china_peer_kind') or 'user').strip() or 'user',
+        'peer_id': peer_id,
+        'thread_id': str(metadata.get('_china_thread_id') or '').strip(),
+        'event_id': str(metadata.get('_china_event_id') or '').strip(),
+        'message_id': str(metadata.get('message_id') or '').strip(),
+    }
+
+
+def _resolve_china_heartbeat_route(
+    session_id: str,
+    *,
+    agent: AgentLoop | None = None,
+    runtime_manager: SessionRuntimeManager | None = None,
+) -> dict[str, str] | None:
+    parsed = parse_china_session_key(session_id)
+    if parsed is None:
+        return None
+
+    current_runtime_manager = runtime_manager or (_global_runtime_manager if _global_runtime_manager is not None else None)
+    current_agent = agent or _global_agent
+    resolved: dict[str, str] | None = None
+
+    if current_runtime_manager is not None:
+        meta = current_runtime_manager.session_meta(session_id)
+        if isinstance(meta, tuple) and len(meta) == 2:
+            runtime_channel = str(meta[0] or '').strip() or parsed.channel
+            target = _parse_runtime_chat_target(str(meta[1] or ''))
+            if target is not None:
+                resolved = {
+                    'channel': runtime_channel,
+                    'chat_id': str(meta[1] or '').strip(),
+                    **target,
+                }
+
+    if current_agent is not None:
+        session_manager = getattr(current_agent, 'sessions', None)
+        if session_manager is not None and hasattr(session_manager, 'get_or_create'):
+            try:
+                session = session_manager.get_or_create(session_id)
+            except Exception:
+                session = None
+            if session is not None:
+                for message in reversed(list(getattr(session, 'messages', []) or [])):
+                    route = _route_from_session_message(message)
+                    if route is None:
+                        continue
+                    if resolved is None:
+                        resolved = {
+                            'channel': parsed.channel,
+                            'chat_id': build_chat_id(
+                                account_id=route['account_id'],
+                                peer_kind=route['peer_kind'],
+                                peer_id=route['peer_id'],
+                                thread_id=route['thread_id'] or None,
+                            ),
+                            **route,
+                        }
+                    else:
+                        for key_name in ('account_id', 'peer_kind', 'peer_id', 'thread_id', 'event_id', 'message_id'):
+                            if not str(resolved.get(key_name) or '').strip():
+                                resolved[key_name] = str(route.get(key_name) or '').strip()
+                    break
+
+    if resolved is not None:
+        return resolved
+
+    if parsed.peer_id:
+        peer_kind = 'group' if parsed.chat_type == 'group' else 'user'
+        return {
+            'channel': parsed.channel,
+            'chat_id': build_chat_id(
+                account_id=parsed.account_id,
+                peer_kind=peer_kind,
+                peer_id=parsed.peer_id,
+                thread_id=parsed.thread_id,
+            ),
+            'account_id': parsed.account_id,
+            'peer_kind': peer_kind,
+            'peer_id': parsed.peer_id,
+            'thread_id': str(parsed.thread_id or '').strip(),
+            'event_id': '',
+            'message_id': '',
+        }
+
+    return None
+
+
+async def _notify_heartbeat_channel_reply(
+    session_id: str,
+    text: str,
+    *,
+    agent: AgentLoop | None = None,
+    runtime_manager: SessionRuntimeManager | None = None,
+) -> None:
+    key = str(session_id or '').strip()
+    payload = str(text or '').strip()
+    if not key.startswith('china:') or not payload:
+        return
+    bus = _global_bus
+    if bus is None:
+        return
+    route = _resolve_china_heartbeat_route(key, agent=agent, runtime_manager=runtime_manager)
+    if route is None:
+        logger.debug('heartbeat china reply skipped: route unavailable for {}', key)
+        return
+    metadata = {
+        'source': 'heartbeat',
+        'session_key': key,
+        '_china_account_id': route['account_id'],
+        '_china_peer_kind': route['peer_kind'],
+        '_china_peer_id': route['peer_id'],
+    }
+    event_id = str(route.get('event_id') or '').strip()
+    if event_id:
+        metadata['_china_event_id'] = event_id
+    message_id = str(route.get('message_id') or '').strip()
+    if message_id:
+        metadata['message_id'] = message_id
+    thread_id = str(route.get('thread_id') or '').strip()
+    if thread_id:
+        metadata['_china_thread_id'] = thread_id
+    await bus.publish_outbound(
+        OutboundMessage(
+            channel=str(route.get('channel') or '').strip() or 'qqbot',
+            chat_id=str(route.get('chat_id') or '').strip(),
+            content=payload,
+            reply_to=message_id or None,
+            metadata=metadata,
+        )
+    )
+
+
+def _make_heartbeat_reply_notifier(
+    runtime_agent: AgentLoop,
+    runtime_manager: SessionRuntimeManager,
+):
+    async def _notify(session_id: str, text: str) -> None:
+        await _notify_heartbeat_channel_reply(
+            session_id,
+            text,
+            agent=runtime_agent,
+            runtime_manager=runtime_manager,
+        )
+
+    return _notify
+
+
 def _get_china_transport(agent: AgentLoop | None = None) -> ChinaBridgeTransport:
     runtime_agent = agent or get_agent()
     runtime_manager = get_runtime_manager(runtime_agent)
@@ -392,8 +585,11 @@ def get_web_heartbeat_service(agent: AgentLoop | None = None):
     runtime_agent = agent or get_agent()
     runtime_manager = get_runtime_manager(runtime_agent)
     global _global_web_heartbeat
-    if _global_web_heartbeat is None:
-        _global_web_heartbeat = build_web_session_heartbeat(runtime_agent, runtime_manager)
+    _global_web_heartbeat = build_web_session_heartbeat(
+        runtime_agent,
+        runtime_manager,
+        reply_notifier=_make_heartbeat_reply_notifier(runtime_agent, runtime_manager),
+    )
     return _global_web_heartbeat
 
 
@@ -433,6 +629,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             runtime_agent,
             get_runtime_manager(runtime_agent),
             replay_pending_outbox=True,
+            reply_notifier=_make_heartbeat_reply_notifier(runtime_agent, get_runtime_manager(runtime_agent)),
         )
         if heartbeat is not None:
             _global_web_heartbeat = heartbeat

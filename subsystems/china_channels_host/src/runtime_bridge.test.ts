@@ -42,7 +42,7 @@ describe("G3kuRuntimeBridge late final delivery", () => {
       counts: { final: 0 },
     });
 
-    const lateText = "已通过异步任务 task:demo 完成交付";
+    const lateText = "async task task:demo delivered";
     await bridge.handleFrame({
       type: "deliver_message",
       event_id: "evt-late",
