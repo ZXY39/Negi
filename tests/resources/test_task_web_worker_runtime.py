@@ -17,9 +17,10 @@ from g3ku.providers.base import LLMModelAttempt, LLMResponse, ToolCallRequest
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
-from main.models import NodeFinalResult, SpawnChildSpec, TaskRecord
+from main.models import NodeFinalResult, SpawnChildResult, SpawnChildSpec, TaskRecord
 from main.models import normalize_final_acceptance_metadata
 from main.protocol import now_iso
+from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import MainRuntimeService
 from main.service.task_stall_callback import normalize_task_stall_payload
 from main.service.task_terminal_callback import (
@@ -2595,10 +2596,259 @@ async def test_spawn_children_surfaces_runtime_failure_info_for_pipeline_excepti
 
         assert result.failure_info is not None
         assert result.failure_info.source == "runtime"
-        assert result.failure_info.summary == "Error: boom"
+        assert result.failure_info.summary == "Error: RuntimeError: boom"
         assert result.failure_info.delivery_status == "blocked"
-        assert result.failure_info.blocking_reason == "Error: boom"
+        assert result.failure_info.blocking_reason == "Error: RuntimeError: boom"
         assert result.failure_info.remaining_work == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_children_isolates_cancelled_child_without_failing_whole_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            if node.goal == "bad child":
+                raise asyncio.CancelledError()
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="good child done",
+                    answer="good child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[
+                SpawnChildSpec(goal="bad child", prompt="bad prompt", execution_policy=_execution_policy()),
+                SpawnChildSpec(goal="good child", prompt="good prompt", execution_policy=_execution_policy()),
+            ],
+            call_id="round-cancel-isolation",
+        )
+
+        bad_result = next(item for item in results if item.goal == "bad child")
+        good_result = next(item for item in results if item.goal == "good child")
+
+        assert len(results) == 2
+        assert bad_result.failure_info is not None
+        assert bad_result.failure_info.source == "runtime"
+        assert bad_result.failure_info.summary == "Error: CancelledError"
+        assert good_result.failure_info is None
+        assert good_result.node_output == "good child done"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_children_empty_runtime_exception_includes_exception_class_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError()
+
+        monkeypatch.setattr(service.node_runner, "run_node", _boom)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy())],
+            call_id="round-empty-runtime-error",
+        )
+
+        result = results[0]
+        assert result.failure_info is not None
+        assert result.failure_info.source == "runtime"
+        assert result.failure_info.summary == "Error: RuntimeError"
+        assert result.failure_info.blocking_reason == "Error: RuntimeError"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_terminal_success_nodes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        stale_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="stale child", prompt="stale prompt", execution_policy=_execution_policy()),
+        )
+        stale_descendant = service.node_runner._create_execution_child(
+            task=task,
+            parent=stale_child,
+            spec=SpawnChildSpec(goal="stale leaf", prompt="stale leaf prompt", execution_policy=_execution_policy()),
+        )
+        steady_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="steady child", prompt="steady prompt", execution_policy=_execution_policy()),
+        )
+        service.node_runner._mark_finished(
+            record.task_id,
+            steady_child.node_id,
+            NodeFinalResult(
+                status="success",
+                delivery_status="final",
+                summary="steady child done",
+                answer="steady child done",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            ),
+        )
+
+        steady_result = SpawnChildResult(
+            goal="steady child",
+            check_result=SKIPPED_CHECK_RESULT,
+            node_output="steady child done",
+            node_output_summary="steady child done",
+            node_output_ref="",
+        )
+
+        def _mutate(metadata: dict[str, object]) -> dict[str, object]:
+            metadata["spawn_operations"] = {
+                "round-1": {
+                    "specs": [
+                        SpawnChildSpec(goal="stale child", prompt="stale prompt", execution_policy=_execution_policy()).model_dump(mode="json"),
+                        SpawnChildSpec(goal="steady child", prompt="steady prompt", execution_policy=_execution_policy()).model_dump(mode="json"),
+                    ],
+                    "entries": [
+                        {
+                            "index": 0,
+                            "goal": "stale child",
+                            "prompt": "stale prompt",
+                            "requires_acceptance": False,
+                            "acceptance_prompt": "",
+                            "status": "running",
+                            "started_at": now_iso(),
+                            "finished_at": "",
+                            "child_node_id": stale_child.node_id,
+                            "acceptance_node_id": "",
+                            "check_status": "skipped",
+                            "result": {},
+                        },
+                        {
+                            "index": 1,
+                            "goal": "steady child",
+                            "prompt": "steady prompt",
+                            "requires_acceptance": False,
+                            "acceptance_prompt": "",
+                            "status": "success",
+                            "started_at": now_iso(),
+                            "finished_at": now_iso(),
+                            "child_node_id": steady_child.node_id,
+                            "acceptance_node_id": "",
+                            "check_status": "skipped",
+                            "result": steady_result.model_dump(mode="json", exclude_none=True),
+                        },
+                    ],
+                    "results": [steady_result.model_dump(mode="json", exclude_none=True)],
+                    "completed": False,
+                }
+            }
+            return metadata
+
+        service.log_service.update_node_metadata(root.node_id, _mutate)
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node_id} new round done",
+                    answer=f"{node_id} new round done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        new_results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="new child", prompt="new prompt", execution_policy=_execution_policy())],
+            call_id="round-2",
+        )
+
+        root_after = service.get_node(root.node_id)
+        stale_after = service.get_node(stale_child.node_id)
+        stale_leaf_after = service.get_node(stale_descendant.node_id)
+        steady_after = service.get_node(steady_child.node_id)
+
+        assert root_after is not None
+        assert stale_after is not None
+        assert stale_leaf_after is not None
+        assert steady_after is not None
+        assert len(new_results) == 1
+        assert stale_after.status == "failed"
+        assert stale_leaf_after.status == "failed"
+        assert "superseded by newer spawn round: round-2" in str(stale_after.failure_reason or "")
+        assert "superseded by newer spawn round: round-2" in str(stale_leaf_after.failure_reason or "")
+        assert steady_after.status == "success"
+
+        spawn_operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        assert {"round-1", "round-2"} <= set(spawn_operations)
+        stale_entry = spawn_operations["round-1"]["entries"][0]
+        steady_entry = spawn_operations["round-1"]["entries"][1]
+        assert stale_entry["status"] == "error"
+        assert stale_entry["result"]["failure_info"]["summary"] == "superseded by newer spawn round: round-2"
+        assert spawn_operations["round-1"]["completed"] is True
+        assert steady_entry["status"] == "success"
     finally:
         await service.close()
 

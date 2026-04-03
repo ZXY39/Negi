@@ -10,7 +10,6 @@ import main.api.bootstrap_rest as bootstrap_rest
 from g3ku.config.schema import MultiAgentConfig
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
-from g3ku.runtime.langgraph_ceo import LangGraphCeoRunner
 
 
 def _build_app() -> FastAPI:
@@ -264,21 +263,10 @@ def test_bootstrap_unlock_succeeds_when_runtime_start_is_deferred(monkeypatch):
     assert response.json()["item"]["runtime_ready"] is False
 
 
-def test_bootstrap_bridge_uses_langgraph_ceo_runner_by_default():
+def test_bootstrap_bridge_uses_canonical_ceo_runner():
     loop = SimpleNamespace(
         multi_agent_config=MultiAgentConfig(),
-        app_config=SimpleNamespace(get_ceo_frontdoor_implementation=lambda: "langgraph"),
-    )
-
-    RuntimeBootstrapBridge(loop).init_multi_agent_runtime()
-
-    assert isinstance(loop.multi_agent_runner, LangGraphCeoRunner)
-
-
-def test_bootstrap_bridge_can_switch_back_to_legacy_ceo_runner():
-    loop = SimpleNamespace(
-        multi_agent_config=MultiAgentConfig(),
-        app_config=SimpleNamespace(get_ceo_frontdoor_implementation=lambda: "legacy"),
+        app_config=SimpleNamespace(),
     )
 
     RuntimeBootstrapBridge(loop).init_multi_agent_runtime()

@@ -11,7 +11,7 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
-from main.errors import TaskPausedError
+from main.errors import TaskPausedError, describe_exception
 from main.ids import new_node_id
 from main.models import (
     NodeFinalResult,
@@ -31,6 +31,7 @@ from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SU
 
 SKIPPED_CHECK_RESULT = '未检验'
 _RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
+_SUPERSEDED_SPAWN_REASON_PREFIX = 'superseded by newer spawn round'
 
 
 _UNSET = object()
@@ -74,6 +75,8 @@ class NodeRunner:
         self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
         self.nested_node_executor = None
+        self.cancel_node_subtree_executor = None
+        self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def _normalized_status(value: Any) -> str:
@@ -110,6 +113,57 @@ class NodeRunner:
             node_output_summary='',
             node_output_ref='',
             failure_info=self._runtime_spawn_failure_info(error_text),
+        )
+
+    @staticmethod
+    def _spawn_operation_lock_key(parent_node_id: str) -> str:
+        return str(parent_node_id or '').strip()
+
+    def _spawn_operation_lock(self, parent_node_id: str) -> asyncio.Lock:
+        key = self._spawn_operation_lock_key(parent_node_id)
+        lock = self._spawn_operation_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._spawn_operation_locks[key] = lock
+        return lock
+
+    @staticmethod
+    def _spawn_round_superseded_reason(replacement_round_id: str) -> str:
+        round_id = str(replacement_round_id or '').strip()
+        if round_id:
+            return f'{_SUPERSEDED_SPAWN_REASON_PREFIX}: {round_id}'
+        return _SUPERSEDED_SPAWN_REASON_PREFIX
+
+    @staticmethod
+    def _spawn_exception_text(exc: BaseException | None) -> str:
+        return f'Error: {describe_exception(exc)}'
+
+    def _spawn_runtime_result(self, goal: str, *, error_text: str) -> SpawnChildResult:
+        normalized_error_text = str(error_text or 'Error: runtime failure').strip() or 'Error: runtime failure'
+        return SpawnChildResult(
+            goal=goal,
+            check_result=normalized_error_text,
+            node_output='',
+            node_output_summary='',
+            node_output_ref='',
+            failure_info=self._runtime_spawn_failure_info(normalized_error_text),
+        )
+
+    def _should_propagate_child_pipeline_cancellation(self, *, task_id: str, parent_node_id: str) -> bool:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
+        if bool(task.pause_requested) or bool(task.cancel_requested):
+            return True
+        if self._task_terminal_reason(task_id, task=task):
+            return True
+        parent = self._store.get_node(parent_node_id)
+        return bool(
+            self._node_terminal_reason(
+                parent,
+                default_failed='parent node failed',
+                default_success='parent node already completed',
+            )
         )
 
     def _spawn_spec_payload(self, spec: SpawnChildSpec | dict[str, Any] | Any) -> dict[str, Any] | None:
@@ -225,7 +279,7 @@ class NodeRunner:
                 raise TaskPausedError(task_id)
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
-            return self._mark_failed(task_id, node.node_id, reason=str(exc))
+            return self._mark_failed(task_id, node.node_id, reason=describe_exception(exc))
 
     async def _run_nested_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         executor = self.nested_node_executor
@@ -474,6 +528,22 @@ class NodeRunner:
         specs: list[SpawnChildSpec],
         call_id: str | None,
     ) -> list[SpawnChildResult]:
+        async with self._spawn_operation_lock(parent_node_id):
+            return await self._spawn_children_locked(
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                specs=specs,
+                call_id=call_id,
+            )
+
+    async def _spawn_children_locked(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        specs: list[SpawnChildSpec],
+        call_id: str | None,
+    ) -> list[SpawnChildResult]:
         task = self._store.get_task(task_id)
         parent = self._store.get_node(parent_node_id)
         if task is None or parent is None:
@@ -482,6 +552,13 @@ class NodeRunner:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = str(call_id or f'call:{len(specs)}')
+        await self._settle_superseded_spawn_operations(
+            task=task,
+            parent=parent,
+            exclude_cache_key=cache_key,
+            replacement_round_id=cache_key,
+        )
+        parent = self._store.get_node(parent_node_id) or parent
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
             return [SpawnChildResult.model_validate(item) for item in list(cached.get('results') or [])]
@@ -534,14 +611,52 @@ class NodeRunner:
 
         async def _run_spec(index: int, spec: SpawnChildSpec) -> SpawnChildResult:
             async with semaphore:
-                return await self._run_child_pipeline(
-                    task=task,
-                    parent=parent,
-                    spec=spec,
-                    cache_key=cache_key,
-                    cached_payload=cached_payload,
-                    index=index,
-                )
+                try:
+                    return await self._run_child_pipeline(
+                        task=task,
+                        parent=parent,
+                        spec=spec,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                    )
+                except TaskPausedError:
+                    raise
+                except asyncio.CancelledError as exc:
+                    if self._should_propagate_child_pipeline_cancellation(
+                        task_id=task.task_id,
+                        parent_node_id=parent.node_id,
+                    ):
+                        raise
+                    error_text = self._spawn_exception_text(exc)
+                    result = self._spawn_runtime_result(spec.goal, error_text=error_text)
+                    self._update_spawn_entry(
+                        task_id=task.task_id,
+                        parent_node_id=parent.node_id,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                        status='error',
+                        finished_at=_now(),
+                        check_status='failed',
+                        result=result.model_dump(mode='json', exclude_none=True),
+                    )
+                    return result
+                except Exception as exc:
+                    error_text = self._spawn_exception_text(exc)
+                    result = self._spawn_runtime_result(spec.goal, error_text=error_text)
+                    self._update_spawn_entry(
+                        task_id=task.task_id,
+                        parent_node_id=parent.node_id,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                        status='error',
+                        finished_at=_now(),
+                        check_status='failed',
+                        result=result.model_dump(mode='json', exclude_none=True),
+                    )
+                    return result
 
         results = await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
         cached_payload['results'] = [item.model_dump(mode='json', exclude_none=True) for item in results]
@@ -566,6 +681,301 @@ class NodeRunner:
         if limit is None:
             return max(1, item_count)
         return max(1, int(limit) if int(limit) > 0 else 1)
+
+    def _spawn_entry_node_ids(self, entry: dict[str, Any]) -> list[str]:
+        node_ids: list[str] = []
+        for field in ('child_node_id', 'acceptance_node_id'):
+            node_id = str(entry.get(field) or '').strip()
+            if node_id:
+                node_ids.append(node_id)
+        return node_ids
+
+    def _spawn_entry_is_active(self, entry: dict[str, Any]) -> bool:
+        status = str(entry.get('status') or '').strip().lower()
+        if status in {'queued', 'running'}:
+            return True
+        for node_id in self._spawn_entry_node_ids(entry):
+            node = self._store.get_node(node_id)
+            if node is None:
+                continue
+            if self._normalized_status(getattr(node, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
+                return True
+        return False
+
+    def _active_prior_spawn_operations(
+        self,
+        *,
+        parent: NodeRecord,
+        exclude_cache_key: str,
+    ) -> list[tuple[str, dict[str, Any], list[int]]]:
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return []
+        active_operations: list[tuple[str, dict[str, Any], list[int]]] = []
+        excluded = str(exclude_cache_key or '').strip()
+        for cache_key, payload in operations.items():
+            normalized_cache_key = str(cache_key or '').strip()
+            if normalized_cache_key == excluded or not isinstance(payload, dict):
+                continue
+            payload_copy = copy.deepcopy(payload)
+            active_indexes: list[int] = []
+            for index, entry in enumerate(list(payload_copy.get('entries') or [])):
+                if isinstance(entry, dict) and self._spawn_entry_is_active(entry):
+                    active_indexes.append(index)
+            if active_indexes:
+                active_operations.append((normalized_cache_key, payload_copy, active_indexes))
+        return active_operations
+
+    def _collect_descendant_node_ids(self, root_node_ids: list[str] | set[str]) -> set[str]:
+        pending = [str(node_id or '').strip() for node_id in list(root_node_ids or []) if str(node_id or '').strip()]
+        collected: set[str] = set()
+        while pending:
+            node_id = pending.pop()
+            if not node_id or node_id in collected:
+                continue
+            collected.add(node_id)
+            for child in list(self._store.list_children(node_id) or []):
+                child_id = str(child.node_id or '').strip()
+                if child_id and child_id not in collected:
+                    pending.append(child_id)
+        return collected
+
+    async def _cancel_spawn_subtrees(self, *, task_id: str, node_ids: set[str]) -> None:
+        targets = sorted(str(node_id or '').strip() for node_id in list(node_ids or []) if str(node_id or '').strip())
+        if not targets:
+            return
+        executor = self.cancel_node_subtree_executor
+        if not callable(executor):
+            return
+        try:
+            await executor(task_id, targets)
+        except TaskPausedError:
+            raise
+        except asyncio.CancelledError:
+            raise
+
+    async def _wait_for_terminal_nodes(self, *, node_ids: set[str], timeout_seconds: float = 2.0) -> set[str]:
+        pending = {
+            str(node_id or '').strip()
+            for node_id in list(node_ids or [])
+            if str(node_id or '').strip()
+            and self._normalized_status(getattr(self._store.get_node(str(node_id or '').strip()), 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}
+        }
+        if not pending:
+            return set()
+        deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout_seconds or 0.0))
+        while pending and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+            pending = {
+                node_id
+                for node_id in pending
+                if self._normalized_status(getattr(self._store.get_node(node_id), 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}
+            }
+        return pending
+
+    def _force_superseded_nodes_terminal(self, *, task_id: str, node_ids: set[str], reason_text: str) -> None:
+        terminal_result = NodeFinalResult(
+            status=STATUS_FAILED,
+            delivery_status='blocked',
+            summary=reason_text,
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=reason_text,
+        )
+        nodes: list[NodeRecord] = []
+        for node_id in list(node_ids or []):
+            node = self._store.get_node(str(node_id or '').strip())
+            if node is None:
+                continue
+            nodes.append(node)
+        nodes.sort(key=lambda item: (int(item.depth or 0), str(item.node_id or '')), reverse=True)
+        for node in nodes:
+            latest = self._store.get_node(node.node_id) or node
+            if self._normalized_status(getattr(latest, 'status', '')) == STATUS_SUCCESS:
+                continue
+            self._mark_finished(task_id, latest.node_id, terminal_result)
+
+    def _rebuild_spawn_entry_result(
+        self,
+        *,
+        task_id: str,
+        entry: dict[str, Any],
+        fallback_goal: str,
+        fallback_reason: str,
+        error_source: str = 'runtime',
+    ) -> tuple[SpawnChildResult, str, str, str | None]:
+        goal = str(entry.get('goal') or fallback_goal or '').strip()
+        requires_acceptance = bool(entry.get('requires_acceptance'))
+        child_node_id = str(entry.get('child_node_id') or '').strip()
+        acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
+        child = self._store.get_node(child_node_id) if child_node_id else None
+        acceptance = self._store.get_node(acceptance_node_id) if acceptance_node_id else None
+        child_summary = ''
+        child_ref = ''
+        if child is not None:
+            child_handoff = self._child_handoff_payload(
+                task_id=task_id,
+                node=child,
+                fallback_output='',
+            )
+            child_summary = str(child_handoff.get('summary') or '')
+            child_ref = str(child_handoff.get('output_ref') or '')
+
+        if requires_acceptance:
+            if acceptance is not None and self._normalized_status(getattr(acceptance, 'status', '')) == STATUS_SUCCESS:
+                check_result = str(
+                    acceptance.final_output
+                    or acceptance.failure_reason
+                    or (self._result_from_record(acceptance).summary if acceptance is not None else '')
+                    or SKIPPED_CHECK_RESULT
+                ).strip() or SKIPPED_CHECK_RESULT
+                return (
+                    SpawnChildResult(
+                        goal=goal,
+                        check_result=check_result,
+                        node_output=child_summary,
+                        node_output_summary=child_summary,
+                        node_output_ref=child_ref,
+                    ),
+                    'success',
+                    'passed',
+                    check_result,
+                )
+            if acceptance is not None:
+                check_result = str(
+                    acceptance.final_output
+                    or acceptance.failure_reason
+                    or (self._result_from_record(acceptance).summary if acceptance is not None else '')
+                    or fallback_reason
+                ).strip() or fallback_reason
+                return (
+                    SpawnChildResult(
+                        goal=goal,
+                        check_result=check_result,
+                        node_output=child_summary,
+                        node_output_summary=child_summary,
+                        node_output_ref=child_ref,
+                        failure_info=self._spawn_failure_info_from_node(
+                            task_id=task_id,
+                            node=acceptance,
+                            fallback_output=check_result,
+                            source=error_source,
+                        ),
+                    ),
+                    'error',
+                    'failed',
+                    check_result,
+                )
+            fallback_error = str(fallback_reason or self._spawn_exception_text(RuntimeError('acceptance node missing'))).strip()
+            result = self._spawn_runtime_result(goal, error_text=fallback_error)
+            return result, 'error', 'failed', fallback_error
+
+        if child is not None and self._normalized_status(getattr(child, 'status', '')) == STATUS_SUCCESS:
+            return (
+                SpawnChildResult(
+                    goal=goal,
+                    check_result=SKIPPED_CHECK_RESULT,
+                    node_output=child_summary,
+                    node_output_summary=child_summary,
+                    node_output_ref=child_ref,
+                ),
+                'success',
+                'skipped',
+                SKIPPED_CHECK_RESULT,
+            )
+        if child is not None:
+            return (
+                SpawnChildResult(
+                    goal=goal,
+                    check_result=SKIPPED_CHECK_RESULT,
+                    node_output=child_summary,
+                    node_output_summary=child_summary,
+                    node_output_ref=child_ref,
+                    failure_info=self._spawn_failure_info_from_node(
+                        task_id=task_id,
+                        node=child,
+                        fallback_output=fallback_reason,
+                        source=error_source,
+                    ),
+                ),
+                'error',
+                'skipped',
+                SKIPPED_CHECK_RESULT,
+            )
+        fallback_error = str(fallback_reason or self._spawn_exception_text(RuntimeError('child node missing'))).strip()
+        result = self._spawn_runtime_result(goal, error_text=fallback_error)
+        return result, 'error', 'failed', fallback_error
+
+    async def _settle_superseded_spawn_operations(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        exclude_cache_key: str,
+        replacement_round_id: str,
+    ) -> None:
+        active_operations = self._active_prior_spawn_operations(parent=parent, exclude_cache_key=exclude_cache_key)
+        if not active_operations:
+            return
+        reason_text = self._spawn_round_superseded_reason(replacement_round_id)
+        active_root_node_ids: set[str] = set()
+        preterminal_node_ids: set[str] = set()
+        for _cache_key, payload, active_indexes in active_operations:
+            for index in active_indexes:
+                entries = list(payload.get('entries') or [])
+                if index >= len(entries) or not isinstance(entries[index], dict):
+                    continue
+                entry = dict(entries[index] or {})
+                for node_id in self._spawn_entry_node_ids(entry):
+                    active_root_node_ids.add(node_id)
+        subtree_node_ids = self._collect_descendant_node_ids(active_root_node_ids)
+        for node_id in list(subtree_node_ids):
+            node = self._store.get_node(node_id)
+            if node is None:
+                continue
+            if self._normalized_status(getattr(node, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
+                preterminal_node_ids.add(node_id)
+
+        await self._cancel_spawn_subtrees(task_id=task.task_id, node_ids=subtree_node_ids)
+        await self._wait_for_terminal_nodes(node_ids=subtree_node_ids)
+        self._force_superseded_nodes_terminal(
+            task_id=task.task_id,
+            node_ids=preterminal_node_ids,
+            reason_text=reason_text,
+        )
+
+        for cache_key, payload, active_indexes in active_operations:
+            specs = list(payload.get('specs') or [])
+            for index in active_indexes:
+                spec_payload = specs[index] if index < len(specs) and isinstance(specs[index], dict) else {}
+                result, status, check_status, child_check_result = self._rebuild_spawn_entry_result(
+                    task_id=task.task_id,
+                    entry=dict((list(payload.get('entries') or []) or [])[index] or {}),
+                    fallback_goal=str(spec_payload.get('goal') or ''),
+                    fallback_reason=self._spawn_exception_text(RuntimeError(reason_text)),
+                    error_source='runtime',
+                )
+                child_node_id = str(((list(payload.get('entries') or []) or [])[index] or {}).get('child_node_id') or '').strip()
+                if child_node_id and child_check_result is not None:
+                    self._log_service.update_node_check_result(task.task_id, child_node_id, child_check_result)
+                self._update_spawn_entry(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    cached_payload=payload,
+                    index=index,
+                    status=status,
+                    finished_at=_now(),
+                    check_status=check_status,
+                    result=result.model_dump(mode='json', exclude_none=True),
+                )
+            payload['completed'] = not any(
+                self._spawn_entry_is_active(item)
+                for item in list(payload.get('entries') or [])
+                if isinstance(item, dict)
+            )
+            self._save_spawn_cache(task.task_id, parent.node_id, cache_key, payload)
 
     async def _run_child_pipeline(
         self,
@@ -767,17 +1177,29 @@ class NodeRunner:
             return result
         except TaskPausedError:
             raise
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            result = SpawnChildResult(
-                goal=spec.goal,
-                check_result=f'Error: {exc}',
-                node_output='',
-                node_output_summary='',
-                node_output_ref='',
-                failure_info=self._runtime_spawn_failure_info(f'Error: {exc}'),
+        except asyncio.CancelledError as exc:
+            if self._should_propagate_child_pipeline_cancellation(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+            ):
+                raise
+            error_text = self._spawn_exception_text(exc)
+            result = self._spawn_runtime_result(spec.goal, error_text=error_text)
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                status='error',
+                finished_at=_now(),
+                check_status='failed',
+                result=result.model_dump(mode='json', exclude_none=True),
             )
+            return result
+        except Exception as exc:
+            error_text = self._spawn_exception_text(exc)
+            result = self._spawn_runtime_result(spec.goal, error_text=error_text)
             self._update_spawn_entry(
                 task_id=task.task_id,
                 parent_node_id=parent.node_id,

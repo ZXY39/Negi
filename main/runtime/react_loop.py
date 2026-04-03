@@ -15,7 +15,7 @@ from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import ToolCallRequest
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
-from main.errors import TaskPausedError
+from main.errors import TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_stable_prompt_cache_key
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
@@ -1091,7 +1091,7 @@ class ReActToolLoop:
                     raise
                 except Exception as exc:  # pragma: no cover - defensive fallback
                     raw_result = None
-                    tool_content = f'Error executing {call.name}: {exc}'
+                    tool_content = f'Error executing {call.name}: {describe_exception(exc)}'
                 finally:
                     if controller is not None:
                         controller.release_tool_slot(slot_lease)

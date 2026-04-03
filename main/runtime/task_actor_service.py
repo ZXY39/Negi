@@ -4,7 +4,7 @@ import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from main.errors import TaskPausedError
+from main.errors import TaskPausedError, describe_exception
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 
@@ -157,6 +157,24 @@ class TaskNodeDispatcher:
             return await current_lease.wait_for(entry.future)
         return await entry.future
 
+    async def cancel_nodes(self, node_ids: list[str]) -> None:
+        entries: list[_DispatchEntry] = []
+        seen: set[str] = set()
+        for raw_node_id in list(node_ids or []):
+            node_id = str(raw_node_id or '').strip()
+            if not node_id or node_id in seen:
+                continue
+            seen.add(node_id)
+            entry = self._entries.get(node_id)
+            if entry is None:
+                continue
+            entries.append(entry)
+            if entry.task is not None and not entry.task.done():
+                entry.task.cancel()
+        waits = [entry.future for entry in entries if not entry.future.done()]
+        if waits:
+            await asyncio.gather(*[asyncio.shield(future) for future in waits], return_exceptions=True)
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -305,6 +323,7 @@ class TaskActorService:
             ),
         }
         self._node_runner.nested_node_executor = self._execute_nested_node
+        self._node_runner.cancel_node_subtree_executor = self._cancel_node_subtree
 
     def configure_node_dispatch_limits(self, *, execution: int, inspection: int) -> None:
         self._node_dispatch_limits = {
@@ -363,7 +382,7 @@ class TaskActorService:
                 blocking_reason='canceled',
             )
         except Exception as exc:
-            text = str(exc or 'task failed').strip() or 'task failed'
+            text = describe_exception(exc)
             result = NodeFinalResult(
                 status='failed',
                 delivery_status='blocked',
@@ -416,6 +435,12 @@ class TaskActorService:
         if dispatcher is not None:
             return await dispatcher.execute_node(task_id, node_id)
         return await self._node_runner.run_node(task_id, node_id)
+
+    async def _cancel_node_subtree(self, task_id: str, node_ids: list[str]) -> None:
+        dispatcher = self._dispatchers.get(str(task_id or '').strip())
+        if dispatcher is None:
+            return
+        await dispatcher.cancel_nodes(node_ids)
 
     async def _execute_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         return await self._execute_nested_node(task_id, node_id)

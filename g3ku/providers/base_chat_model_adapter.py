@@ -1,8 +1,9 @@
-"""Narrow LangChain BaseChatModel adapter for the CEO LangGraph frontdoor."""
+"""Minimal BaseChatModel adapter for g3ku chat backends."""
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from typing import Any, Sequence
 
@@ -29,11 +30,12 @@ def _normalize_tool_choice(value: Any) -> str | dict[str, Any] | None:
     return None
 
 
-class CeoChatModelAdapter(BaseChatModel):
-    """Adapter from ConfigChatBackend-compatible interface to BaseChatModel."""
+class G3kuChatModelAdapter(BaseChatModel):
+    """Adapt g3ku chat backends to LangChain BaseChatModel."""
 
     chat_backend: Any
-    model_refs: list[str]
+    default_model: str | None = None
+    model_refs: list[str] | None = None
     default_temperature: float | None = None
     default_max_tokens: int | None = None
     default_reasoning_effort: str | None = None
@@ -42,7 +44,7 @@ class CeoChatModelAdapter(BaseChatModel):
 
     @property
     def _llm_type(self) -> str:
-        return "g3ku-ceo-frontdoor-model"
+        return "g3ku-chat-model-adapter"
 
     def bind_tools(
         self,
@@ -66,8 +68,22 @@ class CeoChatModelAdapter(BaseChatModel):
         except RuntimeError:
             return asyncio.run(self._agenerate(messages, **kwargs))
         raise RuntimeError(
-            "CeoChatModelAdapter._generate cannot run inside an active event loop; use async APIs."
+            "G3kuChatModelAdapter._generate cannot run inside an active event loop; use async APIs."
         )
+
+    def _resolve_model_refs(self, kwargs: dict[str, Any]) -> list[str]:
+        explicit_model = str(kwargs.get("model") or "").strip()
+        if explicit_model:
+            return [explicit_model]
+        refs = [
+            str(item or "").strip()
+            for item in list(self.model_refs or [])
+            if str(item or "").strip()
+        ]
+        if refs:
+            return refs
+        default_model = str(self.default_model or "").strip()
+        return [default_model] if default_model else []
 
     async def _agenerate(
         self,
@@ -88,29 +104,41 @@ class CeoChatModelAdapter(BaseChatModel):
         raw_temperature = kwargs.get("temperature", self.default_temperature)
         raw_max_tokens = kwargs.get("max_tokens", self.default_max_tokens)
         reasoning_effort = kwargs.get("reasoning_effort", self.default_reasoning_effort)
-        response = await self.chat_backend.chat(
-            messages=openai_messages,
-            tools=openai_tools,
-            model_refs=list(self.model_refs or []),
-            tool_choice=normalized_tool_choice,
-            max_tokens=(int(raw_max_tokens) if raw_max_tokens is not None else None),
-            temperature=(float(raw_temperature) if raw_temperature is not None else None),
-            reasoning_effort=(str(reasoning_effort) if reasoning_effort is not None else None),
-            parallel_tool_calls=(
+        resolved_model_refs = self._resolve_model_refs(kwargs)
+        chat = getattr(self.chat_backend, "chat")
+        signature = inspect.signature(chat)
+
+        chat_kwargs: dict[str, Any] = {
+            "messages": openai_messages,
+            "tools": openai_tools,
+            "tool_choice": normalized_tool_choice,
+            "parallel_tool_calls": (
                 bool(parallel_tool_calls) if isinstance(parallel_tool_calls, bool) else None
             ),
-            prompt_cache_key=(str(prompt_cache_key).strip() or None) if prompt_cache_key is not None else None,
-        )
+            "prompt_cache_key": (str(prompt_cache_key).strip() or None) if prompt_cache_key is not None else None,
+        }
+        if "model_refs" in signature.parameters:
+            chat_kwargs["model_refs"] = resolved_model_refs
+        elif "model" in signature.parameters:
+            chat_kwargs["model"] = str(resolved_model_refs[0] if resolved_model_refs else "").strip() or None
+        if raw_temperature is not None:
+            chat_kwargs["temperature"] = float(raw_temperature)
+        if raw_max_tokens is not None:
+            chat_kwargs["max_tokens"] = int(raw_max_tokens)
+        if reasoning_effort is not None:
+            chat_kwargs["reasoning_effort"] = str(reasoning_effort)
+
+        response = await chat(**chat_kwargs)
 
         additional_kwargs: dict[str, Any] = {}
-        if response.reasoning_content:
+        if getattr(response, "reasoning_content", None):
             additional_kwargs["reasoning_content"] = response.reasoning_content
-        if response.thinking_blocks:
+        if getattr(response, "thinking_blocks", None):
             additional_kwargs["thinking_blocks"] = response.thinking_blocks
 
         tool_calls_payload: list[dict[str, Any]] = []
-        for tc in list(response.tool_calls or []):
-            args: Any = tc.arguments
+        for tc in list(getattr(response, "tool_calls", None) or []):
+            args: Any = getattr(tc, "arguments", {})
             if isinstance(args, str):
                 try:
                     parsed = json.loads(args)
@@ -121,24 +149,27 @@ class CeoChatModelAdapter(BaseChatModel):
                 args = {}
             tool_calls_payload.append(
                 {
-                    "name": str(tc.name or ""),
+                    "name": str(getattr(tc, "name", "") or ""),
                     "args": args,
-                    "id": tc.id or None,
+                    "id": getattr(tc, "id", None),
                     "type": "tool_call",
                 }
             )
 
         ai_message = AIMessage(
-            content=response.content or "",
+            content=getattr(response, "content", None) or "",
             tool_calls=tool_calls_payload,
             additional_kwargs=additional_kwargs,
             response_metadata={
-                "finish_reason": response.finish_reason,
-                "usage": response.usage,
-                "error_text": response.error_text,
+                "finish_reason": getattr(response, "finish_reason", "stop"),
+                "usage": getattr(response, "usage", {}),
+                "error_text": getattr(response, "error_text", None),
             },
         )
         return ChatResult(
             generations=[ChatGeneration(message=ai_message)],
-            llm_output={"usage": response.usage},
+            llm_output={"usage": getattr(response, "usage", {})},
         )
+
+
+__all__ = ["G3kuChatModelAdapter"]

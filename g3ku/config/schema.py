@@ -508,7 +508,6 @@ class AgentsConfig(Base):
     role_concurrency: RoleConcurrencyConfig = Field(default_factory=RoleConcurrencyConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     node_parallelism: NodeParallelismConfig = Field(default_factory=NodeParallelismConfig)
-    ceo_frontdoor_implementation: Literal["legacy", "langgraph"] = "langgraph"
 
 
 class ProviderConfig(Base):
@@ -873,12 +872,6 @@ class Config(BaseSettings):
     def get_role_model_keys(self, role: str) -> list[str]:
         normalized = normalize_role_scope(role)
         return list(getattr(self.models.roles, normalized))
-
-    def get_ceo_frontdoor_implementation(self) -> str:
-        value = str(getattr(self.agents, "ceo_frontdoor_implementation", "langgraph") or "langgraph").strip().lower()
-        if value not in {"legacy", "langgraph"}:
-            return "langgraph"
-        return value
 
     def get_role_max_iterations(self, role: str) -> int | None:
         normalized = normalize_role_scope(role)

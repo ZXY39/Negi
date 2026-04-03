@@ -21,8 +21,7 @@
     },
     "multiAgent": {
       "orchestratorModelKey": null
-    },
-    "ceoFrontdoorImplementation": "langgraph"
+    }
   },
   "models": {
     "catalog": [

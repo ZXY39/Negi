@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from types import SimpleNamespace
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import AIMessage, convert_to_messages
+from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.graph import END, START, StateGraph
+from pydantic import ConfigDict, Field, create_model
+from typing_extensions import TypedDict
 
+from g3ku.agent.tools.base import Tool
+from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
-from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.project_environment import current_project_environment
 from main.runtime.chat_backend import build_session_prompt_cache_key
 from main.runtime.tool_call_repair import (
@@ -18,14 +23,126 @@ from main.runtime.tool_call_repair import (
     recover_tool_calls_from_json_payload,
 )
 
-from .graph import build_langgraph_ceo_graph
-from .model import CeoChatModelAdapter
-from .state import CeoGraphState
-from .tools import build_visible_tool_bundle
+from ._ceo_support import CeoFrontDoorSupport
 
 
-class LangGraphCeoRunner(CeoFrontDoorRunner):
-    """LangGraph-based CEO frontdoor runner with parity-focused behavior."""
+class CeoGraphState(TypedDict, total=False):
+    user_input: Any
+    session: Any
+    on_progress: Any
+    query_text: str
+    messages: list[dict[str, Any]]
+    tool_names: list[str]
+    used_tools: list[str]
+    route_kind: str
+    repair_overlay_text: str | None
+    xml_repair_attempt_count: int
+    xml_repair_excerpt: str
+    xml_repair_tool_names: list[str]
+    xml_repair_last_issue: str
+    empty_response_retry_count: int
+    heartbeat_internal: bool
+    cron_internal: bool
+    runtime_context: dict[str, Any]
+    final_output: str
+    error_message: str
+    model_refs: list[str]
+    prompt_cache_key: str
+    parallel_enabled: bool
+    max_parallel_tool_calls: int | None
+    max_iterations: int | None
+    iteration: int
+    visible_tools: dict[str, Any]
+    langchain_tools: list[Any]
+    langchain_tool_map: dict[str, Any]
+    response_message: Any
+    response_content: Any
+    synthetic_tool_calls_used: bool
+    analysis_text: str
+    tool_call_payloads: list[dict[str, Any]]
+    next_step: str
+
+
+ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
+
+
+@dataclass(slots=True)
+class VisibleToolBundle:
+    native_tools: dict[str, Tool]
+    langchain_tools: list[BaseTool]
+    langchain_tool_map: dict[str, BaseTool]
+
+
+def _build_args_schema(tool: Tool):
+    schema = tool.parameters or {}
+    props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+
+    fields: dict[str, tuple[Any, Any]] = {}
+    for key, prop in props.items():
+        description = prop.get("description") if isinstance(prop, dict) else None
+        default = ... if key in required else None
+        if description:
+            fields[key] = (Any, Field(default=default, description=description))
+        else:
+            fields[key] = (Any, default)
+
+    model_name = "".join(part.capitalize() for part in tool.name.split("_")) + "Args"
+    return create_model(model_name, __config__=ConfigDict(extra="allow"), **fields)
+
+
+def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
+    async def _invoke(**kwargs: Any) -> Any:
+        return await executor(tool.name, kwargs)
+
+    return StructuredTool.from_function(
+        coroutine=_invoke,
+        name=tool.name,
+        description=tool.description,
+        args_schema=_build_args_schema(tool),
+        infer_schema=False,
+    )
+
+
+def _build_visible_tool_bundle(*, tools: dict[str, Tool], executor: ToolExecutor) -> VisibleToolBundle:
+    native_tools = dict(tools or {})
+    langchain_tool_map = {
+        name: _build_langchain_tool(tool, executor)
+        for name, tool in native_tools.items()
+    }
+    return VisibleToolBundle(
+        native_tools=native_tools,
+        langchain_tools=list(langchain_tool_map.values()),
+        langchain_tool_map=dict(langchain_tool_map),
+    )
+
+
+def _build_langgraph_ceo_graph(runner):
+    graph = StateGraph(CeoGraphState)
+    graph.add_node("prepare_turn", runner._graph_prepare_turn)
+    graph.add_node("call_model", runner._graph_call_model)
+    graph.add_node("normalize_model_output", runner._graph_normalize_model_output)
+    graph.add_node("execute_tools", runner._graph_execute_tools)
+    graph.add_node("finalize_turn", runner._graph_finalize_turn)
+    graph.add_edge(START, "prepare_turn")
+    graph.add_edge("prepare_turn", "call_model")
+    graph.add_edge("call_model", "normalize_model_output")
+    graph.add_conditional_edges(
+        "normalize_model_output",
+        runner._graph_next_step,
+        {
+            "call_model": "call_model",
+            "execute_tools": "execute_tools",
+            "finalize": "finalize_turn",
+        },
+    )
+    graph.add_edge("execute_tools", "call_model")
+    graph.add_edge("finalize_turn", END)
+    return graph.compile(name="ceo-frontdoor")
+
+
+class CeoFrontDoorRunner(CeoFrontDoorSupport):
+    """Canonical LangGraph-based CEO frontdoor runner."""
 
     def __init__(self, *, loop) -> None:
         super().__init__(loop=loop)
@@ -33,21 +150,25 @@ class LangGraphCeoRunner(CeoFrontDoorRunner):
 
     def _get_compiled_graph(self):
         if self._compiled_graph is None:
-            self._compiled_graph = build_langgraph_ceo_graph(self)
+            self._compiled_graph = _build_langgraph_ceo_graph(self)
         return self._compiled_graph
 
     @staticmethod
     def _model_response_view(message: AIMessage) -> Any:
         response_metadata = dict(getattr(message, "response_metadata", {}) or {})
         additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
-        return SimpleNamespace(
-            content=getattr(message, "content", ""),
-            tool_calls=list(getattr(message, "tool_calls", None) or []),
-            finish_reason=str(response_metadata.get("finish_reason", "stop") or "stop"),
-            error_text=str(response_metadata.get("error_text", "") or ""),
-            reasoning_content=additional_kwargs.get("reasoning_content"),
-            thinking_blocks=additional_kwargs.get("thinking_blocks"),
-        )
+        return type(
+            "ModelResponseView",
+            (),
+            {
+                "content": getattr(message, "content", ""),
+                "tool_calls": list(getattr(message, "tool_calls", None) or []),
+                "finish_reason": str(response_metadata.get("finish_reason", "stop") or "stop"),
+                "error_text": str(response_metadata.get("error_text", "") or ""),
+                "reasoning_content": additional_kwargs.get("reasoning_content"),
+                "thinking_blocks": additional_kwargs.get("thinking_blocks"),
+            },
+        )()
 
     @staticmethod
     def _tool_call_payloads_from_calls(calls: list[Any]) -> list[dict[str, Any]]:
@@ -80,10 +201,7 @@ class LangGraphCeoRunner(CeoFrontDoorRunner):
                 "type": "function",
                 "function": {
                     "name": str(item.get("name") or "").strip(),
-                    "arguments": json.dumps(
-                        dict(item.get("arguments") or {}),
-                        ensure_ascii=False,
-                    ),
+                    "arguments": json.dumps(dict(item.get("arguments") or {}), ensure_ascii=False),
                 },
             }
             for item in list(payloads or [])
@@ -98,7 +216,7 @@ class LangGraphCeoRunner(CeoFrontDoorRunner):
         parallel_tool_calls: bool | None,
         prompt_cache_key: str,
     ) -> AIMessage:
-        chat_model = CeoChatModelAdapter(
+        chat_model = G3kuChatModelAdapter(
             chat_backend=self._resolve_chat_backend(),
             model_refs=list(model_refs or []),
         )
@@ -228,7 +346,7 @@ class LangGraphCeoRunner(CeoFrontDoorRunner):
                 "elapsed_seconds": elapsed_seconds,
             }
 
-        tool_bundle = build_visible_tool_bundle(
+        tool_bundle = _build_visible_tool_bundle(
             tools=registered_tools,
             executor=_tool_executor,
         )
@@ -399,9 +517,7 @@ class LangGraphCeoRunner(CeoFrontDoorRunner):
 
         if xml_repair_attempt_count > 0:
             xml_repair_attempt_count += 1
-            xml_repair_last_issue = (
-                "reply still did not contain valid structured tool_calls or a valid JSON repair payload"
-            )
+            xml_repair_last_issue = "reply still did not contain valid structured tool_calls or a valid JSON repair payload"
             if xml_repair_attempt_count >= XML_REPAIR_ATTEMPT_LIMIT:
                 return {
                     "final_output": self._xml_repair_explanation(
@@ -568,3 +684,6 @@ class LangGraphCeoRunner(CeoFrontDoorRunner):
         output = str(result.get("final_output") or "").strip()
         setattr(session, "_last_route_kind", str(result.get("route_kind") or "direct_reply"))
         return output
+
+
+__all__ = ["CeoFrontDoorRunner"]

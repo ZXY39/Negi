@@ -115,19 +115,7 @@ class RuntimeBootstrapBridge:
                 logger.warning(
                     'agents.multiAgent settings are deprecated and ignored; top-level split mode is disabled. Use orggraph_create_project for complex work.'
                 )
-        config = getattr(self._loop, 'app_config', None)
-        implementation = (
-            config.get_ceo_frontdoor_implementation()
-            if config is not None and hasattr(config, 'get_ceo_frontdoor_implementation')
-            else 'langgraph'
-        )
-        if implementation == 'legacy':
-            runner_cls = CeoFrontDoorRunner
-        else:
-            from g3ku.runtime.langgraph_ceo import LangGraphCeoRunner
-
-            runner_cls = LangGraphCeoRunner
-        self._loop.multi_agent_runner = runner_cls(loop=self._loop)
+        self._loop.multi_agent_runner = CeoFrontDoorRunner(loop=self._loop)
 
     def register_default_tools(self) -> None:
         self.init_resource_runtime()
