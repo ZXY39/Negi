@@ -10,6 +10,7 @@ from typing import Any
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
+from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
@@ -105,6 +106,21 @@ class CeoFrontDoorRunner:
                     parts.append(text.strip())
             return "\n".join(parts).strip()
         return str(value or "")
+
+    @classmethod
+    def _is_empty_model_response(cls, response: Any) -> bool:
+        if list(getattr(response, "tool_calls", None) or []):
+            return False
+        if cls._content_text(getattr(response, "content", "")).strip():
+            return False
+        if str(getattr(response, "error_text", None) or "").strip():
+            return False
+        if str(getattr(response, "reasoning_content", None) or "").strip():
+            return False
+        thinking_blocks = getattr(response, "thinking_blocks", None)
+        if isinstance(thinking_blocks, list) and thinking_blocks:
+            return False
+        return True
 
     @staticmethod
     def _model_content(value: Any) -> Any:
@@ -477,7 +493,6 @@ class CeoFrontDoorRunner:
         message_history = list(messages or [])
         route_kind = "direct_reply"
         used_tools: list[str] = []
-        empty_response_retries = 0
         repair_overlay_text: str | None = None
         xml_repair_attempt_count = 0
         xml_repair_excerpt = ""
@@ -492,13 +507,28 @@ class CeoFrontDoorRunner:
             request_messages = self._apply_turn_overlay(message_history, overlay_text=repair_overlay_text)
             repair_overlay_text = None
             tool_schemas = [tool.to_schema() for tool in tools.values()]
-            response = await chat_backend.chat(
-                messages=request_messages,
-                tools=tool_schemas or None,
-                model_refs=model_refs,
-                parallel_tool_calls=(parallel_enabled if tool_schemas else None),
-                prompt_cache_key=prompt_cache_key,
-            )
+            provider_retry_count = 0
+            empty_response_retry_count = 0
+            while True:
+                try:
+                    response = await chat_backend.chat(
+                        messages=request_messages,
+                        tools=tool_schemas or None,
+                        model_refs=model_refs,
+                        parallel_tool_calls=(parallel_enabled if tool_schemas else None),
+                        prompt_cache_key=prompt_cache_key,
+                    )
+                except Exception as exc:
+                    if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
+                        raise
+                    provider_retry_count += 1
+                    await asyncio.sleep(float(min(10, max(1, provider_retry_count))))
+                    continue
+                if self._is_empty_model_response(response):
+                    empty_response_retry_count += 1
+                    await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
+                    continue
+                break
             visible_tool_names = {
                 str(name or "").strip()
                 for name in tools.keys()
@@ -663,17 +693,6 @@ class CeoFrontDoorRunner:
 
             if str(getattr(response, "finish_reason", "") or "").strip().lower() == "error":
                 raise RuntimeError(str(getattr(response, "error_text", None) or response.content or "model response failed"))
-            if tool_schemas and empty_response_retries < self._EMPTY_RESPONSE_RETRY_LIMIT:
-                empty_response_retries += 1
-                message_history.append(
-                    {
-                        "role": "user",
-                        "content": self._empty_response_retry_message(
-                            visible_tool_names=list(tools.keys()),
-                        ),
-                    }
-                )
-                continue
             return CeoTurnResult(
                 output=self._empty_response_explanation(used_tools=used_tools),
                 route_kind=self._route_kind_for_turn(used_tools=used_tools, default=route_kind),

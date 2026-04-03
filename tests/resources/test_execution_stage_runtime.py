@@ -1159,6 +1159,63 @@ async def test_old_text_json_no_longer_finishes_node(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_missing_initial_stage_can_auto_recover_after_protocol_repair(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if self.turn < 3:
+                return LLMResponse(
+                    content='still prose, no tool call yet',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        status='success',
+                        delivery_status='final',
+                        summary='done',
+                        answer='done',
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason='',
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    backend = _Backend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+    try:
+        record = await service.create_task('auto stage recover', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+        assert backend.turn == 3
+        assert task.status == 'success'
+        assert root.status == 'success'
+        assert root.final_output == 'done'
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_invalid_submit_final_result_fails_after_five_attempts(tmp_path: Path):
     class _Backend:
         def __init__(self) -> None:

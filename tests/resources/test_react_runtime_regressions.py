@@ -1198,9 +1198,23 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
         def __init__(self) -> None:
             self._responses = [
                 LLMResponse(
-                    content='not json yet',
-                    tool_calls=[],
-                    finish_reason='stop',
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:invalid-final',
+                            name='submit_final_result',
+                            arguments={
+                                'status': 'failed',
+                                'delivery_status': 'final',
+                                'summary': 'done',
+                                'answer': '',
+                                'evidence': [],
+                                'remaining_work': [],
+                                'blocking_reason': '',
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
                     usage={'input_tokens': 8, 'output_tokens': 3},
                 ),
                 LLMResponse(
@@ -1249,8 +1263,161 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
     assert second_request[0]['role'] == 'system'
     assert any(item.get('role') == 'user' for item in second_request)
     merged_user_content = '\n'.join(str(item.get('content') or '') for item in second_request if item.get('role') == 'user')
-    assert 'If you are ending the node now' in merged_user_content
+    assert 'If you are ending the node now' in merged_user_content or 'Your last `submit_final_result` payload violated result contract' in merged_user_content
     assert 'submit_final_result' in merged_user_content
+
+
+@pytest.mark.asyncio
+async def test_react_loop_retries_empty_response_until_valid_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[dict[str, object]] = []
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(float(delay))
+
+    monkeypatch.setattr('main.runtime.react_loop.asyncio.sleep', _fake_sleep)
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            requests.append(dict(kwargs))
+            self.turn += 1
+            if self.turn < 3:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-empty-retry'),
+        node=SimpleNamespace(node_id='node-empty-retry', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-empty-retry","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-empty-retry', 'node_id': 'node-empty-retry'},
+        max_iterations=2,
+    )
+
+    assert result.status == 'success'
+    assert result.answer == 'done'
+    assert len(requests) == 3
+    assert sleep_calls == [1.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_react_loop_auto_wraps_plain_text_final_result() -> None:
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return LLMResponse(
+                content='Final structured summary line 1\n- detail a\n- detail b',
+                tool_calls=[],
+                finish_reason='stop',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-plain-final'),
+        node=SimpleNamespace(node_id='node-plain-final', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-plain-final","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-plain-final', 'node_id': 'node-plain-final'},
+        max_iterations=2,
+    )
+
+    assert result.status == 'success'
+    assert result.delivery_status == 'final'
+    assert result.answer == 'Final structured summary line 1\n- detail a\n- detail b'
+    assert result.summary == 'auto-wrapped plain-text final result'
+    assert result.evidence == []
+
+
+@pytest.mark.asyncio
+async def test_react_loop_auto_wraps_plain_text_final_result_with_tool_evidence() -> None:
+    executed: list[int] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:count',
+                            name='count_tool',
+                            arguments={'count': 2},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
+            return LLMResponse(
+                content='Final answer after tool usage',
+                tool_calls=[],
+                finish_reason='stop',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-plain-final-with-tools'),
+        node=SimpleNamespace(node_id='node-plain-final-with-tools', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-plain-final-with-tools","goal":"demo"}'},
+        ],
+        tools={
+            'count_tool': _CountTool(executed),
+            'submit_final_result': _submit_final_result_tool(),
+        },
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-plain-final-with-tools', 'node_id': 'node-plain-final-with-tools'},
+        max_iterations=3,
+    )
+
+    assert executed == [2]
+    assert result.status == 'success'
+    assert result.answer == 'Final answer after tool usage'
+    assert result.evidence
+    assert any('count_tool' in str(item.note or '') for item in result.evidence)
 
 
 @pytest.mark.asyncio
@@ -1300,3 +1467,63 @@ async def test_react_loop_recovers_raw_final_result_json_after_protocol_repair()
         'type': 'function',
         'function': {'name': 'submit_final_result'},
     }
+
+
+@pytest.mark.asyncio
+async def test_react_loop_retries_provider_chain_exhaustion_until_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[dict[str, object]] = []
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(float(delay))
+
+    monkeypatch.setattr('main.runtime.react_loop.asyncio.sleep', _fake_sleep)
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            requests.append(dict(kwargs))
+            self.turn += 1
+            if self.turn < 3:
+                raise RuntimeError('Model provider call failed after exhausting the configured fallback chain.')
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-provider-retry'),
+        node=SimpleNamespace(node_id='node-provider-retry', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-provider-retry","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-provider-retry', 'node_id': 'node-provider-retry'},
+        max_iterations=3,
+    )
+
+    assert result.status == 'success'
+    assert result.answer == 'done'
+    assert len(requests) == 3
+    assert sleep_calls == [1.0, 2.0]

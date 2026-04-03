@@ -430,14 +430,22 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
 
 
 @pytest.mark.asyncio
-async def test_ceo_frontdoor_runner_retries_empty_turn_without_stage(monkeypatch, tmp_path) -> None:
+async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
+
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(float(delay))
+
+    monkeypatch.setattr('g3ku.runtime.frontdoor.ceo_runner.asyncio.sleep', _fake_sleep)
 
     backend = _BackendRecorder(
         [
             LLMResponse(content="", finish_reason="stop"),
             LLMResponse(content="", finish_reason="stop"),
+            LLMResponse(content="done", finish_reason="stop"),
         ]
     )
     loop = SimpleNamespace(
@@ -478,11 +486,6 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_without_stage(monkeypatch
 
     output = await runner.run_turn(user_input=SimpleNamespace(content="try again"), session=session)
 
-    assert "without visible assistant text" in output.lower()
-    assert len(backend.calls) == 2
-    retry_messages = list(backend.calls[1].get("messages") or [])
-    assert any(
-        str(item.get("role") or "") == "user"
-        and "previous model turn was empty" in str(item.get("content") or "")
-        for item in retry_messages
-    )
+    assert output == "done"
+    assert len(backend.calls) == 3
+    assert sleep_calls == [1.0, 2.0]

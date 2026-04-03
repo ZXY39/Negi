@@ -18,6 +18,7 @@ from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with
 from main.errors import TaskPausedError
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_stable_prompt_cache_key
+from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from main.runtime.stage_budget import (
     FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
@@ -194,19 +195,63 @@ class ReActToolLoop:
                 tool_schemas=tool_schemas,
                 model_refs=current_model_refs,
             )
-            response = await self._chat_with_optional_extensions(
-                messages=request_messages,
-                tools=tool_schemas or None,
-                model_refs=current_model_refs,
-                tool_choice=self._repair_tool_choice(
-                    visible_tools=visible_tools,
-                    stage_gate=stage_gate,
-                    invalid_final_submission_count=invalid_final_submission_count,
-                    invalid_stage_submission_count=invalid_stage_submission_count,
-                ),
-                parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
-                prompt_cache_key=turn_prompt_cache_key,
-            )
+            provider_retry_count = 0
+            empty_response_retry_count = 0
+            while True:
+                self._check_pause_or_cancel(task.task_id)
+                try:
+                    response = await self._chat_with_optional_extensions(
+                        messages=request_messages,
+                        tools=tool_schemas or None,
+                        model_refs=current_model_refs,
+                        tool_choice=self._repair_tool_choice(
+                            visible_tools=visible_tools,
+                            stage_gate=stage_gate,
+                            invalid_final_submission_count=invalid_final_submission_count,
+                            invalid_stage_submission_count=invalid_stage_submission_count,
+                        ),
+                        parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
+                        prompt_cache_key=turn_prompt_cache_key,
+                    )
+                except Exception as exc:
+                    if not self._is_provider_chain_exhausted_error(exc):
+                        raise
+                    provider_retry_count += 1
+                    delay_seconds = self._provider_retry_delay_seconds(provider_retry_count)
+                    self._log_service.update_frame(
+                        task.task_id,
+                        node.node_id,
+                        lambda frame: {
+                            **frame,
+                            'last_error': (
+                                f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
+                                f'Retrying automatically in {delay_seconds:.1f}s '
+                                f'(attempt {provider_retry_count}).'
+                            ),
+                        },
+                        publish_snapshot=True,
+                    )
+                    await asyncio.sleep(delay_seconds)
+                    continue
+                if self._is_empty_model_response(response):
+                    empty_response_retry_count += 1
+                    delay_seconds = self._empty_response_retry_delay_seconds(empty_response_retry_count)
+                    self._log_service.update_frame(
+                        task.task_id,
+                        node.node_id,
+                        lambda frame: {
+                            **frame,
+                            'last_error': (
+                                'Model returned an empty response with no text and no tool calls. '
+                                f'Retrying automatically in {delay_seconds:.1f}s '
+                                f'(attempt {empty_response_retry_count}).'
+                            ),
+                        },
+                        publish_snapshot=True,
+                    )
+                    await asyncio.sleep(delay_seconds)
+                    continue
+                break
             visible_tool_names = {
                 str(name or '').strip()
                 for name in visible_tools.keys()
@@ -245,6 +290,16 @@ class ReActToolLoop:
                     )
                     if repaired_final_call is not None:
                         response_tool_calls = [repaired_final_call]
+                        synthetic_tool_calls_used = True
+                if not response_tool_calls and STAGE_TOOL_NAME in visible_tool_names:
+                    repaired_stage_call = self._recover_stage_submission_tool_call_from_context(
+                        node=node,
+                        stage_gate=stage_gate,
+                        model_messages=model_messages,
+                        invalid_stage_submission_count=invalid_stage_submission_count,
+                    )
+                    if repaired_stage_call is not None:
+                        response_tool_calls = [repaired_stage_call]
                         synthetic_tool_calls_used = True
             tool_calls = [
                 {'id': call.id, 'name': call.name, 'arguments': dict(call.arguments or {})}
@@ -537,7 +592,7 @@ class ReActToolLoop:
                 if bool(stage_gate.get('enabled'))
                 else ''
             )
-            if bool(stage_gate.get('enabled')) and (stage_protocol_message or not matched_raw_final_result_payload):
+            if bool(stage_gate.get('enabled')) and stage_protocol_message:
                 invalid_stage_submission_count += 1
                 last_invalid_stage_submission_reason = (
                     str(stage_protocol_message or '').strip()
@@ -553,6 +608,47 @@ class ReActToolLoop:
                 repair_overlay_text = stage_protocol_message or build_execution_stage_overlay(
                     node_kind=node.node_kind,
                     stage_gate=stage_gate,
+                )
+                continue
+
+            auto_wrapped_final_call = (
+                None
+                if matched_raw_final_result_payload
+                else self._wrap_plain_text_final_result_tool_call(
+                    response_content=response.content,
+                    message_history=message_history,
+                )
+            )
+            if auto_wrapped_final_call is not None:
+                terminal_result, next_history, contract_violations, protocol_error = await self._handle_final_result_tool_turn(
+                    task=task,
+                    node=node,
+                    response=response,
+                    tool_call=auto_wrapped_final_call,
+                    tools=tools,
+                    message_history=message_history,
+                    runtime_context=runtime_context,
+                    assistant_content=response.content,
+                )
+                message_history = next_history
+                if terminal_result is not None:
+                    self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
+                    return terminal_result
+                invalid_final_submission_count += 1
+                reason_parts = list(contract_violations or [])
+                if protocol_error:
+                    reason_parts.append(protocol_error)
+                last_contract_violations = list(contract_violations or [])
+                last_invalid_final_submission_reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
+                if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
+                    return self._invalid_final_submission_failure(
+                        reason=last_invalid_final_submission_reason,
+                        count=invalid_final_submission_count,
+                    )
+                repair_overlay_text = (
+                    self._result_contract_violation_message(contract_violations, node_kind=node.node_kind)
+                    if contract_violations
+                    else self._result_protocol_message(node_kind=node.node_kind)
                 )
                 continue
 
@@ -2018,6 +2114,37 @@ class ReActToolLoop:
         )
 
     @staticmethod
+    def _is_provider_chain_exhausted_error(error: Exception | str) -> bool:
+        return PUBLIC_PROVIDER_FAILURE_MESSAGE in str(error or '')
+
+    @staticmethod
+    def _provider_retry_delay_seconds(attempt_count: int) -> float:
+        if attempt_count <= 1:
+            return 1.0
+        return float(min(10, attempt_count))
+
+    @staticmethod
+    def _empty_response_retry_delay_seconds(attempt_count: int) -> float:
+        if attempt_count <= 1:
+            return 1.0
+        return float(min(10, attempt_count))
+
+    @staticmethod
+    def _is_empty_model_response(response: Any) -> bool:
+        if list(getattr(response, 'tool_calls', None) or []):
+            return False
+        if str(getattr(response, 'content', None) or '').strip():
+            return False
+        if str(getattr(response, 'error_text', None) or '').strip():
+            return False
+        if str(getattr(response, 'reasoning_content', None) or '').strip():
+            return False
+        thinking_blocks = getattr(response, 'thinking_blocks', None)
+        if isinstance(thinking_blocks, list) and thinking_blocks:
+            return False
+        return True
+
+    @staticmethod
     def _repair_tool_choice(
         *,
         visible_tools: dict[str, Tool],
@@ -2049,6 +2176,179 @@ class ReActToolLoop:
                 'function': {'name': STAGE_TOOL_NAME},
             }
         return None
+
+    @classmethod
+    def _recover_stage_submission_tool_call_from_context(
+        cls,
+        *,
+        node,
+        stage_gate: dict[str, Any],
+        model_messages: list[dict[str, Any]],
+        invalid_stage_submission_count: int,
+    ) -> ToolCallRequest | None:
+        if invalid_stage_submission_count <= 0:
+            return None
+        if not bool(stage_gate.get('enabled')):
+            return None
+        has_active_stage = bool(stage_gate.get('has_active_stage'))
+        transition_required = bool(stage_gate.get('transition_required'))
+        if has_active_stage and not transition_required:
+            return None
+        arguments = cls._default_stage_submission_arguments(
+            node_kind=str(getattr(node, 'node_kind', '') or ''),
+            stage_gate=stage_gate,
+            messages=model_messages,
+        )
+        return ToolCallRequest(
+            id=f'call:auto-stage:{int(invalid_stage_submission_count)}',
+            name=STAGE_TOOL_NAME,
+            arguments=arguments,
+        )
+
+    @classmethod
+    def _wrap_plain_text_final_result_tool_call(
+        cls,
+        *,
+        response_content: Any,
+        message_history: list[dict[str, Any]],
+    ) -> ToolCallRequest | None:
+        answer = str(response_content or '')
+        if not answer.strip():
+            return None
+        evidence = cls._auto_wrapped_final_result_evidence(message_history=message_history, response_content=answer)
+        return ToolCallRequest(
+            id='call:auto-final-wrap:1',
+            name=FINAL_RESULT_TOOL_NAME,
+            arguments={
+                'status': 'success',
+                'delivery_status': 'final',
+                'summary': 'auto-wrapped plain-text final result',
+                'answer': answer,
+                'evidence': evidence,
+                'remaining_work': [],
+                'blocking_reason': '',
+            },
+        )
+
+    @classmethod
+    def _auto_wrapped_final_result_evidence(
+        cls,
+        *,
+        message_history: list[dict[str, Any]],
+        response_content: str,
+    ) -> list[dict[str, Any]]:
+        evidence: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+        refs = cls._collect_content_refs([*list(message_history or []), str(response_content or '')])
+        for ref in refs:
+            ref_text = str(ref or '').strip()
+            if not ref_text:
+                continue
+            kind = 'artifact'
+            if ref_text.startswith('path:'):
+                kind = 'file'
+            elif ref_text.startswith('http://') or ref_text.startswith('https://'):
+                kind = 'url'
+            item = {
+                'kind': kind,
+                'ref': ref_text,
+                'note': 'Auto-collected from prior tool/content history.',
+            }
+            signature = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            evidence.append(item)
+        if evidence:
+            return evidence
+
+        tool_names: list[str] = []
+        for message in list(message_history or []):
+            if str(message.get('role') or '').strip().lower() != 'tool':
+                continue
+            tool_name = str(message.get('name') or '').strip()
+            if not tool_name or tool_name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *cls._CONTROL_TOOL_NAMES}:
+                continue
+            if tool_name not in tool_names:
+                tool_names.append(tool_name)
+        for tool_name in tool_names:
+            evidence.append(
+                {
+                    'kind': 'artifact',
+                    'note': f'Auto-collected tool result from {tool_name}.',
+                }
+            )
+        return evidence
+
+    @classmethod
+    def _default_stage_submission_arguments(
+        cls,
+        *,
+        node_kind: str,
+        stage_gate: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        context = cls._extract_node_context_payload(messages)
+        prompt_text = str((context or {}).get('prompt') or '').strip()
+        goal_text = str((context or {}).get('goal') or '').strip()
+        focus_text = cls._truncate_stage_goal_text(prompt_text or goal_text)
+        normalized_kind = str(node_kind or '').strip().lower()
+        has_active_stage = bool(stage_gate.get('has_active_stage'))
+        active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
+        if not has_active_stage:
+            if normalized_kind == 'acceptance':
+                stage_goal = '先创建首个验收阶段并聚焦当前节点目标，完成第一轮关键证据定位与结论核验。'
+            else:
+                stage_goal = '先创建首个执行阶段并围绕当前节点目标完成首轮定向信息收集与关键入口定位。'
+            if focus_text:
+                stage_goal = f'{stage_goal} 当前焦点：{focus_text}'
+            return {
+                'stage_goal': stage_goal,
+                'tool_round_budget': 4,
+            }
+        previous_goal = str((active_stage or {}).get('stage_goal') or '').strip()
+        previous_budget = int((active_stage or {}).get('tool_round_budget') or 0)
+        used_budget = int((active_stage or {}).get('tool_rounds_used') or 0)
+        if normalized_kind == 'acceptance':
+            next_goal = '在上一阶段基础上继续当前验收目标，优先补齐未确认的关键证据与结论。'
+        else:
+            next_goal = '在上一阶段基础上继续推进当前节点目标，优先补齐剩余关键证据并避免重复搜索。'
+        if previous_goal:
+            next_goal = f'{next_goal} 上一阶段目标：{cls._truncate_stage_goal_text(previous_goal)}'
+        if focus_text:
+            next_goal = f'{next_goal} 当前焦点：{focus_text}'
+        return {
+            'stage_goal': next_goal,
+            'tool_round_budget': min(10, previous_budget if previous_budget > 0 else 4),
+            'completed_stage_summary': (
+                f'自动阶段切换：上一阶段预算 {used_budget}/{previous_budget or used_budget or 0} '
+                '已耗尽，但模型未显式创建下一阶段。'
+            ),
+            'key_refs': [],
+        }
+
+    @staticmethod
+    def _extract_node_context_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
+        for message in reversed(list(messages or [])):
+            if str(message.get('role') or '').strip().lower() != 'user':
+                continue
+            content = str(message.get('content') or '').strip()
+            if not content.startswith('{'):
+                continue
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    @staticmethod
+    def _truncate_stage_goal_text(value: Any, *, limit: int = 180) -> str:
+        text = ' '.join(str(value or '').split())
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)].rstrip() + '...'
 
     @classmethod
     def _recover_final_result_tool_call_from_raw_json(
