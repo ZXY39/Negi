@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 from langchain_core.messages import AIMessage, convert_to_messages
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 from pydantic import ConfigDict, Field, create_model
 from typing_extensions import TypedDict
 
@@ -25,12 +26,11 @@ from main.runtime.tool_call_repair import (
 )
 
 from ._ceo_support import CeoFrontDoorSupport
+from .state_models import CeoRuntimeContext, initial_persistent_state
 
 
 class CeoGraphState(TypedDict, total=False):
     user_input: Any
-    session: Any
-    on_progress: Any
     query_text: str
     messages: list[dict[str, Any]]
     tool_names: list[str]
@@ -151,7 +151,7 @@ def _build_visible_tool_bundle(*, tools: dict[str, Tool], executor: ToolExecutor
 
 
 def _build_langgraph_ceo_graph(runner):
-    graph = StateGraph(CeoGraphState)
+    graph = StateGraph(CeoGraphState, context_schema=CeoRuntimeContext)
     graph.add_node("prepare_turn", runner._graph_prepare_turn)
     graph.add_node("call_model", runner._graph_call_model)
     graph.add_node("normalize_model_output", runner._graph_normalize_model_output)
@@ -291,12 +291,15 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             prompt_cache_key=prompt_cache_key,
         )
 
-    async def _graph_prepare_turn(self, state: CeoGraphState) -> dict[str, Any]:
-        await self._loop._ensure_checkpointer_ready()
-
+    async def _graph_prepare_turn(
+        self,
+        state: CeoGraphState,
+        *,
+        runtime: Runtime[CeoRuntimeContext],
+    ) -> dict[str, Any]:
         user_input = state["user_input"]
-        session = state["session"]
-        on_progress = state.get("on_progress")
+        session = runtime.context.session
+        on_progress = runtime.context.on_progress
         query_text = self._content_text(getattr(user_input, "content", ""))
         metadata = dict(getattr(user_input, "metadata", None) or {})
         heartbeat_internal = bool(metadata.get("heartbeat_internal"))
@@ -780,11 +783,14 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         await self._loop._ensure_checkpointer_ready()
         setattr(session, "_last_route_kind", "direct_reply")
         result = await self._get_compiled_graph().ainvoke(
-            {
-                "user_input": user_input,
-                "session": session,
-                "on_progress": on_progress,
-            }
+            initial_persistent_state(user_input=user_input),
+            config={"configurable": {"thread_id": session.state.session_key}},
+            context=CeoRuntimeContext(
+                loop=self._loop,
+                session=session,
+                session_key=session.state.session_key,
+                on_progress=on_progress,
+            ),
         )
         output = str(result.get("final_output") or "").strip()
         setattr(session, "_last_route_kind", str(result.get("route_kind") or "direct_reply"))
