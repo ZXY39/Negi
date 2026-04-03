@@ -27,6 +27,7 @@ class ProviderTarget:
     retry_on: list[str] = field(default_factory=lambda: ['network', '429', '5xx'])
     retry_count: int = 0
     api_key_count: int = 0
+    single_api_key_max_concurrency: int | None = None
 
 
 def _resolve_litellm_model(provider_id: str, model_id: str) -> str:
@@ -126,11 +127,11 @@ def build_provider_from_model_key(
             default_model=model_id,
             extra_headers=extra_headers,
         )
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
 
     if provider_id == 'openai_codex':
         provider = OpenAICodexProvider(default_model=f'openai_codex/{model_id}')
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
 
     if provider_id == 'custom' or _uses_openai_direct_chat_protocol(target):
         provider = CustomProvider(
@@ -151,6 +152,7 @@ def build_provider_from_model_key(
             retry_on=retry_on,
             retry_count=retry_count,
             api_key_count=api_key_count,
+            single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None),
         )
 
     resolved_model = _resolve_litellm_model(provider_id, model_id)
@@ -161,4 +163,4 @@ def build_provider_from_model_key(
         extra_headers=extra_headers,
         provider_name=provider_id,
     )
-    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count)
+    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))

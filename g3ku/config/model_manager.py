@@ -121,6 +121,7 @@ class ModelManager:
         reasoning_effort: str | None = None,
         retry_on: list[str] | None = None,
         retry_count: int | None = None,
+        single_api_key_max_concurrency: int | None = None,
         description: str = "",
     ) -> dict[str, Any]:
         clean_key = str(key or "").strip()
@@ -146,6 +147,7 @@ class ModelManager:
                 "description": str(description or "").strip(),
                 "retry_on": list(retry_on or ["network", "429", "5xx"]),
                 "retry_count": 0 if retry_count is None else int(retry_count),
+                "single_api_key_max_concurrency": None if single_api_key_max_concurrency is None else int(single_api_key_max_concurrency),
             },
         )
         for scope in scopes or []:
@@ -167,6 +169,7 @@ class ModelManager:
         reasoning_effort: str | None | object = _UNSET,
         retry_on: list[str] | None | object = _UNSET,
         retry_count: int | None | object = _UNSET,
+        single_api_key_max_concurrency: int | None | object = _UNSET,
         description: str | None | object = _UNSET,
     ) -> dict[str, Any]:
         item = self._require_model(key)
@@ -197,6 +200,10 @@ class ModelManager:
             item.retry_on = list(retry_on)
         if retry_count is not _UNSET:
             item.retry_count = int(retry_count)
+        if single_api_key_max_concurrency is not _UNSET:
+            item.single_api_key_max_concurrency = (
+                None if single_api_key_max_concurrency in (None, "") else max(1, int(single_api_key_max_concurrency))
+            )
         if description is not _UNSET:
             item.description = str(description).strip()
         self._revalidate()

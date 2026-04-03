@@ -412,6 +412,11 @@ function formatTaskWorkerPercent(value) {
     return Number.isFinite(numeric) ? `${Math.round(numeric)}%` : "--";
 }
 
+function queueMetricCount(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? String(Math.max(0, Math.trunc(numeric))) : "--";
+}
+
 function taskWorkerPressureStateMeta(metrics = taskWorkerStatusMetrics()) {
     const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
     if (workerState === "offline" || workerState === "stopped") return { key: "offline", label: "离线" };
@@ -434,13 +439,10 @@ function renderTaskPerformanceBar() {
     const diskText = metrics?.machine_pressure_disk_busy_available === false
         ? "--"
         : formatTaskWorkerPercent(metrics?.machine_pressure_disk_busy_percent);
-    const runningCount = Number(metrics?.worker_execution_running_count);
-    const targetLimit = Number(metrics?.worker_execution_target_limit);
-    const waitingCount = Number(metrics?.worker_execution_waiting_count);
-    const runningText = Number.isFinite(runningCount) && Number.isFinite(targetLimit) && targetLimit > 0
-        ? `${Math.max(0, Math.trunc(runningCount))} / ${Math.max(0, Math.trunc(targetLimit))}`
-        : (Number.isFinite(runningCount) ? String(Math.max(0, Math.trunc(runningCount))) : "--");
-    const waitingText = Number.isFinite(waitingCount) ? String(Math.max(0, Math.trunc(waitingCount))) : "--";
+    const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
+    const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
+    const nodeRunningText = queueMetricCount(metrics?.node_queue_running_count);
+    const nodeWaitingText = queueMetricCount(metrics?.node_queue_waiting_count);
     U.taskPerformanceBar.hidden = false;
     U.taskPerformanceBar.innerHTML = `
         <div class="task-performance-item task-performance-item--state" data-state="${esc(pressureState.key)}">
@@ -452,12 +454,12 @@ function renderTaskPerformanceBar() {
             <strong class="task-performance-value">${esc(`${cpuText} / ${memoryText} / ${diskText}`)}</strong>
         </div>
         <div class="task-performance-item">
-            <span class="task-performance-label">运行中工作项</span>
-            <strong class="task-performance-value">${esc(runningText)}</strong>
+            <span class="task-performance-label">工具队列</span>
+            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(toolRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(toolWaitingText)}</span>等待</strong>
         </div>
         <div class="task-performance-item">
-            <span class="task-performance-label">等待中工作项</span>
-            <strong class="task-performance-value">${esc(waitingText)}</strong>
+            <span class="task-performance-label">节点队列</span>
+            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(nodeRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(nodeWaitingText)}</span>等待</strong>
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">监控新鲜度</span>

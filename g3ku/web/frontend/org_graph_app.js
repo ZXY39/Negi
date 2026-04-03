@@ -2132,6 +2132,17 @@ function syncCeoInputHeight() {
     U.ceoInput.style.height = `${Math.min(U.ceoInput.scrollHeight, 200)}px`;
 }
 
+function syncCeoAttachButton() {
+    if (!U.ceoAttach) return;
+    U.ceoAttach.disabled = (
+        !!S.ceoUploadBusy
+        || !!S.ceoSessionBusy
+        || !!S.ceoSessionCatalogBusy
+        || !activeSessionId()
+        || activeSessionIsReadonly()
+    );
+}
+
 function renderPendingCeoUploads() {
     if (!U.ceoUploadList) return;
     const uploads = normalizeUploadList(S.ceoUploads);
@@ -2157,15 +2168,14 @@ function renderPendingCeoUploads() {
             </div>
         `;
     }
-    if (U.ceoAttach) {
-        U.ceoAttach.disabled = !!S.ceoUploadBusy || !!S.ceoSessionBusy || !!S.ceoSessionCatalogBusy || !activeSessionId() || activeSessionIsReadonly();
-    }
+    syncCeoAttachButton();
     syncCeoPrimaryButton();
     syncCeoSessionActions();
     icons();
 }
 
 function syncCeoPrimaryButton() {
+    syncCeoAttachButton();
     if (!U.ceoSend) return;
     if (activeSessionIsReadonly()) {
         U.ceoSend.innerHTML = '<i data-lucide="eye"></i> 渠道会话只读';
@@ -5172,6 +5182,7 @@ function renderCeoSessions() {
     if (!sessions.length) {
         U.ceoSessionList.innerHTML = `<div class="empty-state ceo-session-empty">${S.ceoSessionTab === "channel" ? "暂无渠道会话。" : "No sessions yet."}</div>`;
         syncCeoComposerReadonlyState();
+        syncCeoAttachButton();
         syncCeoSessionActions();
         return;
     }
@@ -5191,6 +5202,7 @@ function renderCeoSessions() {
         U.ceoSessionList.innerHTML = sessions.map((item) => renderCeoSessionCard(item, { allowActions: true })).join("");
     }
     syncCeoComposerReadonlyState();
+    syncCeoAttachButton();
     syncCeoSessionActions();
     icons();
 }

@@ -18,9 +18,9 @@ _CURRENT_DISPATCH_LEASE: ContextVar['_DispatchLease | None'] = ContextVar(
 )
 
 
-def _normalize_dispatch_limit(value: int | None, *, default: int) -> int:
+def _normalize_dispatch_limit(value: int | None, *, default: int) -> int | None:
     if value is None:
-        return max(1, int(default or 1))
+        return None
     return max(1, int(value or default or 1))
 
 
@@ -35,7 +35,7 @@ class _DispatchEntry:
 
 
 class _DispatchLease:
-    def __init__(self, *, dispatcher: 'TaskNodeDispatcher', entry: _DispatchEntry, semaphore: asyncio.Semaphore) -> None:
+    def __init__(self, *, dispatcher: 'TaskNodeDispatcher', entry: _DispatchEntry, semaphore: asyncio.Semaphore | None) -> None:
         self.dispatcher = dispatcher
         self.entry = entry
         self._semaphore = semaphore
@@ -62,7 +62,8 @@ class _DispatchLease:
                 should_release = True
         self.dispatcher._finish_entry(self.entry)
         if should_release:
-            self._semaphore.release()
+            if self._semaphore is not None:
+                self._semaphore.release()
 
     async def _enter_nested_wait(self) -> None:
         should_release = False
@@ -75,7 +76,8 @@ class _DispatchLease:
                 should_release = True
         if should_release:
             self.dispatcher._suspend_entry(self.entry)
-            self._semaphore.release()
+            if self._semaphore is not None:
+                self._semaphore.release()
 
     async def _exit_nested_wait(self) -> None:
         need_acquire = False
@@ -88,17 +90,20 @@ class _DispatchLease:
                 need_acquire = True
         if not need_acquire:
             return
-        await self._semaphore.acquire()
+        if self._semaphore is not None:
+            await self._semaphore.acquire()
         should_resume = False
         async with self._lock:
             if self._closed:
-                self._semaphore.release()
+                if self._semaphore is not None:
+                    self._semaphore.release()
                 return
             if self._nested_wait_count == 0 and not self._holding_slot:
                 self._holding_slot = True
                 should_resume = True
             else:
-                self._semaphore.release()
+                if self._semaphore is not None:
+                    self._semaphore.release()
                 return
         if should_resume:
             self.dispatcher._resume_entry(self.entry)
@@ -112,8 +117,8 @@ class TaskNodeDispatcher:
         store,
         log_service,
         node_runner,
-        execution_limit: int = _DEFAULT_NODE_DISPATCH_LIMITS['execution'],
-        inspection_limit: int = _DEFAULT_NODE_DISPATCH_LIMITS['inspection'],
+        execution_limit: int | None = _DEFAULT_NODE_DISPATCH_LIMITS['execution'],
+        inspection_limit: int | None = _DEFAULT_NODE_DISPATCH_LIMITS['inspection'],
     ) -> None:
         self._task_id = str(task_id or '').strip()
         self._store = store
@@ -124,7 +129,7 @@ class TaskNodeDispatcher:
             'inspection': _normalize_dispatch_limit(inspection_limit, default=_DEFAULT_NODE_DISPATCH_LIMITS['inspection']),
         }
         self._semaphores = {
-            role: asyncio.Semaphore(limit)
+            role: (asyncio.Semaphore(limit) if limit is not None else None)
             for role, limit in self._limits.items()
         }
         self._entries: dict[str, _DispatchEntry] = {}
@@ -220,9 +225,12 @@ class TaskNodeDispatcher:
         lease: _DispatchLease | None = None
         context_token = None
         try:
-            await semaphore.acquire()
-            if self._closed:
-                semaphore.release()
+            if semaphore is not None:
+                await semaphore.acquire()
+                if self._closed:
+                    semaphore.release()
+                    raise asyncio.CancelledError()
+            elif self._closed:
                 raise asyncio.CancelledError()
             self._mark_entry_running(entry)
             lease = _DispatchLease(dispatcher=self, entry=entry, semaphore=semaphore)
@@ -283,8 +291,8 @@ class TaskNodeDispatcher:
     def _publish_dispatch_state(self, *, force: bool = False) -> None:
         snapshot = self.snapshot()
         fingerprint = (
-            ('limits_execution', int(snapshot['dispatch_limits']['execution'])),
-            ('limits_inspection', int(snapshot['dispatch_limits']['inspection'])),
+            ('limits_execution', int(snapshot['dispatch_limits']['execution'] or 0)),
+            ('limits_inspection', int(snapshot['dispatch_limits']['inspection'] or 0)),
             ('running_execution', int(snapshot['dispatch_running']['execution'])),
             ('running_inspection', int(snapshot['dispatch_running']['inspection'])),
             ('queued_execution', int(snapshot['dispatch_queued']['execution'])),
@@ -304,8 +312,8 @@ class TaskActorService:
         log_service,
         node_runner,
         stall_notifier=None,
-        node_dispatch_execution_limit: int = _DEFAULT_NODE_DISPATCH_LIMITS['execution'],
-        node_dispatch_inspection_limit: int = _DEFAULT_NODE_DISPATCH_LIMITS['inspection'],
+        node_dispatch_execution_limit: int | None = _DEFAULT_NODE_DISPATCH_LIMITS['execution'],
+        node_dispatch_inspection_limit: int | None = _DEFAULT_NODE_DISPATCH_LIMITS['inspection'],
     ) -> None:
         self._store = store
         self._log_service = log_service
@@ -325,7 +333,7 @@ class TaskActorService:
         self._node_runner.nested_node_executor = self._execute_nested_node
         self._node_runner.cancel_node_subtree_executor = self._cancel_node_subtree
 
-    def configure_node_dispatch_limits(self, *, execution: int, inspection: int) -> None:
+    def configure_node_dispatch_limits(self, *, execution: int | None, inspection: int | None) -> None:
         self._node_dispatch_limits = {
             'execution': _normalize_dispatch_limit(execution, default=_DEFAULT_NODE_DISPATCH_LIMITS['execution']),
             'inspection': _normalize_dispatch_limit(inspection, default=_DEFAULT_NODE_DISPATCH_LIMITS['inspection']),

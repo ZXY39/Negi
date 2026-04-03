@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -65,12 +66,43 @@ class CeoGraphState(TypedDict, total=False):
 
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
+_TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
+
 
 @dataclass(slots=True)
 class VisibleToolBundle:
     native_tools: dict[str, Tool]
     langchain_tools: list[BaseTool]
     langchain_tool_map: dict[str, BaseTool]
+
+
+def _json_schema_annotation(schema: dict[str, Any] | None) -> Any:
+    if not isinstance(schema, dict):
+        return Any
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        non_null_types = [item for item in schema_type if item != "null"]
+        if len(non_null_types) == 1:
+            schema_type = non_null_types[0]
+        else:
+            return Any
+    if schema_type == "string":
+        return str
+    if schema_type == "integer":
+        return int
+    if schema_type == "number":
+        return float
+    if schema_type == "boolean":
+        return bool
+    if schema_type == "array":
+        item_schema = schema.get("items")
+        item_annotation = _json_schema_annotation(item_schema if isinstance(item_schema, dict) else None)
+        if item_annotation is Any:
+            return list[Any]
+        return list[item_annotation]
+    if schema_type == "object":
+        return dict[str, Any]
+    return Any
 
 
 def _build_args_schema(tool: Tool):
@@ -81,11 +113,12 @@ def _build_args_schema(tool: Tool):
     fields: dict[str, tuple[Any, Any]] = {}
     for key, prop in props.items():
         description = prop.get("description") if isinstance(prop, dict) else None
+        annotation = _json_schema_annotation(prop if isinstance(prop, dict) else None)
         default = ... if key in required else None
         if description:
-            fields[key] = (Any, Field(default=default, description=description))
+            fields[key] = (annotation, Field(default=default, description=description))
         else:
-            fields[key] = (Any, default)
+            fields[key] = (annotation, default)
 
     model_name = "".join(part.capitalize() for part in tool.name.split("_")) + "Args"
     return create_model(model_name, __config__=ConfigDict(extra="allow"), **fields)
@@ -136,7 +169,14 @@ def _build_langgraph_ceo_graph(runner):
             "finalize": "finalize_turn",
         },
     )
-    graph.add_edge("execute_tools", "call_model")
+    graph.add_conditional_edges(
+        "execute_tools",
+        runner._graph_next_step,
+        {
+            "call_model": "call_model",
+            "finalize": "finalize_turn",
+        },
+    )
     graph.add_edge("finalize_turn", END)
     return graph.compile(name="ceo-frontdoor")
 
@@ -206,6 +246,30 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             }
             for item in list(payloads or [])
         ]
+
+    @staticmethod
+    def _extract_task_id(text: str) -> str:
+        match = _TASK_ID_PATTERN.search(str(text or ""))
+        return str(match.group(0) if match else "").strip()
+
+    def _task_dispatch_reply(self, *, result_text: str) -> str:
+        text = str(result_text or "").strip()
+        task_id = self._extract_task_id(text)
+        if "复用" in text:
+            if task_id:
+                return (
+                    "已复用正在进行中的异步任务：\n"
+                    f"- 任务 ID: `{task_id}`\n\n"
+                    "我会继续在后台推进。"
+                )
+            return text
+        if task_id:
+            return (
+                "已开始处理，这个需求已转为异步任务：\n"
+                f"- 任务 ID: `{task_id}`\n\n"
+                "我会继续在后台推进，并在有结果后回复你。"
+            )
+        return text
 
     async def _call_model_with_tools(
         self,
@@ -573,7 +637,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
                 event_kind="analysis",
             )
 
-        langchain_tool_map = dict(state.get("langchain_tool_map") or {})
+        visible_tools = dict(state.get("visible_tools") or {})
+        runtime_context = dict(state.get("runtime_context") or {})
+        on_progress = runtime_context.get("on_progress")
         semaphore = asyncio.Semaphore(
             self._parallel_slot_count(
                 state.get("max_parallel_tool_calls"),
@@ -584,10 +650,11 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
 
         async def _run_single(payload: dict[str, Any]) -> dict[str, Any]:
             tool_name = str(payload.get("name") or "")
-            wrapper = langchain_tool_map.get(tool_name)
-            if wrapper is None:
+            tool = visible_tools.get(tool_name)
+            if tool is None:
+                result_text = f"Error: tool not available: {tool_name}"
                 result_payload = {
-                    "result_text": f"Error: tool not available: {tool_name}",
+                    "result_text": result_text,
                     "status": "error",
                     "started_at": "",
                     "finished_at": "",
@@ -595,34 +662,44 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
                 }
             else:
                 async with semaphore:
-                    result_payload = await wrapper.ainvoke(dict(payload.get("arguments") or {}))
-                if not isinstance(result_payload, dict):
-                    rendered = self._render_tool_result(result_payload)
-                    result_payload = {
-                        "result_text": rendered,
-                        "status": self._tool_status(rendered),
-                        "started_at": "",
-                        "finished_at": "",
-                        "elapsed_seconds": None,
-                    }
+                    result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call(
+                        tool=tool,
+                        tool_name=tool_name,
+                        arguments=dict(payload.get("arguments") or {}),
+                        runtime_context=runtime_context,
+                        on_progress=on_progress,
+                    )
+                result_payload = {
+                    "result_text": result_text,
+                    "status": status,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "elapsed_seconds": elapsed_seconds,
+                }
             result_text = str(result_payload.get("result_text") or "")
             status = str(result_payload.get("status") or self._tool_status(result_text))
             await self._emit_progress(
-                state.get("runtime_context", {}).get("on_progress"),
+                on_progress,
                 result_text,
                 event_kind="tool_result" if status == "success" else "tool_error",
                 event_data={"tool_name": tool_name},
             )
-            return self._tool_result_message(
-                tool_call_id=str(payload.get("id") or ""),
-                tool_name=tool_name or "tool",
-                content=result_text,
-                started_at=str(result_payload.get("started_at") or ""),
-                finished_at=str(result_payload.get("finished_at") or ""),
-                elapsed_seconds=result_payload.get("elapsed_seconds"),
-            )
+            return {
+                "tool_name": tool_name,
+                "status": status,
+                "result_text": result_text,
+                "tool_message": self._tool_result_message(
+                    tool_call_id=str(payload.get("id") or ""),
+                    tool_name=tool_name or "tool",
+                    content=result_text,
+                    started_at=str(result_payload.get("started_at") or ""),
+                    finished_at=str(result_payload.get("finished_at") or ""),
+                    elapsed_seconds=result_payload.get("elapsed_seconds"),
+                ),
+            }
 
-        tool_messages = await asyncio.gather(*[_run_single(payload) for payload in tool_call_payloads])
+        tool_results = await asyncio.gather(*[_run_single(payload) for payload in tool_call_payloads])
+        tool_messages = [dict(item.get("tool_message") or {}) for item in tool_results]
         assistant_message = {
             "role": "assistant",
             "content": None if state.get("synthetic_tool_calls_used") else self._model_content(state.get("response_content", "")),
@@ -645,6 +722,34 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             used_tools=used_tools,
             default=str(state.get("route_kind") or "direct_reply"),
         )
+        substantive_tool_names = [
+            str(payload.get("name") or "").strip()
+            for payload in tool_call_payloads
+            if str(payload.get("name") or "").strip()
+            and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
+        ]
+        successful_dispatch = next(
+            (
+                item
+                for item in tool_results
+                if str(item.get("tool_name") or "").strip() == "create_async_task"
+                and str(item.get("status") or "").strip().lower() == "success"
+            ),
+            None,
+        )
+        if successful_dispatch is not None and set(substantive_tool_names) == {"create_async_task"}:
+            return {
+                "messages": messages,
+                "used_tools": used_tools,
+                "route_kind": route_kind,
+                "analysis_text": "",
+                "tool_call_payloads": [],
+                "synthetic_tool_calls_used": False,
+                "final_output": self._task_dispatch_reply(
+                    result_text=str(successful_dispatch.get("result_text") or "")
+                ),
+                "next_step": "finalize",
+            }
         return {
             "messages": messages,
             "used_tools": used_tools,

@@ -10,6 +10,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.types import ContextAssemblyResult
+from g3ku.runtime.frontdoor._ceo_langgraph_impl import _build_args_schema
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
@@ -123,6 +124,34 @@ class _CountTool(Tool):
         return json.dumps({"ok": True, "count": int(count)}, ensure_ascii=False)
 
 
+class _ContinuationTaskTool(Tool):
+    @property
+    def name(self) -> str:
+        return "create_async_task"
+
+    @property
+    def description(self) -> str:
+        return "dispatch async task"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "core_requirement": {"type": "string"},
+                "execution_policy": {"type": "object"},
+                "continuation_of_task_id": {"type": "string"},
+                "reuse_existing": {"type": "boolean"},
+            },
+            "required": ["task", "core_requirement", "execution_policy"],
+        }
+
+    async def execute(self, task: str, core_requirement: str, execution_policy: dict[str, object], **kwargs) -> str:
+        _ = task, core_requirement, execution_policy, kwargs
+        return "创建任务成功task:demo-123"
+
+
 def _assembly_result(*, tool_names: list[str], recent_history: list[dict[str, object]] | None = None, trace: dict[str, object] | None = None) -> ContextAssemblyResult:
     return ContextAssemblyResult(
         system_prompt="SYSTEM PROMPT",
@@ -130,6 +159,31 @@ def _assembly_result(*, tool_names: list[str], recent_history: list[dict[str, ob
         tool_names=tool_names,
         trace=dict(trace or {}),
     )
+
+
+def test_build_args_schema_preserves_declared_json_types() -> None:
+    schema_model = _build_args_schema(_ContinuationTaskTool())
+    schema = schema_model.model_json_schema()
+    properties = dict(schema.get("properties") or {})
+
+    continuation_schema = dict(properties.get("continuation_of_task_id") or {})
+    reuse_schema = dict(properties.get("reuse_existing") or {})
+    task_schema = dict(properties.get("task") or {})
+
+    continuation_types = {
+        str(item.get("type") or "").strip()
+        for item in list(continuation_schema.get("anyOf") or [])
+        if isinstance(item, dict)
+    }
+    reuse_types = {
+        str(item.get("type") or "").strip()
+        for item in list(reuse_schema.get("anyOf") or [])
+        if isinstance(item, dict)
+    }
+
+    assert task_schema.get("type") == "string"
+    assert "string" in continuation_types or continuation_schema.get("type") == "string"
+    assert "boolean" in reuse_types or reuse_schema.get("type") == "boolean"
 
 
 @pytest.mark.asyncio
@@ -490,3 +544,69 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
     assert len(backend.calls) == 3
     assert sleep_calls == [1.0, 2.0]
 
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_dispatch(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-1",
+                        name="create_async_task",
+                        arguments={
+                            "task": "搜索上下文管理 skill",
+                            "core_requirement": "确认是否存在可用的上下文管理类 skill 并给出建议",
+                            "execution_policy": {"mode": "focus"},
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([_ContinuationTaskTool()]),
+        max_iterations=8,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["create_async_task"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return _assembly_result(tool_names=["create_async_task"])
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(user_input=SimpleNamespace(content="帮我查有没有上下文管理 skill"), session=session)
+
+    assert "task:demo-123" in output
+    assert "异步任务" in output
+    assert len(backend.calls) == 1

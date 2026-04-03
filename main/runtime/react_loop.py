@@ -92,6 +92,7 @@ class ReActToolLoop:
         self._max_iterations = self._normalize_optional_limit(max_iterations, default=16)
         self._parallel_tool_calls_enabled = bool(parallel_tool_calls_enabled)
         self._max_parallel_tool_calls = self._normalize_optional_limit(max_parallel_tool_calls, default=10)
+        self._node_turn_controller = None
 
     async def run(
         self,
@@ -190,6 +191,15 @@ class ReActToolLoop:
             )
             if not current_model_refs:
                 raise RuntimeError('no model refs configured for node runtime')
+            node_turn_lease = None
+            node_turn_controller = getattr(self, '_node_turn_controller', None)
+            primary_model_ref = str(current_model_refs[0] or '').strip()
+            if node_turn_controller is not None and primary_model_ref:
+                node_turn_lease = await node_turn_controller.acquire_turn(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    model_ref=primary_model_ref,
+                )
             turn_prompt_cache_key = self._execution_prompt_cache_key(
                 model_messages=model_messages,
                 tool_schemas=tool_schemas,
@@ -197,61 +207,67 @@ class ReActToolLoop:
             )
             provider_retry_count = 0
             empty_response_retry_count = 0
-            while True:
-                self._check_pause_or_cancel(task.task_id)
-                try:
-                    response = await self._chat_with_optional_extensions(
-                        messages=request_messages,
-                        tools=tool_schemas or None,
-                        model_refs=current_model_refs,
-                        tool_choice=self._repair_tool_choice(
-                            visible_tools=visible_tools,
-                            stage_gate=stage_gate,
-                            invalid_final_submission_count=invalid_final_submission_count,
-                            invalid_stage_submission_count=invalid_stage_submission_count,
-                        ),
-                        parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
-                        prompt_cache_key=turn_prompt_cache_key,
-                    )
-                except Exception as exc:
-                    if not self._is_provider_chain_exhausted_error(exc):
-                        raise
-                    provider_retry_count += 1
-                    delay_seconds = self._provider_retry_delay_seconds(provider_retry_count)
-                    self._log_service.update_frame(
-                        task.task_id,
-                        node.node_id,
-                        lambda frame: {
-                            **frame,
-                            'last_error': (
-                                f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
-                                f'Retrying automatically in {delay_seconds:.1f}s '
-                                f'(attempt {provider_retry_count}).'
+            try:
+                while True:
+                    self._check_pause_or_cancel(task.task_id)
+                    try:
+                        response = await self._chat_with_optional_extensions(
+                            messages=request_messages,
+                            tools=tool_schemas or None,
+                            model_refs=current_model_refs,
+                            tool_choice=self._repair_tool_choice(
+                                visible_tools=visible_tools,
+                                stage_gate=stage_gate,
+                                invalid_final_submission_count=invalid_final_submission_count,
+                                invalid_stage_submission_count=invalid_stage_submission_count,
                             ),
-                        },
-                        publish_snapshot=True,
-                    )
-                    await asyncio.sleep(delay_seconds)
-                    continue
-                if self._is_empty_model_response(response):
-                    empty_response_retry_count += 1
-                    delay_seconds = self._empty_response_retry_delay_seconds(empty_response_retry_count)
-                    self._log_service.update_frame(
-                        task.task_id,
-                        node.node_id,
-                        lambda frame: {
-                            **frame,
-                            'last_error': (
-                                'Model returned an empty response with no text and no tool calls. '
-                                f'Retrying automatically in {delay_seconds:.1f}s '
-                                f'(attempt {empty_response_retry_count}).'
-                            ),
-                        },
-                        publish_snapshot=True,
-                    )
-                    await asyncio.sleep(delay_seconds)
-                    continue
-                break
+                            parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
+                            prompt_cache_key=turn_prompt_cache_key,
+                            node_turn_lease=node_turn_lease,
+                            model_concurrency_controller=getattr(self, '_model_concurrency_controller', None),
+                        )
+                    except Exception as exc:
+                        if not self._is_provider_chain_exhausted_error(exc):
+                            raise
+                        provider_retry_count += 1
+                        delay_seconds = self._provider_retry_delay_seconds(provider_retry_count)
+                        self._log_service.update_frame(
+                            task.task_id,
+                            node.node_id,
+                            lambda frame: {
+                                **frame,
+                                'last_error': (
+                                    f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
+                                    f'Retrying automatically in {delay_seconds:.1f}s '
+                                    f'(attempt {provider_retry_count}).'
+                                ),
+                            },
+                            publish_snapshot=True,
+                        )
+                        await asyncio.sleep(delay_seconds)
+                        continue
+                    if self._is_empty_model_response(response):
+                        empty_response_retry_count += 1
+                        delay_seconds = self._empty_response_retry_delay_seconds(empty_response_retry_count)
+                        self._log_service.update_frame(
+                            task.task_id,
+                            node.node_id,
+                            lambda frame: {
+                                **frame,
+                                'last_error': (
+                                    'Model returned an empty response with no text and no tool calls. '
+                                    f'Retrying automatically in {delay_seconds:.1f}s '
+                                    f'(attempt {empty_response_retry_count}).'
+                                ),
+                            },
+                            publish_snapshot=True,
+                        )
+                        await asyncio.sleep(delay_seconds)
+                        continue
+                    break
+            finally:
+                if node_turn_lease is not None and node_turn_controller is not None:
+                    node_turn_controller.release_turn(node_turn_lease)
             visible_tool_names = {
                 str(name or '').strip()
                 for name in visible_tools.keys()

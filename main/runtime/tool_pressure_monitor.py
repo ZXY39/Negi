@@ -132,6 +132,7 @@ class WorkerPressureMonitor:
         self._last_recovery_step_at = 0.0
         self._sample_mono = 0.0
         self._last_disk_sample: Any = None
+        self._last_perdisk_sample: dict[str, Any] | None = None
         self._last_disk_sample_mono = 0.0
         self._snapshot: dict[str, Any] = {
             'machine_pressure_available': False,
@@ -370,8 +371,12 @@ class WorkerPressureMonitor:
                 elif should_throttle:
                     next_state = 'throttled'
                 elif machine_safe and self._consecutive_machine_safe >= self._safe_consecutive_samples:
+                    was_recovering = current_state == 'recovering'
                     self._controller.begin_recovery(at=timestamp)
-                    if current_mono - self._last_recovery_step_at >= self._recover_window_seconds or self._last_recovery_step_at <= 0.0:
+                    if was_recovering and (
+                        current_mono - self._last_recovery_step_at >= self._recover_window_seconds
+                        or self._last_recovery_step_at <= 0.0
+                    ):
                         self._controller.step_recovery(at=timestamp)
                         self._last_recovery_step_at = current_mono
                     next_state = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
@@ -387,10 +392,12 @@ class WorkerPressureMonitor:
 
             if next_state == 'critical':
                 self._controller.critical(at=timestamp)
-                self._last_recovery_step_at = current_mono
+                if current_state != 'critical':
+                    self._last_recovery_step_at = current_mono
             elif next_state == 'throttled':
                 self._controller.throttle(at=timestamp)
-                self._last_recovery_step_at = current_mono
+                if current_state != 'throttled':
+                    self._last_recovery_step_at = current_mono
             elif next_state == 'normal' and current_state != 'normal' and machine_safe:
                 self._controller.set_budget_state('normal', at=timestamp)
             self._snapshot['budget_state'] = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
@@ -522,6 +529,10 @@ class WorkerPressureMonitor:
                 'disk_read_bytes_per_sec': 0.0,
                 'disk_write_bytes_per_sec': 0.0,
             }
+        try:
+            perdisk = psutil.disk_io_counters(perdisk=True)
+        except Exception:
+            perdisk = None
         disk_busy_percent = 0.0
         disk_busy_available = False
         disk_read_bytes_per_sec = 0.0
@@ -539,7 +550,24 @@ class WorkerPressureMonitor:
                 self._last_disk_sample,
                 wall_delta,
             )
+            if (not disk_busy_available or disk_busy_percent <= 0.0) and isinstance(perdisk, dict) and isinstance(self._last_perdisk_sample, dict):
+                per_disk_busy_values: list[float] = []
+                for name, current_disk in perdisk.items():
+                    previous_disk = self._last_perdisk_sample.get(name) if isinstance(self._last_perdisk_sample, dict) else None
+                    if previous_disk is None:
+                        continue
+                    current_available, current_busy = self._disk_busy_percent_from_samples(
+                        current_disk,
+                        previous_disk,
+                        wall_delta,
+                    )
+                    if current_available:
+                        per_disk_busy_values.append(float(current_busy or 0.0))
+                if per_disk_busy_values:
+                    disk_busy_available = True
+                    disk_busy_percent = max(per_disk_busy_values)
         self._last_disk_sample = disk
+        self._last_perdisk_sample = dict(perdisk or {}) if isinstance(perdisk, dict) else None
         self._last_disk_sample_mono = now_mono
         return {
             'available': True,

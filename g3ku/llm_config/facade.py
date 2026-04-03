@@ -191,6 +191,7 @@ class LLMConfigFacade:
                 description=binding.description,
                 retry_on=binding.retry_on,
                 retry_count=binding.retry_count,
+                single_api_key_max_concurrency=binding.single_api_key_max_concurrency,
             )
         )
         return self.get_binding(config, binding.key)
@@ -212,6 +213,11 @@ class LLMConfigFacade:
             binding.retry_on = [str(item).strip() for item in draft_payload.get("retry_on") if str(item).strip()]
         if "retry_count" in draft_payload:
             binding.retry_count = int(draft_payload.get("retry_count") or 0)
+        if "single_api_key_max_concurrency" in draft_payload or "singleApiKeyMaxConcurrency" in draft_payload:
+            raw_limit = draft_payload.get("single_api_key_max_concurrency")
+            if raw_limit is None and "singleApiKeyMaxConcurrency" in draft_payload:
+                raw_limit = draft_payload.get("singleApiKeyMaxConcurrency")
+            binding.single_api_key_max_concurrency = None if raw_limit in (None, "") else max(1, int(raw_limit))
 
         if not any(key in draft_payload for key in config_fields):
             return self.get_binding(config, model_key)
@@ -320,6 +326,7 @@ class LLMConfigFacade:
             record=record,
             retry_on=[],
             retry_count=0,
+            single_api_key_max_concurrency=None,
         )
 
     def export_runtime_config(self, config_id: str) -> GenericRuntimeConfig:
@@ -335,6 +342,7 @@ class LLMConfigFacade:
             record=record,
             retry_on=list(getattr(binding, "retry_on", []) or []),
             retry_count=int(getattr(binding, "retry_count", 0) or 0),
+            single_api_key_max_concurrency=getattr(binding, "single_api_key_max_concurrency", None),
         )
 
     def _binding_payload(self, binding: Any, record: NormalizedProviderConfig) -> dict[str, Any]:
@@ -352,6 +360,7 @@ class LLMConfigFacade:
             "reasoning_effort": record.parameters.get("reasoning_effort"),
             "retry_on": list(binding.retry_on or []),
             "retry_count": int(getattr(binding, "retry_count", 0) or 0),
+            "single_api_key_max_concurrency": getattr(binding, "single_api_key_max_concurrency", None),
             "description": binding.description,
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
@@ -460,6 +469,7 @@ class LLMConfigFacade:
         record: NormalizedProviderConfig,
         retry_on: list[str],
         retry_count: int,
+        single_api_key_max_concurrency: int | None,
     ) -> RuntimeTarget:
         model_parameters = _runtime_model_parameters(record.parameters)
         return RuntimeTarget(
@@ -479,6 +489,7 @@ class LLMConfigFacade:
             default_reasoning_effort=str(model_parameters.get("reasoning_effort")) if model_parameters.get("reasoning_effort") is not None else None,
             retry_on=list(retry_on),
             retry_count=max(0, int(retry_count or 0)),
+            single_api_key_max_concurrency=single_api_key_max_concurrency,
             extra_options=dict(record.extra_options),
         )
 

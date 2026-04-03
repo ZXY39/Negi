@@ -6162,6 +6162,24 @@ textarea {
     color: var(--text-primary);
 }
 
+.task-performance-queue-value {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.task-performance-count {
+    font-weight: 900;
+}
+
+.task-performance-count--running {
+    color: var(--status-success-text);
+}
+
+.task-performance-count--waiting {
+    color: #d97706;
+}
+
 .task-performance-item--state[data-state="normal"] {
     border-color: color-mix(in srgb, var(--status-success-text) 24%, var(--border-color));
     background: color-mix(in srgb, var(--status-success-bg) 18%, var(--bg-panel));

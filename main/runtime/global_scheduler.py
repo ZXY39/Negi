@@ -16,7 +16,7 @@ class GlobalScheduler:
         per_task_limit: int = 1,
     ) -> None:
         self._runner = runner
-        self._max_concurrent_tasks = max(1, int(max_concurrent_tasks or 4))
+        self._max_concurrent_tasks = None if max_concurrent_tasks is None else max(1, int(max_concurrent_tasks or 1))
         self._per_task_limit = max(1, int(per_task_limit or 1))
         self._running: dict[str, asyncio.Task[None]] = {}
         self._queued: deque[str] = deque()
@@ -27,7 +27,7 @@ class GlobalScheduler:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            'max_concurrent_tasks': int(self._max_concurrent_tasks),
+            'max_concurrent_tasks': None if self._max_concurrent_tasks is None else int(self._max_concurrent_tasks),
             'per_task_limit': int(self._per_task_limit),
             'running_task_ids': sorted(self._running.keys()),
             'queued_task_ids': list(self._queued),
@@ -128,7 +128,7 @@ class GlobalScheduler:
         try:
             while not self._closed:
                 started = False
-                while len(self._running) < self._max_concurrent_tasks and self._queued:
+                while ((self._max_concurrent_tasks is None) or (len(self._running) < self._max_concurrent_tasks)) and self._queued:
                     task_id = self._queued.popleft()
                     self._queued_set.discard(task_id)
                     if task_id in self._running:

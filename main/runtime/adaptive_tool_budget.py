@@ -242,6 +242,8 @@ class AdaptiveToolBudgetController:
                 'tool_pressure_target_limit': int(self._target_running_tools_limit),
                 'tool_pressure_running_count': int(self._running_tools_count),
                 'tool_pressure_waiting_count': int(len(self._waiting_queue)),
+                'tool_queue_running_count': int(self._running_tools_count),
+                'tool_queue_waiting_count': int(len(self._waiting_queue)),
                 'tool_pressure_last_transition_at': self._last_transition_at,
                 'tool_pressure_throttled_since': self._throttled_since,
                 'tool_pressure_critical_since': self._critical_since,

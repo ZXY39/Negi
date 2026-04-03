@@ -16,6 +16,8 @@ from loguru import logger
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
+from g3ku.llm_config.runtime_resolver import resolve_chat_target
+from g3ku.utils.api_keys import parse_api_keys
 from g3ku.web.worker_control import managed_worker_snapshot
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
@@ -57,7 +59,9 @@ from main.protocol import build_envelope, now_iso
 from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.global_scheduler import GlobalScheduler
+from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_runner import NodeRunner
+from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.debug_recorder import RuntimeDebugRecorder
@@ -296,8 +300,9 @@ class MainRuntimeService:
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
         adaptive_budget_settings = self._adaptive_tool_budget_settings(app_config)
         node_dispatch_limits = self._node_dispatch_concurrency_settings(app_config)
-        execution_max_concurrency = app_config.get_role_max_concurrency('execution') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
-        acceptance_max_concurrency = app_config.get_role_max_concurrency('inspection') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
+        execution_runtime_enabled = self.execution_mode == 'worker'
+        execution_max_concurrency = None
+        acceptance_max_concurrency = None
         react_loop = ReActToolLoop(
             chat_backend=chat_backend,
             log_service=self.log_service,
@@ -306,6 +311,20 @@ class MainRuntimeService:
             max_parallel_tool_calls=max_parallel_tool_calls,
         )
         react_loop._tool_execution_manager = None
+        self.model_key_concurrency_controller = ModelKeyConcurrencyController(
+            resolve_model_limits=self._resolve_model_limit_payload,
+        ) if execution_runtime_enabled else None
+        self.node_turn_controller = NodeTurnController(
+            model_concurrency_controller=self.model_key_concurrency_controller,
+            gate_supplier=self._node_turn_gate_allowed,
+        ) if execution_runtime_enabled and self.model_key_concurrency_controller is not None else None
+        if self.model_key_concurrency_controller is not None and self.node_turn_controller is not None:
+            self.model_key_concurrency_controller.configure(
+                resolve_model_limits=self._resolve_model_limit_payload,
+                on_availability_changed=self.node_turn_controller.poke,
+            )
+        react_loop._model_concurrency_controller = self.model_key_concurrency_controller
+        react_loop._node_turn_controller = self.node_turn_controller
         adaptive_budget_enabled = bool(adaptive_budget_settings.get('enabled')) and self.execution_mode == 'worker'
         self.adaptive_tool_budget_controller = AdaptiveToolBudgetController(
             normal_limit=int(adaptive_budget_settings['normal_limit']),
@@ -335,16 +354,12 @@ class MainRuntimeService:
             log_service=self.log_service,
             node_runner=self.node_runner,
             stall_notifier=self.task_stall_notifier,
-            node_dispatch_execution_limit=int(node_dispatch_limits['execution']),
-            node_dispatch_inspection_limit=int(node_dispatch_limits['inspection']),
-        )
-        scheduler_concurrency = max(
-            1,
-            int(execution_max_concurrency or acceptance_max_concurrency or 4),
+            node_dispatch_execution_limit=None if execution_runtime_enabled else int(node_dispatch_limits['execution']),
+            node_dispatch_inspection_limit=None if execution_runtime_enabled else int(node_dispatch_limits['inspection']),
         )
         self.global_scheduler = GlobalScheduler(
             runner=self.task_actor_service,
-            max_concurrent_tasks=scheduler_concurrency,
+            max_concurrent_tasks=None if execution_runtime_enabled else 4,
             per_task_limit=1,
         )
         self.tool_pressure_monitor = WorkerPressureMonitor(
@@ -2469,12 +2484,12 @@ class MainRuntimeService:
         self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
         self.node_runner._execution_max_iterations = config.get_role_max_iterations('execution')
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
-        self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
-        self.node_runner._acceptance_max_concurrency = config.get_role_max_concurrency('inspection')
+        self.node_runner._execution_max_concurrency = None
+        self.node_runner._acceptance_max_concurrency = None
         node_dispatch_limits = self._node_dispatch_concurrency_settings(config)
         self.task_actor_service.configure_node_dispatch_limits(
-            execution=int(node_dispatch_limits['execution']),
-            inspection=int(node_dispatch_limits['inspection']),
+            execution=None,
+            inspection=None,
         )
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(config)
         self._react_loop._parallel_tool_calls_enabled = parallel_enabled
@@ -2489,6 +2504,13 @@ class MainRuntimeService:
                 critical_limit=int(adaptive_budget_settings['critical_limit']),
                 step_up=int(adaptive_budget_settings['step_up']),
             )
+        if self.model_key_concurrency_controller is not None:
+            self.model_key_concurrency_controller.configure(
+                resolve_model_limits=self._resolve_model_limit_payload,
+                on_availability_changed=self.node_turn_controller.poke if self.node_turn_controller is not None else None,
+            )
+        if self.node_turn_controller is not None:
+            self.node_turn_controller.configure(gate_supplier=self._node_turn_gate_allowed)
         if self.tool_pressure_monitor is not None:
             self.tool_pressure_monitor.configure(
                 sample_seconds=float(adaptive_budget_settings['sample_seconds']),
@@ -4189,6 +4211,8 @@ class MainRuntimeService:
             await callback_client.aclose()
         if self.tool_pressure_monitor is not None:
             await self.tool_pressure_monitor.close()
+        if self.node_turn_controller is not None:
+            await self.node_turn_controller.close()
         await self.worker_heartbeat_service.close()
         await self.task_stall_notifier.close()
         if self.execution_mode == 'worker' and self.worker_id and self._worker_lease_acquired:
@@ -4217,11 +4241,60 @@ class MainRuntimeService:
 
     def _tool_pressure_snapshot(self) -> dict[str, Any]:
         summary_stats = self._summary_stats_snapshot()
+        node_turn_snapshot = self._node_turn_snapshot()
         if self.tool_pressure_monitor is not None:
-            return {**dict(self.tool_pressure_monitor.snapshot() or {}), **summary_stats}
+            return {**dict(self.tool_pressure_monitor.snapshot() or {}), **node_turn_snapshot, **summary_stats}
         if self.adaptive_tool_budget_controller is not None:
-            return {**dict(self.adaptive_tool_budget_controller.snapshot() or {}), **summary_stats}
-        return summary_stats
+            return {**dict(self.adaptive_tool_budget_controller.snapshot() or {}), **node_turn_snapshot, **summary_stats}
+        return {**node_turn_snapshot, **summary_stats}
+
+    def _node_turn_snapshot(self) -> dict[str, Any]:
+        controller = getattr(self, 'node_turn_controller', None)
+        if controller is None:
+            return {
+                'node_queue_running_count': 0,
+                'node_queue_waiting_count': 0,
+                'node_queue_oldest_wait_ms': 0.0,
+            }
+        try:
+            payload = dict(controller.snapshot() or {})
+        except Exception:
+            payload = {}
+        return {
+            'node_queue_running_count': int(payload.get('node_queue_running_count') or 0),
+            'node_queue_waiting_count': int(payload.get('node_queue_waiting_count') or 0),
+            'node_queue_oldest_wait_ms': float(payload.get('node_queue_oldest_wait_ms') or 0.0),
+        }
+
+    def _node_turn_gate_allowed(self) -> bool:
+        monitor = getattr(self, 'tool_pressure_monitor', None)
+        if monitor is None:
+            return True
+        try:
+            snapshot = dict(monitor.snapshot() or {})
+        except Exception:
+            return True
+        budget_state = str(snapshot.get('budget_state') or snapshot.get('tool_pressure_state') or 'normal').strip().lower()
+        machine_state = str(snapshot.get('machine_pressure_state') or '').strip().lower()
+        local_state = str(snapshot.get('local_pressure_state') or '').strip().lower()
+        return budget_state != 'critical' and machine_state != 'critical' and local_state != 'critical'
+
+    def _resolve_model_limit_payload(self, model_ref: str) -> dict[str, Any]:
+        config = self._app_config
+        normalized_model_ref = str(model_ref or '').strip()
+        if config is None or not normalized_model_ref:
+            return {'key_count': 1, 'per_key_limit': None}
+        try:
+            target = resolve_chat_target(config, normalized_model_ref, workspace=config.workspace_path)
+        except Exception:
+            return {'key_count': 1, 'per_key_limit': None}
+        raw_api_key = str((dict(getattr(target, 'secret_payload', {}) or {})).get('api_key', '') or '')
+        key_count = max(1, len(parse_api_keys(raw_api_key)))
+        raw_limit = getattr(target, 'single_api_key_max_concurrency', None)
+        return {
+            'key_count': key_count,
+            'per_key_limit': None if raw_limit in (None, '') else max(1, int(raw_limit)),
+        }
 
     def _tool_pressure_status_payload(self, item: dict[str, Any] | None) -> dict[str, Any]:
         current_payload = dict(item.get('payload') or {}) if isinstance(item, dict) else {}
@@ -4264,6 +4337,8 @@ class MainRuntimeService:
             'tool_pressure_target_limit': int(merged.get('tool_pressure_target_limit') or 0),
             'tool_pressure_running_count': int(merged.get('tool_pressure_running_count') or 0),
             'tool_pressure_waiting_count': int(merged.get('tool_pressure_waiting_count') or 0),
+            'tool_queue_running_count': int(merged.get('tool_queue_running_count') or merged.get('tool_pressure_running_count') or 0),
+            'tool_queue_waiting_count': int(merged.get('tool_queue_waiting_count') or merged.get('tool_pressure_waiting_count') or 0),
             'tool_pressure_event_loop_lag_ms': float(merged.get('tool_pressure_event_loop_lag_ms') or 0.0),
             'tool_pressure_writer_queue_depth': int(merged.get('tool_pressure_writer_queue_depth') or 0),
             'tool_pressure_process_cpu_ratio': float(merged.get('tool_pressure_process_cpu_ratio') or 0.0),
@@ -4275,6 +4350,9 @@ class MainRuntimeService:
             'worker_execution_running_count': int(merged.get('worker_execution_running_count') or merged.get('tool_pressure_running_count') or 0),
             'worker_execution_waiting_count': int(merged.get('worker_execution_waiting_count') or merged.get('tool_pressure_waiting_count') or 0),
             'worker_execution_oldest_wait_ms': float(merged.get('worker_execution_oldest_wait_ms') or 0.0),
+            'node_queue_running_count': int(merged.get('node_queue_running_count') or 0),
+            'node_queue_waiting_count': int(merged.get('node_queue_waiting_count') or 0),
+            'node_queue_oldest_wait_ms': float(merged.get('node_queue_oldest_wait_ms') or 0.0),
             'machine_pressure_state': str(merged.get('machine_pressure_state') or 'unknown'),
             'local_pressure_state': str(merged.get('local_pressure_state') or 'unknown'),
             'budget_state': str(merged.get('budget_state') or merged.get('tool_pressure_state') or 'normal'),

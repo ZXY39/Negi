@@ -278,6 +278,7 @@ class ManagedModelConfig(Base):
     reasoning_effort: str | None = None
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
     retry_count: int = Field(default=0, ge=0)
+    single_api_key_max_concurrency: int | None = Field(default=None, ge=1)
     description: str = ""
 
     @field_validator("key")
@@ -328,6 +329,15 @@ class ManagedModelConfig(Base):
             return 0
         if isinstance(value, str) and not value.strip():
             return 0
+        return int(value)
+
+    @field_validator("single_api_key_max_concurrency", mode="before")
+    @classmethod
+    def _normalize_single_api_key_max_concurrency(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
         return int(value)
 
     @model_validator(mode="after")
