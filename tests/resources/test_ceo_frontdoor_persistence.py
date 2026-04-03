@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from g3ku.runtime.frontdoor import _ceo_langgraph_impl as ceo_langgraph_impl
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 
 
@@ -65,3 +66,50 @@ async def test_ceo_frontdoor_runner_passes_thread_id_and_runtime_context() -> No
     assert graph_input["user_input"] is user_input
     assert "session" not in graph_input
     assert "on_progress" not in graph_input
+
+
+def test_ceo_frontdoor_graph_compiles_with_checkpointer_and_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    compiled_graph = object()
+
+    class _FakeStateGraph:
+        def __init__(self, state_schema, **kwargs) -> None:
+            captured["state_schema"] = state_schema
+            captured["init_kwargs"] = dict(kwargs)
+
+        def add_node(self, name, node) -> None:
+            return None
+
+        def add_edge(self, start, end) -> None:
+            return None
+
+        def add_conditional_edges(self, start, path, path_map) -> None:
+            return None
+
+        def compile(self, **kwargs):
+            captured["compile_kwargs"] = dict(kwargs)
+            return compiled_graph
+
+    monkeypatch.setattr(ceo_langgraph_impl, "StateGraph", _FakeStateGraph)
+
+    loop = SimpleNamespace(_checkpointer=object(), _store=object())
+    runner = SimpleNamespace(
+        _loop=loop,
+        _graph_prepare_turn=object(),
+        _graph_call_model=object(),
+        _graph_normalize_model_output=object(),
+        _graph_execute_tools=object(),
+        _graph_finalize_turn=object(),
+        _graph_next_step=object(),
+    )
+
+    result = ceo_langgraph_impl._build_langgraph_ceo_graph(runner)
+
+    assert result is compiled_graph
+    assert captured["state_schema"] is ceo_langgraph_impl.CeoGraphState
+    assert captured["init_kwargs"] == {"context_schema": ceo_langgraph_impl.CeoRuntimeContext}
+    assert captured["compile_kwargs"] == {
+        "name": "ceo-frontdoor",
+        "checkpointer": loop._checkpointer,
+        "store": loop._store,
+    }
