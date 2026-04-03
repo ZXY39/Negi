@@ -26,6 +26,7 @@ from main.runtime.tool_call_repair import (
 )
 
 from ._ceo_support import CeoFrontDoorSupport
+from .history_compaction import compact_frontdoor_history
 from .state_models import CeoRuntimeContext, initial_persistent_state
 
 
@@ -278,6 +279,23 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
         return self._registered_tools(list(state.get("tool_names") or []))
 
+    def _frontdoor_compaction_settings(self) -> tuple[int, int]:
+        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        recent_count = max(1, int(getattr(assembly_cfg, "frontdoor_recent_message_count", 8) or 8))
+        trigger_count = max(
+            recent_count + 1,
+            int(getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 24) or 24),
+        )
+        return recent_count, trigger_count
+
+    def _compact_frontdoor_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        recent_count, trigger_count = self._frontdoor_compaction_settings()
+        return compact_frontdoor_history(
+            messages,
+            recent_message_count=recent_count,
+            summary_trigger_message_count=trigger_count,
+        )
+
     def _build_langchain_tools_for_state(
         self,
         *,
@@ -479,6 +497,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
         if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
             messages.append({"role": "user", "content": self._model_content(user_content)})
+        messages = self._compact_frontdoor_messages(messages)
 
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
@@ -792,6 +811,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         messages = list(state.get("messages") or [])
         messages.append(assistant_message)
         messages.extend(tool_messages)
+        messages = self._compact_frontdoor_messages(messages)
 
         used_tools = list(state.get("used_tools") or [])
         used_tools.extend(
@@ -858,7 +878,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
             if last_role != "assistant":
                 messages.append({"role": "assistant", "content": output})
-            result["messages"] = messages
+            result["messages"] = self._compact_frontdoor_messages(messages)
         return result
 
     @staticmethod
