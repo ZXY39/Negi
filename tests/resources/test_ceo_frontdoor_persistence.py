@@ -289,3 +289,31 @@ async def test_ceo_frontdoor_prepare_turn_passes_checkpoint_messages_to_builder(
 
     assert captured["persisted_session"] is runtime_session
     assert captured["checkpoint_messages"] == checkpoint_messages
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_finalize_turn_persists_direct_reply_into_checkpoint_messages(tmp_path) -> None:
+    loop = SimpleNamespace(
+        sessions=SessionManager(tmp_path),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": [
+                {"role": "system", "content": "SYSTEM PROMPT"},
+                {"role": "user", "content": "plain question"},
+            ],
+            "final_output": "plain answer",
+            "route_kind": "direct_reply",
+            "heartbeat_internal": False,
+            "query_text": "plain question",
+        }
+    )
+
+    assert result["final_output"] == "plain answer"
+    assert result["messages"] == [
+        {"role": "system", "content": "SYSTEM PROMPT"},
+        {"role": "user", "content": "plain question"},
+        {"role": "assistant", "content": "plain answer"},
+    ]

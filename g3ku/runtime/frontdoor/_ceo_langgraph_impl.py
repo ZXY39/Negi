@@ -848,10 +848,18 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         output = str(state.get("final_output") or "").strip()
         if not output and not bool(state.get("heartbeat_internal")):
             output = self._empty_reply_fallback(str(state.get("query_text") or ""))
-        return {
+        route_kind = str(state.get("route_kind") or "direct_reply")
+        result = {
             "final_output": output,
-            "route_kind": str(state.get("route_kind") or "direct_reply"),
+            "route_kind": route_kind,
         }
+        messages = [dict(message) for message in list(state.get("messages") or []) if isinstance(message, dict)]
+        if output and route_kind == "direct_reply":
+            last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
+            if last_role != "assistant":
+                messages.append({"role": "assistant", "content": output})
+            result["messages"] = messages
+        return result
 
     @staticmethod
     def _graph_next_step(state: CeoGraphState) -> str:

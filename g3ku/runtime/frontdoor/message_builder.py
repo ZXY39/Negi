@@ -152,6 +152,13 @@ class CeoMessageBuilder:
             history.pop(0)
         return history
 
+    @staticmethod
+    def _history_is_semantically_complete(history_messages: list[dict[str, Any]] | None) -> bool:
+        messages = [message for message in list(history_messages or []) if isinstance(message, dict)]
+        if not messages:
+            return False
+        return str(messages[-1].get('role') or '').strip().lower() == 'assistant'
+
     def _history_has_current_user(
         self,
         *,
@@ -159,14 +166,12 @@ class CeoMessageBuilder:
         query_text: str,
         user_metadata: dict[str, Any] | None,
     ) -> bool:
-        messages = [
-            message
-            for message in list(history_messages or [])
-            if isinstance(message, dict) and str(message.get('role') or '').strip().lower() == 'user'
-        ]
+        messages = [message for message in list(history_messages or []) if isinstance(message, dict)]
         if not messages:
             return False
         last = dict(messages[-1])
+        if str(last.get('role') or '').strip().lower() != 'user':
+            return False
         last_metadata = last.get('metadata') if isinstance(last.get('metadata'), dict) else {}
         turn_id = str((user_metadata or {}).get('_transcript_turn_id') or '').strip()
         if turn_id and str(last_metadata.get('_transcript_turn_id') or '').strip() == turn_id:
@@ -603,7 +608,15 @@ class CeoMessageBuilder:
 
         checkpoint_history = self._checkpoint_history(checkpoint_messages)
         transcript_history = self._transcript_history(persisted_session)
-        history_messages = checkpoint_history or transcript_history
+        current_user_in_checkpoint = self._history_has_current_user(
+            history_messages=checkpoint_history,
+            query_text=query_text,
+            user_metadata=user_metadata,
+        )
+        use_checkpoint_history = bool(checkpoint_history) and (
+            self._history_is_semantically_complete(checkpoint_history) or current_user_in_checkpoint
+        )
+        history_messages = checkpoint_history if use_checkpoint_history else transcript_history
         current_user_in_history = self._history_has_current_user(
             history_messages=history_messages,
             query_text=query_text,
@@ -638,9 +651,10 @@ class CeoMessageBuilder:
                 'matched_terms': list(memory_write_terms),
                 'visible': memory_write_visible,
             },
-            'history_source': 'checkpoint' if checkpoint_history else 'transcript',
+            'history_source': 'checkpoint' if use_checkpoint_history else 'transcript',
             'checkpoint_message_count': len(checkpoint_history),
             'transcript_message_count': len(transcript_history),
+            'current_user_in_checkpoint': current_user_in_checkpoint,
             'current_user_in_history': current_user_in_history,
             'current_user_in_transcript': current_user_in_transcript,
             'retrieved_record_count': len(list(retrieved_bundle.records or [])),

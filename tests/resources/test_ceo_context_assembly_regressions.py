@@ -343,3 +343,62 @@ async def test_message_builder_prefers_checkpoint_history_over_transcript_once_a
     assert contents.count("follow up question") == 1
     assert contents[-1] == "follow up question"
     assert result.trace["current_user_in_transcript"] is True
+
+
+@pytest.mark.asyncio
+async def test_message_builder_falls_back_to_transcript_when_checkpoint_history_is_incomplete() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "prior question")
+    persisted_session.add_message("assistant", "prior answer")
+
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {"role": "user", "content": "prior question"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="next question",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        checkpoint_messages=checkpoint_messages,
+        user_content="next question",
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert "OLD SYSTEM" not in contents
+    assert "prior question" in contents
+    assert "prior answer" in contents
+    assert contents.count("next question") == 1
+    assert contents[-1] == "next question"
+    assert result.trace["history_source"] == "transcript"
+
+
+@pytest.mark.asyncio
+async def test_message_builder_keeps_repeated_user_text_after_completed_turn() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {"role": "user", "content": "repeat this"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="repeat this",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="repeat this",
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert contents.count("repeat this") == 2
+    assert contents[-2:] == ["done", "repeat this"]
+    assert result.trace["current_user_in_history"] is False
