@@ -402,3 +402,43 @@ async def test_message_builder_keeps_repeated_user_text_after_completed_turn() -
     assert contents.count("repeat this") == 2
     assert contents[-2:] == ["done", "repeat this"]
     assert result.trace["current_user_in_history"] is False
+
+
+@pytest.mark.asyncio
+async def test_message_builder_does_not_dedupe_same_text_when_turn_ids_mismatch() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message(
+        "user",
+        "repeat this",
+        metadata={"_transcript_turn_id": "old-turn", "_transcript_state": "complete"},
+    )
+    persisted_session.add_message("assistant", "done")
+
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {
+            "role": "user",
+            "content": "repeat this",
+            "metadata": {"_transcript_turn_id": "old-turn"},
+        },
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="repeat this",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        checkpoint_messages=checkpoint_messages,
+        user_content="repeat this",
+        user_metadata={"_transcript_turn_id": "new-turn"},
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert "OLD SYSTEM" not in contents
+    assert contents.count("repeat this") == 2
+    assert contents[-2:] == ["done", "repeat this"]
+    assert result.trace["current_user_in_checkpoint"] is False
+    assert result.trace["history_source"] == "transcript"

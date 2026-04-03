@@ -174,8 +174,9 @@ class CeoMessageBuilder:
             return False
         last_metadata = last.get('metadata') if isinstance(last.get('metadata'), dict) else {}
         turn_id = str((user_metadata or {}).get('_transcript_turn_id') or '').strip()
-        if turn_id and str(last_metadata.get('_transcript_turn_id') or '').strip() == turn_id:
-            return True
+        last_turn_id = str(last_metadata.get('_transcript_turn_id') or '').strip()
+        if turn_id and last_turn_id:
+            return last_turn_id == turn_id
         return self._content_text(last.get('content')).strip() == str(query_text or '').strip()
 
     def _transcript_has_current_user(
