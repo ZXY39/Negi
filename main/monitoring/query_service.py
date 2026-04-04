@@ -296,10 +296,10 @@ class TaskQueryService:
             detail.output_preview = self._preview_text(detail.output)
             detail.check_result_preview = self._preview_text(detail.check_result)
             detail.final_output_preview = self._preview_text(detail.final_output)
-            detail.input = ''
-            detail.output = ''
-            detail.check_result = ''
-            detail.final_output = ''
+            detail.input = self._summary_inline_text(detail.input, detail.input_ref)
+            detail.output = self._summary_inline_text(detail.output, detail.output_ref)
+            detail.check_result = self._summary_inline_text(detail.check_result, detail.check_result_ref)
+            detail.final_output = self._summary_inline_text(detail.final_output, detail.final_output_ref)
         if normalized_detail_level == 'full':
             final_output_full = self._resolve_detail_text(detail.final_output, detail.final_output_ref)
             if final_output_full:
@@ -384,6 +384,17 @@ class TaskQueryService:
         if len(text) <= max_chars:
             return text
         return f'{text[: max_chars - 3].rstrip()}...'
+
+    @classmethod
+    def _summary_inline_text(cls, value: str, ref: str, *, max_chars: int = 160) -> str:
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        if not str(ref or '').strip():
+            return text
+        if len(text) <= max_chars:
+            return text
+        return ''
 
     def _resolve_execution_trace(
         self,

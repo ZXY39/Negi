@@ -3272,11 +3272,11 @@ def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inli
     assert item["check_result_preview"]
     assert item["final_output_preview"]
     assert item["input_preview"] != input_text
-    assert item["output_preview"] != final_output
+    assert item["output_preview"] != output_text
     assert item["check_result_preview"] != check_result
     assert item["final_output_preview"] != final_output
     assert len(item["input_preview"]) < len(input_text)
-    assert len(item["output_preview"]) < len(final_output)
+    assert len(item["output_preview"]) < len(output_text)
     assert len(item["check_result_preview"]) < len(check_result)
     assert len(item["final_output_preview"]) < len(final_output)
     assert item["input_ref"].startswith("artifact:")
