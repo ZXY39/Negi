@@ -92,8 +92,8 @@ async def get_task_node_detail(
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_node_detail_payload(task_id, node_id, detail_level=detail_level)
-    if payload is None:
+    payload = service.node_detail(task_id, node_id, detail_level=detail_level)
+    if not isinstance(payload, dict):
         raise HTTPException(status_code=404, detail='node_not_found')
     return payload
 

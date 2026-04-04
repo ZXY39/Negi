@@ -199,6 +199,16 @@ def _execution_trace_output_ref(record: TaskProjectionToolResultRecord) -> str:
         wrapper_ref = str(envelope.ref or '').strip()
         if wrapper_ref:
             return wrapper_ref
+    if isinstance(parsed_payload, dict):
+        wrapper_ref = str(
+            parsed_payload.get('wrapper_ref')
+            or parsed_payload.get('requested_ref')
+            or parsed_payload.get('ref')
+            or ''
+        ).strip()
+        resolved_ref = str(parsed_payload.get('resolved_ref') or '').strip()
+        if wrapper_ref and wrapper_ref != resolved_ref:
+            return wrapper_ref
     return output_ref
 
 

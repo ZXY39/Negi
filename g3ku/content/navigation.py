@@ -211,6 +211,17 @@ def _structured_resolved_ref_and_depth(value: Any) -> tuple[str, int]:
     return resolved_ref, 0
 
 
+def _structured_ref_payload(value: Any) -> tuple[str, str]:
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return "", ""
+    canonical_ref = str(payload.get("resolved_ref") or "").strip()
+    wrapper_ref = str(payload.get("wrapper_ref") or payload.get("requested_ref") or payload.get("ref") or "").strip()
+    if canonical_ref and wrapper_ref == canonical_ref:
+        wrapper_ref = ""
+    return canonical_ref, wrapper_ref
+
+
 def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
     if not normalized.startswith("tool_result:"):
@@ -351,6 +362,9 @@ def content_summary_and_ref(value: Any) -> tuple[str, str]:
     if envelope is not None:
         canonical_ref = str(envelope.resolved_ref or getattr(envelope.handle, "resolved_ref", "") or envelope.ref or "")
         return envelope.summary, canonical_ref
+    structured_ref, _wrapper_ref = _structured_ref_payload(value)
+    if structured_ref:
+        return _stringify(value), structured_ref
     if isinstance(value, (dict, list)):
         return _stringify(value), ""
     return str(value or ""), ""

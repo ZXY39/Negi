@@ -3208,6 +3208,54 @@ def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
     assert "artifacts" not in payload
 
 
+def test_rest_node_detail_reports_real_artifact_metadata_for_summary_and_full(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    matching = service.artifact_store.create_text_artifact(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        kind="report",
+        title="Root Artifact",
+        content="root artifact content",
+    )
+
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    client = TestClient(_build_app())
+
+    summary_response = client.get(f"/api/tasks/{record.task_id}/nodes/{root.node_id}")
+    full_response = client.get(
+        f"/api/tasks/{record.task_id}/nodes/{root.node_id}",
+        params={"detail_level": "full"},
+    )
+
+    assert summary_response.status_code == 200
+    assert full_response.status_code == 200
+
+    summary_payload = summary_response.json()
+    assert summary_payload["artifact_count"] == 1
+    assert summary_payload["artifacts_preview"][0]["artifact_id"] == matching.artifact_id
+    assert summary_payload["item"]["artifact_count"] == 1
+    assert summary_payload["item"]["artifacts_preview"][0]["artifact_id"] == matching.artifact_id
+
+    full_payload = full_response.json()
+    assert full_payload["artifact_count"] == 1
+    assert full_payload["artifacts"][0]["artifact_id"] == matching.artifact_id
+    assert full_payload["item"]["artifact_count"] == 1
+    assert full_payload["item"]["artifacts_preview"] == []
+
+
 def test_get_node_detail_payload_uses_summary_mode_and_execution_trace_ref(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -3498,7 +3546,7 @@ def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Pa
 
     captured: dict[str, str] = {}
 
-    def _get_node_detail_payload(task_id: str, node_id: str, detail_level: str = "summary"):
+    def _node_detail(task_id: str, node_id: str, detail_level: str = "summary"):
         captured["task_id"] = task_id
         captured["node_id"] = node_id
         captured["detail_level"] = detail_level
@@ -3514,7 +3562,7 @@ def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Pa
             },
         }
 
-    service.get_node_detail_payload = _get_node_detail_payload
+    service.node_detail = _node_detail
     monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
     client = TestClient(_build_app())
 

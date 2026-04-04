@@ -552,6 +552,87 @@ async def test_persisted_tool_result_output_ref_stays_canonical_while_execution_
 
 
 @pytest.mark.asyncio
+async def test_inline_content_json_tool_results_preserve_structured_refs(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        navigator = service.content_store
+        inner = navigator.maybe_externalize_text(
+            'alpha\nneedle\nomega\n',
+            runtime={'task_id': record.task_id, 'node_id': record.root_node_id},
+            display_name='inner',
+            source_kind='node_output',
+            force=True,
+        )
+        assert inner is not None
+        wrapped = navigator.maybe_externalize_text(
+            json.dumps(inner.to_dict(), ensure_ascii=False),
+            runtime={'task_id': record.task_id, 'node_id': record.root_node_id},
+            display_name='wrapped',
+            source_kind='tool_result:content',
+            force=True,
+        )
+        assert wrapped is not None
+        inline_open_payload = service.open_content(ref=wrapped.ref)
+
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='inspect inline content.open payload output refs',
+            tool_round_budget=1,
+        )
+        tool_calls = [
+            ToolCallRequest(
+                id='call:content-open',
+                name='content',
+                arguments={'action': 'open', 'ref': wrapped.ref},
+            )
+        ]
+        service.log_service.append_node_output(
+            record.task_id,
+            record.root_node_id,
+            content='',
+            tool_calls=[{'id': 'call:content-open', 'name': 'content', 'arguments': {'action': 'open', 'ref': wrapped.ref}}],
+        )
+        service.log_service.record_tool_result_batch(
+            task_id=record.task_id,
+            node_id=record.root_node_id,
+            response_tool_calls=tool_calls,
+            results=[
+                _tool_result_payload(
+                    call_id='call:content-open',
+                    tool_name='content',
+                    content=json.dumps(inline_open_payload, ensure_ascii=False),
+                )
+            ],
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:content-open', 'name': 'content', 'arguments': {'action': 'open', 'ref': wrapped.ref}}],
+            created_at=now_iso(),
+        )
+
+        tool_results = service.store.list_task_node_tool_results(record.task_id, record.root_node_id)
+        assert len(tool_results) == 1
+        assert tool_results[0].output_ref == inner.ref
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
+        assert detail is not None
+        tool_step = detail['item']['execution_trace']['stages'][0]['rounds'][0]['tools'][0]
+        assert tool_step['output_ref'] == wrapped.ref
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_ref_based_content_reads_now_consume_stage_budget(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
