@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
-from g3ku.content import ContentNavigationService, parse_content_envelope
+from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
@@ -1783,6 +1783,22 @@ def test_content_navigation_open_raw_view_reads_wrapper_json(tmp_path: Path):
     store.close()
 
 
+def test_content_navigation_resolves_nested_wrappers_hop_by_hop(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("alpha\nneedle\nomega\n", runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    middle = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:middle"}, display_name="middle", source_kind="tool_result:content", force=True)
+    outer = navigator.maybe_externalize_text(json.dumps(middle.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:outer"}, display_name="outer", source_kind="tool_result:content", force=True)
+    result = navigator.search(ref=outer.ref, query="needle")
+    assert result["count"] == 1
+    assert result["requested_ref"] == outer.ref
+    assert result["resolved_ref"] == inner.ref
+    assert result["wrapper_ref"] == outer.ref
+    assert result["wrapper_depth"] == 2
+    store.close()
+
+
 def test_content_navigation_detects_wrapper_ref_cycles(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
@@ -1793,6 +1809,44 @@ def test_content_navigation_detects_wrapper_ref_cycles(tmp_path: Path):
     Path(b.path).write_text(json.dumps({"type": "content_ref", "ref": f"artifact:{a.artifact_id}"}), encoding="utf-8")
     with pytest.raises(ValueError, match="content ref cycle detected"):
         navigator.describe(ref=f"artifact:{a.artifact_id}")
+    store.close()
+
+
+def test_content_navigation_detects_self_referential_wrapper_cycles(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    wrapper = artifact_store.create_text_artifact(task_id="task:test", node_id="node:self", kind="tool_result:content", title="Self", content="seed-self")
+    wrapper_ref = f"artifact:{wrapper.artifact_id}"
+    Path(wrapper.path).write_text(json.dumps({"type": "content_ref", "ref": wrapper_ref}), encoding="utf-8")
+    with pytest.raises(ValueError, match="content ref cycle detected"):
+        navigator.describe(ref=wrapper_ref)
+    store.close()
+
+
+def test_content_navigation_populates_path_ref_metadata(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    target = tmp_path / "notes.txt"
+    target.write_text("line one\nline two\n", encoding="utf-8")
+    result = navigator.describe(path=str(target))
+    assert result["requested_ref"] == "path:notes.txt"
+    assert result["resolved_ref"] == "path:notes.txt"
+    assert result["wrapper_ref"] == ""
+    assert result["wrapper_depth"] == 0
+    store.close()
+
+
+def test_content_summary_and_ref_keeps_wrapper_ref_for_content_envelopes(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("canonical body", runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
+    summary, ref = content_summary_and_ref(wrapped.to_dict())
+    assert summary == wrapped.summary
+    assert ref == wrapped.ref
     store.close()
 
 

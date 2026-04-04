@@ -325,8 +325,7 @@ def parse_content_envelope(value: Any) -> ContentEnvelope | None:
 def content_summary_and_ref(value: Any) -> tuple[str, str]:
     envelope = parse_content_envelope(value)
     if envelope is not None:
-        canonical_ref = str(envelope.resolved_ref or getattr(envelope.handle, "resolved_ref", "") or envelope.ref or "")
-        return envelope.summary, canonical_ref
+        return envelope.summary, str(envelope.ref or "")
     if isinstance(value, (dict, list)):
         return _stringify(value), ""
     return str(value or ""), ""
@@ -380,12 +379,13 @@ class ContentNavigationService:
             mime_type=mime_type,
             origin_ref=origin_ref,
         )
+        resolved_ref, nested_depth = self._resolved_ref_and_depth_from_value(value)
         handle = self._apply_handle_refs(
             handle,
             requested_ref=handle.ref,
-            resolved_ref=self._canonical_ref_from_value(value),
-            wrapper_ref=handle.ref if self._canonical_ref_from_value(value) and self._canonical_ref_from_value(value) != handle.ref else "",
-            wrapper_depth=1 if self._canonical_ref_from_value(value) and self._canonical_ref_from_value(value) != handle.ref else 0,
+            resolved_ref=resolved_ref,
+            wrapper_ref=handle.ref if resolved_ref and resolved_ref != handle.ref else "",
+            wrapper_depth=(1 + nested_depth) if resolved_ref and resolved_ref != handle.ref else 0,
         )
         summary = _content_summary(handle)
         return ContentEnvelope(
@@ -628,7 +628,7 @@ class ContentNavigationService:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
             except ValueError:
                 ref_path = str(file_path)
-            return text, self._build_handle(
+            handle = self._build_handle(
                 ref=f"path:{ref_path}",
                 artifact_id="",
                 uri=str(file_path),
@@ -681,8 +681,10 @@ class ContentNavigationService:
         )
         requested_ref = _requested_ref or normalized_ref
         if resolved_view == "canonical":
-            next_ref = self._canonical_ref_from_value(text)
-            if next_ref and next_ref != normalized_ref:
+            next_ref = self._next_wrapper_ref_from_value(text)
+            if next_ref:
+                if next_ref == normalized_ref:
+                    raise ValueError("content ref cycle detected")
                 return self._resolve(
                     ref=next_ref,
                     view=resolved_view,
@@ -717,6 +719,26 @@ class ContentNavigationService:
         if envelope is None:
             return ""
         return str(envelope.resolved_ref or getattr(envelope.handle, "resolved_ref", "") or envelope.ref or "").strip()
+
+    @staticmethod
+    def _next_wrapper_ref_from_value(value: Any) -> str:
+        envelope = parse_content_envelope(value)
+        if envelope is None:
+            return ""
+        return str(envelope.ref or getattr(envelope.handle, "ref", "") or "").strip()
+
+    @classmethod
+    def _resolved_ref_and_depth_from_value(cls, value: Any) -> tuple[str, int]:
+        envelope = parse_content_envelope(value)
+        if envelope is None:
+            return "", 0
+        resolved_ref = cls._canonical_ref_from_value(envelope)
+        handle = envelope.handle
+        if handle is not None:
+            return resolved_ref, max(0, int(handle.wrapper_depth or 0))
+        immediate_ref = str(envelope.ref or "").strip()
+        nested_depth = 1 if resolved_ref and immediate_ref and resolved_ref != immediate_ref else 0
+        return resolved_ref, nested_depth
 
     @staticmethod
     def _apply_handle_refs(
