@@ -15,6 +15,7 @@ from g3ku.core.events import AgentEvent
 from g3ku.core.messages import AssistantMessage, UserInputMessage
 from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
+from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.cancellation import ToolCancellationToken
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -179,6 +180,18 @@ class RuntimeAgentSession:
     @staticmethod
     def _new_turn_id() -> str:
         return uuid.uuid4().hex[:16]
+
+    @staticmethod
+    def _serialize_pending_interrupts(values: list[Any]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for raw in list(values or []):
+            items.append(
+                {
+                    "id": str(getattr(raw, "interrupt_id", getattr(raw, "id", "")) or ""),
+                    "value": getattr(raw, "value", None),
+                }
+            )
+        return items
 
     def _ensure_user_turn_id(self, user_input: UserInputMessage) -> str:
         metadata = dict(user_input.metadata or {})
@@ -880,6 +893,28 @@ class RuntimeAgentSession:
             on_progress=self._handle_progress,
         )
 
+    async def _pause_for_frontdoor_interrupt(self, exc: CeoFrontdoorInterrupted) -> RunResult:
+        serialized_interrupts = self._serialize_pending_interrupts(exc.interrupts)
+        self._state.is_running = False
+        self._state.paused = True
+        self._state.status = "paused"
+        self._state.latest_message = ""
+        self._state.last_error = None
+        self._state.pending_tool_calls.clear()
+        self._pending_tool_names.clear()
+        self._state.pending_interrupts = serialized_interrupts
+        self._set_paused_execution_context(
+            {
+                **(self._build_execution_context_snapshot(allow_manual_pause=True, status_override="paused") or {}),
+                "source": "approval",
+                "interrupts": serialized_interrupts,
+                "graph_state": dict(exc.values or {}),
+            }
+        )
+        await self._emit("frontdoor_interrupt", interrupts=serialized_interrupts)
+        await self._emit_state_snapshot()
+        return RunResult(output="", events=list(self._event_log))
+
     async def prompt(
         self,
         message: str | UserInputMessage,
@@ -918,6 +953,7 @@ class RuntimeAgentSession:
                 self._state.latest_message = ""
                 self._state.last_error = None
                 self._state.pending_tool_calls.clear()
+                self._state.pending_interrupts = []
                 if persist_transcript and internal_source is None:
                     await self._persist_pending_user_message(
                         user_input=user_input,
@@ -940,6 +976,8 @@ class RuntimeAgentSession:
                 if not already_paused:
                     await self._emit_state_snapshot()
                 raise
+            except CeoFrontdoorInterrupted as exc:
+                return await self._pause_for_frontdoor_interrupt(exc)
             except Exception as exc:
                 self._state.is_running = False
                 self._state.status = "error"
@@ -1105,6 +1143,48 @@ class RuntimeAgentSession:
             return await self.prompt(additional_context)
         return RunResult(output="", events=list(self._event_log))
 
+    async def resume_frontdoor_interrupt(
+        self,
+        *,
+        resume_value: Any,
+        live_context: dict[str, str] | None = None,
+    ) -> RunResult:
+        from g3ku.shells.web import refresh_web_agent_runtime
+
+        async with self._turn_lock:
+            self._apply_live_context(live_context)
+            await refresh_web_agent_runtime(force=False, reason="resume_interrupt")
+            runner = getattr(self._loop, "multi_agent_runner", None)
+            if runner is None or not hasattr(runner, "resume_turn"):
+                raise RuntimeError("frontdoor_interrupt_resume_unavailable")
+            self._event_log = []
+            self._state.is_running = True
+            self._state.paused = False
+            self._state.status = "running"
+            self._state.latest_message = ""
+            self._state.last_error = None
+            self._state.pending_tool_calls.clear()
+            self._pending_tool_names.clear()
+            self._state.pending_interrupts = []
+            await self._emit("control_ack", action="resume_interrupt", accepted=True)
+            await self._emit_state_snapshot()
+            try:
+                output = await runner.resume_turn(
+                    session=self,
+                    resume_value=resume_value,
+                    on_progress=self._handle_progress,
+                )
+            except CeoFrontdoorInterrupted as exc:
+                return await self._pause_for_frontdoor_interrupt(exc)
+            self.clear_paused_execution_context()
+            self._state.is_running = False
+            self._state.paused = False
+            self._state.status = "completed"
+            self._state.latest_message = str(output or "")
+            await self._emit("message_end", role="assistant", text=str(output or ""), source="user")
+            await self._emit_state_snapshot()
+            return RunResult(output=str(output or ""), events=list(self._event_log))
+
     async def cancel(self, *, reason: str = "user_cancelled") -> None:
         await self._emit_safe_stop_notice("cancel")
         if self._active_cancel_token is not None:
@@ -1117,6 +1197,7 @@ class RuntimeAgentSession:
         self._state.paused = False
         self._state.status = "idle"
         self._state.pending_tool_calls.clear()
+        self._state.pending_interrupts = []
         await self._emit("control_ack", action="cancel", accepted=True, reason=reason)
         await self._emit_state_snapshot()
 

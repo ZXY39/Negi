@@ -14,6 +14,7 @@ from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
+from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import websocket_ceo
 from g3ku.runtime.manager import SessionRuntimeManager
@@ -460,6 +461,65 @@ async def test_runtime_agent_session_marks_heartbeat_message_end(tmp_path: Path,
     message_end = next(event for event in events if event.type == "message_end")
     assert message_end.payload["text"] == HEARTBEAT_OK
     assert message_end.payload["heartbeat_internal"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_state(tmp_path, monkeypatch) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _InterruptingRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session, on_progress
+            raise CeoFrontdoorInterrupted(
+                interrupts=[
+                    CeoPendingInterrupt(
+                        interrupt_id="interrupt-1",
+                        value={"kind": "frontdoor_tool_approval", "tool_calls": [{"name": "create_async_task"}]},
+                    )
+                ],
+                values={"tool_call_payloads": [{"name": "create_async_task"}]},
+            )
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_InterruptingRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+
+    result = await session.prompt("create a task")
+
+    assert result.output == ""
+    assert session.state.status == "paused"
+    assert session.state.paused is True
+    assert session.state.pending_interrupts == [
+        {
+            "id": "interrupt-1",
+            "value": {"kind": "frontdoor_tool_approval", "tool_calls": [{"name": "create_async_task"}]},
+        }
+    ]
+    paused = session.paused_execution_context_snapshot()
+    assert paused["interrupts"][0]["id"] == "interrupt-1"
 
 
 @pytest.mark.asyncio
@@ -1366,6 +1426,80 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
     assert len(final_events) == 1
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
+
+
+def test_ceo_websocket_resume_interrupt_forwards_resume_payload(tmp_path, monkeypatch) -> None:
+    class _ResumeSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(
+                status="paused",
+                is_running=False,
+                pending_interrupts=[{"id": "interrupt-1", "value": {"kind": "frontdoor_tool_approval"}}],
+            )
+            self.resume_payloads: list[object] = []
+            self._listeners = set()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+            return lambda: self._listeners.discard(listener)
+
+        def state_dict(self) -> dict[str, object]:
+            return {
+                "status": self.state.status,
+                "is_running": self.state.is_running,
+                "pending_interrupts": list(self.state.pending_interrupts),
+            }
+
+        def inflight_turn_snapshot(self):
+            return {"status": "paused", "interrupts": list(self.state.pending_interrupts)}
+
+        async def resume_frontdoor_interrupt(self, *, resume_value):
+            self.resume_payloads.append(resume_value)
+            self.state.status = "completed"
+            self.state.pending_interrupts = []
+            return SimpleNamespace(output="")
+
+    live_session = _ResumeSession()
+    session_manager = SessionManager(tmp_path)
+    session_manager.get_or_create("web:shared")
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_agent",
+        lambda: SimpleNamespace(
+            sessions=session_manager,
+            main_task_service=SimpleNamespace(
+                startup=lambda: None,
+                registry=SimpleNamespace(
+                    subscribe_ceo=lambda _session_id: asyncio.Queue(),
+                    subscribe_global_ceo=lambda: asyncio.Queue(),
+                    unsubscribe_ceo=lambda _session_id, _queue: None,
+                    unsubscribe_global_ceo=lambda _queue: None,
+                    next_ceo_seq=lambda _session_id: 1,
+                    publish_global_ceo=lambda _envelope: None,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", lambda _agent: None)
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get_or_create=lambda **kwargs: live_session, get=lambda _key: live_session),
+    )
+    monkeypatch.setattr(websocket_ceo, "workspace_path", lambda: tmp_path)
+
+    client = TestClient(app)
+    with client.websocket_connect("/api/ws/ceo?session_id=web:shared") as ws:
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.send_json({"type": "client.resume_interrupt", "resume": {"approved": True}})
+
+    assert live_session.resume_payloads == [{"approved": True}]
 
 
 def test_ceo_websocket_turn_patch_carries_live_tool_events(tmp_path: Path, monkeypatch) -> None:

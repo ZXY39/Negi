@@ -36,6 +36,7 @@ class AgentState:
     latest_message: str = ""
     stream_message: Any | None = None
     pending_tool_calls: set[str] = field(default_factory=set)
+    pending_interrupts: list[dict[str, Any]] = field(default_factory=list)
     queued_steering_messages: list[Any] = field(default_factory=list)
     queued_follow_up_messages: list[Any] = field(default_factory=list)
     last_error: StructuredError | None = None

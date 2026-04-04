@@ -5,6 +5,7 @@ import base64
 import mimetypes
 import shutil
 import uuid
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
@@ -181,6 +182,12 @@ def _serialize_upload_descriptor(path: Path, *, name: str, mime_type: str) -> di
         'size': resolved.stat().st_size,
         'kind': _upload_kind(mime_type=resolved_mime, name=name),
     }
+
+
+async def _maybe_await(value: Any) -> Any:
+    if isawaitable(value):
+        return await value
+    return value
 
 
 async def _store_uploaded_file(session_id: str, upload: UploadFile) -> dict[str, Any]:
@@ -594,10 +601,12 @@ async def ceo_websocket(websocket: WebSocket):
         except WebSocketChannelClosed:
             return
         return
-    await ensure_web_runtime_services(agent)
-    await service.startup()
-    queue = await service.registry.subscribe_ceo(session_id)
-    global_queue = await service.registry.subscribe_global_ceo()
+    ensure_result = ensure_web_runtime_services(agent)
+    if isawaitable(ensure_result):
+        await ensure_result
+    await _maybe_await(service.startup())
+    queue = await _maybe_await(service.registry.subscribe_ceo(session_id))
+    global_queue = await _maybe_await(service.registry.subscribe_global_ceo())
     stream_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     if ':' in session_id:
@@ -675,6 +684,14 @@ async def ceo_websocket(websocket: WebSocket):
             await _safe_send(payload)
 
     async def relay_session_event(event: AgentEvent) -> None:
+        if event.type == 'frontdoor_interrupt':
+            payload = dict(event.payload or {})
+            await _push_stream_event(
+                'ceo.turn.interrupt',
+                {'interrupts': list(payload.get('interrupts') or [])},
+            )
+            await _push_turn_patch()
+            return
         if event.type == 'control_ack':
             payload = dict(event.payload or {})
             await _push_stream_event('ceo.control_ack', payload)
@@ -777,6 +794,23 @@ async def ceo_websocket(websocket: WebSocket):
                 break
             data = await websocket_receive_json(websocket)
             message_type = str(data.get('type') or '')
+            if message_type == 'client.resume_interrupt':
+                if _current_session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
+                    await _safe_send(
+                        build_envelope(
+                            channel='ceo',
+                            session_id=session_id,
+                            type='error',
+                            data={'code': 'ceo_turn_in_progress'},
+                        )
+                    )
+                    continue
+                current_turn_task = asyncio.create_task(
+                    session.resume_frontdoor_interrupt(resume_value=data.get('resume'))
+                )
+                _register_turn_task(current_turn_task)
+                current_turn_task.add_done_callback(_clear_turn_task)
+                continue
             if message_type == 'client.pause_turn':
                 if _current_session_is_running():
                     await session.pause(manual=True)
@@ -846,5 +880,5 @@ async def ceo_websocket(websocket: WebSocket):
         global_sender_task.cancel()
         stream_task.cancel()
         await asyncio.gather(sender_task, global_sender_task, stream_task, return_exceptions=True)
-        await service.registry.unsubscribe_ceo(session_id, queue)
-        await service.registry.unsubscribe_global_ceo(global_queue)
+        await _maybe_await(service.registry.unsubscribe_ceo(session_id, queue))
+        await _maybe_await(service.registry.unsubscribe_global_ceo(global_queue))
