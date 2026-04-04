@@ -6,6 +6,19 @@ if TYPE_CHECKING:
     from .ceo_runner import CeoFrontDoorRunner
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple | set):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
 def _thread_config(*, session_id: str, checkpoint_id: str | None = None) -> dict[str, Any]:
     configurable = {"thread_id": str(session_id or "").strip()}
     normalized_checkpoint_id = str(checkpoint_id or "").strip()
@@ -17,7 +30,7 @@ def _thread_config(*, session_id: str, checkpoint_id: str | None = None) -> dict
 def _serialize_interrupt(item: Any) -> dict[str, Any]:
     return {
         "id": str(getattr(item, "id", "") or ""),
-        "value": getattr(item, "value", None),
+        "value": _json_safe(getattr(item, "value", None)),
     }
 
 
@@ -31,7 +44,7 @@ def _serialize_task(item: Any) -> dict[str, Any]:
     }
     state = getattr(item, "state", None)
     if state is not None:
-        payload["state"] = state
+        payload["state"] = _json_safe(state)
     return payload
 
 
@@ -46,9 +59,9 @@ def serialize_state_snapshot(snapshot: Any) -> dict[str, Any]:
         "checkpoint_id": str(configurable.get("checkpoint_id") or ""),
         "checkpoint_ns": str(configurable.get("checkpoint_ns") or ""),
         "parent_checkpoint_id": str(parent_configurable.get("checkpoint_id") or ""),
-        "values": dict(getattr(snapshot, "values", {}) or {}),
-        "next": list(getattr(snapshot, "next", ()) or ()),
-        "metadata": dict(getattr(snapshot, "metadata", {}) or {}),
+        "values": _json_safe(dict(getattr(snapshot, "values", {}) or {})),
+        "next": _json_safe(list(getattr(snapshot, "next", ()) or ())),
+        "metadata": _json_safe(dict(getattr(snapshot, "metadata", {}) or {})),
         "created_at": str(getattr(snapshot, "created_at", "") or ""),
         "tasks": tasks,
         "has_interrupts": any(bool(task.get("interrupts")) for task in tasks),
