@@ -7,10 +7,6 @@ from typing import TYPE_CHECKING, Any
 from g3ku.agent.chatmodel_utils import ensure_chat_model
 from g3ku.agent.rag_memory import MemoryManager
 from g3ku.runtime.engine import AgentRuntimeEngine
-from g3ku.runtime.model_bridge import (
-    LoopRuntimeContext as _LoopRuntimeContext,
-    LoopRuntimeMiddleware as _LoopRuntimeMiddleware,
-)
 from g3ku.session.manager import SessionManager
 
 if TYPE_CHECKING:
@@ -76,6 +72,4 @@ __all__ = [
     'ensure_chat_model',
     'MemoryManager',
     'SessionManager',
-    '_LoopRuntimeContext',
-    '_LoopRuntimeMiddleware',
 ]

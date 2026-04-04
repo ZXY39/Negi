@@ -151,11 +151,13 @@ class RuntimeTarget(StrictModel):
     base_url: str
     resolved_model: str
     headers: dict[str, str] = Field(default_factory=dict)
+    model_parameters: dict[str, Any] = Field(default_factory=dict)
     max_tokens_limit: int | None = None
     default_temperature: float | None = None
     default_reasoning_effort: str | None = None
     retry_on: list[str] = Field(default_factory=list)
     retry_count: int = Field(default=0, ge=0)
+    single_api_key_max_concurrency: int | None = Field(default=None, ge=1)
     extra_options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -166,6 +168,7 @@ class ModelBindingDraft(StrictModel):
     description: str = ""
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
     retry_count: int = Field(default=0, ge=0)
+    single_api_key_max_concurrency: int | None = Field(default=None, ge=1)
 
 
 class MemoryModelBinding(StrictModel):

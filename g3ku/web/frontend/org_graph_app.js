@@ -20,7 +20,7 @@ const CEO_TOOL_OUTPUT_PREVIEW_MAX_CHARS = 240;
 const CEO_TOOL_PROGRESS_MAX_LINES = 4;
 const CEO_TOOL_STEP_MAX = 5;
 const TASK_DETAIL_SESSION_KEY = "g3ku.task-detail.session.v1";
-const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v1";
+const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v2";
 const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
@@ -109,20 +109,40 @@ const S = {
     currentTaskId: null,
     tasks: [],
     currentTask: null,
-    currentTaskProgress: null,
-    currentTaskTreeRoot: null,
-    currentTaskRuntimeSummary: null,
+    taskGovernance: null,
+    taskSummary: null,
+    rootNode: null,
+    frontier: [],
+    recentModelCalls: [],
+    liveFrameMap: {},
     currentNodeDetail: null,
     taskDetailRenderToken: 0,
     taskNodeDetails: {},
     taskNodeDetailRequests: {},
+    taskNodeLatestContexts: {},
+    taskNodeLatestContextRequests: {},
+    treeRootNodeId: "",
+    treeNodesById: {},
+    treeSnapshotVersion: "",
+    treeDirtyParentsById: {},
+    treeBranchSyncInFlightById: {},
+    treeBranchSyncQueuedById: {},
+    treeBranchSyncTokenById: {},
+    treeLargeMode: false,
     taskDetailViewStates: {},
     pendingTaskDetailRestore: null,
     taskNodeBusy: false,
     tasksWorkerOnline: true,
     tasksWorkerReportedOnline: true,
+    tasksWorkerState: "online",
+    tasksWorkerReportedState: "online",
+    tasksWorkerLastSeenAt: "",
+    tasksWorkerControlAvailable: true,
     tasksWorker: null,
+    tasksWorkerStatusPayload: null,
     tasksWorkerStaleAfterSeconds: 15,
+    taskWorkerStatusPollId: null,
+    taskPerformanceRefreshId: null,
     taskTokenStatsOpen: false,
     taskArtifacts: [],
     selectedArtifactId: "",
@@ -134,9 +154,26 @@ const S = {
     taskBusy: false,
     taskPage: 1,
     taskPageSize: RESOURCE_PAGE_SIZES[0],
+    tasksById: {},
+    orderedTaskIds: [],
+    visibleTaskIds: [],
+    pendingTaskCardPatchIds: new Set(),
+    taskCardPatchQueuedAt: {},
+    taskCardPatchFlushId: null,
+    taskListDirtyWhileHidden: false,
+    taskListReconcileBusy: false,
+    lastTaskSummaryPatchAt: "",
+    lastTaskTokenPatchAt: "",
+    taskListReconnectNeedsReconcile: false,
     taskGridSignature: "",
     taskMetricSnapshot: {},
     taskMetricAnimationTaskIds: new Set(),
+    taskHallStats: {
+        task_hall_full_render_count: 0,
+        task_hall_card_patch_count: 0,
+        task_hall_hidden_defer_count: 0,
+        task_hall_max_patch_queue_age_ms: 0,
+    },
     confirmState: null,
     toastState: { timeoutId: null, intervalId: null, remaining: 0 },
     openResourceSelectId: "",
@@ -160,9 +197,8 @@ const S = {
         rolesDirty: false,
         dragState: null,
     },
-    tree: null,
     treeView: null,
-    treeRoundSelectionsByNodeId: {},
+    treeSelectedRoundByNodeId: {},
     treePan: {
         active: false,
         originNodeId: null,
@@ -247,6 +283,7 @@ const U = {
     modelBackdrop: document.getElementById("model-detail-backdrop"),
     modelDrawer: document.querySelector(".model-detail-dialog"),
     taskGrid: document.getElementById("task-card-grid"),
+    taskPerformanceBar: document.getElementById("task-performance-bar"),
     taskToolbar: document.getElementById("task-toolbar"),
     taskDepthSelect: document.getElementById("task-depth-select"),
     taskDepthCustomWrap: document.getElementById("task-depth-custom-wrap"),
@@ -270,6 +307,13 @@ const U = {
     tdStatusPill: document.getElementById("td-status-pill"),
     tdStatus: document.getElementById("td-status"),
     tdActiveCount: document.getElementById("td-active-count"),
+    taskGovernancePanel: document.getElementById("task-governance-panel"),
+    taskGovernanceDetails: document.getElementById("task-governance-details"),
+    taskGovernanceStatus: document.getElementById("task-governance-status"),
+    taskGovernanceLastDecision: document.getElementById("task-governance-last-decision"),
+    taskGovernanceHistoryCount: document.getElementById("task-governance-history-count"),
+    taskGovernanceHistory: document.getElementById("task-governance-history"),
+    taskGovernanceEmpty: document.getElementById("task-governance-empty"),
     taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
     tree: document.getElementById("org-tree-container"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
@@ -283,7 +327,7 @@ const U = {
     taskTokenClose: null,
     artifactList: document.getElementById("artifact-list"),
     artifactContent: document.getElementById("artifact-content"),
-    artifactApply: document.getElementById("artifact-apply-btn"),
+    nodeContextDisclosure: document.getElementById("node-context-disclosure"),
     feedTitle: document.getElementById("feed-target-name"),
     detail: document.getElementById("agent-detail-view"),
     adRole: document.getElementById("ad-role"),
@@ -958,6 +1002,13 @@ function normalizeCeoSnapshotToolEvent(event = {}) {
     return Object.keys(next).length ? next : null;
 }
 
+function normalizeCeoSnapshotToolEvents(events = []) {
+    return (Array.isArray(events) ? events : [])
+        .map((item) => normalizeCeoSnapshotToolEvent(item))
+        .filter(Boolean)
+        .slice(-CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT);
+}
+
 function normalizeCeoSnapshotMessage(message = {}) {
     if (!message || typeof message !== "object") return null;
     const role = String(message?.role || "").trim().toLowerCase();
@@ -971,33 +1022,14 @@ function normalizeCeoSnapshotMessage(message = {}) {
     const attachments = role === "user" ? cloneCeoSnapshotAttachments(message?.attachments) : [];
     if (attachments.length) next.attachments = attachments;
     if (role === "assistant") {
-        const toolEvents = (Array.isArray(message?.tool_events) ? message.tool_events : [])
-            .map((item) => normalizeCeoSnapshotToolEvent(item))
-            .filter(Boolean)
-            .slice(-CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT);
-        const interactionTrace = normalizeCeoInteractionTrace(message?.interaction_trace);
+        const toolEvents = normalizeCeoSnapshotToolEvents(message?.tool_events);
         if (toolEvents.length) next.tool_events = toolEvents;
-        if (interactionTrace) next.interaction_trace = interactionTrace;
-        if (!String(next.content || "").trim() && !toolEvents.length && !interactionTrace) return null;
+        if (!String(next.content || "").trim() && !toolEvents.length) return null;
         return next;
     }
     if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
     if (role === "system" && !String(next.content || "").trim()) return null;
     return next;
-}
-
-function normalizeCeoSnapshotStage(stage = null) {
-    if (!stage || typeof stage !== "object") return null;
-    const next = {};
-    const stageGoal = String(stage?.stage_goal || "").trim();
-    const stageStatus = String(stage?.status || "").trim();
-    const roundsUsed = Number(stage?.tool_rounds_used);
-    const roundBudget = Number(stage?.tool_round_budget);
-    if (stageGoal) next.stage_goal = stageGoal;
-    if (stageStatus) next.status = stageStatus;
-    if (Number.isFinite(roundsUsed) && roundsUsed >= 0) next.tool_rounds_used = roundsUsed;
-    if (Number.isFinite(roundBudget) && roundBudget >= 0) next.tool_round_budget = roundBudget;
-    return Object.keys(next).length ? next : null;
 }
 
 function normalizeCeoSnapshotInflight(snapshot = null) {
@@ -1018,16 +1050,9 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
             if (attachments.length) next.user_message.attachments = attachments;
         }
     }
-    const toolEvents = (Array.isArray(snapshot?.tool_events) ? snapshot.tool_events : [])
-        .map((item) => normalizeCeoSnapshotToolEvent(item))
-        .filter(Boolean)
-        .slice(-CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT);
-    const interactionTrace = normalizeCeoInteractionTrace(snapshot?.interaction_trace);
-    const stage = normalizeCeoSnapshotStage(snapshot?.stage);
+    const toolEvents = normalizeCeoSnapshotToolEvents(snapshot?.tool_events);
     const errorMessage = String(snapshot?.last_error?.message || "").trim();
     if (toolEvents.length) next.tool_events = toolEvents;
-    if (interactionTrace) next.interaction_trace = interactionTrace;
-    if (stage) next.stage = stage;
     if (errorMessage) next.last_error = { message: errorMessage };
     if (!ceoInflightTurnHasVisibleAssistantState(next) && !next.user_message) return null;
     return next;
@@ -1182,11 +1207,27 @@ function appendCeoSessionSnapshotMessage(messages = [], message = null) {
         && sameAttachments
     ) {
         if (nextMessage.tool_events) previous.tool_events = nextMessage.tool_events;
-        if (nextMessage.interaction_trace) previous.interaction_trace = nextMessage.interaction_trace;
         return trimCeoSessionSnapshotMessages(next);
     }
     next.push(nextMessage);
     return trimCeoSessionSnapshotMessages(next);
+}
+
+function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = null) {
+    const normalizedInflight = normalizeCeoSnapshotInflight(inflightTurn);
+    if (!normalizedInflight?.user_message) return normalizedInflight;
+    const normalizedMessages = trimCeoSessionSnapshotMessages(messages);
+    const lastUserMessage = [...normalizedMessages].reverse().find((item) => String(item?.role || "").trim().toLowerCase() === "user");
+    if (!lastUserMessage) return normalizedInflight;
+    const userContent = String(normalizedInflight.user_message?.content || "");
+    const userAttachments = normalizeUploadList(normalizedInflight.user_message?.attachments);
+    const lastContent = String(lastUserMessage?.content || "");
+    const lastAttachments = normalizeUploadList(lastUserMessage?.attachments);
+    const sameAttachments = JSON.stringify(lastAttachments) === JSON.stringify(userAttachments);
+    if (lastContent !== userContent || !sameAttachments) return normalizedInflight;
+    const deduped = { ...normalizedInflight };
+    delete deduped.user_message;
+    return ceoInflightTurnHasVisibleAssistantState(deduped) ? deduped : null;
 }
 
 function renderCeoSessionLoadingState(sessionId, session = null) {
@@ -1248,7 +1289,7 @@ function captureTaskDetailSessionSnapshot() {
         currentTaskId,
         selectedNodeId: String(S.selectedNodeId || "").trim(),
         selectedArtifactId: String(S.selectedArtifactId || "").trim(),
-        treeRoundSelectionsByNodeId: normalizeTreeRoundSelections(S.treeRoundSelectionsByNodeId),
+        treeSelectedRoundByNodeId: normalizeTreeRoundSelections(S.treeSelectedRoundByNodeId),
         nodeViewStates,
     };
 }
@@ -1329,7 +1370,7 @@ function readTaskDetailSessionSnapshot() {
         currentTaskId,
         selectedNodeId: String(raw?.selectedNodeId || "").trim(),
         selectedArtifactId: String(raw?.selectedArtifactId || "").trim(),
-        treeRoundSelectionsByNodeId: normalizeTreeRoundSelections(raw?.treeRoundSelectionsByNodeId),
+        treeSelectedRoundByNodeId: normalizeTreeRoundSelections(raw?.treeSelectedRoundByNodeId),
         nodeViewStates,
     };
 }
@@ -1415,7 +1456,7 @@ function renderFlowHeading(count = 0) {
 }
 
 function renderArtifactHeading(count = 0) {
-    renderTaskSectionHeading(U.artifactHeading, { icon: "package", label: "工件", count });
+    renderTaskSectionHeading(U.artifactHeading, { icon: "files", label: "文件", count });
     icons();
 }
 
@@ -1701,19 +1742,10 @@ function renderTaskDepthControl() {
     U.taskDepthCustomSave.disabled = disabled;
     U.taskDepthCustomInput.value = customDraft;
 
-    if (S.taskDefaults.loading) {
-        U.taskDepthHint.textContent = "正在加载全局任务树深度设置...";
-        return;
+    if (U.taskDepthHint) {
+        U.taskDepthHint.textContent = "";
+        U.taskDepthHint.hidden = true;
     }
-    if (S.taskDefaults.saving) {
-        U.taskDepthHint.textContent = `正在保存，全局后续新任务将使用 ${currentMaxDepth} 层深度。`;
-        return;
-    }
-    if (editingCustomValue) {
-        U.taskDepthHint.textContent = `全局后续新任务会自动使用 ${currentMaxDepth} 层深度。自定义值需为非负整数。`;
-        return;
-    }
-    U.taskDepthHint.textContent = `全局后续新任务会自动使用该深度，支持固定值 1-${TASK_DEPTH_PRESET_MAX}，也可填写自定义非负整数。`;
 }
 
 async function loadTaskDefaults() {
@@ -1779,6 +1811,17 @@ function taskCreatedSortValue(task) {
 }
 
 function orderedTasks(tasks = S.tasks) {
+    if (
+        (tasks === S.tasks || tasks == null)
+        && S.tasksById
+        && typeof S.tasksById === "object"
+        && Array.isArray(S.orderedTaskIds)
+        && S.orderedTaskIds.length
+    ) {
+        return S.orderedTaskIds
+            .map((taskId) => S.tasksById?.[taskId] || null)
+            .filter(Boolean);
+    }
     return [...(Array.isArray(tasks) ? tasks : [])].sort((left, right) => {
         const timeDiff = taskCreatedSortValue(right) - taskCreatedSortValue(left);
         if (timeDiff !== 0) return timeDiff;
@@ -2097,6 +2140,17 @@ function syncCeoInputHeight() {
     U.ceoInput.style.height = `${Math.min(U.ceoInput.scrollHeight, 200)}px`;
 }
 
+function syncCeoAttachButton() {
+    if (!U.ceoAttach) return;
+    U.ceoAttach.disabled = (
+        !!S.ceoUploadBusy
+        || !!S.ceoSessionBusy
+        || !!S.ceoSessionCatalogBusy
+        || !activeSessionId()
+        || activeSessionIsReadonly()
+    );
+}
+
 function renderPendingCeoUploads() {
     if (!U.ceoUploadList) return;
     const uploads = normalizeUploadList(S.ceoUploads);
@@ -2122,15 +2176,14 @@ function renderPendingCeoUploads() {
             </div>
         `;
     }
-    if (U.ceoAttach) {
-        U.ceoAttach.disabled = !!S.ceoUploadBusy || !!S.ceoSessionBusy || !!S.ceoSessionCatalogBusy || !activeSessionId() || activeSessionIsReadonly();
-    }
+    syncCeoAttachButton();
     syncCeoPrimaryButton();
     syncCeoSessionActions();
     icons();
 }
 
 function syncCeoPrimaryButton() {
+    syncCeoAttachButton();
     if (!U.ceoSend) return;
     if (activeSessionIsReadonly()) {
         U.ceoSend.innerHTML = '<i data-lucide="eye"></i> 渠道会话只读';
@@ -2223,24 +2276,22 @@ function handleCeoControlAck(payload = {}) {
     if (manualPauseWaitingReason) {
         patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
             const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
-            let messages = trimCeoSessionSnapshotMessages(entry?.messages);
+            const messages = trimCeoSessionSnapshotMessages(entry?.messages);
             const normalizedSource = source ? normalizeCeoTurnSource(source) : "";
             const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
             const inflightMatchesSource = !normalizedSource
                 || !inflightTurn
                 || !inflightSource
                 || normalizeCeoTurnSource(inflightSource) === normalizedSource;
-            if (inflightTurn?.user_message && inflightMatchesSource) {
-                messages = appendCeoSessionSnapshotMessage(messages, {
-                    role: "user",
-                    content: String(inflightTurn.user_message?.content || ""),
-                    attachments: inflightTurn.user_message?.attachments || [],
-                });
-            }
             return {
                 ...(entry || {}),
                 messages,
-                inflight_turn: inflightMatchesSource ? null : inflightTurn,
+                inflight_turn: inflightMatchesSource
+                    ? {
+                        ...inflightTurn,
+                        status: "paused",
+                    }
+                    : inflightTurn,
             };
         });
         syncCeoSessionActions();
@@ -2392,76 +2443,116 @@ function resetCeoFeed() {
     S.ceoPendingTurns = [];
 }
 
+function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    const status = String(snapshot.status || "").trim().toLowerCase();
+    const assistantText = String(snapshot.assistant_text || "").trim();
+    const toolEvents = normalizeCeoSnapshotToolEvents(snapshot.tool_events);
+    return !!assistantText || toolEvents.length > 0 || status === "paused" || status === "error";
+}
+
+function ceoNeedsAssistantTurn(snapshot = null) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    const source = normalizeCeoTurnSource(snapshot?.source || "");
+    const status = String(snapshot.status || "").trim().toLowerCase();
+    return ceoInflightTurnHasVisibleAssistantState(snapshot) || (source !== "heartbeat" && status === "running");
+}
+
+function renderCeoAssistantTextIntoTurn(turn, text = "") {
+    if (!turn?.textEl) return;
+    const normalizedText = String(text || "").trim();
+    if (!normalizedText) {
+        if (!turn.textEl.textContent?.trim()) turn.textEl.textContent = "处理中...";
+        turn.textEl.classList.add("pending");
+        turn.textEl.classList.remove("markdown-content");
+        return;
+    }
+    turn.textEl.innerHTML = renderMarkdown(normalizedText);
+    turn.textEl.classList.remove("pending");
+    turn.textEl.classList.add("markdown-content");
+}
+
+function resetCeoToolFlow(turn) {
+    if (!turn?.listEl || !turn?.flowEl) return;
+    turn.listEl.innerHTML = "";
+    turn.steps = 0;
+    turn.hasError = false;
+    turn.historyExpanded = false;
+    turn.flowEl.hidden = true;
+    turn.flowEl.open = false;
+    if (turn.footerEl instanceof HTMLElement) turn.footerEl.hidden = true;
+    if (turn.toggleEl instanceof HTMLButtonElement) {
+        turn.toggleEl.textContent = "展开全部";
+        turn.toggleEl.setAttribute("aria-expanded", "false");
+    }
+}
+
+function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}) {
+    if (!turn?.listEl || !turn?.flowEl) return 0;
+    const normalizedSource = normalizeCeoTurnSource(source || turn.source || "user");
+    const events = normalizeCeoSnapshotToolEvents(toolEvents);
+    resetCeoToolFlow(turn);
+    events.forEach((event) => {
+        applyCeoToolEventToTurn(turn, {
+            ...(event && typeof event === "object" ? event : {}),
+            source: String(event?.source || normalizedSource).trim().toLowerCase() || normalizedSource,
+        });
+    });
+    if (!events.length) updateCeoTurnMeta(turn, "等待工具开始...");
+    return events.length;
+}
+
+function patchCeoInflightTurn(snapshot = null) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    const source = normalizeCeoTurnSource(snapshot?.source || "user");
+    const status = String(snapshot.status || "").trim().toLowerCase();
+    const existingTurn = getActiveCeoTurn(source);
+    if (!existingTurn && !ceoNeedsAssistantTurn(snapshot)) return false;
+    const turn = existingTurn || ensureActiveCeoTurn({ source });
+    if (!turn?.textEl || !turn?.flowEl) return false;
+    mutateCeoFeed(() => {
+        renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "");
+        const toolCount = renderCeoToolEventsIntoTurn(turn, snapshot?.tool_events || [], { source });
+        if (!toolCount) {
+            if (status === "paused") updateCeoTurnMeta(turn, "已暂停");
+            else if (status === "error") updateCeoTurnMeta(turn, "运行出错");
+            else updateCeoTurnMeta(turn, "等待工具开始...");
+        }
+        if (toolCount) {
+            turn.flowEl.hidden = false;
+            turn.flowEl.open = status !== "completed";
+        }
+        icons();
+    }, { scrollMode: "preserve" });
+    setCeoSessionSnapshotCache(activeSessionId(), { inflight_turn: snapshot });
+    return true;
+}
+
 function restoreCeoInflightTurn(snapshot = null) {
     if (!snapshot || typeof snapshot !== "object") return;
-    const source = String(snapshot.source || "").trim().toLowerCase();
+    const source = normalizeCeoTurnSource(snapshot?.source || "");
     const isHeartbeat = source === "heartbeat";
-    const interactionTrace = normalizeCeoInteractionTrace(snapshot.interaction_trace);
     const userMessage = snapshot.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
     if (userMessage && !isHeartbeat) {
         const attachments = normalizeUploadList(userMessage.attachments);
         const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
         addMsg(text, "user", { attachments, scrollMode: "preserve" });
     }
+    patchCeoInflightTurn(snapshot);
     const status = String(snapshot.status || "").trim().toLowerCase();
-    if (interactionTrace) {
-        patchCeoInflightTurn(snapshot);
-    }
-    const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
     const assistantText = String(snapshot.assistant_text || "").trim();
-    const needsAssistantTurn = !!interactionTrace || toolEvents.length > 0 || status === "paused" || status === "error" || (!isHeartbeat && status === "running");
-    const turn = needsAssistantTurn ? ensureActiveCeoTurn({ source }) : null;
-    if (turn?.textEl && assistantText) {
-        turn.textEl.innerHTML = renderMarkdown(assistantText);
-        turn.textEl.classList.remove("pending");
-        turn.textEl.classList.add("markdown-content");
-    }
-    if (!interactionTrace) {
-        toolEvents.forEach((event) => appendCeoToolEvent({
-            ...(event && typeof event === "object" ? event : {}),
-            source: String(event?.source || source).trim().toLowerCase(),
-        }));
-    }
     if (status === "paused") {
         finalizePausedCeoTurn(assistantText || "已暂停", { source });
         return;
     }
     if (status === "error") {
         const errorMessage = String(snapshot?.last_error?.message || "").trim() || "unknown error";
-        finalizeCeoTurn(`运行出错：${errorMessage}`, { source, interaction_trace: interactionTrace });
+        finalizeCeoTurn(`运行出错：${errorMessage}`, { source });
     }
 }
 
 function renderPersistedCeoAssistantTurn(item = {}) {
-    const interactionTrace = normalizeCeoInteractionTrace(item?.interaction_trace);
-    if (interactionTrace) {
-        const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
-        if (!turn) {
-            addMsg(String(item?.content || ""), "system", { markdown: true, scrollMode: "preserve" });
-            return;
-        }
-        S.ceoPendingTurns.push(turn);
-        mutateCeoFeed(() => {
-            const content = String(item?.content || "");
-            if (turn.textEl) {
-                turn.textEl.innerHTML = renderMarkdown(content);
-                turn.textEl.classList.remove("pending");
-                turn.textEl.classList.add("markdown-content");
-            }
-            renderCeoTraceIntoTurn(turn, interactionTrace);
-            updateCeoTurnMeta(turn, `${interactionTrace.stages.length} 个阶段`);
-            turn.flowEl.hidden = false;
-            turn.flowEl.open = false;
-            icons();
-        }, { scrollMode: "preserve" });
-        const activeIndex = findActiveCeoTurnIndex("history");
-        if (activeIndex >= 0) {
-            S.ceoPendingTurns.splice(activeIndex, 1);
-        }
-        turn.finalized = true;
-        return;
-    }
-    const toolEvents = Array.isArray(item?.tool_events) ? item.tool_events : [];
+    const toolEvents = normalizeCeoSnapshotToolEvents(item?.tool_events);
     const content = String(item?.content || "");
     if (!toolEvents.length) {
         addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
@@ -2473,10 +2564,13 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         return;
     }
     S.ceoPendingTurns.push(turn);
-    toolEvents.forEach((event) => appendCeoToolEvent({
-        ...(event && typeof event === "object" ? event : {}),
-        source: "history",
-    }));
+    withCeoFeedBatch(() => {
+        renderCeoAssistantTextIntoTurn(turn, content);
+        renderCeoToolEventsIntoTurn(turn, toolEvents, { source: "history" });
+        turn.flowEl.hidden = false;
+        turn.flowEl.open = false;
+        icons();
+    }, { scrollMode: "preserve" });
     finalizeCeoTurn(content, { source: "history" });
 }
 
@@ -2505,7 +2599,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null) {
                 addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
             }
         });
-        restoreCeoInflightTurn(inflightTurn);
+        restoreCeoInflightTurn(dedupeInflightUserMessageAgainstMessages(messages, inflightTurn));
         setCeoSessionSnapshotCache(activeSessionId(), {
             messages,
             inflight_turn: inflightTurn,
@@ -2513,212 +2607,6 @@ function renderCeoSnapshot(messages = [], inflightTurn = null) {
     }, {
         scrollMode: shouldScrollToLatest ? "bottom" : "preserve",
     });
-}
-
-function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
-    if (!snapshot || typeof snapshot !== "object") return false;
-    const status = String(snapshot.status || "").trim().toLowerCase();
-    const assistantText = String(snapshot.assistant_text || "").trim();
-    const toolEvents = Array.isArray(snapshot.tool_events) ? snapshot.tool_events : [];
-    return !!assistantText
-        || toolEvents.length > 0
-        || !!normalizeCeoInteractionTrace(snapshot.interaction_trace)
-        || status === "paused"
-        || status === "error";
-}
-
-function normalizeCeoInteractionTrace(trace = null) {
-    if (!trace || typeof trace !== "object") return null;
-    const stages = (Array.isArray(trace?.stages) ? trace.stages : [])
-        .map((stage, index) => normalizeExecutionStageTrace(stage, index))
-        .filter((stage) => stage && (stage.stage_goal || stage.rounds.length));
-    if (!stages.length) return null;
-    return {
-        stages,
-        final_output: String(trace?.final_output || "").trim(),
-    };
-}
-
-function ceoTraceStatus(value = "") {
-    const normalized = String(value || "").trim().toLowerCase();
-    if (["running", "active", "queued", "pending"].includes(normalized)) return "running";
-    if (["success", "completed", "final"].includes(normalized)) return "success";
-    if (["error", "failed", "blocked"].includes(normalized)) return "error";
-    return stageTraceStatus({ status: value });
-}
-
-function captureCeoTraceViewState(turn) {
-    const traceItems = turn?.listEl instanceof HTMLElement
-        ? Array.from(turn.listEl.querySelectorAll(".task-trace-step")).map((step, index) => ({
-            index,
-            key: String(step.dataset.traceKey || "").trim(),
-            title: String(step.querySelector(".interaction-step-title")?.textContent || "").trim(),
-            open: !!step.open,
-            defaultOpen: String(step.dataset.defaultOpen || "").trim().toLowerCase() === "true",
-        }))
-        : [];
-    return { traceItems };
-}
-
-function applyCeoTraceViewState(traceList, traceItems) {
-    if (!(traceList instanceof HTMLElement) || !Array.isArray(traceItems) || !traceItems.length) return;
-    const keyState = new Map();
-    const titleState = new Map();
-    traceItems.forEach((item) => {
-        if (item?.key && !keyState.has(item.key)) keyState.set(item.key, item);
-        if (item?.title && !titleState.has(item.title)) titleState.set(item.title, item);
-    });
-    Array.from(traceList.querySelectorAll(".task-trace-step")).forEach((step, index) => {
-        const traceKey = String(step.dataset.traceKey || "").trim();
-        const title = String(step.querySelector(".interaction-step-title")?.textContent || "").trim();
-        const previous = keyState.get(traceKey) || titleState.get(title) || traceItems[index];
-        if (!previous || typeof previous.open !== "boolean") return;
-        const previousDefaultOpen = typeof previous.defaultOpen === "boolean" ? previous.defaultOpen : previous.open;
-        const currentDefaultOpen = String(step.dataset.defaultOpen || "").trim().toLowerCase() === "true";
-        step.open = previous.open !== previousDefaultOpen ? previous.open : currentDefaultOpen;
-    });
-}
-
-function applyCeoTraceDescriptors(root, descriptors = []) {
-    if (!(root instanceof HTMLElement)) return;
-    (Array.isArray(descriptors) ? descriptors : []).forEach((descriptor) => {
-        const traceKey = String(descriptor?.traceKey || "").trim();
-        if (!traceKey) return;
-        const selector = `.task-trace-step[data-trace-key="${String(traceKey).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
-        const step = root.querySelector(selector);
-        if (!(step instanceof HTMLElement)) return;
-        if (descriptor.startedAt) step.dataset.startedAt = descriptor.startedAt;
-        else delete step.dataset.startedAt;
-        if (descriptor.finishedAt) step.dataset.finishedAt = descriptor.finishedAt;
-        else delete step.dataset.finishedAt;
-        if (Number.isFinite(Number(descriptor.elapsedSeconds))) {
-            step.dataset.elapsedSeconds = String(Number(descriptor.elapsedSeconds));
-        } else {
-            delete step.dataset.elapsedSeconds;
-        }
-        step.dataset.traceStatus = String(descriptor.status || "").trim();
-    });
-}
-
-function buildCeoTraceBundle(trace = null) {
-    const normalized = normalizeCeoInteractionTrace(trace);
-    if (!normalized) return { html: "", descriptors: [], stageCount: 0 };
-    const descriptors = [];
-    const html = normalized.stages.map((stage, stageIndex) => {
-        const stageKey = `ceo:stage:${stage.stage_id || stage.stage_index || stageIndex + 1}`;
-        const roundsHtml = (Array.isArray(stage.rounds) ? stage.rounds : []).map((round, roundIndex) => {
-            const roundKey = `${stageKey}:round:${round.round_id || round.round_index || roundIndex + 1}`;
-            const toolsHtml = (Array.isArray(round.tools) ? round.tools : []).map((tool, toolIndex) => {
-                const toolKey = `${roundKey}:tool:${tool.tool_call_id || toolIndex}`;
-                descriptors.push({
-                    traceKey: toolKey,
-                    status: ceoTraceStatus(tool.status),
-                    startedAt: String(tool.started_at || ""),
-                    finishedAt: String(tool.finished_at || ""),
-                    elapsedSeconds: tool.elapsed_seconds,
-                });
-                return renderTraceStep({
-                    traceKey: toolKey,
-                    title: `工具 · ${tool.tool_name || "tool"}`,
-                    status: ceoTraceStatus(tool.status),
-                    open: false,
-                    showRuntime: true,
-                    bodyHtml: [
-                        renderTraceField("参数", tool.arguments_text, "无参数"),
-                        renderTraceField(
-                            "工具输出",
-                            tool.output_text,
-                            tool.status === "running" ? "等待工具输出..." : "暂无工具输出",
-                            { decodeEscapes: true },
-                        ),
-                    ].join(""),
-                });
-            }).join("") || renderTraceField("工具", "", "本轮暂无工具记录");
-            const roundStatus = buildLiveSectionStatus(round.tools || []);
-            descriptors.push({
-                traceKey: roundKey,
-                status: roundStatus,
-                startedAt: String(round.created_at || ""),
-                finishedAt: "",
-                elapsedSeconds: null,
-            });
-            const roundTitle = round.budget_counted
-                ? `第 ${round.round_index || roundIndex + 1} 轮`
-                : `第 ${round.round_index || roundIndex + 1} 轮（不计预算）`;
-            return renderTraceStep({
-                traceKey: roundKey,
-                title: `${roundTitle}${round.created_at ? ` · ${formatCompactTime(round.created_at)}` : ""}`,
-                status: roundStatus,
-                open: false,
-                showRuntime: false,
-                bodyHtml: toolsHtml,
-            });
-        }).join("") || renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次");
-        const stageStatus = ceoTraceStatus(stage.status);
-        descriptors.push({
-            traceKey: stageKey,
-            status: stageStatus,
-            startedAt: String(stage.created_at || ""),
-            finishedAt: String(stage.finished_at || ""),
-            elapsedSeconds: null,
-        });
-        const stageLabel = stage.stage_goal || `阶段 ${stage.stage_index || stageIndex + 1}`;
-        return renderTraceStep({
-            traceKey: stageKey,
-            title: stageLabel,
-            status: stageStatus,
-            open: stageStatus === "running",
-            showRuntime: false,
-            bodyHtml: roundsHtml,
-        });
-    }).join("");
-    return { html, descriptors, stageCount: normalized.stages.length };
-}
-
-function renderCeoTraceIntoTurn(turn, trace = null) {
-    if (!turn?.listEl || !turn?.flowEl) return false;
-    const bundle = buildCeoTraceBundle(trace);
-    const previousViewState = captureCeoTraceViewState(turn);
-    turn.listEl.innerHTML = bundle.html;
-    applyCeoTraceDescriptors(turn.listEl, bundle.descriptors);
-    applyCeoTraceViewState(turn.listEl, previousViewState.traceItems);
-    turn.steps = bundle.stageCount;
-    turn.hasError = bundle.descriptors.some((descriptor) => descriptor?.status === "error");
-    turn.flowEl.hidden = bundle.stageCount <= 0;
-    trimCeoToolSteps(turn);
-    refreshLiveDurationBadges();
-    icons();
-    return bundle.stageCount > 0;
-}
-
-function patchCeoInflightTurn(snapshot = null) {
-    if (!snapshot || typeof snapshot !== "object") return false;
-    const trace = normalizeCeoInteractionTrace(snapshot.interaction_trace);
-    const source = String(snapshot.source || "").trim().toLowerCase() || "user";
-    const status = String(snapshot.status || "").trim().toLowerCase();
-    const existingTurn = getActiveCeoTurn(source);
-    if (status === "paused" && !existingTurn) return false;
-    if (!existingTurn && !ceoInflightTurnHasVisibleAssistantState(snapshot)) return false;
-    const turn = existingTurn || ensureActiveCeoTurn({ source });
-    if (!turn?.textEl || !turn?.flowEl) return false;
-    mutateCeoFeed(() => {
-        const assistantText = String(snapshot.assistant_text || "").trim();
-        if (assistantText) {
-            turn.textEl.innerHTML = renderMarkdown(assistantText);
-            turn.textEl.classList.remove("pending");
-            turn.textEl.classList.add("markdown-content");
-        }
-        const hasTrace = renderCeoTraceIntoTurn(turn, trace);
-        const stage = snapshot.stage && typeof snapshot.stage === "object" ? snapshot.stage : null;
-        const summaryText = stage
-            ? `${String(stage.stage_goal || "").trim() || "当前阶段"} · ${Number(stage.tool_rounds_used || 0)}/${Number(stage.tool_round_budget || 0)} 轮`
-            : (hasTrace ? "阶段进行中" : "等待工具开始...");
-        updateCeoTurnMeta(turn, summaryText);
-        turn.flowEl.open = hasTrace;
-        icons();
-    }, { scrollMode: "preserve" });
-    setCeoSessionSnapshotCache(activeSessionId(), { inflight_turn: snapshot });
-    return true;
 }
 
 function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
@@ -2824,7 +2712,7 @@ function discardActiveCeoTurn({ source = "" } = {}) {
 }
 
 function hasRunningCeoToolStep(turn) {
-    return !!turn?.listEl?.querySelector?.(".interaction-step.running, .task-trace-step.running");
+    return !!turn?.listEl?.querySelector?.(".interaction-step.running");
 }
 
 function discardPendingCeoTurns({ force = false, source = null } = {}) {
@@ -2866,8 +2754,9 @@ function ensureActiveCeoTurn({ source = "" } = {}) {
 
 function updateCeoTurnMeta(turn, stateLabel) {
     if (!turn?.metaEl) return;
-    const stepLabel = turn.steps > 0 ? `${turn.steps} 个阶段` : "等待工具开始...";
-    turn.metaEl.textContent = stateLabel ? `${stepLabel} - ${stateLabel}` : stepLabel;
+    const stepLabel = turn.steps > 0 ? `${turn.steps} 个步骤` : "等待工具开始...";
+    const nextStateLabel = String(stateLabel || "").trim();
+    turn.metaEl.textContent = nextStateLabel && nextStateLabel !== stepLabel ? `${stepLabel} - ${nextStateLabel}` : stepLabel;
 }
 
 function findCeoToolStep(turn, { toolCallId = "", toolName = "" } = {}) {
@@ -3265,8 +3154,8 @@ function refreshLiveDurationBadges() {
         if (!(runtimeEl instanceof HTMLElement)) return;
         updateRuntimeBadge(item, runtimeEl);
     });
-    if (typeof refreshTaskWorkerOnlineState === "function") {
-        refreshTaskWorkerOnlineState({ render: S.view === "tasks" });
+    if (typeof refreshTaskWorkerState === "function") {
+        refreshTaskWorkerState({ render: S.view === "tasks" });
     }
 }
 
@@ -3280,6 +3169,78 @@ function stopLiveDurationTicker() {
     if (!S.liveDurationIntervalId) return;
     window.clearInterval(S.liveDurationIntervalId);
     S.liveDurationIntervalId = null;
+}
+
+function applyCeoToolEventToTurn(turn, event = {}) {
+    if (!turn?.listEl || !turn?.flowEl) return null;
+    const status = resolveCeoToolEventStatus(event);
+    const toolName = String(event.tool_name || "tool").trim() || "tool";
+    const rawText = String(event.text || "").trim();
+    const detail = ceoFriendlyToolDetail(toolName, rawText, status, event.kind);
+    const toolCallId = String(event.tool_call_id || "").trim();
+    let item = findCeoToolStep(turn, { toolCallId, toolName });
+    const stage = ceoToolStage(toolName, rawText, status);
+    if (!(item instanceof HTMLElement)) {
+        item = document.createElement("div");
+        item.setAttribute("role", "listitem");
+        item.innerHTML = `
+            <div class="interaction-step-header">
+                <span class="interaction-step-lead">
+                    <span class="interaction-step-icon" data-icon-name="loader-circle"><i data-lucide="loader-circle"></i></span>
+                    <span class="interaction-step-title"></span>
+                </span>
+                <span class="interaction-step-side">
+                    <time class="interaction-step-started" hidden></time>
+                    <span class="interaction-step-runtime" hidden></span>
+                    <span class="interaction-step-status"></span>
+                    <button type="button" class="interaction-step-disclosure" hidden aria-expanded="false" aria-label="Expand tool output"></button>
+                </span>
+            </div>
+            <div class="interaction-step-preview" hidden></div>
+            <div class="interaction-step-detail" hidden></div>
+        `;
+        item.dataset.outputExpanded = "false";
+        item.querySelector(".interaction-step-disclosure")?.addEventListener("click", (interactionEvent) => {
+            interactionEvent.preventDefault();
+            interactionEvent.stopPropagation();
+            mutateCeoFeed(() => {
+                toggleCeoToolStepOutput(item);
+            }, { scrollMode: "preserve" });
+        });
+        turn.listEl.appendChild(item);
+    }
+    const eventTimestamp = String(event.timestamp || "").trim();
+    const eventElapsed = Number.parseFloat(String(event.elapsed_seconds ?? ""));
+    if (!item.dataset.startedAt && eventTimestamp) item.dataset.startedAt = eventTimestamp;
+    if (status === "success" || status === "error") {
+        if (eventTimestamp) item.dataset.finishedAt = eventTimestamp;
+    } else {
+        delete item.dataset.finishedAt;
+    }
+    if (Number.isFinite(eventElapsed) && eventElapsed >= 0) {
+        item.dataset.elapsedSeconds = String(eventElapsed);
+    } else if (status === "running") {
+        delete item.dataset.elapsedSeconds;
+    }
+    applyCeoToolStepState(item, {
+        status,
+        toolName,
+        detail,
+        toolCallId,
+        kind: event.kind,
+        stage,
+    });
+    syncCeoBackgroundDetailState(item, { rawDetail: rawText });
+    turn.flowEl.hidden = false;
+    turn.flowEl.open = true;
+    turn.hasError = turn.hasError || status === "error";
+    trimCeoToolSteps(turn);
+    updateCeoTurnMeta(turn, stage.meta);
+    const runtimeEl = item.querySelector(".interaction-step-runtime");
+    if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
+    updateCeoBackgroundDetail(item);
+    icons();
+    return item;
 }
 
 function appendCeoToolEvent(event = {}) {
@@ -3297,73 +3258,7 @@ function appendCeoToolEvent(event = {}) {
     const turn = ensureActiveCeoTurn({ source });
     if (!turn?.listEl || !turn.flowEl) return;
     mutateCeoFeed(() => {
-        const status = resolveCeoToolEventStatus(event);
-        const toolName = String(event.tool_name || "tool").trim() || "tool";
-        const rawText = String(event.text || "").trim();
-        const detail = ceoFriendlyToolDetail(toolName, rawText, status, event.kind);
-        const toolCallId = String(event.tool_call_id || "").trim();
-        let item = findCeoToolStep(turn, { toolCallId, toolName });
-        const stage = ceoToolStage(toolName, rawText, status);
-        if (!(item instanceof HTMLElement)) {
-            item = document.createElement("div");
-            item.setAttribute("role", "listitem");
-            item.innerHTML = `
-                <div class="interaction-step-header">
-                    <span class="interaction-step-lead">
-                        <span class="interaction-step-icon" data-icon-name="loader-circle"><i data-lucide="loader-circle"></i></span>
-                        <span class="interaction-step-title"></span>
-                    </span>
-                    <span class="interaction-step-side">
-                        <time class="interaction-step-started" hidden></time>
-                        <span class="interaction-step-runtime" hidden></span>
-                        <span class="interaction-step-status"></span>
-                        <button type="button" class="interaction-step-disclosure" hidden aria-expanded="false" aria-label="Expand tool output"></button>
-                    </span>
-                </div>
-                <div class="interaction-step-preview" hidden></div>
-                <div class="interaction-step-detail" hidden></div>
-            `;
-            item.dataset.outputExpanded = "false";
-            item.querySelector(".interaction-step-disclosure")?.addEventListener("click", (interactionEvent) => {
-                interactionEvent.preventDefault();
-                interactionEvent.stopPropagation();
-                mutateCeoFeed(() => {
-                    toggleCeoToolStepOutput(item);
-                }, { scrollMode: "preserve" });
-            });
-            turn.listEl.appendChild(item);
-        }
-        const eventTimestamp = String(event.timestamp || "").trim();
-        const eventElapsed = Number.parseFloat(String(event.elapsed_seconds ?? ""));
-        if (!item.dataset.startedAt && eventTimestamp) item.dataset.startedAt = eventTimestamp;
-        if (status === "success" || status === "error") {
-            if (eventTimestamp) item.dataset.finishedAt = eventTimestamp;
-        } else {
-            delete item.dataset.finishedAt;
-        }
-        if (Number.isFinite(eventElapsed) && eventElapsed >= 0) {
-            item.dataset.elapsedSeconds = String(eventElapsed);
-        } else if (status === "running") {
-            delete item.dataset.elapsedSeconds;
-        }
-        applyCeoToolStepState(item, {
-            status,
-            toolName,
-            detail,
-            toolCallId,
-            kind: event.kind,
-            stage,
-        });
-        syncCeoBackgroundDetailState(item, { rawDetail: rawText });
-        turn.flowEl.hidden = false;
-        turn.flowEl.open = true;
-        turn.hasError = turn.hasError || status === "error";
-        trimCeoToolSteps(turn);
-        updateCeoTurnMeta(turn, stage.meta);
-        const runtimeEl = item.querySelector(".interaction-step-runtime");
-        if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
-        updateCeoBackgroundDetail(item);
-        icons();
+        applyCeoToolEventToTurn(turn, event);
     }, { scrollMode: "preserve" });
 }
 
@@ -3387,7 +3282,7 @@ function finalizeCeoTurn(text, meta = {}) {
             const messages = appendCeoSessionSnapshotMessage(entry?.messages, {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
-                interaction_trace: meta?.interaction_trace || null,
+                tool_events: inflightMatchesSource ? inflightTurn?.tool_events || [] : [],
             });
             return {
                 ...(entry || {}),
@@ -3402,10 +3297,6 @@ function finalizeCeoTurn(text, meta = {}) {
         turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
-        const finalTrace = normalizeCeoInteractionTrace(meta?.interaction_trace);
-        if (finalTrace) {
-            renderCeoTraceIntoTurn(turn, finalTrace);
-        }
         if (turn.steps > 0) {
             const hasRunningStep = hasRunningCeoToolStep(turn);
             turn.flowEl.hidden = false;
@@ -3438,7 +3329,6 @@ function finalizeCeoTurn(text, meta = {}) {
             role: "assistant",
             content: String(text || "").trim() || "Done.",
             tool_events: inflightTurn?.tool_events || [],
-            interaction_trace: meta?.interaction_trace || inflightTurn?.interaction_trace || null,
         });
         return {
             ...(entry || {}),
@@ -4405,15 +4295,15 @@ function renderModelDetail() {
                         <div class="model-form-grid">
                             <label class="resource-field">
                                 <span class="resource-field-label">Max Tokens</span>
-                                <input class="resource-search" type="number" min="1" step="1" name="maxTokens" value="${esc(String(current?.max_tokens ?? ""))}" placeholder="留空使用默认值">
+                                <input class="resource-search" type="number" min="1" step="1" name="maxTokens" value="${esc(String(current?.max_tokens ?? ""))}" placeholder="留空则不下发">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Temperature</span>
-                                <input class="resource-search" type="number" min="0" max="2" step="0.1" name="temperature" value="${esc(String(current?.temperature ?? ""))}" placeholder="留空使用默认值">
+                                <input class="resource-search" type="number" min="0" max="2" step="0.1" name="temperature" value="${esc(String(current?.temperature ?? ""))}" placeholder="留空则不下发">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Reasoning Effort</span>
-                                <input class="resource-search" name="reasoningEffort" value="${esc(current?.reasoning_effort || "")}" placeholder="如 low / medium / high">
+                                <input class="resource-search" name="reasoningEffort" value="${esc(current?.reasoning_effort || "")}" placeholder="留空则不下发">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Retry On</span>
@@ -4776,20 +4666,12 @@ function cancelModelRoleEditing() {
 }
 
 async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
-    const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
-    if (!targets.length) return;
-    const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
-    const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
+    const updates = buildModelRoleChainUpdates(scopes, { useDrafts });
+    if (!Object.keys(updates).length) return;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {
-        let payload = null;
-        for (const scope of targets) {
-            payload = await ApiClient.updateModelRoleChain(scope, {
-                modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
-                maxIterations: iterationSource[scope],
-            });
-        }
+        const payload = await ApiClient.updateModelRoleChains(updates);
         if (payload) applyModelCatalog(payload);
         hint(successText);
     } catch (e) {
@@ -4901,22 +4783,12 @@ function cancelModelRoleEditing() {
 }
 
 async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
-    const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
-    if (!targets.length) return;
-    const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
-    const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
-    const concurrencySource = useDrafts ? S.modelCatalog.roleConcurrencyDrafts : S.modelCatalog.roleConcurrency;
+    const updates = buildModelRoleChainUpdates(scopes, { useDrafts });
+    if (!Object.keys(updates).length) return;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {
-        let payload = null;
-        for (const scope of targets) {
-            payload = await ApiClient.updateModelRoleChain(scope, {
-                modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
-                maxIterations: iterationSource[scope],
-                maxConcurrency: concurrencySource[scope],
-            });
-        }
+        const payload = await ApiClient.updateModelRoleChains(updates);
         if (payload) applyModelCatalog(payload);
         hint(successText);
     } catch (e) {
@@ -4927,6 +4799,23 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
         S.modelCatalog.saving = false;
         renderModelCatalog();
     }
+}
+
+function buildModelRoleChainUpdates(scopes = MODEL_SCOPES.map((item) => item.key), { useDrafts = false } = {}) {
+    const targets = [...new Set(scopes.map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!targets.length) return {};
+    const roleSource = useDrafts ? S.modelCatalog.roleDrafts : S.modelCatalog.roles;
+    const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
+    const draftConcurrencySource = S.modelCatalog.roleConcurrencyDrafts || DEFAULT_ROLE_CONCURRENCY();
+    const concurrencySource = useDrafts ? draftConcurrencySource : S.modelCatalog.roleConcurrency;
+    return Object.fromEntries(targets.map((scope) => [
+        scope,
+        {
+            modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
+            maxIterations: iterationSource[scope],
+            maxConcurrency: concurrencySource[scope],
+        },
+    ]));
 }
 
 async function handleModelRoleEditorAction() {
@@ -4972,7 +4861,8 @@ function collectModelFormData(form, current) {
     const apiBase = String(formData.get("apiBase") || "").trim();
     const maxTokensText = String(formData.get("maxTokens") || "").trim();
     const temperatureText = String(formData.get("temperature") || "").trim();
-    const reasoningEffort = String(formData.get("reasoningEffort") || "").trim();
+    const reasoningEffortText = String(formData.get("reasoningEffort") || "").trim();
+    const reasoningEffort = reasoningEffortText || null;
     const retryOnRaw = String(formData.get("retryOn") || "").trim();
     const retryCountText = String(formData.get("retryCount") || "").trim();
     const description = String(formData.get("description") || "").trim();
@@ -5014,7 +4904,7 @@ function collectModelFormData(form, current) {
         };
         if (maxTokens !== null) payload.maxTokens = maxTokens;
         if (temperature !== null) payload.temperature = temperature;
-        if (reasoningEffort) payload.reasoningEffort = reasoningEffort;
+        if (reasoningEffort !== null) payload.reasoningEffort = reasoningEffort;
         if (retryOn !== null) payload.retryOn = retryOn;
         payload.retryCount = retryCount;
         if (extraHeaders !== null) payload.extraHeaders = extraHeaders;
@@ -5025,9 +4915,17 @@ function collectModelFormData(form, current) {
     if (providerModel !== String(current?.provider_model || "")) patch.providerModel = providerModel;
     if (apiKey !== String(current?.api_key || "")) patch.apiKey = apiKey;
     if (apiBase !== String(current?.api_base || "")) patch.apiBase = apiBase;
-    if (maxTokens !== null && maxTokens !== Number(current?.max_tokens ?? NaN)) patch.maxTokens = maxTokens;
-    if (temperature !== null && temperature !== Number(current?.temperature ?? NaN)) patch.temperature = temperature;
-    if (reasoningEffort !== String(current?.reasoning_effort || "")) patch.reasoningEffort = reasoningEffort;
+    if (maxTokensText) {
+        if (maxTokens !== Number(current?.max_tokens ?? NaN)) patch.maxTokens = maxTokens;
+    } else if (current?.max_tokens != null) {
+        patch.maxTokens = null;
+    }
+    if (temperatureText) {
+        if (temperature !== Number(current?.temperature ?? NaN)) patch.temperature = temperature;
+    } else if (current?.temperature != null) {
+        patch.temperature = null;
+    }
+    if (reasoningEffort !== (String(current?.reasoning_effort || "").trim() || null)) patch.reasoningEffort = reasoningEffort;
     if (retryOn !== null && JSON.stringify(retryOn) !== JSON.stringify(current?.retry_on || [])) patch.retryOn = retryOn;
     if (retryCount !== Number.parseInt(String(current?.retry_count ?? 0), 10)) patch.retryCount = retryCount;
     if (description !== String(current?.description || "")) patch.description = description;
@@ -5292,6 +5190,7 @@ function renderCeoSessions() {
     if (!sessions.length) {
         U.ceoSessionList.innerHTML = `<div class="empty-state ceo-session-empty">${S.ceoSessionTab === "channel" ? "暂无渠道会话。" : "No sessions yet."}</div>`;
         syncCeoComposerReadonlyState();
+        syncCeoAttachButton();
         syncCeoSessionActions();
         return;
     }
@@ -5311,6 +5210,7 @@ function renderCeoSessions() {
         U.ceoSessionList.innerHTML = sessions.map((item) => renderCeoSessionCard(item, { allowActions: true })).join("");
     }
     syncCeoComposerReadonlyState();
+    syncCeoAttachButton();
     syncCeoSessionActions();
     icons();
 }
@@ -5701,24 +5601,6 @@ function initCeoWs() {
         if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {}, payload.data || {});
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
         if (payload.type === "ceo.turn.patch") patchCeoInflightTurn(payload.data?.inflight_turn || null);
-        if (payload.type === "ceo.agent.tool") {
-            const rawSource = String(payload.data?.source || "").trim().toLowerCase();
-            let toolSource = rawSource ? normalizeCeoTurnSource(rawSource) : "";
-            if (!toolSource) {
-                const snapshotSource = String(getCeoSessionSnapshotCache(activeSessionId())?.inflight_turn?.source || "").trim().toLowerCase();
-                if (snapshotSource) toolSource = normalizeCeoTurnSource(snapshotSource);
-            }
-            if (!toolSource) {
-                const activeTurns = S.ceoPendingTurns.filter((turn) => turn && !turn.finalized);
-                if (activeTurns.length === 1) toolSource = normalizeCeoTurnSource(activeTurns[0]?.source || "");
-            }
-            const activeTurn = toolSource ? getActiveCeoTurn(toolSource) : null;
-            const hasStructuredTrace = !!activeTurn?.listEl?.querySelector?.(".task-trace-step");
-            if (!hasStructuredTrace) {
-                if (!activeTurn && !toolSource && !S.ceoTurnActive) return;
-                appendCeoToolEvent(payload.data || {});
-            }
-        }
         if (payload.type === "ceo.error") handleCeoError(payload.data || {});
         if (payload.type === "ceo.reply.final") finalizeCeoTurn(payload.data?.text || "", payload.data || {});
         if (payload.type === "ceo.turn.discard") discardActiveCeoTurn({ source: payload.data?.source || "" });
@@ -6112,8 +5994,14 @@ function switchView(view) {
     if (view === "tasks") {
         void loadTasks();
         initTasksWs();
+        if (typeof ensureTaskListVisibleReconcile === "function") ensureTaskListVisibleReconcile();
     } else {
         closeTasksWs();
+    }
+    if (navView === "tasks" && typeof startTaskWorkerStatusPolling === "function") {
+        startTaskWorkerStatusPolling();
+    } else if (typeof stopTaskWorkerStatusPolling === "function") {
+        stopTaskWorkerStatusPolling();
     }
     if (view === "skills") void loadSkills();
     if (view === "tools") void loadTools();
@@ -6141,7 +6029,7 @@ function bind() {
     U.taskTokenButton?.addEventListener("click", () => setTaskTokenStatsOpen(true));
     U.taskTokenClose?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.taskTokenBackdrop?.addEventListener("click", () => setTaskTokenStatsOpen(false));
-    U.artifactApply?.addEventListener("click", () => void applySelectedArtifact());
+    U.nodeContextDisclosure?.addEventListener("toggle", () => void handleNodeContextDisclosureToggle());
     U.ceoSessionPanelToggle?.addEventListener("click", () => setCeoSessionPanelExpanded(!S.ceoSessionPanelExpanded));
     U.ceoNewSession?.addEventListener("click", () => void createNewCeoSession());
     U.ceoSessionTabLocal?.addEventListener("click", () => setCeoSessionTab("local"));
@@ -6462,6 +6350,9 @@ function bind() {
         closeTaskMenus();
         renderTasks();
     }));
+    document.addEventListener("visibilitychange", () => {
+        if (typeof ensureTaskListVisibleReconcile === "function") ensureTaskListVisibleReconcile();
+    });
     U.taskBatchMenu?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
         await runTaskBatchAction(button.dataset.batchAction, { returnFocus: button });
     }));

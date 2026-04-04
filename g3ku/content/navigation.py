@@ -19,6 +19,17 @@ MAX_SEARCH_LIMIT = 50
 _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
 _PREVIEW_CHAR_LIMIT = 220
+_ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
+    {
+        "tool_result:memory_search",
+        "tool_result:create_async_task_cn",
+        "tool_result:task_failed_nodes_cn",
+        "tool_result:task_fetch_cn",
+        "tool_result:task_node_detail_cn",
+        "tool_result:task_progress_cn",
+        "tool_result:task_summary_cn",
+    }
+)
 
 
 def _json_dumps(value: Any) -> str:
@@ -198,8 +209,37 @@ def _parsed_json_payload(value: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str) -> bool:
+    normalized = str(source_kind or "").strip().lower()
+    if not normalized.startswith("tool_result:"):
+        return False
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("ok") is not True:
+        return False
+    level = str(payload.get("level") or "").strip().lower()
+    if level != "l2":
+        return False
+    uri = str(payload.get("uri") or "").strip()
+    if not uri.startswith(("g3ku://skill/", "g3ku://resource/tool/")):
+        return False
+    content = payload.get("content")
+    l0 = payload.get("l0")
+    l1 = payload.get("l1")
+    if not isinstance(content, str):
+        return False
+    if not isinstance(l0, str) or not isinstance(l1, str):
+        return False
+    return True
+
+
 def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
+    if normalized in _ALWAYS_INLINE_TOOL_RESULT_SOURCES:
+        return True
+    if _should_keep_inline_direct_load_tool_result(value, source_kind=source_kind):
+        return True
     if normalized not in {"tool_result:content", "tool_result:filesystem"}:
         return False
     payload = _parsed_json_payload(value)
@@ -636,16 +676,28 @@ class ContentNavigationService:
         origin_ref: str,
     ) -> ContentHandle:
         artifact = None
-        if self._artifact_store is not None and hasattr(self._artifact_store, "create_text_artifact"):
-            artifact = self._artifact_store.create_text_artifact(
-                task_id=_runtime_task_id(runtime),
-                node_id=_runtime_node_id(runtime),
-                kind=source_kind,
-                title=display_name,
-                content=text,
-                extension=".txt",
-                mime_type=mime_type,
-            )
+        if self._artifact_store is not None:
+            create_singleton = getattr(self._artifact_store, "create_or_replace_singleton_text_artifact", None)
+            if source_kind == "task_runtime_messages" and callable(create_singleton):
+                artifact = create_singleton(
+                    task_id=_runtime_task_id(runtime),
+                    node_id=_runtime_node_id(runtime),
+                    kind=source_kind,
+                    title=display_name,
+                    content=text,
+                    extension=".txt",
+                    mime_type=mime_type,
+                )
+            elif hasattr(self._artifact_store, "create_text_artifact"):
+                artifact = self._artifact_store.create_text_artifact(
+                    task_id=_runtime_task_id(runtime),
+                    node_id=_runtime_node_id(runtime),
+                    kind=source_kind,
+                    title=display_name,
+                    content=text,
+                    extension=".txt",
+                    mime_type=mime_type,
+                )
         ref = f"artifact:{artifact.artifact_id}" if artifact is not None else ""
         uri = str(getattr(artifact, "path", "") or "")
         artifact_id = str(getattr(artifact, "artifact_id", "") or "")

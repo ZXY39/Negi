@@ -53,6 +53,7 @@ dependencies = [
     "json-repair>=0.57.0,<1.0.0",
     "qdrant-client>=1.10.0,<2.0.0",
     "PyYAML>=6.0.0,<7.0.0",
+    "psutil>=7.0.0,<8.0.0",
 ]
 
 [project.optional-dependencies]

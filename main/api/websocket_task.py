@@ -28,34 +28,14 @@ def _worker_status_payload(service) -> dict[str, object]:
     return service.worker_status_payload()
 
 
-def _load_task_list_snapshot_state(service, *, requested_session_id: str, effective_session_id: str | None, after_seq: int) -> tuple[list[dict[str, object]], dict[str, object], int, int]:
-    snapshot: list[dict[str, object]] = []
-    worker_payload: dict[str, object] = {}
+def _task_list_boundary_seq(service, *, requested_session_id: str, after_seq: int) -> tuple[int, int]:
     boundary_seq = service.registry.current_task_list_seq(requested_session_id)
-    for _ in range(3):
-        candidate_boundary = service.registry.current_task_list_seq(requested_session_id)
-        snapshot = [item.model_dump(mode='json') for item in service.query_service.get_tasks(effective_session_id, 1)]
-        worker_payload = _worker_status_payload(service)
-        confirm_seq = service.registry.current_task_list_seq(requested_session_id)
-        boundary_seq = candidate_boundary
-        if confirm_seq == candidate_boundary:
-            boundary_seq = confirm_seq
-            break
-    return snapshot, worker_payload, max(int(after_seq or 0), int(boundary_seq or 0)), int(boundary_seq or 0)
+    return max(int(after_seq or 0), int(boundary_seq or 0)), int(boundary_seq or 0)
 
 
-def _load_task_detail_snapshot_state(service, *, task_id: str, after_seq: int) -> tuple[dict[str, object] | None, int, int]:
-    payload: dict[str, object] | None = None
+def _task_detail_boundary_seq(service, *, task_id: str, after_seq: int) -> tuple[int, int]:
     boundary_seq = service.registry.current_global_task_seq(task_id)
-    for _ in range(3):
-        candidate_boundary = service.registry.current_global_task_seq(task_id)
-        payload = service.get_task_detail_payload(task_id, mark_read=False)
-        confirm_seq = service.registry.current_global_task_seq(task_id)
-        boundary_seq = candidate_boundary
-        if confirm_seq == candidate_boundary:
-            boundary_seq = confirm_seq
-            break
-    return payload, max(int(after_seq or 0), int(boundary_seq or 0)), int(boundary_seq or 0)
+    return max(int(after_seq or 0), int(boundary_seq or 0)), int(boundary_seq or 0)
 
 
 async def _queue_sender(
@@ -128,12 +108,10 @@ async def tasks_websocket(websocket: WebSocket):
             await websocket_close(websocket, code=4503)
             return
         await service.startup()
-        effective_session_id = None if requested_session_id.lower() == 'all' else requested_session_id
         queue = await service.registry.subscribe_task_list(requested_session_id)
-        snapshot, worker_payload, current_seq, boundary_seq = _load_task_list_snapshot_state(
+        current_seq, boundary_seq = _task_list_boundary_seq(
             service,
             requested_session_id=requested_session_id,
-            effective_session_id=effective_session_id,
             after_seq=after_seq,
         )
         sender_task = asyncio.create_task(
@@ -156,11 +134,8 @@ async def tasks_websocket(websocket: WebSocket):
                 channel='task',
                 session_id=requested_session_id,
                 seq=current_seq,
-                type='task.list.snapshot',
-                data={
-                    'items': snapshot,
-                    **worker_payload,
-                },
+                type='task.worker.status',
+                data=_worker_status_payload(service),
             ),
         )
         while True:
@@ -237,14 +212,8 @@ async def task_websocket(websocket: WebSocket, task_id: str):
             return
         await service.startup()
         task_id = service.normalize_task_id(task_id)
-        queue = await service.registry.subscribe_global_task(task_id)
-        payload, current_seq, boundary_seq = _load_task_detail_snapshot_state(
-            service,
-            task_id=task_id,
-            after_seq=after_seq,
-        )
-        if payload is None:
-            await service.registry.unsubscribe_global_task(task_id, queue)
+        task = service.get_task(task_id)
+        if task is None:
             await websocket_send_json(
                 websocket,
                 build_envelope(
@@ -258,7 +227,13 @@ async def task_websocket(websocket: WebSocket, task_id: str):
             )
             await websocket_close(websocket, code=4404)
             return
-        session_id = requested_session_id or str(payload.get('task', {}).get('session_id') or 'web:shared')
+        queue = await service.registry.subscribe_global_task(task_id)
+        current_seq, boundary_seq = _task_detail_boundary_seq(
+            service,
+            task_id=task_id,
+            after_seq=after_seq,
+        )
+        session_id = requested_session_id or str(getattr(task, 'session_id', '') or 'web:shared')
         sender_task = asyncio.create_task(
             _queue_sender(websocket, queue, min_seq=boundary_seq),
             name=f'task-detail-ws-sender:{task_id}',
@@ -272,17 +247,6 @@ async def task_websocket(websocket: WebSocket, task_id: str):
                 seq=current_seq,
                 type='hello',
                 data={'task_id': task_id, 'session_id': session_id},
-            ),
-        )
-        await websocket_send_json(
-            websocket,
-            build_envelope(
-                channel='task',
-                session_id=session_id,
-                task_id=task_id,
-                seq=current_seq,
-                type='task.snapshot',
-                data=payload,
             ),
         )
         while True:

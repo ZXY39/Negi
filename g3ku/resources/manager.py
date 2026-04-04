@@ -147,6 +147,35 @@ class ResourceManager:
         with self.acquire_tool(name, reload_on_release="never"):
             return descriptor.toolskills_main_path.read_text(encoding="utf-8")
 
+    def _resolved_services(self) -> dict[str, Any]:
+        services = self._services_getter() if self._services_getter is not None else {}
+        normalized = dict(services or {})
+        normalized.setdefault("app_config", self.app_config)
+
+        loop = normalized.get("loop")
+        main_task_service = normalized.get("main_task_service")
+        if main_task_service is None and loop is not None:
+            main_task_service = getattr(loop, "main_task_service", None)
+            if main_task_service is not None:
+                normalized["main_task_service"] = main_task_service
+
+        if normalized.get("memory_manager") is None and main_task_service is not None:
+            memory_manager = getattr(main_task_service, "memory_manager", None)
+            if memory_manager is not None:
+                normalized["memory_manager"] = memory_manager
+
+        if normalized.get("memory_manager") is None and loop is not None:
+            memory_manager = getattr(loop, "memory_manager", None)
+            if memory_manager is not None:
+                normalized["memory_manager"] = memory_manager
+
+        if normalized.get("app_config") is None and main_task_service is not None:
+            app_config = getattr(main_task_service, "_app_config", None)
+            if app_config is not None:
+                normalized["app_config"] = app_config
+
+        return normalized
+
     def acquire_tool(self, name: str, *, reload_on_release: str = "always"):
         handle = self._locks.acquire(ResourceKind.TOOL, name)
         return _ManagedAccessHandle(self, handle, reload_on_release=reload_on_release)
@@ -260,8 +289,7 @@ class ResourceManager:
             else:
                 self._locks.unregister_path(ResourceKind.SKILL, name)
 
-        services = self._services_getter() if self._services_getter is not None else {}
-        services.setdefault("app_config", self.app_config)
+        services = self._resolved_services()
         for name, descriptor in discovery.tools.items():
             old_descriptor = old.tools.get(name)
             old_instance = old.tool_instances.get(name)
@@ -374,8 +402,7 @@ class ResourceManager:
             descriptor = self._registry.build_skill_descriptor(root, tool_names=final_tool_names)
             discovered_skills_by_root[root] = descriptor
 
-        services = self._services_getter() if self._services_getter is not None else {}
-        services.setdefault("app_config", self.app_config)
+        services = self._resolved_services()
 
         occupied_tool_names = set(new_tools.keys())
         for root in tool_roots:
@@ -499,6 +526,8 @@ class ResourceManager:
     @staticmethod
     def _can_reuse_tool_instance(*, old_descriptor: ToolResourceDescriptor | None, descriptor: ToolResourceDescriptor, old_instance: Any) -> bool:
         if old_descriptor is None or old_instance is None:
+            return False
+        if type(old_instance).__name__ == "RepairRequiredTool":
             return False
         if old_descriptor.fingerprint != descriptor.fingerprint:
             return False

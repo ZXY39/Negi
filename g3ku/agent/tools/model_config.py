@@ -127,9 +127,7 @@ class ModelConfigTool(Tool):
             return {"items": manager.list_models()}
 
         if action_name == "get_model":
-            result = manager.get_model(str(kwargs.get("key") or "").strip())
-            await self._refresh_runtime(kwargs)
-            return result
+            return manager.get_model(str(kwargs.get("key") or "").strip())
 
         if action_name == "add_model":
             result = manager.add_model(
@@ -193,9 +191,20 @@ class ModelConfigTool(Tool):
         if loop is None:
             return
         try:
-            from g3ku.shells.web import refresh_web_agent_runtime
-
+            from g3ku.shells.web import refresh_web_agent_runtime, is_no_ceo_model_configured_error
             await refresh_web_agent_runtime(force=True, reason="model_config_tool")
-        except Exception:
-            # File save succeeded; runtime refresh is best-effort.
+        except Exception as exc:
+            if is_no_ceo_model_configured_error(exc):
+                return
+            raise RuntimeError(str(exc or "web_runtime_refresh_failed").strip() or "web_runtime_refresh_failed") from exc
+        service = getattr(loop, "main_task_service", None)
+        if service is None or str(getattr(service, "execution_mode", "") or "").strip().lower() != "web":
             return
+        if not bool(getattr(service, "is_worker_online", lambda **_kwargs: False)()):
+            return
+        try:
+            await service.request_worker_runtime_refresh(reason="model_config_tool")
+        except Exception as exc:
+            raise RuntimeError(
+                str(exc or "worker_runtime_refresh_failed").strip() or "worker_runtime_refresh_failed"
+            ) from exc

@@ -31,6 +31,22 @@ def _infer_auth_mode(provider_id: str) -> AuthMode:
     return AuthMode.API_KEY
 
 
+def _optional_chat_parameters(
+    *,
+    max_tokens: Any = _UNSET,
+    temperature: Any = _UNSET,
+    reasoning_effort: Any = _UNSET,
+) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    if max_tokens is not _UNSET and max_tokens not in (None, ""):
+        parameters["max_tokens"] = int(max_tokens)
+    if temperature is not _UNSET and temperature not in (None, ""):
+        parameters["temperature"] = float(temperature)
+    if reasoning_effort is not _UNSET and str(reasoning_effort or "").strip():
+        parameters["reasoning_effort"] = str(reasoning_effort).strip()
+    return parameters
+
+
 def _chat_binding_draft(
     *,
     provider_model: str,
@@ -49,16 +65,11 @@ def _chat_binding_draft(
         "api_key": api_key,
         "base_url": api_base,
         "default_model": model_id,
-        "parameters": {
-            "timeout_s": 8,
-            "temperature": 0.1 if temperature is None else float(temperature),
-            "max_tokens": 4096 if max_tokens is None else int(max_tokens),
-            **(
-                {"reasoning_effort": str(reasoning_effort).strip()}
-                if reasoning_effort is not None and str(reasoning_effort).strip()
-                else {}
-            ),
-        },
+        "parameters": _optional_chat_parameters(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        ),
         "extra_headers": extra_headers or {},
         "extra_options": {},
     }
@@ -110,6 +121,7 @@ class ModelManager:
         reasoning_effort: str | None = None,
         retry_on: list[str] | None = None,
         retry_count: int | None = None,
+        single_api_key_max_concurrency: int | None = None,
         description: str = "",
     ) -> dict[str, Any]:
         clean_key = str(key or "").strip()
@@ -135,6 +147,7 @@ class ModelManager:
                 "description": str(description or "").strip(),
                 "retry_on": list(retry_on or ["network", "429", "5xx"]),
                 "retry_count": 0 if retry_count is None else int(retry_count),
+                "single_api_key_max_concurrency": None if single_api_key_max_concurrency is None else int(single_api_key_max_concurrency),
             },
         )
         for scope in scopes or []:
@@ -147,45 +160,51 @@ class ModelManager:
         self,
         *,
         key: str,
-        provider_model: str | None = None,
-        api_key: str | None = None,
-        api_base: str | None = None,
-        extra_headers: dict[str, str] | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        reasoning_effort: str | None = None,
-        retry_on: list[str] | None = None,
-        retry_count: int | None = None,
-        description: str | None = None,
+        provider_model: str | None | object = _UNSET,
+        api_key: str | None | object = _UNSET,
+        api_base: str | None | object = _UNSET,
+        extra_headers: dict[str, str] | None | object = _UNSET,
+        max_tokens: int | None | object = _UNSET,
+        temperature: float | None | object = _UNSET,
+        reasoning_effort: str | None | object = _UNSET,
+        retry_on: list[str] | None | object = _UNSET,
+        retry_count: int | None | object = _UNSET,
+        single_api_key_max_concurrency: int | None | object = _UNSET,
+        description: str | None | object = _UNSET,
     ) -> dict[str, Any]:
         item = self._require_model(key)
         patch: dict[str, Any] = {}
-        if provider_model is not None:
+        if provider_model is not _UNSET:
             provider_id, model_id = self.config.parse_provider_model(str(provider_model).strip())
             patch["provider_id"] = provider_id
             patch["default_model"] = model_id
-        if api_key is not None:
+        if api_key is not _UNSET:
             patch["api_key"] = str(api_key).strip()
-        if api_base is not None:
+        if api_base is not _UNSET:
             patch["base_url"] = str(api_base).strip()
+        parameters_present = any(value is not _UNSET for value in (max_tokens, temperature, reasoning_effort))
         parameters: dict[str, Any] = {}
-        if max_tokens is not None:
-            parameters["max_tokens"] = int(max_tokens)
-        if temperature is not None:
-            parameters["temperature"] = float(temperature)
-        if reasoning_effort is not None:
-            parameters["reasoning_effort"] = str(reasoning_effort).strip()
-        if parameters:
+        if max_tokens is not _UNSET:
+            parameters["max_tokens"] = None if max_tokens in (None, "") else int(max_tokens)
+        if temperature is not _UNSET:
+            parameters["temperature"] = None if temperature in (None, "") else float(temperature)
+        if reasoning_effort is not _UNSET:
+            parameters["reasoning_effort"] = str(reasoning_effort).strip() or None
+        if parameters_present:
             patch["parameters"] = parameters
-        if extra_headers is not None:
+        if extra_headers is not _UNSET:
             patch["extra_headers"] = extra_headers
         if patch:
             self.facade.update_binding(self.config, model_key=key, draft_payload=patch)
-        if retry_on is not None:
+        if retry_on is not _UNSET:
             item.retry_on = list(retry_on)
-        if retry_count is not None:
+        if retry_count is not _UNSET:
             item.retry_count = int(retry_count)
-        if description is not None:
+        if single_api_key_max_concurrency is not _UNSET:
+            item.single_api_key_max_concurrency = (
+                None if single_api_key_max_concurrency in (None, "") else max(1, int(single_api_key_max_concurrency))
+            )
+        if description is not _UNSET:
             item.description = str(description).strip()
         self._revalidate()
         self.save()
@@ -221,20 +240,20 @@ class ModelManager:
     def set_scope_max_concurrency(self, scope: str, max_concurrency: int | None) -> dict[str, Any]:
         return self.update_scope_route(scope, max_concurrency=max_concurrency)
 
-    def update_scope_route(
+    def _prepare_scope_route_update(
         self,
         scope: str,
         *,
-        model_keys: list[str] | None = None,
+        model_keys: list[str] | None | object = _UNSET,
         max_iterations: Any = _UNSET,
         max_concurrency: Any = _UNSET,
-    ) -> dict[str, Any]:
+    ) -> tuple[str, dict[str, Any]]:
         normalized_scope = _normalize_scope(scope)
-        updated = False
-        if model_keys is not None:
+        prepared: dict[str, Any] = {}
+        if model_keys is not _UNSET:
             cleaned: list[str] = []
             seen: set[str] = set()
-            for ref in model_keys:
+            for ref in list(model_keys or []):
                 key = str(ref or "").strip()
                 if not key or key in seen:
                     continue
@@ -245,18 +264,38 @@ class ModelManager:
                 cleaned.append(key)
             if not cleaned:
                 raise ValueError("model_keys must not be empty")
-            setattr(self.config.models.roles, normalized_scope, cleaned)
-            updated = True
+            prepared["model_keys"] = cleaned
         if max_iterations is not _UNSET:
-            clean_iterations = self._normalize_optional_limit(max_iterations, field_name="max_iterations")
-            setattr(self.config.agents.role_iterations, normalized_scope, clean_iterations)
-            updated = True
+            prepared["max_iterations"] = self._normalize_optional_limit(max_iterations, field_name="max_iterations")
         if max_concurrency is not _UNSET:
-            clean_concurrency = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
-            setattr(self.config.agents.role_concurrency, normalized_scope, clean_concurrency)
-            updated = True
-        if not updated:
+            prepared["max_concurrency"] = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
+        if not prepared:
             raise ValueError("model_keys, max_iterations, or max_concurrency must be provided")
+        return normalized_scope, prepared
+
+    def _apply_scope_route_update(self, normalized_scope: str, prepared: dict[str, Any]) -> None:
+        if "model_keys" in prepared:
+            setattr(self.config.models.roles, normalized_scope, list(prepared["model_keys"]))
+        if "max_iterations" in prepared:
+            setattr(self.config.agents.role_iterations, normalized_scope, prepared["max_iterations"])
+        if "max_concurrency" in prepared:
+            setattr(self.config.agents.role_concurrency, normalized_scope, prepared["max_concurrency"])
+
+    def update_scope_route(
+        self,
+        scope: str,
+        *,
+        model_keys: list[str] | None | object = _UNSET,
+        max_iterations: Any = _UNSET,
+        max_concurrency: Any = _UNSET,
+    ) -> dict[str, Any]:
+        normalized_scope, prepared = self._prepare_scope_route_update(
+            scope,
+            model_keys=model_keys,
+            max_iterations=max_iterations,
+            max_concurrency=max_concurrency,
+        )
+        self._apply_scope_route_update(normalized_scope, prepared)
         self._revalidate()
         self.save()
         return {
@@ -264,6 +303,34 @@ class ModelManager:
             "model_keys": list(getattr(self.config.models.roles, normalized_scope)),
             "max_iterations": self.config.get_role_max_iterations(normalized_scope),
             "max_concurrency": self.config.get_role_max_concurrency(normalized_scope),
+        }
+
+    def update_scope_routes_bulk(self, updates: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(updates, dict) or not updates:
+            raise ValueError("updates must not be empty")
+        prepared_updates: list[tuple[str, dict[str, Any]]] = []
+        seen_scopes: set[str] = set()
+        for scope, payload in updates.items():
+            body = payload if isinstance(payload, dict) else {}
+            normalized_scope, prepared = self._prepare_scope_route_update(
+                str(scope or ""),
+                model_keys=body.get("model_keys", _UNSET),
+                max_iterations=body.get("max_iterations", _UNSET),
+                max_concurrency=body.get("max_concurrency", _UNSET),
+            )
+            if normalized_scope in seen_scopes:
+                raise ValueError(f"Duplicate scope update: {normalized_scope}")
+            seen_scopes.add(normalized_scope)
+            prepared_updates.append((normalized_scope, prepared))
+        for normalized_scope, prepared in prepared_updates:
+            self._apply_scope_route_update(normalized_scope, prepared)
+        self._revalidate()
+        self.save()
+        return {
+            "roles": {scope: list(getattr(self.config.models.roles, scope)) for scope in VALID_SCOPES},
+            "role_iterations": {scope: self.config.get_role_max_iterations(scope) for scope in VALID_SCOPES},
+            "role_concurrency": {scope: self.config.get_role_max_concurrency(scope) for scope in VALID_SCOPES},
+            "updated_scopes": [scope for scope, _prepared in prepared_updates],
         }
 
     def add_model_to_scope(self, key: str, scope: str) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import subprocess
@@ -20,6 +21,9 @@ WEB_KEEP_WORKER_ENV = "G3KU_WEB_KEEP_WORKER"
 
 _WORKER_LOCK = threading.RLock()
 _MANAGED_WORKER_PROCESS: subprocess.Popen | None = None
+_MANAGED_WORKER_STARTED_AT_MONOTONIC: float | None = None
+_MANAGED_WORKER_STARTED_AT: str = ""
+_MANAGED_WORKER_STARTING_GRACE_SECONDS = 10.0
 
 
 def _env_enabled(name: str) -> bool:
@@ -36,7 +40,7 @@ def keep_worker_enabled() -> bool:
 
 
 def _active_process_locked() -> subprocess.Popen | None:
-    global _MANAGED_WORKER_PROCESS
+    global _MANAGED_WORKER_PROCESS, _MANAGED_WORKER_STARTED_AT_MONOTONIC, _MANAGED_WORKER_STARTED_AT
 
     process = _MANAGED_WORKER_PROCESS
     if process is None:
@@ -50,6 +54,8 @@ def _active_process_locked() -> subprocess.Popen | None:
         getattr(process, "returncode", None),
     )
     _MANAGED_WORKER_PROCESS = None
+    _MANAGED_WORKER_STARTED_AT_MONOTONIC = None
+    _MANAGED_WORKER_STARTED_AT = ""
     return None
 
 
@@ -61,8 +67,31 @@ def managed_worker_pid() -> int | None:
         return int(getattr(process, "pid", 0) or 0) or None
 
 
+def managed_worker_snapshot(*, starting_grace_s: float = _MANAGED_WORKER_STARTING_GRACE_SECONDS) -> dict[str, object]:
+    with _WORKER_LOCK:
+        process = _active_process_locked()
+        pid = int(getattr(process, "pid", 0) or 0) or None if process is not None else None
+        started_at = str(_MANAGED_WORKER_STARTED_AT or "").strip()
+        started_at_monotonic = _MANAGED_WORKER_STARTED_AT_MONOTONIC
+    grace_seconds = max(0.0, float(starting_grace_s or 0.0))
+    starting = bool(
+        process is not None
+        and started_at_monotonic is not None
+        and grace_seconds > 0
+        and (time.monotonic() - started_at_monotonic) <= grace_seconds
+    )
+    return {
+        "pid": pid,
+        "active": process is not None,
+        "auto_worker_enabled": auto_worker_enabled(),
+        "started_at": started_at,
+        "starting": starting,
+        "starting_grace_seconds": grace_seconds,
+    }
+
+
 def start_managed_task_worker() -> bool:
-    global _MANAGED_WORKER_PROCESS
+    global _MANAGED_WORKER_PROCESS, _MANAGED_WORKER_STARTED_AT_MONOTONIC, _MANAGED_WORKER_STARTED_AT
 
     if not auto_worker_enabled():
         return False
@@ -83,8 +112,11 @@ def start_managed_task_worker() -> bool:
             "env": {
                 **os.environ.copy(),
                 BOOTSTRAP_MASTER_KEY_ENV: master_key,
+                "G3KU_TASK_RUNTIME_ROLE": "worker",
             },
         }
+        popen_kwargs["env"].pop(WEB_AUTO_WORKER_ENV, None)
+        popen_kwargs["env"].pop(WEB_KEEP_WORKER_ENV, None)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         if creationflags:
             popen_kwargs["creationflags"] = creationflags
@@ -93,6 +125,8 @@ def start_managed_task_worker() -> bool:
         if os.name == "nt" and not assign_process_to_kill_on_close_job(process):
             logger.debug("Managed task worker job-object binding skipped pid={}", getattr(process, "pid", None))
         _MANAGED_WORKER_PROCESS = process
+        _MANAGED_WORKER_STARTED_AT_MONOTONIC = time.monotonic()
+        _MANAGED_WORKER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
     logger.info("Started managed task worker pid={} cwd={}", process.pid, Path.cwd())
     return True
@@ -154,7 +188,7 @@ def _stop_process(process: subprocess.Popen) -> None:
 
 
 async def shutdown_managed_task_worker() -> None:
-    global _MANAGED_WORKER_PROCESS
+    global _MANAGED_WORKER_PROCESS, _MANAGED_WORKER_STARTED_AT_MONOTONIC, _MANAGED_WORKER_STARTED_AT
 
     if keep_worker_enabled():
         return
@@ -162,6 +196,8 @@ async def shutdown_managed_task_worker() -> None:
     with _WORKER_LOCK:
         process = _MANAGED_WORKER_PROCESS
         _MANAGED_WORKER_PROCESS = None
+        _MANAGED_WORKER_STARTED_AT_MONOTONIC = None
+        _MANAGED_WORKER_STARTED_AT = ""
 
     if process is None:
         return
@@ -178,6 +214,7 @@ __all__ = [
     "ensure_managed_task_worker",
     "keep_worker_enabled",
     "managed_worker_pid",
+    "managed_worker_snapshot",
     "shutdown_managed_task_worker",
     "start_managed_task_worker",
     "wait_for_task_worker_online",

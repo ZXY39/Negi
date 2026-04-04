@@ -23,7 +23,7 @@ from g3ku.china_bridge.registry import (
 )
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.schema import Config
-from g3ku.config.model_manager import ModelManager, VALID_SCOPES
+from g3ku.config.model_manager import ModelManager, VALID_SCOPES, _UNSET
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
@@ -36,6 +36,7 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
+from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.governance.roles import to_public_allowed_roles
 from main.protocol import now_iso
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -192,93 +193,15 @@ class _StandaloneResourceService:
         return self._decorate_tool_family(self._raw_tool_family(tool_id))
 
     def _tool_family_executor_name(self, family) -> str:
-        primary = str(getattr(family, 'primary_executor_name', '') or '').strip()
-        if primary:
-            return primary
-        for action in list(getattr(family, 'actions', []) or []):
-            for executor_name in list(getattr(action, 'executor_names', []) or []):
-                name = str(executor_name or '').strip()
-                if name:
-                    return name
-        fallback = str(getattr(family, 'tool_id', '') or '').strip()
-        descriptor = self._resource_manager.get_tool_descriptor(fallback) if fallback else None
-        if descriptor is not None:
-            return fallback
-        return ''
-
-    @staticmethod
-    def _tool_family_executor_names(family) -> list[str]:
-        names: list[str] = []
-        for action in list(getattr(family, 'actions', []) or []):
-            for executor_name in list(getattr(action, 'executor_names', []) or []):
-                name = str(executor_name or '').strip()
-                if name and name not in names:
-                    names.append(name)
-        return names
-
-    def _resolve_tool_toolskill_target(self, tool_id: str):
-        requested = str(tool_id or '').strip()
-        family = self._raw_tool_family(requested)
-        if family is not None:
-            return family, requested, self._tool_family_executor_name(family)
-        if requested:
-            for item in self.resource_registry.list_tool_families():
-                for executor_name in self._tool_family_executor_names(item):
-                    if requested == executor_name:
-                        return item, requested, executor_name
-        return None, requested, ''
+        return resolve_primary_executor_name(family, resource_manager=self._resource_manager)
 
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
-        family, requested_tool_id, executor_name = self._resolve_tool_toolskill_target(tool_id)
-        if family is None:
-            return None
-        family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        family_primary_executor = self._tool_family_executor_name(family)
-        resolved_tool_id = (
-            executor_name
-            if requested_tool_id and executor_name and requested_tool_id == executor_name and executor_name != family_tool_id
-            else family_tool_id
+        return build_tool_toolskill_payload(
+            tool_id,
+            raw_tool_family_getter=self._raw_tool_family,
+            resource_registry=self.resource_registry,
+            resource_manager=self._resource_manager,
         )
-        content = ''
-        path = ''
-        descriptor = None
-        if executor_name:
-            try:
-                content = self._resource_manager.load_toolskill_body(executor_name)
-            except FileNotFoundError:
-                content = ''
-            descriptor = self._resource_manager.get_tool_descriptor(executor_name)
-            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
-                path = str(descriptor.toolskills_main_path)
-        if descriptor is None:
-            descriptor = self._resource_manager.get_tool_descriptor(str(getattr(family, 'tool_id', '') or '').strip())
-            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
-                path = str(descriptor.toolskills_main_path)
-        tool_type = str(getattr(family, 'tool_type', getattr(descriptor, 'tool_type', 'internal')) or 'internal')
-        install_dir = str(
-            getattr(family, 'install_dir', None)
-            or getattr(descriptor, 'install_dir', '')
-            or ''
-        ).strip() or None
-        callable_flag = bool(getattr(family, 'callable', getattr(descriptor, 'callable', True)))
-        repair_required = callable_flag and not bool(getattr(family, 'available', getattr(descriptor, 'available', True)))
-        return {
-            'tool_id': resolved_tool_id or family_tool_id,
-            'family_tool_id': family_tool_id,
-            'requested_tool_id': requested_tool_id or family_tool_id,
-            'primary_executor_name': family_primary_executor,
-            'resolved_executor_name': executor_name or family_primary_executor,
-            'content': content,
-            'path': path,
-            'description': family.description,
-            'tool_type': tool_type,
-            'install_dir': install_dir,
-            'callable': callable_flag,
-            'available': bool(getattr(family, 'available', getattr(descriptor, 'available', True))),
-            'repair_required': repair_required,
-            'warnings': list(getattr(family, 'metadata', {}).get('warnings') or []),
-            'errors': list(getattr(family, 'metadata', {}).get('errors') or []),
-        }
 
     def _subject(self, *, actor_role: str, session_id: str, task_id: str | None = None, node_id: str | None = None) -> PermissionSubject:
         return PermissionSubject(
@@ -835,10 +758,49 @@ def _resource_delete_http_error(exc: ValueError) -> HTTPException:
 
 
 async def _refresh_runtime(reason: str) -> None:
+    web_refreshed = False
     try:
         await refresh_web_agent_runtime(force=True, reason=reason)
+        web_refreshed = True
+    except Exception as exc:
+        if is_no_ceo_model_configured_error(exc) or str(exc or '').strip() == 'project is locked':
+            return
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'web_runtime_refresh_failed',
+                'saved': True,
+                'web_refreshed': False,
+                'worker_refresh_acked': False,
+                'reason': reason,
+                'error': str(exc or 'web_runtime_refresh_failed').strip() or 'web_runtime_refresh_failed',
+            },
+        ) from exc
+    try:
+        service = _service()
+    except HTTPException as exc:
+        _ = exc
+        return
     except Exception:
         return
+    if str(getattr(service, 'execution_mode', '') or '').strip().lower() != 'web':
+        return
+    if not bool(getattr(service, 'is_worker_online', lambda **kwargs: False)()):
+        return
+    try:
+        await service.request_worker_runtime_refresh(reason=reason)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'worker_runtime_refresh_failed',
+                'saved': True,
+                'web_refreshed': web_refreshed,
+                'worker_refresh_acked': False,
+                'reason': reason,
+                'error': str(exc or 'worker_runtime_refresh_failed').strip() or 'worker_runtime_refresh_failed',
+            },
+        ) from exc
 
 
 
@@ -852,6 +814,60 @@ def _model_role_iterations(manager: ModelManager) -> dict[str, int]:
 
 def _model_role_concurrency(manager: ModelManager) -> dict[str, int | None]:
     return {scope: manager.config.get_role_max_concurrency(scope) for scope in VALID_SCOPES}
+
+
+def _model_roles_payload(manager: ModelManager) -> dict[str, Any]:
+    return {
+        'roles': _model_roles(manager),
+        'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
+    }
+
+
+def _llm_routes_payload(manager: ModelManager) -> dict[str, Any]:
+    return {
+        'routes': manager.facade.get_routes(manager.config),
+        'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
+    }
+
+
+def _scope_route_update_kwargs(payload: dict[str, Any] | None) -> dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    raw_model_keys = body.get('model_keys')
+    if raw_model_keys is None and 'modelKeys' in body:
+        raw_model_keys = body.get('modelKeys')
+    raw_max_iterations = body.get('max_iterations')
+    if raw_max_iterations is None and 'maxIterations' in body:
+        raw_max_iterations = body.get('maxIterations')
+    raw_max_concurrency = body.get('max_concurrency')
+    if raw_max_concurrency is None and 'maxConcurrency' in body and 'max_concurrency' not in body:
+        raw_max_concurrency = body.get('maxConcurrency')
+
+    update_kwargs: dict[str, Any] = {}
+    if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
+        update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
+    if 'max_iterations' in body or 'maxIterations' in body:
+        update_kwargs['max_iterations'] = raw_max_iterations
+    if 'max_concurrency' in body or 'maxConcurrency' in body:
+        update_kwargs['max_concurrency'] = raw_max_concurrency
+    return update_kwargs
+
+
+def _bulk_scope_route_updates(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    body = payload if isinstance(payload, dict) else {}
+    raw_updates = body.get('updates')
+    if not isinstance(raw_updates, dict) or not raw_updates:
+        raise ValueError('updates must be a non-empty object')
+    updates: dict[str, dict[str, Any]] = {}
+    for raw_scope, raw_item in raw_updates.items():
+        scope = str(raw_scope or '').strip()
+        if not scope:
+            raise ValueError('scope key must not be empty')
+        if not isinstance(raw_item, dict):
+            raise ValueError(f'updates.{scope} must be an object')
+        updates[scope] = _scope_route_update_kwargs(raw_item)
+    return updates
 
 
 def _main_runtime_settings_payload(cfg: Config) -> dict[str, Any]:
@@ -1603,9 +1619,7 @@ async def list_models():
     return {
         'ok': True,
         'items': manager.list_models(),
-        'roles': _model_roles(manager),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
+        **_model_roles_payload(manager),
     }
 
 
@@ -1640,22 +1654,43 @@ async def create_model(payload: dict = Body(...)):
 @router.put('/models/{model_key}')
 async def update_model(model_key: str, payload: dict = Body(...)):
     manager = ModelManager.load()
+    body = payload if isinstance(payload, dict) else {}
     raw_retry_count = payload.get('retry_count')
     if raw_retry_count is None and 'retryCount' in payload:
         raw_retry_count = payload.get('retryCount')
+
+    def _pick(snake_key: str, camel_key: str | None = None):
+        if snake_key in body:
+            return body.get(snake_key)
+        if camel_key and camel_key in body:
+            return body.get(camel_key)
+        return _UNSET
+
     try:
         item = manager.update_model(
             key=model_key,
-            provider_model=payload.get('provider_model'),
-            api_key=payload.get('api_key'),
-            api_base=payload.get('api_base'),
-            extra_headers=payload.get('extra_headers') if isinstance(payload.get('extra_headers'), dict) else None,
-            max_tokens=payload.get('max_tokens'),
-            temperature=payload.get('temperature'),
-            reasoning_effort=payload.get('reasoning_effort'),
-            retry_on=[str(item) for item in (payload.get('retry_on') or [])] if payload.get('retry_on') is not None else None,
-            retry_count=raw_retry_count,
-            description=payload.get('description'),
+            provider_model=_pick('provider_model', 'providerModel'),
+            api_key=_pick('api_key', 'apiKey'),
+            api_base=_pick('api_base', 'apiBase'),
+            extra_headers=(
+                body.get('extra_headers')
+                if 'extra_headers' in body and isinstance(body.get('extra_headers'), dict)
+                else body.get('extraHeaders')
+                if 'extraHeaders' in body and isinstance(body.get('extraHeaders'), dict)
+                else _UNSET
+            ),
+            max_tokens=_pick('max_tokens', 'maxTokens'),
+            temperature=_pick('temperature'),
+            reasoning_effort=_pick('reasoning_effort', 'reasoningEffort'),
+            retry_on=(
+                [str(item) for item in (body.get('retry_on') or [])]
+                if 'retry_on' in body
+                else [str(item) for item in (body.get('retryOn') or [])]
+                if 'retryOn' in body
+                else _UNSET
+            ),
+            retry_count=raw_retry_count if ('retry_count' in body or 'retryCount' in body) else _UNSET,
+            description=_pick('description'),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1699,24 +1734,8 @@ async def delete_model(model_key: str):
 @router.put('/models/roles/{scope}')
 async def update_model_roles(scope: str, payload: dict = Body(...)):
     manager = ModelManager.load()
-    body = payload if isinstance(payload, dict) else {}
-    raw_model_keys = payload.get('model_keys')
-    if raw_model_keys is None and 'modelKeys' in payload:
-        raw_model_keys = payload.get('modelKeys')
-    raw_max_iterations = payload.get('max_iterations')
-    if raw_max_iterations is None and 'maxIterations' in payload:
-        raw_max_iterations = payload.get('maxIterations')
-    raw_max_concurrency = payload.get('max_concurrency')
-    if raw_max_concurrency is None and 'maxConcurrency' in payload and 'max_concurrency' not in payload:
-        raw_max_concurrency = payload.get('maxConcurrency')
     try:
-        update_kwargs: dict[str, Any] = {}
-        if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
-            update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
-        if 'max_iterations' in body or 'maxIterations' in body:
-            update_kwargs['max_iterations'] = raw_max_iterations
-        if 'max_concurrency' in body or 'maxConcurrency' in body:
-            update_kwargs['max_concurrency'] = raw_max_concurrency
+        update_kwargs = _scope_route_update_kwargs(payload)
         roles = manager.update_scope_route(
             scope,
             **update_kwargs,
@@ -1731,6 +1750,20 @@ async def update_model_roles(scope: str, payload: dict = Body(...)):
         'all_roles': _model_roles(manager),
         'role_iterations': _model_role_iterations(manager),
         'role_concurrency': _model_role_concurrency(manager),
+    }
+
+
+@router.put('/models/routes/batch')
+async def update_model_roles_bulk(payload: dict = Body(...)):
+    manager = ModelManager.load()
+    try:
+        result = manager.update_scope_routes_bulk(_bulk_scope_route_updates(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _refresh_runtime('admin_model_roles')
+    return {
+        'ok': True,
+        **result,
     }
 
 
@@ -1823,9 +1856,7 @@ async def list_llm_bindings():
     return {
         'ok': True,
         'items': manager.list_models(),
-        'routes': manager.facade.get_routes(manager.config),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
+        **_llm_routes_payload(manager),
     }
 
 
@@ -1893,33 +1924,15 @@ async def get_llm_routes():
     manager = ModelManager.load()
     return {
         'ok': True,
-        'routes': manager.facade.get_routes(manager.config),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
+        **_llm_routes_payload(manager),
     }
 
 
 @router.put('/llm/routes/{scope}')
 async def update_llm_route(scope: str, payload: dict = Body(...)):
     manager = ModelManager.load()
-    body = payload if isinstance(payload, dict) else {}
-    raw_model_keys = payload.get('model_keys')
-    if raw_model_keys is None and 'modelKeys' in payload:
-        raw_model_keys = payload.get('modelKeys')
-    raw_max_iterations = payload.get('max_iterations')
-    if raw_max_iterations is None and 'maxIterations' in payload:
-        raw_max_iterations = payload.get('maxIterations')
-    raw_max_concurrency = payload.get('max_concurrency')
-    if raw_max_concurrency is None and 'maxConcurrency' in payload and 'max_concurrency' not in payload:
-        raw_max_concurrency = payload.get('maxConcurrency')
     try:
-        update_kwargs: dict[str, Any] = {}
-        if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
-            update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
-        if 'max_iterations' in body or 'maxIterations' in body:
-            update_kwargs['max_iterations'] = raw_max_iterations
-        if 'max_concurrency' in body or 'maxConcurrency' in body:
-            update_kwargs['max_concurrency'] = raw_max_concurrency
+        update_kwargs = _scope_route_update_kwargs(payload)
         route = manager.update_scope_route(
             scope,
             **update_kwargs,
@@ -1930,9 +1943,24 @@ async def update_llm_route(scope: str, payload: dict = Body(...)):
     return {
         'ok': True,
         'route': route,
-        'routes': manager.facade.get_routes(manager.config),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
+        **_llm_routes_payload(manager),
+    }
+
+
+@router.put('/llm/routes')
+async def update_llm_routes_bulk(payload: dict = Body(...)):
+    manager = ModelManager.load()
+    try:
+        result = manager.update_scope_routes_bulk(_bulk_scope_route_updates(payload))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _refresh_runtime('admin_llm_route_update')
+    return {
+        'ok': True,
+        'updated_scopes': result.get('updated_scopes', []),
+        'routes': result.get('roles', {}),
+        'role_iterations': result.get('role_iterations', {}),
+        'role_concurrency': result.get('role_concurrency', {}),
     }
 
 
@@ -2306,8 +2334,40 @@ async def get_retrieval_traces(limit: int = Query(20, ge=1, le=200)):
     return await service.get_context_traces(trace_kind='retrieval', limit=limit)
 
 
-@router.get('/memory/context-assembly-traces')
-async def get_context_assembly_traces(limit: int = Query(20, ge=1, le=200)):
-    service = _service()
+@router.get('/memory/runtime-stats')
+async def get_memory_runtime_stats():
+    agent = get_agent()
+    service = getattr(agent, 'main_task_service', None)
+    if service is None:
+        raise HTTPException(status_code=503, detail='main_task_service_unavailable')
     await service.startup()
-    return await service.get_context_traces(trace_kind='context_assembly', limit=limit)
+
+    async def _stats_for(manager: Any | None) -> dict[str, Any] | None:
+        if manager is None:
+            return None
+        stats_fn = getattr(manager, 'stats', None)
+        if not callable(stats_fn):
+            return {'available': False}
+        try:
+            stats = await stats_fn()
+        except Exception as exc:
+            return {
+                'available': True,
+                'error': str(exc),
+            }
+        return {
+            'available': True,
+            'manager_type': type(manager).__name__,
+            'stats': stats,
+        }
+
+    loop_manager = getattr(agent, 'memory_manager', None)
+    service_manager = getattr(service, 'memory_manager', None)
+    return {
+        'ok': True,
+        'item': {
+            'same_object': loop_manager is service_manager,
+            'loop_manager': await _stats_for(loop_manager),
+            'service_manager': await _stats_for(service_manager),
+        },
+    }

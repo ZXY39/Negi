@@ -2,7 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 
+from main.runtime.stage_budget import CONTROL_STAGE_TOOL_NAMES, FINAL_RESULT_TOOL_NAME, STAGE_TOOL_NAME
+
 _STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
+_NON_SUBSTANTIVE_PROGRESS_TOOL_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *CONTROL_STAGE_TOOL_NAMES}
+
+
+def _stage_has_substantive_progress(active: dict[str, Any]) -> bool:
+    for round_item in list(active.get('rounds') or []):
+        if not isinstance(round_item, dict):
+            continue
+        tool_names = [
+            str(name or '').strip()
+            for name in list(round_item.get('tool_names') or [])
+            if str(name or '').strip()
+        ]
+        if any(name not in _NON_SUBSTANTIVE_PROGRESS_TOOL_NAMES for name in tool_names):
+            return True
+    return False
 
 
 def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
@@ -101,10 +118,17 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
             f'当前普通工具轮次使用 {used}/{budget}。'
             '除创建新阶段外，其余所有思考、工具调用和验收裁定都必须只服务于当前阶段目标。'
         )
+    reminder = ''
+    if not _stage_has_substantive_progress(active):
+        reminder = (
+            ' 当前阶段尚未产生任何实质执行回合；'
+            '不要再次调用 `submit_next_stage`，必须先执行普通工具或派生子节点。'
+        )
     return (
         f'当前阶段【{mode} | {status}】目标：{goal}。'
         f'当前普通工具轮次使用 {used}/{budget}。'
         '除创建新阶段外，其余所有思考、工具调用和派生行为都必须只服务于当前阶段目标。'
+        f'{reminder}'
     )
 
 

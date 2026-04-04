@@ -5,14 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 
 
 def ensure_chat_model(
     provider: Any,
     *,
     default_model: str,
-    default_temperature: float,
-    default_max_tokens: int,
+    default_temperature: float | None,
+    default_max_tokens: int | None,
     default_reasoning_effort: str | None,
 ) -> BaseChatModel:
     """Coerce legacy g3ku providers into BaseChatModel when needed."""
@@ -20,14 +21,8 @@ def ensure_chat_model(
         return provider
 
     if hasattr(provider, "chat"):
-        try:
-            from g3ku.integrations.langchain_runtime import ProviderChatModelAdapter
-        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency fallback
-            raise RuntimeError(
-                "LangChain runtime dependencies are missing. Install langchain to run the agent loop."
-            ) from exc
-        return ProviderChatModelAdapter(
-            provider=provider,
+        return G3kuChatModelAdapter(
+            chat_backend=provider,
             default_model=default_model,
             default_temperature=default_temperature,
             default_max_tokens=default_max_tokens,

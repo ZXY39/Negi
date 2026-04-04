@@ -7,7 +7,7 @@ from g3ku.utils.api_keys import MULTI_API_KEY_HELP_TEXT, MULTI_API_KEY_PLACEHOLD
 from .enums import AuthMode, Capability, FieldInputType, ProtocolAdapter
 from .models import ProviderTemplate, TemplateFieldOption, TemplateFieldSpec
 
-TEMPLATE_VERSION = "2026.03.15.1"
+TEMPLATE_VERSION = "2026.04.01.1"
 
 
 def option(value: str, label: str | None = None) -> TemplateFieldOption:
@@ -70,28 +70,20 @@ def _base_fields(default_base_url: str, default_model: str, api_key_default: str
             default=default_model,
         ),
         field(
-            key="timeout_s",
-            label="Timeout (seconds)",
-            input_type=FieldInputType.NUMBER,
-            required=True,
-            default=8,
-            constraints={"min": 1, "max": 20},
-        ),
-        field(
             key="temperature",
             label="Temperature",
             input_type=FieldInputType.NUMBER,
-            required=True,
-            default=0.2,
-            constraints={"min": 0, "max": 2},
+            required=False,
+            default=None,
+            constraints={"min": 0, "max": 2, "integer": False},
         ),
         field(
             key="max_tokens",
             label="Max Tokens",
             input_type=FieldInputType.NUMBER,
-            required=True,
-            default=4096,
-            constraints={"min": 1},
+            required=False,
+            default=None,
+            constraints={"min": 1, "integer": True},
         ),
         field(
             key="extra_headers",
@@ -169,7 +161,7 @@ def build_openai_compatible_template(
                 input_type=FieldInputType.SELECT,
                 required=False,
                 advanced=True,
-                default="medium",
+                default=None,
                 options=[option("low"), option("medium"), option("high")],
             ),
             field(
@@ -263,7 +255,7 @@ def build_anthropic_compatible_template(
                 required=False,
                 advanced=True,
                 default=1.0,
-                constraints={"min": 0, "max": 1},
+                constraints={"min": 0, "max": 1, "integer": False},
             ),
             field(
                 key="thinking_budget_tokens",
@@ -272,7 +264,7 @@ def build_anthropic_compatible_template(
                 required=False,
                 advanced=True,
                 default=1024,
-                constraints={"min": 0},
+                constraints={"min": 0, "integer": True},
             ),
         ]
     )
@@ -368,7 +360,7 @@ def build_ollama_template(
                 required=False,
                 advanced=True,
                 default=32768,
-                constraints={"min": 1},
+                constraints={"min": 1, "integer": True},
             ),
             field(
                 key="keep_alive",

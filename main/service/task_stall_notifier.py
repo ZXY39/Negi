@@ -85,16 +85,16 @@ class TaskStallNotifier:
         if task is None or not self._is_web_task(self._service, task):
             self.cancel_task(task_id)
             return
-        runtime_state = self._service.log_service.read_runtime_state(task.task_id) or {}
-        last_visible_output_at = str(runtime_state.get("last_visible_output_at") or task.created_at or "").strip()
+        runtime_meta = self._service.log_service.read_task_runtime_meta(task.task_id) or {}
+        last_visible_output_at = str(runtime_meta.get("last_visible_output_at") or task.created_at or "").strip()
         if not last_visible_output_at:
             last_visible_output_at = str(getattr(task, "created_at", "") or "").strip()
-        self._service.log_service.update_runtime_state(
+        self._service.log_service.update_task_runtime_meta(
             task.task_id,
             last_visible_output_at=last_visible_output_at,
             last_stall_notice_bucket_minutes=max(
                 0,
-                int(runtime_state.get("last_stall_notice_bucket_minutes") or 0),
+                int(runtime_meta.get("last_stall_notice_bucket_minutes") or 0),
             ),
         )
         self._schedule(task.task_id)
@@ -105,7 +105,7 @@ class TaskStallNotifier:
             self.cancel_task(task_id)
             return
         reset_at = str(occurred_at or "").strip() or self._service._stall_now_iso()
-        self._service.log_service.update_runtime_state(
+        self._service.log_service.update_task_runtime_meta(
             task.task_id,
             last_visible_output_at=reset_at,
             last_stall_notice_bucket_minutes=0,
@@ -240,7 +240,7 @@ class TaskStallNotifier:
         if not payload:
             self._schedule(task_id)
             return
-        self._service.log_service.update_runtime_state(
+        self._service.log_service.update_task_runtime_meta(
             task_id,
             last_stall_notice_bucket_minutes=current_bucket_minutes,
         )

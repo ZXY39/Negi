@@ -13,7 +13,7 @@ from uuid import uuid4
 from g3ku.china_bridge.registry import china_channel_attr, china_channel_ids, china_channel_spec
 from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_CONCURRENCY, DEFAULT_ROLE_MAX_ITERATIONS
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
-from g3ku.security import (
+from g3ku.security.bootstrap import (
     apply_config_secret_entries,
     extract_config_secret_entries,
     get_bootstrap_security_service,
@@ -327,9 +327,16 @@ def _normalize_inline_model_bindings(cfg: Config) -> bool:
             ).strip(),
             default_model=model_id,
             parameters={
-                "timeout_s": 8,
-                "temperature": float(item.temperature),
-                "max_tokens": int(item.max_tokens),
+                **(
+                    {"temperature": float(item.temperature)}
+                    if item.temperature is not None
+                    else {}
+                ),
+                **(
+                    {"max_tokens": int(item.max_tokens)}
+                    if item.max_tokens is not None
+                    else {}
+                ),
                 **(
                     {"reasoning_effort": str(item.reasoning_effort).strip()}
                     if item.reasoning_effort is not None and str(item.reasoning_effort).strip()
@@ -455,6 +462,10 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "governanceStorePath": cfg.main_runtime.governance_store_path,
             "defaultMaxDepth": cfg.main_runtime.default_max_depth,
             "hardMaxDepth": cfg.main_runtime.hard_max_depth,
+            "nodeDispatchConcurrency": {
+                "execution": cfg.get_node_dispatch_concurrency("execution"),
+                "inspection": cfg.get_node_dispatch_concurrency("inspection"),
+            },
         },
         "chinaBridge": {
             "enabled": cfg.china_bridge.enabled,
@@ -473,6 +484,12 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "channels": channel_payloads,
         },
     }
+
+
+def build_runtime_config_payload(cfg: Config) -> dict[str, object]:
+    """Build the full runtime config payload, including resolved secret overlays."""
+
+    return deepcopy(_runtime_config_payload(cfg))
 
 
 def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> None:
@@ -553,6 +570,25 @@ def _ensure_role_concurrency_defaults(raw_data: dict[str, Any]) -> bool:
     )
 
 
+def _migrate_removed_ceo_frontdoor_implementation(raw_data: dict[str, Any]) -> bool:
+    agents = raw_data.get("agents")
+    if not isinstance(agents, dict):
+        return False
+    changed = False
+    for key in ("ceoFrontdoorImplementation", "ceo_frontdoor_implementation"):
+        if key not in agents:
+            continue
+        value = str(agents.get(key) or "").strip().lower()
+        if value == "legacy":
+            raise ValueError(
+                "agents.ceoFrontdoorImplementation='legacy' is no longer supported. "
+                "The legacy CEO runner has been removed; delete this field and use the canonical CeoFrontDoorRunner."
+            )
+        agents.pop(key, None)
+        changed = True
+    return changed
+
+
 def build_project_config_from_example(example_path: Path | None = None) -> Config:
     """Build a strict project config from a project-local or bundled example file."""
     raw, source = _read_example_config_text(example_path)
@@ -578,6 +614,7 @@ def load_config(config_path: Path | None = None) -> Config:
     changed = changed or llm_changed
     changed = _ensure_role_iterations_defaults(raw_data) or changed
     changed = _ensure_role_concurrency_defaults(raw_data) or changed
+    changed = _migrate_removed_ceo_frontdoor_implementation(raw_data) or changed
     security = get_bootstrap_security_service(Path.cwd())
     migrated = _migrate_config(
         apply_config_secret_entries(deepcopy(raw_data), security.current_overlay())

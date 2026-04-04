@@ -17,10 +17,12 @@ from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
+from g3ku.resources.tool_settings import FilesystemToolSettings
 from main.models import TaskArtifactRecord
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
 from main.storage.artifact_store import TaskArtifactStore
+from tools.filesystem.main.tool import FilesystemTool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -64,6 +66,19 @@ def _python_launcher() -> str:
     if os.name == 'nt':
         return 'py -3'
     return 'python3' if shutil.which('python3') else 'python'
+
+
+def _large_direct_load_payload(*, uri: str, body_label: str) -> dict[str, object]:
+    body = '\n'.join(f'{body_label} line {index:03d}' for index in range(1, 321))
+    return {
+        'ok': True,
+        'level': 'l2',
+        'content': body,
+        'l0': f'{body_label} short summary',
+        'l1': f'{body_label} structured overview',
+        'path': f'/virtual/{body_label}.md',
+        'uri': uri,
+    }
 
 
 def _write_demo_tool(root: Path, *, name: str = 'demo_echo', guide: str = 'Demo echo guide') -> Path:
@@ -422,8 +437,9 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
 
-    target_file = workspace / 'target.txt'
-    written_file = workspace / 'written.txt'
+    target_file = workspace / 'temp' / 'target.txt'
+    written_file = workspace / 'temp' / 'written.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
     target_file.write_text('before value\n', encoding='utf-8')
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
@@ -437,7 +453,7 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
-        assert 'target.txt' in await tool.execute(action='list', path=str(workspace))
+        assert 'target.txt' in await tool.execute(action='list', path=str(target_file.parent))
         described = json.loads(await tool.execute(action='describe', path=str(target_file)))
         assert described['handle']['line_count'] == 1
         opened = json.loads(await tool.execute(action='open', path=str(target_file), start_line=1, end_line=5))
@@ -508,6 +524,75 @@ async def test_filesystem_tool_rejects_relative_paths(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_filesystem_tool_reports_reliable_file_changes_only(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'temp' / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('before\n', encoding='utf-8')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+
+    class _RecordingService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str, str]] = []
+
+        def refresh_resource_paths(self, paths, *, trigger: str = 'path-change', session_id: str = 'web:shared'):
+            _ = paths, trigger, session_id
+            return {'ok': True}
+
+        def record_node_file_change(self, task_id: str, node_id: str, *, path: str, change_type: str) -> None:
+            self.calls.append((task_id, node_id, path, change_type))
+
+    service = _RecordingService()
+    tool = FilesystemTool(
+        workspace=workspace,
+        artifact_store=artifact_store,
+        main_task_service=service,
+        settings=FilesystemToolSettings(),
+    )
+    runtime = {
+        'task_id': 'task:test',
+        'node_id': 'node:test',
+        'session_key': 'web:shared',
+    }
+
+    created_file = workspace / 'temp' / 'created.txt'
+    result = await tool.execute(action='write', path=str(created_file), content='hello\n', _FilesystemTool__g3ku_runtime=runtime)
+    assert 'Successfully wrote' in result
+
+    result = await tool.execute(
+        action='edit',
+        path=str(target_file),
+        old_text='before',
+        new_text='after',
+        _FilesystemTool__g3ku_runtime=runtime,
+    )
+    assert 'Successfully edited' in result
+
+    result = await tool.execute(action='delete', path=str(created_file), _FilesystemTool__g3ku_runtime=runtime)
+    assert 'Successfully deleted' in result
+
+    result = json.loads(
+        await tool.execute(
+            action='propose_patch',
+            path=str(target_file),
+            old_text='after',
+            new_text='patched',
+            summary='Patch target',
+            _FilesystemTool__g3ku_runtime=runtime,
+        )
+    )
+    assert result['success'] is True
+
+    assert service.calls == [
+        ('task:test', 'node:test', str(created_file.resolve()), 'created'),
+        ('task:test', 'node:test', str(target_file.resolve()), 'modified'),
+    ]
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_filesystem_tool_rejects_artifact_refs_with_content_guidance(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
@@ -555,14 +640,60 @@ async def test_filesystem_search_overflow_requires_refine(tmp_path: Path):
 
         dir_payload = json.loads(await tool.execute(action='search', path=str(target_dir), query='needle', limit=5))
         assert dir_payload['ok'] is True
-        assert dir_payload['overflow'] is True
-        assert dir_payload['requires_refine'] is True
-        assert dir_payload['hits'] == []
-        assert dir_payload['count'] == 0
-        assert dir_payload['overflow_lower_bound'] == 6
         assert dir_payload['scope_type'] == 'directory'
+        if shutil.which('rg'):
+            assert dir_payload['overflow'] is True
+            assert dir_payload['requires_refine'] is True
+            assert dir_payload['hits'] == []
+            assert dir_payload['count'] == 0
+            assert dir_payload['overflow_lower_bound'] == 6
+            assert dir_payload['backend'] == 'rg'
+        else:
+            assert dir_payload['requires_refine'] is True
+            assert dir_payload['backend'] == 'unavailable'
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_search_refines_when_directory_backend_is_unavailable(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    target_dir = workspace / 'src'
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(5):
+        (target_dir / f'module_{index}.txt').write_text('needle\n', encoding='utf-8')
+    tool = FilesystemTool(
+        workspace=workspace,
+        settings=FilesystemToolSettings(
+            search_max_files=2,
+            search_timeout_seconds=10.0,
+        ),
+    )
+    monkeypatch.setattr(shutil, 'which', lambda _name: None)
+
+    payload = json.loads(await tool.execute(action='search', path=str(target_dir), query='needle', limit=10))
+
+    assert payload['ok'] is True
+    assert payload['requires_refine'] is True
+    assert payload['timed_out'] is False
+    assert payload['scope_type'] == 'directory'
+    assert payload['backend'] == 'unavailable'
+    assert 'backend is unavailable' in str(payload['message']).lower()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_search_file_includes_search_diagnostics(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('needle\n', encoding='utf-8')
+    tool = FilesystemTool(workspace=workspace, settings=FilesystemToolSettings())
+    payload = json.loads(await tool.execute(action='search', path=str(target_file), query='needle', limit=5))
+    assert payload['ok'] is True
+    assert payload['backend'] == 'file'
+    assert payload['timed_out'] is False
+    assert int(payload['scanned_files']) == 1
+    assert int(payload['scanned_bytes']) >= len('needle\n'.encode('utf-8'))
 
 
 @pytest.mark.asyncio
@@ -1404,6 +1535,41 @@ def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp
     store.close()
 
 
+def test_content_navigation_uses_singleton_runtime_frame_message_artifact(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+
+    first = navigator.maybe_externalize_text(
+        json.dumps([{'role': 'user', 'content': 'first'}], ensure_ascii=False, indent=2),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='runtime-frame-messages:node:test',
+        source_kind='task_runtime_messages',
+        force=True,
+    )
+    second = navigator.maybe_externalize_text(
+        json.dumps([{'role': 'user', 'content': 'second'}], ensure_ascii=False, indent=2),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='runtime-frame-messages:node:test',
+        source_kind='task_runtime_messages',
+        force=True,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.ref == second.ref
+    artifacts = store.list_artifacts('task:test')
+    runtime_artifacts = [item for item in artifacts if item.kind == 'task_runtime_messages']
+    assert len(runtime_artifacts) == 1
+    assert 'second' in Path(runtime_artifacts[0].path).read_text(encoding='utf-8')
+
+    store.close()
+
+
 def test_prepare_messages_for_model_uses_compact_content_refs(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
@@ -1477,6 +1643,156 @@ def test_externalize_for_message_keeps_open_excerpt_inline(tmp_path: Path):
     assert 'line-040' in payload['excerpt']
     assert 'line-120' in payload['excerpt']
 
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ('source_kind', 'uri'),
+    [
+        ('tool_result:load_skill_context', 'g3ku://skill/full_body_skill'),
+        ('tool_result:load_tool_context', 'g3ku://resource/tool/content'),
+    ],
+)
+def test_externalize_for_message_keeps_direct_load_context_inline(tmp_path: Path, source_kind: str, uri: str):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = _large_direct_load_payload(uri=uri, body_label=source_kind.replace(':', '_'))
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='load-context',
+        source_kind=source_kind,
+        compact=True,
+    )
+
+    assert parse_content_envelope(rendered) is None
+    parsed = json.loads(str(rendered))
+    assert parsed == payload
+
+    store.close()
+
+
+@pytest.mark.parametrize(
+    'source_kind',
+    [
+        'tool_result:memory_search',
+        'tool_result:create_async_task_cn',
+        'tool_result:task_failed_nodes_cn',
+        'tool_result:task_fetch_cn',
+        'tool_result:task_node_detail_cn',
+        'tool_result:task_progress_cn',
+        'tool_result:task_summary_cn',
+    ],
+)
+def test_externalize_for_message_keeps_named_inline_exception_tools_inline(tmp_path: Path, source_kind: str):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = {
+        'ok': True,
+        'tool': source_kind,
+        'items': [
+            {
+                'id': f'item-{index:03d}',
+                'text': 'inline exception payload ' + ('x' * 80),
+            }
+            for index in range(60)
+        ],
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='named-inline-exception',
+        source_kind=source_kind,
+        compact=True,
+    )
+
+    assert parse_content_envelope(rendered) is None
+    parsed = json.loads(str(rendered))
+    assert parsed == payload
+
+    store.close()
+
+
+def test_externalize_for_message_still_externalizes_large_non_direct_load_search_payload(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = {
+        'ok': True,
+        'mode': 'search',
+        'query': 'long search',
+        'candidates': [
+            {
+                'tool_id': f'tool-{index:03d}',
+                'description': 'candidate description ' + ('x' * 80),
+            }
+            for index in range(40)
+        ],
+        'next_action_hint': 'Call load_tool_context(tool_id="<tool_id>") to load details for a candidate.',
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='tool-search',
+        source_kind='tool_result:load_tool_context',
+        compact=True,
+    )
+
+    envelope = parse_content_envelope(rendered)
+    assert envelope is not None
+    assert envelope.ref.startswith('artifact:')
+
+    store.close()
+
+
+def test_content_navigation_search_uses_canonical_ref_for_wrapped_content(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("alpha\nneedle\nomega\n", runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
+    result = navigator.search(ref=wrapped.ref, query="needle")
+    assert result["count"] == 1
+    assert result["resolved_ref"] == inner.ref
+    store.close()
+
+
+def test_content_navigation_open_raw_view_reads_wrapper_json(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("canonical body", runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
+    raw_result = navigator.open(ref=wrapped.ref, view="raw", start_line=1, end_line=20)
+    assert raw_result["resolved_ref"] == wrapped.ref
+    assert inner.ref in raw_result["excerpt"]
+    store.close()
+
+
+def test_content_navigation_detects_wrapper_ref_cycles(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    a = artifact_store.create_text_artifact(task_id="task:test", node_id="node:a", kind="tool_result:content", title="A", content="{}")
+    b = artifact_store.create_text_artifact(task_id="task:test", node_id="node:b", kind="tool_result:content", title="B", content="{}")
+    Path(a.path).write_text(json.dumps({"type": "content_ref", "ref": f"artifact:{b.artifact_id}"}), encoding="utf-8")
+    Path(b.path).write_text(json.dumps({"type": "content_ref", "ref": f"artifact:{a.artifact_id}"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="content ref cycle detected"):
+        navigator.describe(ref=f"artifact:{a.artifact_id}")
     store.close()
 
 
@@ -1586,45 +1902,30 @@ async def test_memory_write_builds_without_rag_store_and_writes_explicit_items(t
     assert manager.last_call['items'][0]['key'] == 'preferred_package_manager'
 
 
-@pytest.mark.asyncio
-async def test_memory_write_coerces_non_json_manager_payload_to_strings(tmp_path: Path):
+def test_resource_manager_infers_memory_manager_from_main_task_service_for_memory_write(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
 
-    class _WeirdMemoryManager:
-        def helper(self):
-            return 'ok'
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    service = SimpleNamespace(memory_manager=None)
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-no-memory-manager')
 
-        async def write_explicit_memory_items(self, **kwargs):
-            _ = kwargs
-            return {'ok': True, 'callback': self.helper}
+    try:
+        unavailable_tool = manager.get_tool('memory_write')
+        assert unavailable_tool is not None
+        assert type(unavailable_tool).__name__ == 'RepairRequiredTool'
 
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_write']
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': _WeirdMemoryManager()},
-    )
+        service.memory_manager = object()
+        manager.reload_now(trigger='test-main-task-memory-manager')
 
-    payload = json.loads(
-        await tool.execute(
-            items=[
-                {
-                    'kind': 'workflow',
-                    'key': 'document_output_location',
-                    'value': 'desktop',
-                    'statement': 'User prefers all organized document outputs to be placed on the desktop by default.',
-                    'source_excerpt': '记住以后所有整理文档类的都放在桌面',
-                }
-            ],
-            __g3ku_runtime={'session_key': 'cli:demo'},
-        )
-    )
-    assert payload['ok'] is True
-    assert isinstance(payload['callback'], str)
-    assert 'helper' in payload['callback']
+        restored_tool = manager.get_tool('memory_write')
+        assert restored_tool is not None
+        assert type(restored_tool).__name__ == 'EmbeddedMCPTool'
+    finally:
+        manager.close()
 
 
 def test_resource_loader_injects_tool_secrets(tmp_path: Path):
@@ -1638,7 +1939,10 @@ def test_resource_loader_injects_tool_secrets(tmp_path: Path):
     loader = ResourceLoader(workspace, app_config=SimpleNamespace(tool_secrets={'filesystem': {'token': 'demo-secret'}}))
     runtime = loader.build_runtime_context(descriptor)
 
-    assert runtime.tool_settings == {'restrict_to_workspace': False}
+    assert runtime.tool_settings['restrict_to_workspace'] is False
+    assert 'search_timeout_seconds' in runtime.tool_settings
+    assert 'search_max_files' in runtime.tool_settings
+    assert 'search_max_bytes' in runtime.tool_settings
     assert runtime.tool_secrets == {'token': 'demo-secret'}
 
 
@@ -1812,11 +2116,6 @@ async def test_execution_node_messages_include_visible_skill_inventory(tmp_path:
                 'description': 'Demo skill for resource smoke tests.',
             }
         ]
-        assert payload['skill_usage_rules'] == {
-            'visible_only': True,
-            'skill_discovery_allowed': False,
-            'load_skill_context_requires_visible_skill_id': True,
-        }
     finally:
         await service.close()
         manager.close()

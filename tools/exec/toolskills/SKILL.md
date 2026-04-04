@@ -15,7 +15,9 @@
 
 - 优先使用更专用的工具。只有在 `filesystem`、`content` 等工具不能直接完成任务时再使用 `exec`。
 - 需要在特定目录执行时，显式传入绝对 `working_dir`。
-- 不要假设 Bash、Unix heredoc 或 `rg` 一定可用；命令语法必须匹配当前节点拿到的 OS / shell 环境信息。
+- 在 Windows 上，`exec` 始终运行于 PowerShell。优先使用 PowerShell 兼容命令，例如 `Get-ChildItem`、`Get-Location`、`Get-Content`，或别名 `ls` / `pwd`。
+- 不要假设 Bash、Unix heredoc、`true`、`false` 或 `rg` 这类类 Unix shell 内建一定可用；命令语法必须匹配当前节点拿到的 OS / shell 环境信息。
+- 如果调用方开启了 `restrict_to_workspace`，`working_dir` 必须留在允许的工作区范围内。
 - `exec` 会继承当前 G3KU 进程的 Python 环境；做 Python 验证时，优先使用运行时提供的项目解释器提示，或环境变量 `G3KU_PROJECT_PYTHON`。
 - 结果过长时，先看 `stdout_ref` / `stderr_ref`，再用 `content.search` 和 `content.open` 做局部定位。
 

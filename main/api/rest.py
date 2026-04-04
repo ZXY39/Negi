@@ -28,6 +28,10 @@ def _ensure_task_route_id(task_id: str) -> str:
     return task_id
 
 
+def _task_control_error_status(detail: str) -> int:
+    return 503 if detail in {'task_worker_offline', 'task_worker_starting', 'task_worker_stale'} else 400
+
+
 @router.get('/tasks')
 async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1)):
     service = _service()
@@ -44,8 +48,18 @@ async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1
     }
 
 
+@router.get('/tasks/worker-status')
+async def get_task_worker_status():
+    service = _service()
+    await service.startup()
+    return {'ok': True, **service.worker_status_payload()}
+
+
 @router.get('/tasks/{task_id}')
-async def get_task(task_id: str, mark_read: bool = Query(False)):
+async def get_task(
+    task_id: str,
+    mark_read: bool = Query(False),
+):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
@@ -54,6 +68,18 @@ async def get_task(task_id: str, mark_read: bool = Query(False)):
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, **payload}
+
+
+@router.get('/tasks/{task_id}/tree-snapshot')
+async def get_task_tree_snapshot(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = service.get_task_tree_snapshot_payload(task_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return payload
 
 
 @router.get('/tasks/{task_id}/nodes/{node_id}')
@@ -68,6 +94,38 @@ async def get_task_node_detail(task_id: str, node_id: str):
     return payload
 
 
+@router.get('/tasks/{task_id}/nodes/{node_id}/latest-context')
+async def get_task_node_latest_context(task_id: str, node_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = service.get_node_latest_context_payload(task_id, node_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return payload
+
+
+@router.get('/tasks/{task_id}/nodes/{node_id}/tree-subtree')
+async def get_task_node_tree_subtree(
+    task_id: str,
+    node_id: str,
+    round_id: str | None = Query(None),
+):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = service.get_task_tree_subtree_payload(
+        task_id,
+        node_id,
+        round_id=round_id,
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return payload
+
+
 @router.post('/tasks/{task_id}/pause')
 async def pause_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)
@@ -77,8 +135,7 @@ async def pause_task(task_id: str):
         record = await service.pause_task(task_id)
     except ValueError as exc:
         detail = str(exc)
-        status_code = 503 if detail == 'task_worker_offline' else 400
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+        raise HTTPException(status_code=_task_control_error_status(detail), detail=detail) from exc
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}
@@ -93,8 +150,7 @@ async def resume_task(task_id: str):
         record = await service.resume_task(task_id)
     except ValueError as exc:
         detail = str(exc)
-        status_code = 503 if detail == 'task_worker_offline' else 400
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+        raise HTTPException(status_code=_task_control_error_status(detail), detail=detail) from exc
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}
@@ -111,7 +167,7 @@ async def retry_task(task_id: str):
         detail = str(exc)
         if detail == 'task_not_failed':
             raise HTTPException(status_code=409, detail=detail) from exc
-        if detail == 'task_worker_offline':
+        if detail in {'task_worker_offline', 'task_worker_starting', 'task_worker_stale'}:
             raise HTTPException(status_code=503, detail=detail) from exc
         raise HTTPException(status_code=400, detail=detail) from exc
     if record is None:
@@ -128,8 +184,7 @@ async def cancel_task(task_id: str):
         record = await service.cancel_task(task_id)
     except ValueError as exc:
         detail = str(exc)
-        status_code = 503 if detail == 'task_worker_offline' else 400
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+        raise HTTPException(status_code=_task_control_error_status(detail), detail=detail) from exc
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}

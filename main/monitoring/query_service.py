@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 
-from g3ku.content import content_summary_and_ref
-from main.models import ModelTokenUsageRecord, NodeRecord, TokenUsageSummary
+from main.models import ModelTokenUsageRecord, NodeRecord, TokenUsageSummary, normalize_tool_file_changes
 from main.monitoring.execution_trace import build_execution_trace
 from main.token_usage import aggregate_node_token_usage
 from main.monitoring.models import (
@@ -18,9 +17,10 @@ from main.monitoring.models import (
     TaskModelCallRecord,
     TaskNodeDetail,
     TaskProgressResult,
-    TaskSpawnRound,
     TaskSummaryResult,
-    TaskTreeNodeSummary,
+    TaskTreeSnapshot,
+    TaskTreeSnapshotNode,
+    TaskTreeSnapshotRound,
 )
 
 
@@ -28,11 +28,11 @@ _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
 
 
 class TaskQueryService:
-    def __init__(self, *, store, file_store, log_service):
+    def __init__(self, *, store, file_store, log_service, debug_recorder=None):
         self._store = store
         self._file_store = file_store
         self._log_service = log_service
-        self._tree_builder = getattr(log_service, '_tree_builder', None)
+        self._debug_recorder = debug_recorder
 
     def summary(self, session_id: str | None = None) -> TaskSummaryResult:
         tasks = self._store.list_tasks(session_id)
@@ -81,7 +81,7 @@ class TaskQueryService:
         if mark_read:
             self._log_service.mark_task_read(task_id)
             task = self._store.get_task(task_id) or task
-        root = self._projection_root(task)
+        node_map, rounds_by_parent, direct_children = self._projection_maps(task.task_id)
         token_usage = task.token_usage
         runtime_nodes = self._store.list_nodes(task.task_id)
         _runtime_token_usage, token_usage_by_model = aggregate_node_token_usage(
@@ -90,7 +90,14 @@ class TaskQueryService:
         )
         latest_node = self._latest_projection_node(task_id)
         live_state = self._projection_live_state(task_id)
-        tree_text = self._render_projection_tree_text(root, task_id=task.task_id, live_state=live_state)
+        tree_text = self._render_projection_tree_text(
+            task.task_id,
+            root_node_id=str(task.root_node_id or '').strip(),
+            node_map=node_map,
+            rounds_by_parent=rounds_by_parent,
+            direct_children=direct_children,
+            live_state=live_state,
+        )
         latest_node = self._with_display_fallback_for_latest_node(
             task_id,
             latest_node=latest_node,
@@ -104,7 +111,6 @@ class TaskQueryService:
             task_id=task.task_id,
             task_status=task.status,
             tree_text=str(tree_text or '(empty tree)'),
-            root=root,
             latest_node=latest_node,
             live_state=live_state,
             nodes=[self._serialize_node(node) for node in runtime_nodes],
@@ -118,72 +124,119 @@ class TaskQueryService:
         task = self._store.get_task(task_id)
         if task is None:
             return None
-        root = self._projection_root(task)
-        if root is None:
+        root_node_id = str(task.root_node_id or '').strip()
+        if not root_node_id:
+            return []
+        node_map, rounds_by_parent, direct_children = self._projection_maps(task.task_id)
+        if root_node_id not in node_map:
             return []
 
         failed_node_ids: list[str] = []
 
-        def _walk(node: TaskTreeNodeSummary | None) -> None:
-            if node is None:
+        def _walk(node_id: str, seen: set[str]) -> None:
+            normalized_node_id = str(node_id or '').strip()
+            if not normalized_node_id or normalized_node_id in seen:
                 return
-            node_id = str(getattr(node, 'node_id', '') or '').strip()
-            status = str(getattr(node, 'status', 'in_progress') or 'in_progress').strip()
-            if node_id and status == 'failed':
-                failed_node_ids.append(node_id)
-            for child in list(getattr(node, 'children', []) or []):
-                _walk(child)
+            record = node_map.get(normalized_node_id)
+            if record is None:
+                return
+            seen.add(normalized_node_id)
+            status = str(getattr(record, 'status', 'in_progress') or 'in_progress').strip()
+            if normalized_node_id and status == 'failed':
+                failed_node_ids.append(normalized_node_id)
+            for child_id in self._projection_visible_child_ids(
+                normalized_node_id,
+                node_map=node_map,
+                rounds_by_parent=rounds_by_parent,
+                direct_children=direct_children,
+            ):
+                _walk(child_id, seen)
 
-        _walk(root)
+        _walk(root_node_id, set())
         return failed_node_ids
 
-    def get_task_snapshot(self, task_id: str, *, mark_read: bool = True) -> dict[str, Any] | None:
-        progress = self.view_progress(task_id, mark_read=mark_read)
-        if progress is None:
-            return None
+    def get_task_snapshot(
+        self,
+        task_id: str,
+        *,
+        mark_read: bool = True,
+    ) -> dict[str, Any] | None:
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        started_mono = time.perf_counter()
         task = self._store.get_task(task_id)
         if task is None:
             return None
-        root = self._compact_tree_payload(progress.root)
-        runtime_summary = progress.live_state.model_dump(mode='json') if progress.live_state is not None else {
+        if mark_read:
+            self._log_service.mark_task_read(task_id)
+            task = self._store.get_task(task_id) or task
+        live_state = self._projection_live_state(task.task_id)
+        root_node = self.get_node_detail(task.task_id, task.root_node_id)
+        runtime_meta = self._log_service.read_task_runtime_meta(task.task_id) or {}
+        governance = dict(runtime_meta.get('governance') or {})
+        runtime_summary = live_state.model_dump(mode='json') if live_state is not None else {
             'active_node_ids': [],
             'runnable_node_ids': [],
             'waiting_node_ids': [],
+            'dispatch_limits': {'execution': 0, 'inspection': 0},
+            'dispatch_running': {'execution': 0, 'inspection': 0},
+            'dispatch_queued': {'execution': 0, 'inspection': 0},
             'frames': [],
         }
-        return {
-            'task': task.model_dump(mode='json'),
-            'tree_root': root,
-            'runtime_summary': runtime_summary,
-            'default_selected_node_id': str(getattr(progress.root, 'node_id', '') or ''),
-            'progress': {
-                'task_id': progress.task_id,
-                'task_status': progress.task_status,
-                'tree_text': progress.tree_text,
-                'root': root,
-                'latest_node': progress.latest_node.model_dump(mode='json') if progress.latest_node is not None else None,
-                'live_state': runtime_summary,
-                'nodes': list(progress.nodes or []),
-                'token_usage': progress.token_usage.model_dump(mode='json'),
-                'token_usage_by_model': [item.model_dump(mode='json') for item in list(progress.token_usage_by_model or [])],
-                'model_calls': [item.model_dump(mode='json') for item in list(progress.model_calls or [])],
-                'text': progress.text,
-            },
+        counts = {
+            'total_nodes': len(self._store.list_task_nodes(task.task_id)),
+            'total_rounds': len(self._store.list_task_node_rounds(task.task_id)),
+            'active_node_count': len(list(runtime_summary.get('active_node_ids') or [])),
+            'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
+            'waiting_node_count': len(list(runtime_summary.get('waiting_node_ids') or [])),
         }
+        frontier = [
+            frame.model_dump(mode='json')
+            for frame in list(live_state.frames or [])
+        ] if live_state is not None else []
+        token_usage_by_model = [
+            item.model_dump(mode='json')
+            for item in self._projection_token_usage_by_model(task.task_id)
+        ]
+        payload = {
+            'task': {**task.model_dump(mode='json'), 'governance': governance},
+            'summary': {
+                'task_id': task.task_id,
+                'status': task.status,
+                'brief': task.brief_text,
+                'updated_at': task.updated_at,
+                'token_usage_by_model': token_usage_by_model,
+                **counts,
+            },
+            'governance': governance,
+            'runtime_summary': runtime_summary,
+            'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
+            'frontier': frontier,
+            'counts': counts,
+            'recent_model_calls': [item.model_dump(mode='json') for item in self._recent_model_calls(task.task_id)],
+        }
+        self._record_debug('query_service.get_task_snapshot', started_at=started_at, started_mono=started_mono)
+        return payload
 
     def get_node_detail(self, task_id: str, node_id: str) -> TaskNodeDetail | None:
         task = self._store.get_task(task_id)
         detail_record = self._store.get_task_node_detail(node_id)
+        node_record = self._store.get_task_node(node_id)
+        runtime_node = self._store.get_node(node_id)
         if task is None or detail_record is None or detail_record.task_id != task.task_id:
             return None
+        if node_record is not None and str(node_record.task_id or '').strip() != task.task_id:
+            node_record = None
+        if runtime_node is not None and str(runtime_node.task_id or '').strip() != task.task_id:
+            runtime_node = None
         payload = dict(detail_record.payload or {})
+        node_payload = dict(getattr(node_record, 'payload', None) or {}) if node_record is not None else {}
         detail = TaskNodeDetail(
             node_id=str(payload.get('node_id') or detail_record.node_id),
             task_id=str(payload.get('task_id') or detail_record.task_id),
-            parent_node_id=payload.get('parent_node_id'),
-            depth=int(payload.get('depth') or 0),
-            node_kind=str(payload.get('node_kind') or 'execution'),
-            status=str(payload.get('status') or 'in_progress'),
+            parent_node_id=payload.get('parent_node_id', node_payload.get('parent_node_id')),
+            depth=int(payload.get('depth') or node_payload.get('depth') or 0),
+            node_kind=str(payload.get('node_kind') or node_payload.get('node_kind') or 'execution'),
+            status=str(payload.get('status') or node_payload.get('status') or 'in_progress'),
             goal=str(payload.get('goal') or ''),
             prompt=str(payload.get('prompt_summary') or detail_record.prompt_summary or ''),
             input=str(payload.get('input_text') or detail_record.input_text or ''),
@@ -195,8 +248,16 @@ class TaskQueryService:
             final_output=str(payload.get('final_output') or detail_record.final_output or ''),
             final_output_ref=str(payload.get('final_output_ref') or detail_record.final_output_ref or ''),
             failure_reason=str(payload.get('failure_reason') or detail_record.failure_reason or ''),
-            updated_at=str(payload.get('updated_at') or detail_record.updated_at or ''),
-            execution_trace=dict(payload.get('execution_trace') or {}),
+            updated_at=str(
+                payload.get('updated_at')
+                or (str(runtime_node.updated_at or '') if runtime_node is not None else '')
+                or node_payload.get('updated_at')
+                or detail_record.updated_at
+                or ''
+            ),
+            children_fingerprint=str(payload.get('children_fingerprint') or node_payload.get('children_fingerprint') or ''),
+            execution_trace=self._execution_trace(runtime_node) if runtime_node is not None else dict(payload.get('execution_trace') or {}),
+            tool_file_changes=normalize_tool_file_changes(payload.get('tool_file_changes')),
             token_usage=TokenUsageSummary.model_validate(payload.get('token_usage') or {}),
             token_usage_by_model=[
                 ModelTokenUsageRecord.model_validate(item)
@@ -204,152 +265,297 @@ class TaskQueryService:
                 if isinstance(item, dict)
             ],
         )
+        final_output_full = self._resolve_detail_text(detail.final_output, detail.final_output_ref)
+        if final_output_full:
+            detail.final_output = final_output_full
+            detail.execution_trace['final_output'] = final_output_full
+        acceptance_result_full = self._resolve_detail_text(detail.check_result, detail.check_result_ref)
+        if acceptance_result_full:
+            detail.check_result = acceptance_result_full
+            detail.execution_trace['acceptance_result'] = acceptance_result_full
         return detail
 
-    def _compact_tree_payload(self, root) -> dict[str, Any] | None:
-        if root is None:
+    def get_tree_snapshot(self, task_id: str) -> TaskTreeSnapshot | None:
+        task = self._store.get_task(task_id)
+        if task is None:
             return None
-        return {
-            'node_id': root.node_id,
-            'parent_node_id': root.parent_node_id,
-            'depth': int(root.depth or 0),
-            'node_kind': str(getattr(root, 'node_kind', 'execution') or 'execution'),
-            'status': root.status,
-            'title': root.title,
-            'updated_at': root.updated_at,
-            'spawn_rounds': [
-                {
-                    'round_id': round_item.round_id,
-                    'round_index': int(round_item.round_index or 0),
-                    'label': round_item.label,
-                    'is_latest': bool(round_item.is_latest),
-                    'created_at': round_item.created_at,
-                    'child_node_ids': list(round_item.child_node_ids or []),
-                    'source': round_item.source,
-                    'total_children': int(round_item.total_children or 0),
-                    'completed_children': int(round_item.completed_children or 0),
-                    'running_children': int(round_item.running_children or 0),
-                    'failed_children': int(round_item.failed_children or 0),
-                    'children': [self._compact_tree_payload(child) for child in list(round_item.children or [])],
-                }
-                for round_item in list(root.spawn_rounds or [])
-            ],
-            'default_round_id': str(root.default_round_id or ''),
-            'auxiliary_children': [self._compact_tree_payload(child) for child in list(getattr(root, 'auxiliary_children', []) or [])],
-            'children': [self._compact_tree_payload(child) for child in list(root.children or [])],
-        }
+        return self._build_tree_snapshot(task_id=task.task_id, root_node_id=task.root_node_id)
 
-    def _projection_root(self, task) -> TaskTreeNodeSummary | None:
-        nodes = self._store.list_task_nodes(task.task_id)
-        if not nodes:
+    def get_tree_subtree(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        round_id: str | None = None,
+    ) -> TaskTreeSnapshot | None:
+        task = self._store.get_task(task_id)
+        root = self._store.get_task_node(node_id)
+        if task is None or root is None or str(root.task_id or '').strip() != task.task_id:
             return None
-        node_map = {str(item.node_id or '').strip(): item for item in nodes if str(item.node_id or '').strip()}
-        rounds = self._store.list_task_node_rounds(task.task_id)
+        return self._build_tree_snapshot(
+            task_id=task.task_id,
+            root_node_id=task.root_node_id,
+            scope_root_id=str(node_id or '').strip(),
+            root_round_id=str(round_id or '').strip(),
+        )
+
+    def _projection_maps(self, task_id: str) -> tuple[dict[str, Any], dict[str, list[Any]], dict[str, list[str]]]:
+        projection_nodes = list(self._store.list_task_nodes(task_id) or [])
+        node_map = {
+            str(item.node_id or '').strip(): item
+            for item in projection_nodes
+            if str(item.node_id or '').strip()
+        }
+        rounds = list(self._store.list_task_node_rounds(task_id) or [])
         rounds_by_parent: dict[str, list[Any]] = {}
         for item in rounds:
             rounds_by_parent.setdefault(str(item.parent_node_id or '').strip(), []).append(item)
-
+        for parent_id, items in rounds_by_parent.items():
+            rounds_by_parent[parent_id] = sorted(
+                [item for item in items if str(getattr(item, 'round_id', '') or '').strip()],
+                key=lambda item: (int(getattr(item, 'round_index', 0) or 0), str(getattr(item, 'round_id', '') or '')),
+            )
         direct_children: dict[str, list[str]] = {}
-        for item in nodes:
-            parent_id = str(item.parent_node_id or '').strip()
-            if not parent_id:
+        for item in projection_nodes:
+            parent_id = str(getattr(item, 'parent_node_id', '') or '').strip()
+            node_id = str(getattr(item, 'node_id', '') or '').strip()
+            if not parent_id or not node_id:
                 continue
-            direct_children.setdefault(parent_id, []).append(item.node_id)
-
-        def _sort_node_ids(node_ids: list[str]) -> list[str]:
-            return sorted(
-                [str(node_id or '').strip() for node_id in node_ids if str(node_id or '').strip() in node_map],
-                key=lambda node_id: (
-                    str(getattr(node_map[node_id], 'sort_key', '') or ''),
-                    str(node_id or ''),
+            direct_children.setdefault(parent_id, []).append(node_id)
+        for parent_id, child_ids in list(direct_children.items()):
+            direct_children[parent_id] = sorted(
+                [child_id for child_id in child_ids if child_id in node_map],
+                key=lambda child_id: (
+                    str(getattr(node_map[child_id], 'sort_key', '') or ''),
+                    str(child_id or ''),
                 ),
             )
+        return node_map, rounds_by_parent, direct_children
 
-        def _build(node_id: str):
-            record = node_map.get(str(node_id or '').strip())
-            if record is None:
-                return None
-            parent_rounds = sorted(
-                rounds_by_parent.get(record.node_id, []),
-                key=lambda item: (int(item.round_index or 0), str(item.round_id or '')),
-            )
-            selected_round_id = str(record.selected_round_id or record.default_round_id or '')
-            if not selected_round_id and parent_rounds:
-                selected_round_id = str(parent_rounds[-1].round_id or '')
-            round_child_ids = {
-                child_id
-                for round_item in parent_rounds
-                for child_id in list(round_item.child_node_ids or [])
-                if str(child_id or '').strip()
-            }
-            auxiliary_child_ids = [
-                child_id
-                for child_id in _sort_node_ids(direct_children.get(record.node_id, []))
-                if child_id not in round_child_ids
-            ]
-            spawn_rounds: list[TaskSpawnRound] = []
-            for round_item in parent_rounds:
-                round_children = [
-                    child
-                    for child in (
-                        _build(str(child_id or '').strip())
-                        for child_id in list(round_item.child_node_ids or [])
-                        if str(child_id or '').strip() in node_map
-                    )
-                    if child is not None
-                ]
-                spawn_rounds.append(
-                    TaskSpawnRound(
-                        round_id=str(round_item.round_id or ''),
-                        round_index=int(round_item.round_index or 0),
-                        label=str(round_item.label or ''),
-                        is_latest=bool(round_item.is_latest),
-                        created_at=str(round_item.created_at or ''),
-                        child_node_ids=[str(item) for item in list(round_item.child_node_ids or []) if str(item or '').strip()],
-                        source=str(round_item.source or 'explicit'),
-                        total_children=int(round_item.total_children or 0),
-                        completed_children=int(round_item.completed_children or 0),
-                        running_children=int(round_item.running_children or 0),
-                        failed_children=int(round_item.failed_children or 0),
-                        children=round_children,
-                    )
-                )
-            selected_round = next((item for item in spawn_rounds if item.round_id == selected_round_id), None)
-            auxiliary_children = [
-                child
-                for child in (_build(child_id) for child_id in auxiliary_child_ids)
-                if child is not None
-            ]
-            children = [
-                child
-                for child in (
-                    auxiliary_children
-                    + list(selected_round.children if selected_round is not None else [])
-                )
-                if child is not None
-            ]
-            return TaskTreeNodeSummary(
-                node_id=record.node_id,
-                parent_node_id=record.parent_node_id,
-                depth=int(record.depth or 0),
-                node_kind=str(record.node_kind or 'execution'),
-                status=record.status,
-                title=str(record.title or record.node_id),
-                updated_at=str(record.updated_at or ''),
-                spawn_rounds=spawn_rounds,
-                default_round_id=str(record.default_round_id or ''),
-                auxiliary_children=auxiliary_children,
-                children=children,
-            )
+    def _resolve_detail_text(self, text: str, ref: str) -> str:
+        normalized_ref = str(ref or '').strip()
+        if normalized_ref:
+            resolver = getattr(self._log_service, 'resolve_content_ref', None)
+            if callable(resolver):
+                resolved = str(resolver(normalized_ref) or '')
+                if resolved:
+                    return resolved
+        return str(text or '')
 
-        return _build(task.root_node_id)
+    @staticmethod
+    def _projection_default_round_id(record: Any, rounds: list[Any]) -> str:
+        explicit_default = str(getattr(record, 'default_round_id', '') or '').strip()
+        if explicit_default and any(str(getattr(item, 'round_id', '') or '').strip() == explicit_default for item in rounds):
+            return explicit_default
+        if rounds:
+            latest = next((item for item in rounds if bool(getattr(item, 'is_latest', False))), rounds[-1])
+            return str(getattr(latest, 'round_id', '') or '').strip()
+        return ''
+
+    @staticmethod
+    def _projection_round_child_ids(round_record: Any, *, node_map: dict[str, Any] | None = None) -> list[str]:
+        child_ids = [
+            str(child_id or '').strip()
+            for child_id in list(getattr(round_record, 'child_node_ids', []) or [])
+            if str(child_id or '').strip()
+        ]
+        if node_map is None:
+            return child_ids
+        return [child_id for child_id in child_ids if child_id in node_map]
+
+    def _projection_auxiliary_child_ids(
+        self,
+        parent_node_id: str,
+        *,
+        node_map: dict[str, Any],
+        rounds_by_parent: dict[str, list[Any]],
+        direct_children: dict[str, list[str]],
+    ) -> list[str]:
+        normalized_parent_id = str(parent_node_id or '').strip()
+        round_child_ids = {
+            child_id
+            for round_record in list(rounds_by_parent.get(normalized_parent_id, []) or [])
+            for child_id in self._projection_round_child_ids(round_record, node_map=node_map)
+        }
+        return [
+            child_id
+            for child_id in list(direct_children.get(normalized_parent_id, []) or [])
+            if child_id not in round_child_ids
+        ]
+
+    def _projection_selected_round(
+        self,
+        record: Any,
+        rounds: list[Any],
+        *,
+        round_override: str = '',
+    ) -> Any | None:
+        if not rounds:
+            return None
+        requested_round_id = str(round_override or '').strip()
+        selected_round_id = str(getattr(record, 'selected_round_id', '') or '').strip()
+        default_round_id = self._projection_default_round_id(record, rounds)
+        for candidate_round_id in [requested_round_id, selected_round_id, default_round_id]:
+            if not candidate_round_id:
+                continue
+            selected = next(
+                (item for item in rounds if str(getattr(item, 'round_id', '') or '').strip() == candidate_round_id),
+                None,
+            )
+            if selected is not None:
+                return selected
+        return next((item for item in rounds if bool(getattr(item, 'is_latest', False))), None) or rounds[-1]
+
+    def _projection_visible_child_ids(
+        self,
+        parent_node_id: str,
+        *,
+        node_map: dict[str, Any],
+        rounds_by_parent: dict[str, list[Any]],
+        direct_children: dict[str, list[str]],
+        round_override: str = '',
+    ) -> list[str]:
+        normalized_parent_id = str(parent_node_id or '').strip()
+        seen: set[str] = set()
+        out: list[str] = []
+        for child_id in self._projection_auxiliary_child_ids(
+            normalized_parent_id,
+            node_map=node_map,
+            rounds_by_parent=rounds_by_parent,
+            direct_children=direct_children,
+        ):
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            out.append(child_id)
+        record = node_map.get(normalized_parent_id)
+        if record is None:
+            return out
+        selected_round = self._projection_selected_round(
+            record,
+            list(rounds_by_parent.get(normalized_parent_id, []) or []),
+            round_override=round_override,
+        )
+        if selected_round is None:
+            return out
+        for child_id in self._projection_round_child_ids(selected_round, node_map=node_map):
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            out.append(child_id)
+        return out
+
+    def _snapshot_node_from_projection(
+        self,
+        record: Any,
+        *,
+        node_map: dict[str, Any],
+        rounds_by_parent: dict[str, list[Any]],
+        direct_children: dict[str, list[str]],
+    ) -> TaskTreeSnapshotNode:
+        node_id = str(getattr(record, 'node_id', '') or '').strip()
+        parent_rounds = list(rounds_by_parent.get(node_id, []))
+        auxiliary_child_ids = self._projection_auxiliary_child_ids(
+            node_id,
+            node_map=node_map,
+            rounds_by_parent=rounds_by_parent,
+            direct_children=direct_children,
+        )
+        snapshot_rounds = [
+            TaskTreeSnapshotRound(
+                round_id=str(getattr(round_record, 'round_id', '') or '').strip(),
+                label=str(getattr(round_record, 'label', '') or '').strip(),
+                is_latest=bool(getattr(round_record, 'is_latest', False)),
+                total_children=int(getattr(round_record, 'total_children', 0) or 0),
+                completed_children=int(getattr(round_record, 'completed_children', 0) or 0),
+                running_children=int(getattr(round_record, 'running_children', 0) or 0),
+                failed_children=int(getattr(round_record, 'failed_children', 0) or 0),
+                child_ids=self._projection_round_child_ids(round_record),
+            )
+            for round_record in parent_rounds
+        ]
+        return TaskTreeSnapshotNode(
+            node_id=node_id,
+            parent_node_id=str(getattr(record, 'parent_node_id', '') or '').strip() or None,
+            node_kind=str(getattr(record, 'node_kind', '') or 'execution').strip() or 'execution',
+            status=str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress',
+            title=str(getattr(record, 'title', '') or node_id).strip() or node_id,
+            updated_at=str(getattr(record, 'updated_at', '') or '').strip(),
+            children_fingerprint=str(getattr(record, 'children_fingerprint', '') or '').strip(),
+            default_round_id=self._projection_default_round_id(record, parent_rounds),
+            rounds=snapshot_rounds,
+            auxiliary_child_ids=auxiliary_child_ids,
+        )
+
+    def _build_tree_snapshot(
+        self,
+        *,
+        task_id: str,
+        root_node_id: str,
+        scope_root_id: str = '',
+        root_round_id: str = '',
+    ) -> TaskTreeSnapshot:
+        node_map, rounds_by_parent, direct_children = self._projection_maps(task_id)
+        snapshot_nodes = {
+            node_id: self._snapshot_node_from_projection(
+                record,
+                node_map=node_map,
+                rounds_by_parent=rounds_by_parent,
+                direct_children=direct_children,
+            )
+            for node_id, record in node_map.items()
+        }
+        included_ids: set[str]
+        normalized_scope_root_id = str(scope_root_id or '').strip()
+        if normalized_scope_root_id:
+            included_ids = set()
+            queue: list[tuple[str, str]] = [(normalized_scope_root_id, str(root_round_id or '').strip())]
+            while queue:
+                current_id, round_override = queue.pop(0)
+                if current_id in included_ids:
+                    continue
+                if current_id not in node_map:
+                    continue
+                included_ids.add(current_id)
+                for child_id in self._projection_visible_child_ids(
+                    current_id,
+                    node_map=node_map,
+                    rounds_by_parent=rounds_by_parent,
+                    direct_children=direct_children,
+                    round_override=round_override,
+                ):
+                    if child_id not in included_ids:
+                        queue.append((child_id, ''))
+        else:
+            included_ids = set(snapshot_nodes.keys())
+        projection_meta = self._store.get_task_projection_meta(task_id)
+        snapshot_version = str(getattr(projection_meta, 'version', '') or '').strip() or str(
+            max(0, len(snapshot_nodes))
+        )
+        return TaskTreeSnapshot(
+            task_id=task_id,
+            root_node_id=normalized_scope_root_id or str(root_node_id or '').strip(),
+            generated_at=datetime.now().astimezone().isoformat(timespec='seconds'),
+            snapshot_version=snapshot_version,
+            nodes_by_id={node_id: snapshot_nodes[node_id] for node_id in included_ids if node_id in snapshot_nodes},
+        )
+
+    def _record_debug(self, section: str, *, started_at: str, started_mono: float) -> None:
+        recorder = self._debug_recorder
+        if recorder is None or not hasattr(recorder, 'record'):
+            return
+        try:
+            recorder.record(
+                section=section,
+                elapsed_ms=(time.perf_counter() - started_mono) * 1000.0,
+                started_at=started_at,
+            )
+        except Exception:
+            return
 
     def _recent_model_calls(self, task_id: str, *, limit: int = 50) -> list[TaskModelCallRecord]:
-        events = self._store.list_task_events(after_seq=0, task_id=task_id, limit=1000)
         records: list[TaskModelCallRecord] = []
-        for event in list(events or []):
-            if str(event.get('event_type') or '') != 'task.model.call':
-                continue
+        for event in list(self._store.list_task_model_calls(task_id, limit=max(1, int(limit or 50))) or []):
             payload = dict(event.get('payload') or {})
             records.append(
                 TaskModelCallRecord(
@@ -366,14 +572,73 @@ class TaskQueryService:
                     ],
                 )
             )
-        records.sort(key=lambda item: int(item.call_index or 0))
         return records[-max(1, int(limit or 1)) :]
+
+    def _projection_token_usage_by_model(self, task_id: str) -> list[ModelTokenUsageRecord]:
+        aggregates: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for record in list(self._store.list_task_node_details(task_id) or []):
+            payload = dict(record.payload or {})
+            for item in list(payload.get('token_usage_by_model') or []):
+                if not isinstance(item, dict):
+                    continue
+                model_usage = ModelTokenUsageRecord.model_validate(item)
+                key = (
+                    str(model_usage.model_key or '').strip(),
+                    str(model_usage.provider_id or '').strip(),
+                    str(model_usage.provider_model or '').strip(),
+                )
+                bucket = aggregates.setdefault(
+                    key,
+                    {
+                        'model_key': key[0],
+                        'provider_id': key[1],
+                        'provider_model': key[2],
+                        'tracked': False,
+                        'input_tokens': 0,
+                        'output_tokens': 0,
+                        'cache_hit_tokens': 0,
+                        'call_count': 0,
+                        'calls_with_usage': 0,
+                        'calls_without_usage': 0,
+                        'is_partial': False,
+                    },
+                )
+                bucket['tracked'] = bool(bucket['tracked']) or bool(model_usage.tracked)
+                bucket['input_tokens'] += int(model_usage.input_tokens or 0)
+                bucket['output_tokens'] += int(model_usage.output_tokens or 0)
+                bucket['cache_hit_tokens'] += int(model_usage.cache_hit_tokens or 0)
+                bucket['call_count'] += int(model_usage.call_count or 0)
+                bucket['calls_with_usage'] += int(model_usage.calls_with_usage or 0)
+                bucket['calls_without_usage'] += int(model_usage.calls_without_usage or 0)
+                bucket['is_partial'] = bool(bucket['is_partial']) or bool(model_usage.is_partial)
+        items = [ModelTokenUsageRecord.model_validate(item) for item in aggregates.values()]
+        items.sort(
+            key=lambda item: (
+                -(int(item.input_tokens or 0) + int(item.output_tokens or 0)),
+                str(item.model_key or ''),
+                str(item.provider_model or ''),
+            )
+        )
+        return items
 
     def _projection_live_state(self, task_id: str) -> TaskLiveState | None:
         frames = self._store.list_task_runtime_frames(task_id)
+        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
+        dispatch_limits = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_limits'))
+        dispatch_running = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_running'))
+        dispatch_queued = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_queued'))
         if not frames:
-            runtime_state = self._log_service.read_runtime_state(task_id)
-            return self._live_state(runtime_state or {})
+            if any(dispatch_limits.values()) or any(dispatch_running.values()) or any(dispatch_queued.values()):
+                return TaskLiveState(
+                    active_node_ids=[],
+                    runnable_node_ids=[],
+                    waiting_node_ids=[],
+                    dispatch_limits=dispatch_limits,
+                    dispatch_running=dispatch_running,
+                    dispatch_queued=dispatch_queued,
+                    frames=[],
+                )
+            return None
         live_frames: list[TaskLiveFrame] = []
         active_node_ids: list[str] = []
         runnable_node_ids: list[str] = []
@@ -428,8 +693,19 @@ class TaskQueryService:
             active_node_ids=sorted(active_node_ids),
             runnable_node_ids=sorted(runnable_node_ids),
             waiting_node_ids=sorted(waiting_node_ids),
+            dispatch_limits=dispatch_limits,
+            dispatch_running=dispatch_running,
+            dispatch_queued=dispatch_queued,
             frames=live_frames,
         )
+
+    @staticmethod
+    def _sanitize_dispatch_counters(payload: Any) -> dict[str, int]:
+        counters = dict(payload or {}) if isinstance(payload, dict) else {}
+        return {
+            'execution': max(0, int(counters.get('execution') or 0)),
+            'inspection': max(0, int(counters.get('inspection') or 0)),
+        }
 
     def _latest_projection_node(self, task_id: str) -> LatestTaskNodeOutput | None:
         details = self._store.list_task_node_details(task_id)
@@ -561,13 +837,6 @@ class TaskQueryService:
             selected_detail = next((item for item in details if str(item.node_id or '').strip() == preferred), None)
         if selected_detail is None and details:
             selected_detail = max(details, key=lambda item: (str(item.updated_at or ''), str(item.node_id or '')))
-        if selected_detail is not None:
-            payload = dict(selected_detail.payload or {})
-            execution_trace = payload.get('execution_trace') if isinstance(payload.get('execution_trace'), dict) else None
-            if isinstance(execution_trace, dict):
-                tool_steps = [item for item in list(execution_trace.get('tool_steps') or []) if isinstance(item, dict)]
-                if tool_steps:
-                    return tool_steps
         node_id = preferred or str(getattr(selected_detail, 'node_id', '') or '').strip()
         if not node_id:
             return []
@@ -591,24 +860,40 @@ class TaskQueryService:
 
     def _render_projection_tree_text(
         self,
-        root: TaskTreeNodeSummary | None,
-        *,
         task_id: str,
+        *,
+        root_node_id: str,
+        node_map: dict[str, Any],
+        rounds_by_parent: dict[str, list[Any]],
+        direct_children: dict[str, list[str]],
         live_state: TaskLiveState | None = None,
     ) -> str:
-        if root is None:
+        normalized_root_node_id = str(root_node_id or '').strip()
+        if not normalized_root_node_id or normalized_root_node_id not in node_map:
             return '(empty tree)'
         lines: list[str] = []
         stage_goals = self._node_stage_goal_map(task_id, live_state=live_state)
 
-        def _walk(node: TaskTreeNodeSummary, prefix: str = '', *, is_root: bool = False) -> None:
-            label = self._tree_text_label(node, stage_goals)
+        def _walk(node_id: str, prefix: str = '', *, is_root: bool = False, seen: set[str]) -> None:
+            normalized_node_id = str(node_id or '').strip()
+            if not normalized_node_id or normalized_node_id in seen:
+                return
+            record = node_map.get(normalized_node_id)
+            if record is None:
+                return
+            seen.add(normalized_node_id)
+            label = self._tree_text_label(record, stage_goals)
             lines.append(label if is_root else f'{prefix}|-{label}')
             child_prefix = '' if is_root else f'{prefix}  '
-            for child in list(node.children or []):
-                _walk(child, child_prefix, is_root=False)
+            for child_id in self._projection_visible_child_ids(
+                str(getattr(record, 'node_id', '') or '').strip(),
+                node_map=node_map,
+                rounds_by_parent=rounds_by_parent,
+                direct_children=direct_children,
+            ):
+                _walk(child_id, child_prefix, is_root=False, seen=seen)
 
-        _walk(root, is_root=True)
+        _walk(normalized_root_node_id, is_root=True, seen=set())
         return '\n'.join(lines)
 
     def _node_stage_goal_map(
@@ -657,7 +942,7 @@ class TaskQueryService:
         return max(scored, key=lambda item: (item[0], item[1]))[2]
 
     @staticmethod
-    def _tree_display_stage_goal(node: TaskTreeNodeSummary, stage_goals: dict[str, str]) -> str:
+    def _tree_display_stage_goal(node: Any, stage_goals: dict[str, str]) -> str:
         stage_goal = str(stage_goals.get(str(node.node_id or '').strip()) or '').strip()
         if stage_goal:
             return stage_goal
@@ -666,7 +951,7 @@ class TaskQueryService:
         return '无阶段目标'
 
     @classmethod
-    def _tree_text_label(cls, node: TaskTreeNodeSummary, stage_goals: dict[str, str]) -> str:
+    def _tree_text_label(cls, node: Any, stage_goals: dict[str, str]) -> str:
         node_id = str(getattr(node, 'node_id', '') or '').strip()
         status = str(getattr(node, 'status', '') or '').strip()
         stage_goal = cls._tree_display_stage_goal(node, stage_goals)
@@ -749,7 +1034,10 @@ class TaskQueryService:
         }
 
     def _execution_trace(self, node: NodeRecord) -> dict[str, object]:
-        return build_execution_trace(node)
+        frame = self._log_service.read_runtime_frame(node.task_id, node.node_id)
+        live_tool_calls = [dict(item) for item in list((frame or {}).get('tool_calls') or []) if isinstance(item, dict)]
+        tool_results = list(self._store.list_task_node_tool_results(node.task_id, node.node_id) or [])
+        return build_execution_trace(node, tool_results=tool_results, live_tool_calls=live_tool_calls)
 
     @staticmethod
     def _live_state(runtime_state: dict[str, Any]) -> TaskLiveState | None:
@@ -847,163 +1135,3 @@ class TaskQueryService:
             return []
         return ['Active parallel work:', *lines]
 
-    @staticmethod
-    def _merge_background_execution_update(
-        step: dict[str, Any],
-        *,
-        payload: dict[str, Any],
-        message_meta: dict[str, Any],
-        output_text: str,
-        output_ref: str,
-    ) -> None:
-        status = str(payload.get('status') or '').strip().lower()
-        if status == 'completed':
-            step['status'] = 'success'
-        elif status in {'stopped', 'failed', 'error', 'not_found', 'unavailable'}:
-            step['status'] = 'error'
-        elif status == 'background_running':
-            step['status'] = 'running'
-        if output_text:
-            step['output_text'] = output_text
-        if output_ref:
-            step['output_ref'] = output_ref
-        if str(message_meta.get('finished_at') or '').strip():
-            step['finished_at'] = str(message_meta.get('finished_at') or '')
-        elapsed = TaskQueryService._resolve_tool_elapsed_seconds(
-            message_meta=message_meta,
-            payload=payload,
-            started_at=str(step.get('started_at') or ''),
-            is_running=str(step.get('status') or '') == 'running',
-        )
-        if elapsed is not None:
-            step['elapsed_seconds'] = elapsed
-
-    def _tool_message_map(self, node: NodeRecord) -> dict[str, dict[str, Any]]:
-        messages = self._parse_input_messages(node.input)
-        result: dict[str, dict[str, Any]] = {}
-        for item in messages:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get('role') or '').strip().lower() != 'tool':
-                continue
-            tool_call_id = str(item.get('tool_call_id') or '').strip()
-            if not tool_call_id:
-                continue
-            result[tool_call_id] = dict(item)
-        return result
-
-    def _tool_output_map(self, node: NodeRecord) -> dict[str, str]:
-        messages = self._parse_input_messages(node.input)
-        result: dict[str, str] = {}
-        for item in messages:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get('role') or '').strip().lower() != 'tool':
-                continue
-            tool_call_id = str(item.get('tool_call_id') or '').strip()
-            if not tool_call_id:
-                continue
-            content = item.get('content')
-            summary, _ref = content_summary_and_ref(content)
-            result[tool_call_id] = summary
-        return result
-
-    def _tool_output_ref_map(self, node: NodeRecord) -> dict[str, str]:
-        messages = self._parse_input_messages(node.input)
-        result: dict[str, str] = {}
-        for item in messages:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get('role') or '').strip().lower() != 'tool':
-                continue
-            tool_call_id = str(item.get('tool_call_id') or '').strip()
-            if not tool_call_id:
-                continue
-            _summary, ref = content_summary_and_ref(item.get('content'))
-            result[tool_call_id] = ref
-        return result
-
-    @staticmethod
-    def _parse_input_messages(raw: str) -> list[dict[str, object]]:
-        text = str(raw or '').strip()
-        if not text:
-            return []
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return []
-        return parsed if isinstance(parsed, list) else []
-
-    @staticmethod
-    def _parse_tool_payload(content: object) -> dict[str, object] | None:
-        if not isinstance(content, str):
-            return None
-        text = content.strip()
-        if not text or text[:1] not in {'{', '['}:
-            return None
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-
-    @staticmethod
-    def _resolve_tool_elapsed_seconds(
-        *,
-        message_meta: dict[str, Any],
-        payload: dict[str, Any] | None,
-        started_at: str,
-        is_running: bool,
-    ) -> float | None:
-        raw_elapsed = None
-        if isinstance(payload, dict):
-            raw_elapsed = payload.get('elapsed_seconds')
-        if raw_elapsed is None:
-            raw_elapsed = message_meta.get('elapsed_seconds')
-        try:
-            if raw_elapsed is not None:
-                return round(max(0.0, float(raw_elapsed)), 1)
-        except (TypeError, ValueError):
-            pass
-        started_ts = TaskQueryService._iso_to_epoch_seconds(started_at)
-        if started_ts is None:
-            return None
-        finished_ts = TaskQueryService._iso_to_epoch_seconds(str(message_meta.get('finished_at') or ''))
-        if finished_ts is not None:
-            return round(max(0.0, finished_ts - started_ts), 1)
-        if is_running:
-            return round(max(0.0, datetime.now(timezone.utc).timestamp() - started_ts), 1)
-        return None
-
-    @staticmethod
-    def _iso_to_epoch_seconds(value: str) -> float | None:
-        text = str(value or '').strip()
-        if not text:
-            return None
-        normalized = text.replace('Z', '+00:00')
-        try:
-            parsed = datetime.fromisoformat(normalized)
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return parsed.timestamp()
-        return parsed.astimezone(timezone.utc).timestamp()
-
-    @staticmethod
-    def _tool_step_status(output_text: str, node_status: str, *, payload: dict[str, Any] | None = None) -> str:
-        payload_status = str((payload or {}).get('status') or '').strip().lower()
-        if payload_status == 'background_running':
-            return 'running'
-        if payload_status in {'completed'}:
-            return 'success'
-        if payload_status in {'stopped', 'failed', 'error', 'not_found', 'unavailable'}:
-            return 'error'
-        text = str(output_text or '').strip()
-        if text:
-            lowered = text.lower()
-            if text.startswith('Error:') or '"status":"error"' in lowered or '"status": "error"' in lowered:
-                return 'error'
-            return 'success'
-        if str(node_status or '').strip().lower() == 'in_progress':
-            return 'running'
-        return 'success'

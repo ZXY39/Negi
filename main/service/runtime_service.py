@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
 import shutil
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,6 +15,10 @@ import httpx
 from loguru import logger
 
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.config.loader import get_config_path
+from g3ku.llm_config.runtime_resolver import resolve_chat_target
+from g3ku.utils.api_keys import parse_api_keys
+from g3ku.web.worker_control import managed_worker_snapshot
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
 from g3ku.content import ContentNavigationService
@@ -35,6 +41,7 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
+from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.governance.roles import to_public_allowed_roles
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
@@ -47,13 +54,19 @@ from main.models import (
 )
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
-from main.monitoring.query_service import TaskQueryService
+from main.monitoring.query_service_v2 import TaskQueryServiceV2
 from main.protocol import build_envelope, now_iso
-from main.monitoring.tree_builder import TaskTreeBuilder
+from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
+from main.runtime.global_scheduler import GlobalScheduler
+from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_runner import NodeRunner
+from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.task_runner import TaskRunner
+from main.runtime.task_actor_service import TaskActorService
+from main.runtime.task_governance import GOVERNANCE_PATCH_EVENT_TYPE, TaskGovernanceManager, normalize_task_governance_state
+from main.runtime.debug_recorder import RuntimeDebugRecorder
+from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.event_registry import TaskEventRegistry
 from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
@@ -68,6 +81,7 @@ from main.service.task_terminal_callback import (
 )
 from main.service.task_stall_callback import (
     TASK_STALL_REASON_CANCEL_REQUESTED,
+    TASK_STALL_REASON_GOVERNANCE_REVIEW,
     TASK_STALL_REASON_MISSING_TASK,
     TASK_STALL_REASON_NOT_IN_PROGRESS,
     TASK_STALL_REASON_SUSPECTED_STALL,
@@ -79,6 +93,7 @@ from main.service.task_stall_callback import (
 )
 from main.service.task_event_callback import (
     normalize_task_event_payload,
+    resolve_task_event_batch_callback_url,
     resolve_task_event_callback_token,
     resolve_task_event_callback_url,
 )
@@ -87,15 +102,69 @@ from main.service.task_stall_notifier import (
     stalled_minutes_since,
     stall_bucket_minutes,
 )
+from main.service.worker_heartbeat_service_v2 import WorkerHeartbeatServiceV2
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
 _UNSET = object()
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
 _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
+_WORKER_STATUS_STARTING_GRACE_SECONDS = 10.0
+_WORKER_STATUS_CALLBACK_RETRY_DELAYS = [0.0, 0.5, 2.0, 5.0]
+_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS = 2.0
+_WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS = 5.0
+_WORKER_RUNTIME_REFRESH_POLL_SECONDS = 0.1
+_WORKER_LEASE_ROLE = 'task_worker'
+_WORKER_LEASE_TTL_SECONDS = 20.0
+_TASK_SUMMARY_DEBOUNCE_SECONDS = 0.5
+_TASK_SUMMARY_MAX_WAIT_SECONDS = 1.0
+_TASK_SUMMARY_BATCH_WINDOW_SECONDS = 0.25
+_TASK_SUMMARY_BATCH_MAX_ITEMS = 128
+_TASK_SUMMARY_BATCH_MAX_BYTES = 64 * 1024
+_TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
+_WORKER_STATE_STARTING = 'starting'
+_WORKER_STATE_ONLINE = 'online'
+_WORKER_STATE_STALE = 'stale'
+_WORKER_STATE_STOPPED = 'stopped'
+_WORKER_STATE_OFFLINE = 'offline'
+_WORKER_STATUS_TERMINAL_STATES = frozenset({'stopped', 'offline', 'dead'})
 _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
+
+
+_TASK_RUNTIME_V3_MARKER = '.task-runtime-v3'
+
+
+def _prepare_task_runtime_v3_root(
+    *,
+    store_path: Path,
+    files_base_dir: Path,
+    artifact_dir: Path,
+    event_history_dir: Path,
+) -> None:
+    runtime_root = store_path.parent
+    marker_path = runtime_root / _TASK_RUNTIME_V3_MARKER
+    if marker_path.exists():
+        return
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    for candidate in (
+        store_path,
+        store_path.with_name(f'{store_path.name}-wal'),
+        store_path.with_name(f'{store_path.name}-shm'),
+    ):
+        try:
+            if candidate.exists():
+                candidate.unlink()
+        except FileNotFoundError:
+            continue
+    for directory in (files_base_dir, artifact_dir, event_history_dir):
+        try:
+            if directory.exists():
+                shutil.rmtree(directory, ignore_errors=True)
+        except Exception:
+            logger.debug('task runtime v3 cleanup skipped for {}', directory)
+    marker_path.write_text('task-runtime-v3\n', encoding='utf-8')
 
 
 class ResourceDeleteBlockedError(ValueError):
@@ -176,29 +245,50 @@ class MainRuntimeService:
             normalized_mode = 'embedded'
         self.execution_mode = normalized_mode
         self.worker_id = str(worker_id or (new_worker_id() if normalized_mode == 'worker' else '')).strip()
-        self.store = SQLiteTaskStore(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
-        self.file_store = TaskFileStore(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
-        self.artifact_store = TaskArtifactStore(artifact_dir=artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'), store=self.store)
+        resolved_store_path = Path(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
+        resolved_files_base_dir = Path(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
+        resolved_artifact_dir = Path(artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'))
+        event_history_settings = self._event_history_settings(app_config)
+        resolved_event_history_dir = Path(
+            str(event_history_settings.get('dir') or (Path.cwd() / '.g3ku' / 'main-runtime' / 'event-history'))
+        )
+        _prepare_task_runtime_v3_root(
+            store_path=resolved_store_path,
+            files_base_dir=resolved_files_base_dir,
+            artifact_dir=resolved_artifact_dir,
+            event_history_dir=resolved_event_history_dir,
+        )
+        self.runtime_debug_recorder = RuntimeDebugRecorder()
+        self.store = SQLiteTaskStore(
+            resolved_store_path,
+            debug_recorder=self.runtime_debug_recorder,
+            event_history_dir=resolved_event_history_dir,
+            event_history_enabled=bool(event_history_settings.get('enabled', True)),
+            event_history_archive_encoding=str(event_history_settings.get('archive_encoding') or 'gzip'),
+        )
+        self.file_store = TaskFileStore(resolved_files_base_dir)
+        self.artifact_store = TaskArtifactStore(artifact_dir=resolved_artifact_dir, store=self.store)
         self.content_store = ContentNavigationService(
             workspace=Path.cwd(),
             artifact_store=self.artifact_store,
             artifact_lookup=self.store,
         )
         self.registry = TaskEventRegistry()
-        self.tree_builder = TaskTreeBuilder()
         self.log_service = TaskLogService(
             store=self.store,
             file_store=self.file_store,
-            tree_builder=self.tree_builder,
             registry=self.registry,
             content_store=self.content_store,
+            debug_recorder=self.runtime_debug_recorder,
+            event_history_enabled=bool(event_history_settings.get('enabled', True)),
+            live_patch_persist_window_ms=int(event_history_settings.get('live_patch_persist_window_ms') or 0),
         )
         self.log_service.add_live_snapshot_publisher(self._publish_live_snapshot)
+        self.log_service.add_summary_metric_reporter(self._increment_summary_stat)
         self.task_stall_notifier = TaskStallNotifier(service=self)
         self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
-        self.query_service = TaskQueryService(store=self.store, file_store=self.file_store, log_service=self.log_service)
-        self.log_service.set_snapshot_payload_builder(lambda task_id: self.get_task_detail_payload(task_id, mark_read=False))
+        self.query_service = TaskQueryServiceV2(store=self.store, file_store=self.file_store, log_service=self.log_service, debug_recorder=self.runtime_debug_recorder)
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
         self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
         self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
@@ -210,8 +300,11 @@ class MainRuntimeService:
         self.tool_execution_manager = ToolExecutionManager()
         self._builtin_tool_cache: dict[str, Tool] | None = None
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
-        execution_max_concurrency = app_config.get_role_max_concurrency('execution') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
-        acceptance_max_concurrency = app_config.get_role_max_concurrency('inspection') if app_config is not None and hasattr(app_config, 'get_role_max_concurrency') else None
+        adaptive_budget_settings = self._adaptive_tool_budget_settings(app_config)
+        node_dispatch_limits = self._node_dispatch_concurrency_settings(app_config)
+        execution_runtime_enabled = self.execution_mode == 'worker'
+        execution_max_concurrency = None
+        acceptance_max_concurrency = None
         react_loop = ReActToolLoop(
             chat_backend=chat_backend,
             log_service=self.log_service,
@@ -220,6 +313,28 @@ class MainRuntimeService:
             max_parallel_tool_calls=max_parallel_tool_calls,
         )
         react_loop._tool_execution_manager = None
+        self.model_key_concurrency_controller = ModelKeyConcurrencyController(
+            resolve_model_limits=self._resolve_model_limit_payload,
+        ) if execution_runtime_enabled else None
+        self.node_turn_controller = NodeTurnController(
+            model_concurrency_controller=self.model_key_concurrency_controller,
+            gate_supplier=self._node_turn_gate_allowed,
+        ) if execution_runtime_enabled and self.model_key_concurrency_controller is not None else None
+        if self.model_key_concurrency_controller is not None and self.node_turn_controller is not None:
+            self.model_key_concurrency_controller.configure(
+                resolve_model_limits=self._resolve_model_limit_payload,
+                on_availability_changed=self.node_turn_controller.poke,
+            )
+        react_loop._model_concurrency_controller = self.model_key_concurrency_controller
+        react_loop._node_turn_controller = self.node_turn_controller
+        adaptive_budget_enabled = bool(adaptive_budget_settings.get('enabled')) and self.execution_mode == 'worker'
+        self.adaptive_tool_budget_controller = AdaptiveToolBudgetController(
+            normal_limit=int(adaptive_budget_settings['normal_limit']),
+            throttled_limit=int(adaptive_budget_settings['throttled_limit']),
+            critical_limit=int(adaptive_budget_settings['critical_limit']),
+            step_up=int(adaptive_budget_settings['step_up']),
+        ) if adaptive_budget_enabled else None
+        react_loop._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
         self._react_loop = react_loop
         self.node_runner = NodeRunner(
             store=self.store,
@@ -235,19 +350,91 @@ class MainRuntimeService:
             acceptance_max_concurrency=acceptance_max_concurrency,
             context_enricher=self._enrich_node_messages,
         )
-        self.task_runner = TaskRunner(
+        self.task_governance_manager = TaskGovernanceManager(service=self)
+        self.node_runner.governance_child_created_observer = self.task_governance_manager.on_execution_child_created
+        self.node_runner.governance_spawn_refusal_supplier = self.task_governance_manager.spawn_refusal_message
+        if self.node_turn_controller is not None:
+            self.node_turn_controller.configure(freeze_supplier=self.task_governance_manager.is_task_frozen)
+        self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
+        self.task_actor_service = TaskActorService(
             store=self.store,
             log_service=self.log_service,
             node_runner=self.node_runner,
             stall_notifier=self.task_stall_notifier,
+            node_dispatch_execution_limit=None if execution_runtime_enabled else int(node_dispatch_limits['execution']),
+            node_dispatch_inspection_limit=None if execution_runtime_enabled else int(node_dispatch_limits['inspection']),
+        )
+        self.global_scheduler = GlobalScheduler(
+            runner=self.task_actor_service,
+            max_concurrent_tasks=None if execution_runtime_enabled else 4,
+            per_task_limit=1,
+        )
+        self.tool_pressure_monitor = WorkerPressureMonitor(
+            controller=self.adaptive_tool_budget_controller,
+            store=self.store,
+            sample_seconds=float(adaptive_budget_settings['sample_seconds']),
+            recover_window_seconds=float(adaptive_budget_settings['recover_window_seconds']),
+            warn_consecutive_samples=int(adaptive_budget_settings['warn_consecutive_samples']),
+            safe_consecutive_samples=int(adaptive_budget_settings['safe_consecutive_samples']),
+            pressure_snapshot_stale_after_seconds=float(adaptive_budget_settings['pressure_snapshot_stale_after_seconds']),
+            event_loop_warn_ms=float(adaptive_budget_settings['event_loop_warn_ms']),
+            event_loop_safe_ms=float(adaptive_budget_settings['event_loop_safe_ms']),
+            event_loop_critical_ms=float(adaptive_budget_settings['event_loop_critical_ms']),
+            writer_queue_warn=int(adaptive_budget_settings['writer_queue_warn']),
+            writer_queue_safe=int(adaptive_budget_settings['writer_queue_safe']),
+            writer_queue_critical=int(adaptive_budget_settings['writer_queue_critical']),
+            sqlite_write_wait_warn_ms=float(adaptive_budget_settings['sqlite_write_wait_warn_ms']),
+            sqlite_write_wait_safe_ms=float(adaptive_budget_settings['sqlite_write_wait_safe_ms']),
+            sqlite_write_wait_critical_ms=float(adaptive_budget_settings['sqlite_write_wait_critical_ms']),
+            sqlite_query_warn_ms=float(adaptive_budget_settings['sqlite_query_warn_ms']),
+            sqlite_query_safe_ms=float(adaptive_budget_settings['sqlite_query_safe_ms']),
+            sqlite_query_critical_ms=float(adaptive_budget_settings['sqlite_query_critical_ms']),
+            machine_cpu_warn_percent=float(adaptive_budget_settings['machine_cpu_warn_percent']),
+            machine_cpu_safe_percent=float(adaptive_budget_settings['machine_cpu_safe_percent']),
+            machine_cpu_critical_percent=float(adaptive_budget_settings['machine_cpu_critical_percent']),
+            machine_memory_warn_percent=float(adaptive_budget_settings['machine_memory_warn_percent']),
+            machine_memory_safe_percent=float(adaptive_budget_settings['machine_memory_safe_percent']),
+            machine_memory_critical_percent=float(adaptive_budget_settings['machine_memory_critical_percent']),
+            machine_disk_busy_warn_percent=float(adaptive_budget_settings['machine_disk_busy_warn_percent']),
+            machine_disk_busy_safe_percent=float(adaptive_budget_settings['machine_disk_busy_safe_percent']),
+            machine_disk_busy_critical_percent=float(adaptive_budget_settings['machine_disk_busy_critical_percent']),
+            process_cpu_warn_ratio=float(adaptive_budget_settings['process_cpu_warn_ratio']),
+            process_cpu_safe_ratio=float(adaptive_budget_settings['process_cpu_safe_ratio']),
+        ) if self.adaptive_tool_budget_controller is not None else None
+        self.node_runner._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
+        self.worker_heartbeat_service = WorkerHeartbeatServiceV2(
+            store=self.store,
+            scheduler=self.global_scheduler,
+            execution_mode=self.execution_mode,
+            worker_id=self.worker_id or 'worker',
+            publish_status=self._publish_worker_status_from_any_thread,
+            pressure_snapshot_supplier=self._tool_pressure_snapshot,
+            debug_snapshot_supplier=lambda: {'recent_long_blocks': self.runtime_debug_recorder.snapshot()},
+            lease_heartbeat=self._renew_worker_lease_from_thread,
         )
         self._started = False
         self._runtime_loop = None
+        self._worker_lease_takeover = False
+        self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_worker_status_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_summary_delivery_task: asyncio.Task[Any] | None = None
         self._task_event_dispatch_tasks: set[asyncio.Task[Any]] = set()
+        self._callback_client: httpx.AsyncClient | None = None
+        self._pending_task_summaries: dict[str, dict[str, Any]] = {}
+        self._task_summary_flush_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._last_summary_payloads: dict[str, dict[str, Any]] = {}
+        self._task_summary_stats: dict[str, float] = {
+            'task_summary_dirty_count': 0.0,
+            'task_summary_flush_count': 0.0,
+            'task_summary_skip_unchanged_count': 0.0,
+            'task_summary_outbox_write_count': 0.0,
+            'task_summary_batch_request_count': 0.0,
+            'task_summary_batch_item_count': 0.0,
+        }
         if self.execution_mode == 'worker':
             self.log_service.add_task_terminal_listener(self._enqueue_task_terminal_callback)
 
@@ -255,6 +442,10 @@ class MainRuntimeService:
         if self._started:
             return
         self._started = True
+        if self._runtime_loop is None:
+            self._runtime_loop = asyncio.get_running_loop()
+        if self.execution_mode == 'worker':
+            self._acquire_worker_lease_or_raise()
         self.resource_registry.refresh_from_current_resources()
         self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
@@ -265,21 +456,20 @@ class MainRuntimeService:
                 pass
         if self.execution_mode in {'embedded', 'worker'}:
             for task in self.store.list_tasks():
-                self.log_service.bootstrap_missing_files(task.task_id)
-                self.log_service.ensure_task_projection(task.task_id)
+                self.log_service.sync_task_read_models(task.task_id)
                 if task.status != 'in_progress':
                     continue
-                runtime_state = self.log_service.read_runtime_state(task.task_id)
-                if runtime_state is None:
-                    self.log_service.mark_task_failed(task.task_id, reason='runtime_state_corrupt')
-                    continue
-                if bool(task.is_paused) or bool(runtime_state.get('paused')):
+                if bool(task.is_paused) or bool(task.pause_requested):
                     continue
                 self._recover_interrupted_task(task.task_id)
-                self.task_runner.start_background(task.task_id)
+                await self.global_scheduler.enqueue_task(task.task_id)
             self.task_stall_notifier.bootstrap_running_tasks()
         if self.execution_mode == 'worker':
+            if self.tool_pressure_monitor is not None:
+                self.tool_pressure_monitor.start()
             self._start_worker_loops()
+            self._schedule_pending_task_summary_callbacks()
+            self._schedule_pending_task_worker_status_callbacks()
             self._schedule_pending_task_terminal_callbacks()
             self._schedule_pending_task_stall_callbacks()
 
@@ -334,16 +524,17 @@ class MainRuntimeService:
             ),
         )
 
-        self.log_service.update_runtime_state(
+        self.log_service.update_task_runtime_meta(
             task.task_id,
-            root_node_id=task.root_node_id,
-            paused=False,
-            pause_requested=False,
-            cancel_requested=bool(task.cancel_requested),
+            last_visible_output_at=self._stall_now_iso(),
+            last_stall_notice_bucket_minutes=0,
+        )
+        self.log_service.replace_runtime_frames(
+            task.task_id,
+            frames=[self.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')],
             active_node_ids=[root.node_id],
             runnable_node_ids=[root.node_id],
             waiting_node_ids=[],
-            frames=[self.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')],
             publish_snapshot=False,
         )
         self.log_service.refresh_task_view(task.task_id, mark_unread=True)
@@ -447,64 +638,55 @@ class MainRuntimeService:
                 await asyncio.sleep(0.5)
 
     async def _worker_heartbeat_loop(self) -> None:
-        while True:
-            try:
-                active_task_count = sum(
-                    1
-                    for task in self.store.list_tasks()
-                    if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
-                    and not bool(getattr(task, 'is_paused', False))
-                )
-                updated_at = now_iso()
-                payload = {
-                    'execution_mode': self.execution_mode,
-                    'active_task_count': active_task_count,
-                }
-                self.store.upsert_worker_status(
-                    worker_id=self.worker_id or 'worker',
-                    role='task_worker',
-                    status='running',
-                    updated_at=updated_at,
-                    payload=payload,
-                )
-                self.publish_worker_status_event(
-                    item={
-                        'worker_id': self.worker_id or 'worker',
-                        'role': 'task_worker',
-                        'status': 'running',
-                        'updated_at': updated_at,
-                        'payload': payload,
-                    }
-                )
-                await asyncio.sleep(1.0 if active_task_count > 0 else 5.0)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                await asyncio.sleep(1.0)
+        await self.worker_heartbeat_service.run_forever()
+
+    def _publish_worker_status_from_any_thread(self, item: dict[str, Any]) -> None:
+        loop = self._runtime_loop
+        payload = dict(item or {})
+        if loop is None or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(
+            lambda: self.publish_worker_status_event(item=payload, bridge=False)
+        )
 
     async def _process_worker_command(self, command: dict[str, Any]) -> None:
         command_id = str(command.get('command_id') or '').strip()
         command_type = str(command.get('command_type') or '').strip()
         task_id = self.normalize_task_id(str(command.get('task_id') or '').strip())
+        payload = dict(command.get('payload') or {}) if isinstance(command.get('payload'), dict) else {}
         success = False
         error_text = ''
+        result_payload: dict[str, Any] | None = None
         try:
             if command_type == 'create_task':
                 task = self.get_task(task_id)
                 if task is not None and not bool(task.is_paused):
-                    self.task_runner.start_background(task.task_id)
+                    await self.global_scheduler.enqueue_task(task.task_id)
                 success = True
             elif command_type == 'resume_task':
                 if task_id:
-                    await self.task_runner.resume(task_id)
+                    await self.resume_task(task_id)
                 success = True
             elif command_type == 'pause_task':
                 if task_id:
-                    await self.task_runner.pause(task_id)
+                    await self.pause_task(task_id)
                 success = True
             elif command_type == 'cancel_task':
                 if task_id:
-                    await self.task_runner.cancel(task_id)
+                    await self.cancel_task(task_id)
+                success = True
+            elif command_type == 'refresh_runtime_config':
+                changed = self.ensure_runtime_config_current(
+                    force=True,
+                    reason=str(payload.get('reason') or 'worker_command_refresh').strip() or 'worker_command_refresh',
+                )
+                result_payload = {
+                    'changed': bool(changed),
+                    'applied_revision': int(getattr(self, '_runtime_model_revision', 0) or 0),
+                    'applied_config_mtime_ns': int(self._config_mtime_ns()),
+                    'worker_id': str(self.worker_id or 'worker'),
+                    'worker_pid': int(os.getpid()),
+                }
                 success = True
             else:
                 error_text = f'unsupported_command:{command_type}'
@@ -517,6 +699,7 @@ class MainRuntimeService:
                     finished_at=now_iso(),
                     success=success,
                     error_text=error_text,
+                    result=result_payload,
                 )
 
     def _enqueue_task_command(
@@ -537,6 +720,106 @@ class MainRuntimeService:
             payload=dict(payload or {}),
         )
         return command_id
+
+    @staticmethod
+    def _config_mtime_ns() -> int:
+        try:
+            return int(Path(get_config_path()).stat().st_mtime_ns)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _lease_expiry_from(updated_at: str, *, ttl_seconds: float = _WORKER_LEASE_TTL_SECONDS) -> str:
+        parsed = MainRuntimeService._parse_worker_timestamp(updated_at)
+        if parsed is None:
+            return now_iso()
+        return (parsed + timedelta(seconds=max(1.0, float(ttl_seconds or _WORKER_LEASE_TTL_SECONDS)))).astimezone().isoformat(timespec='seconds')
+
+    def _worker_lease_payload(self, *, heartbeat_at: str) -> dict[str, Any]:
+        return {
+            'workspace': str(Path.cwd()),
+            'worker_id': str(self.worker_id or 'worker'),
+            'worker_pid': int(os.getpid()),
+            'heartbeat_at': str(heartbeat_at or ''),
+            'execution_mode': str(self.execution_mode or ''),
+            'takeover': bool(self._worker_lease_takeover),
+        }
+
+    def _acquire_worker_lease_or_raise(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        started_at = now_iso()
+        lease = self.store.acquire_worker_lease(
+            role=_WORKER_LEASE_ROLE,
+            worker_id=str(self.worker_id or 'worker'),
+            holder_pid=int(os.getpid()),
+            acquired_at=started_at,
+            heartbeat_at=started_at,
+            expires_at=self._lease_expiry_from(started_at),
+            payload=self._worker_lease_payload(heartbeat_at=started_at),
+        )
+        if bool(lease.get('acquired')):
+            self._worker_lease_takeover = bool(lease.get('takeover'))
+            self._worker_lease_acquired = True
+            return
+        holder = str(lease.get('worker_id') or '').strip() or 'unknown'
+        expires_at = str(lease.get('expires_at') or '').strip()
+        raise RuntimeError(f'worker_lease_unavailable:{holder}:{expires_at}')
+
+    def _renew_worker_lease_from_thread(self, heartbeat_at: str, payload: dict[str, Any]) -> None:
+        if self.execution_mode != 'worker' or not self._worker_lease_acquired:
+            return
+        merged_payload = {
+            **self._worker_lease_payload(heartbeat_at=heartbeat_at),
+            'status_payload': dict(payload or {}),
+        }
+        self.store.renew_worker_lease(
+            role=_WORKER_LEASE_ROLE,
+            worker_id=str(self.worker_id or 'worker'),
+            heartbeat_at=heartbeat_at,
+            expires_at=self._lease_expiry_from(heartbeat_at),
+            payload=merged_payload,
+        )
+
+    async def request_worker_runtime_refresh(
+        self,
+        *,
+        reason: str,
+        timeout_s: float = _WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS,
+    ) -> dict[str, object]:
+        if self.execution_mode != 'web':
+            changed = self.ensure_runtime_config_current(force=True, reason=reason)
+            return {
+                'changed': bool(changed),
+                'worker_refresh_acked': True,
+                'worker_id': str(self.worker_id or ''),
+                'worker_pid': int(os.getpid()),
+                'applied_config_mtime_ns': int(self._config_mtime_ns()),
+            }
+        command_id = self._enqueue_task_command(
+            command_type='refresh_runtime_config',
+            task_id=None,
+            session_id='web:shared',
+            payload={
+                'reason': str(reason or '').strip() or 'runtime_refresh',
+                'expected_config_mtime_ns': int(self._config_mtime_ns()),
+            },
+        )
+        deadline = time.monotonic() + max(0.1, float(timeout_s or _WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS))
+        while True:
+            current = self.store.get_task_command(command_id)
+            if current and str(current.get('status') or '').strip().lower() in {'completed', 'failed'}:
+                if str(current.get('status') or '').strip().lower() == 'failed':
+                    raise RuntimeError(str(current.get('error_text') or 'worker_runtime_refresh_failed').strip() or 'worker_runtime_refresh_failed')
+                result = dict(current.get('result') or {}) if isinstance(current.get('result'), dict) else {}
+                return {
+                    'worker_refresh_acked': True,
+                    'command_id': command_id,
+                    **result,
+                }
+            if time.monotonic() >= deadline:
+                raise TimeoutError('worker_runtime_refresh_timeout')
+            await asyncio.sleep(_WORKER_RUNTIME_REFRESH_POLL_SECONDS)
 
     def _build_task_record(
         self,
@@ -626,7 +909,7 @@ class MainRuntimeService:
         )
         record, root = self.log_service.initialize_task(record, root)
         if self.execution_mode in {'embedded', 'worker'}:
-            self.task_runner.start_background(record.task_id)
+            await self.global_scheduler.enqueue_task(record.task_id)
         else:
             self._enqueue_task_command(
                 command_type='create_task',
@@ -642,7 +925,11 @@ class MainRuntimeService:
     async def cancel_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
-            await self.task_runner.cancel(task_id)
+            self.task_actor_service.request_cancel(task_id)
+            await self.global_scheduler.cancel_task(task_id)
+            current = self.get_task(task_id)
+            if current is not None and current.status == 'in_progress' and not bool(current.is_paused):
+                self.log_service.mark_task_failed(task_id, reason='canceled')
         else:
             self._assert_worker_available()
             self.log_service.request_cancel(task_id)
@@ -659,7 +946,8 @@ class MainRuntimeService:
     async def pause_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
-            await self.task_runner.pause(task_id)
+            self.task_actor_service.request_pause(task_id)
+            await self.global_scheduler.cancel_task(task_id)
         else:
             self._assert_worker_available()
             self.log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
@@ -676,7 +964,11 @@ class MainRuntimeService:
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
-            await self.task_runner.resume(task_id)
+            task = self.get_task(task_id)
+            if task is None:
+                return None
+            self.task_actor_service.clear_pause(task_id)
+            await self.global_scheduler.enqueue_task(task_id)
         else:
             self._assert_worker_available()
             task = self.get_task(task_id)
@@ -718,23 +1010,22 @@ class MainRuntimeService:
             return None
         if not (bool(task.is_paused) or task.status in {'success', 'failed'}):
             raise ValueError('task_not_paused')
-        if self.task_runner.is_active(task_id):
+        if self.global_scheduler.is_active(task_id):
             try:
-                await asyncio.wait_for(self.task_runner.wait(task_id), timeout=2.0)
+                await asyncio.wait_for(self.global_scheduler.wait(task_id), timeout=2.0)
             except asyncio.TimeoutError as exc:
                 raise ValueError('task_still_stopping') from exc
-        if self.task_runner.is_active(task_id):
+        if self.global_scheduler.is_active(task_id) or self.global_scheduler.is_queued(task_id):
             raise ValueError('task_still_stopping')
         artifacts = self.list_artifacts(task_id)
         self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
         self.file_store.delete_task_files(task_id)
         self.store.delete_task(task_id)
-        self.store.append_task_event(
+        self.log_service.append_task_event(
             task_id=task.task_id,
             session_id=task.session_id,
             event_type='task.deleted',
-            created_at=now_iso(),
-            payload={'task_id': task.task_id},
+            data={'task_id': task.task_id},
         )
         self._publish_task_deleted_event(session_id=task.session_id, task_id=task.task_id)
         await self.registry.forget_task(task.session_id, task_id)
@@ -742,7 +1033,7 @@ class MainRuntimeService:
 
     async def wait_for_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
-        await self.task_runner.wait(task_id)
+        await self.global_scheduler.wait(task_id)
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> TaskRecord | None:
@@ -752,6 +1043,28 @@ class MainRuntimeService:
     def latest_worker_status(self) -> dict[str, Any] | None:
         items = self.store.list_worker_status(role='task_worker')
         return items[0] if items else None
+
+    @staticmethod
+    def _parse_worker_timestamp(value: Any) -> datetime | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _managed_worker_runtime_snapshot(self) -> dict[str, object]:
+        if self.execution_mode != 'web':
+            return {}
+        try:
+            snapshot = managed_worker_snapshot(starting_grace_s=_WORKER_STATUS_STARTING_GRACE_SECONDS)
+        except Exception:
+            return {}
+        return dict(snapshot or {}) if isinstance(snapshot, dict) else {}
 
     def _worker_status_stale_after_seconds(
         self,
@@ -785,31 +1098,62 @@ class MainRuntimeService:
         *,
         stale_after_seconds: float | None = None,
     ) -> bool:
+        if not item:
+            return self.execution_mode in {'embedded', 'worker'}
+        status = str(item.get('status') or item.get('state') or '').strip().lower()
+        if status in _WORKER_STATUS_TERMINAL_STATES:
+            return False
         if self.execution_mode in {'embedded', 'worker'}:
             return True
-        if not item:
+        updated_dt = self._parse_worker_timestamp(item.get('updated_at'))
+        if updated_dt is None:
             return False
-        status = str(item.get('status') or item.get('state') or '').strip().lower()
-        if status in {'stopped', 'offline', 'dead'}:
-            return False
-        updated_at = str(item.get('updated_at') or '').strip()
-        if not updated_at:
-            return False
-        try:
-            updated_dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
-        except ValueError:
-            return False
-        if updated_dt.tzinfo is None:
-            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-        age_seconds = max(0.0, (datetime.now(timezone.utc) - updated_dt.astimezone(timezone.utc)).total_seconds())
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - updated_dt).total_seconds())
         stale_window_seconds = self._worker_status_stale_after_seconds(item, override_seconds=stale_after_seconds)
         return age_seconds <= stale_window_seconds
 
+    def _managed_worker_is_starting(
+        self,
+        *,
+        item: dict[str, Any] | None,
+        snapshot: dict[str, object] | None = None,
+    ) -> bool:
+        current = item if isinstance(item, dict) else {}
+        worker_snapshot = dict(snapshot or {}) if isinstance(snapshot, dict) else self._managed_worker_runtime_snapshot()
+        if not worker_snapshot:
+            return False
+        if not bool(worker_snapshot.get('active')) or not bool(worker_snapshot.get('auto_worker_enabled')):
+            return False
+        if not bool(worker_snapshot.get('starting')):
+            return False
+        started_at_dt = self._parse_worker_timestamp(worker_snapshot.get('started_at'))
+        if not current:
+            return True
+        current_updated_at = self._parse_worker_timestamp(current.get('updated_at'))
+        if started_at_dt is None or current_updated_at is None:
+            return True
+        return current_updated_at < started_at_dt
+
+    def worker_state(
+        self,
+        *,
+        item: dict[str, Any] | None = None,
+        stale_after_seconds: float | None = None,
+    ) -> str:
+        current = dict(item or self.latest_worker_status() or {})
+        if self._managed_worker_is_starting(item=current if current else None):
+            return _WORKER_STATE_STARTING
+        if not current:
+            return _WORKER_STATE_ONLINE if self.execution_mode in {'embedded', 'worker'} else _WORKER_STATE_OFFLINE
+        status = str(current.get('status') or current.get('state') or '').strip().lower()
+        if status in _WORKER_STATUS_TERMINAL_STATES:
+            return _WORKER_STATE_STOPPED
+        if self._worker_online_from_item(current, stale_after_seconds=stale_after_seconds):
+            return _WORKER_STATE_ONLINE
+        return _WORKER_STATE_STALE
+
     def is_worker_online(self, *, stale_after_seconds: float | None = None) -> bool:
-        return self._worker_online_from_item(
-            self.latest_worker_status(),
-            stale_after_seconds=stale_after_seconds,
-        )
+        return self.worker_state(stale_after_seconds=stale_after_seconds) == _WORKER_STATE_ONLINE
 
     def worker_status_payload(
         self,
@@ -822,13 +1166,19 @@ class MainRuntimeService:
             item=current if current else None,
             override_seconds=stale_after_seconds,
         )
+        state = self.worker_state(
+            item=current if current else None,
+            stale_after_seconds=window_seconds,
+        )
+        last_seen_at = str(current.get('updated_at') or '').strip()
         return {
             'worker': current or None,
-            'worker_online': self._worker_online_from_item(
-                current if current else None,
-                stale_after_seconds=window_seconds,
-            ),
+            'worker_online': state == _WORKER_STATE_ONLINE,
+            'worker_state': state,
+            'worker_last_seen_at': last_seen_at,
+            'worker_control_available': state == _WORKER_STATE_ONLINE,
             'worker_stale_after_seconds': window_seconds,
+            **self._tool_pressure_status_payload(current if current else None),
         }
 
     def _publish_task_list_envelope(
@@ -851,11 +1201,39 @@ class MainRuntimeService:
         self.registry.publish_task_list(target_session_id, payload)
         return payload
 
+    def _callback_headers(self, *, token: str) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        normalized_token = str(token or '').strip()
+        if normalized_token:
+            headers['x-g3ku-internal-token'] = normalized_token
+        return headers
+
+    def _get_callback_client(self) -> httpx.AsyncClient:
+        client = self._callback_client
+        if client is None:
+            client = httpx.AsyncClient()
+            self._callback_client = client
+        return client
+
+    async def _post_internal_callback(
+        self,
+        url: str,
+        *,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+    ) -> httpx.Response:
+        client = self._get_callback_client()
+        return await client.post(url, json=payload, headers=headers, timeout=float(timeout or _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS))
+
     def _schedule_task_event_callback(self, payload: dict[str, Any] | None) -> None:
         if self.execution_mode != 'worker':
             return
         normalized = normalize_task_event_payload(payload)
         if not normalized:
+            return
+        if str(normalized.get('event_type') or '').strip() == 'task.summary.patch':
+            self._enqueue_task_summary_callback(normalized)
             return
         try:
             loop = asyncio.get_running_loop()
@@ -873,13 +1251,15 @@ class MainRuntimeService:
         callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
         if not callback_url:
             return
-        headers: dict[str, str] = {}
         callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
-        if callback_token:
-            headers['x-g3ku-internal-token'] = callback_token
+        headers = self._callback_headers(token=callback_token)
         try:
-            async with httpx.AsyncClient(timeout=1.5) as client:
-                await client.post(callback_url, json=payload, headers=headers)
+            await self._post_internal_callback(
+                callback_url,
+                payload=payload,
+                headers=headers,
+                timeout=1.5,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -902,42 +1282,8 @@ class MainRuntimeService:
                 data=data,
             )
         if self.execution_mode == 'worker' and not bridge:
-            self._schedule_task_event_callback(
-                {
-                    'event_type': 'task.worker.status',
-                    'session_id': 'all',
-                    'data': data,
-                }
-            )
+            self._enqueue_task_worker_status_callback(data)
         return data
-
-    def _publish_task_snapshot_event(
-        self,
-        *,
-        session_id: str,
-        task_id: str,
-        data: dict[str, Any],
-        bridge: bool = False,
-    ) -> dict[str, Any]:
-        payload = build_envelope(
-            channel='task',
-            session_id=session_id,
-            task_id=task_id,
-            seq=self.registry.next_global_task_seq(task_id),
-            type='task.snapshot',
-            data=data,
-        )
-        self.registry.publish_global_task(task_id, payload)
-        if self.execution_mode == 'worker' and not bridge:
-            self._schedule_task_event_callback(
-                {
-                    'event_type': 'task.snapshot',
-                    'session_id': session_id,
-                    'task_id': task_id,
-                    'data': data,
-                }
-            )
-        return payload
 
     def _publish_task_list_patch_event(
         self,
@@ -962,13 +1308,13 @@ class MainRuntimeService:
                 target_session_id=target_session_id,
                 session_id=normalized_session_id,
                 task_id=normalized_task_id,
-                event_type='task.list.patch',
+                event_type='task.summary.patch',
                 data=data,
             )
         if self.execution_mode == 'worker' and not bridge:
             self._schedule_task_event_callback(
                 {
-                    'event_type': 'task.list.patch',
+                    'event_type': 'task.summary.patch',
                     'session_id': normalized_session_id,
                     'task_id': normalized_task_id,
                     'data': data,
@@ -1009,16 +1355,99 @@ class MainRuntimeService:
         self.registry.publish_global_task(task.task_id, payload)
 
     def _publish_live_snapshot(self, task: TaskRecord, payload: dict[str, Any], publish_summary: bool) -> None:
-        self._publish_task_snapshot_event(
-            session_id=task.session_id,
-            task_id=task.task_id,
-            data=payload,
-        )
-        if publish_summary:
-            self._publish_task_list_patch_event(
+        started_at = now_iso()
+        started_mono = time.perf_counter()
+        event_type = str(payload.get('event_type') or '').strip()
+        data = dict(payload.get('data') or {})
+        if event_type == 'task.summary.patch':
+            if self.execution_mode == 'worker':
+                self._enqueue_task_summary_callback(
+                    {
+                        'event_type': event_type,
+                        'session_id': task.session_id,
+                        'task_id': task.task_id,
+                        'data': data,
+                    },
+                    immediate=bool(payload.get('dispatch_immediate')),
+                )
+                self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+                return
+            self._publish_task_list_envelope(
+                target_session_id=task.session_id,
                 session_id=task.session_id,
-                task_payload=self.log_service._task_summary_payload(task),
+                task_id=task.task_id,
+                event_type=event_type,
+                data=data,
             )
+            self._publish_task_list_envelope(
+                target_session_id='all',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                event_type=event_type,
+                data=data,
+            )
+            detail_payload = build_envelope(
+                channel='task',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                seq=self.registry.next_global_task_seq(task.task_id),
+                type=event_type,
+                data=data,
+            )
+            self.registry.publish_global_task(task.task_id, detail_payload)
+            self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+            return
+        if event_type == 'task.token.patch':
+            if self.execution_mode == 'worker':
+                self._schedule_task_event_callback(
+                    {
+                        'event_type': event_type,
+                        'session_id': task.session_id,
+                        'task_id': task.task_id,
+                        'data': data,
+                    }
+                )
+                self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+                return
+            self._publish_task_list_envelope(
+                target_session_id=task.session_id,
+                session_id=task.session_id,
+                task_id=task.task_id,
+                event_type=event_type,
+                data=data,
+            )
+            self._publish_task_list_envelope(
+                target_session_id='all',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                event_type=event_type,
+                data=data,
+            )
+            self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+            return
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal', GOVERNANCE_PATCH_EVENT_TYPE}:
+            detail_payload = build_envelope(
+                channel='task',
+                session_id=task.session_id,
+                task_id=task.task_id,
+                seq=self.registry.next_global_task_seq(task.task_id),
+                type=event_type,
+                data=data,
+            )
+            self.registry.publish_global_task(task.task_id, detail_payload)
+            if self.execution_mode == 'worker':
+                self._schedule_task_event_callback(
+                    {
+                        'event_type': event_type,
+                        'session_id': task.session_id,
+                        'task_id': task.task_id,
+                        'data': data,
+                    }
+                )
+            self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+            return
+        self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
+        return
 
     def forward_live_task_event(self, payload: dict[str, Any] | None) -> bool:
         normalized = normalize_task_event_payload(payload)
@@ -1028,29 +1457,68 @@ class MainRuntimeService:
         session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
         task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip()) if normalized.get('task_id') else ''
         data = dict(normalized.get('data') or {})
-        if event_type == 'task.snapshot' and task_id:
-            self._publish_task_snapshot_event(
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal', GOVERNANCE_PATCH_EVENT_TYPE} and task_id:
+            payload = build_envelope(
+                channel='task',
                 session_id=session_id,
                 task_id=task_id,
+                seq=self.registry.next_global_task_seq(task_id),
+                type=event_type,
                 data=data,
-                bridge=True,
             )
+            self.registry.publish_global_task(task_id, payload)
             return True
-        if event_type == 'task.list.patch':
-            self._publish_task_list_patch_event(
+        if event_type == 'task.token.patch' and task_id:
+            for target_session_id in {session_id, 'all'}:
+                self._publish_task_list_envelope(
+                    target_session_id=target_session_id,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type='task.token.patch',
+                    data=data,
+                )
+            return True
+        if event_type == 'task.summary.patch':
+            normalized_task_payload = dict(data.get('task') or {})
+            normalized_task_id = self.normalize_task_id(str(normalized_task_payload.get('task_id') or task_id or '').strip())
+            normalized_task_payload['task_id'] = normalized_task_id
+            for target_session_id in {session_id, 'all'}:
+                self._publish_task_list_envelope(
+                    target_session_id=target_session_id,
+                    session_id=session_id,
+                    task_id=normalized_task_id,
+                    event_type='task.summary.patch',
+                    data={'task': normalized_task_payload},
+                )
+            payload = build_envelope(
+                channel='task',
                 session_id=session_id,
-                task_payload=dict(data.get('task') or {}),
-                bridge=True,
+                task_id=normalized_task_id,
+                seq=self.registry.next_global_task_seq(normalized_task_id),
+                type='task.summary.patch',
+                data={'task': normalized_task_payload},
             )
+            self.registry.publish_global_task(normalized_task_id, payload)
             return True
         if event_type == 'task.worker.status':
-            self.publish_worker_status_event(payload=data, bridge=True)
+            self.publish_worker_status_event(
+                item=dict(data.get('worker') or {}) if isinstance(data.get('worker'), dict) else None,
+                bridge=True,
+            )
             return True
         return False
 
     def _assert_worker_available(self) -> None:
-        if self.execution_mode == 'web' and not self.is_worker_online():
-            raise ValueError('task_worker_offline')
+        if self.execution_mode != 'web':
+            return
+        state = self.worker_state()
+        if state == _WORKER_STATE_ONLINE:
+            return
+        if state == _WORKER_STATE_STARTING:
+            raise ValueError('task_worker_starting')
+        if state == _WORKER_STATE_STALE:
+            raise ValueError('task_worker_stale')
+        raise ValueError('task_worker_offline')
 
     @staticmethod
     def _normalize_session_key(session_id: str | None) -> str:
@@ -1261,6 +1729,11 @@ class MainRuntimeService:
             return TASK_STALL_REASON_USER_PAUSED
         if bool(current_runtime_state.get('paused')) or bool(current_runtime_state.get('pause_requested')):
             return TASK_STALL_REASON_USER_PAUSED
+        governance_state = normalize_task_governance_state(
+            (self.log_service.read_task_runtime_meta(task.task_id) or {}).get('governance')
+        )
+        if bool(governance_state.get('review_inflight')) or bool(governance_state.get('frozen')):
+            return TASK_STALL_REASON_GOVERNANCE_REVIEW
         if bool(getattr(task, 'cancel_requested', False)):
             return TASK_STALL_REASON_CANCEL_REQUESTED
         if bool(current_runtime_state.get('cancel_requested')):
@@ -1324,25 +1797,37 @@ class MainRuntimeService:
             }
         )
 
-    @staticmethod
-    def _task_stall_latest_node_summary(detail: dict[str, Any]) -> str:
-        progress = detail.get('progress') if isinstance(detail.get('progress'), dict) else {}
-        latest_node = progress.get('latest_node') if isinstance(progress.get('latest_node'), dict) else {}
-        if not latest_node:
+    def _task_stall_latest_node_summary(self, detail: dict[str, Any]) -> str:
+        payload = detail if isinstance(detail, dict) else {}
+        task_id = str((payload.get('task') or {}).get('task_id') or '').strip()
+        root_node = payload.get('root_node') if isinstance(payload.get('root_node'), dict) else {}
+        frontier = [item for item in list(payload.get('frontier') or []) if isinstance(item, dict)]
+        candidate = root_node
+        frontier_node_id = str(frontier[0].get('node_id') or '').strip() if frontier else ''
+        root_node_id = str(root_node.get('node_id') or '').strip()
+        if task_id and frontier_node_id and frontier_node_id != root_node_id:
+            detail_payload = self.get_node_detail_payload(task_id, frontier_node_id) or {}
+            candidate = detail_payload.get('item') if isinstance(detail_payload.get('item'), dict) else candidate
+        if not candidate:
             return ''
-        title = str(latest_node.get('title') or latest_node.get('node_id') or 'node').strip() or 'node'
-        status = str(latest_node.get('status') or 'in_progress').strip() or 'in_progress'
-        output = str(latest_node.get('output') or latest_node.get('output_excerpt') or '').strip()
+        title = str(self._repair_legacy_display_text(candidate.get('goal') or candidate.get('title') or candidate.get('node_id') or 'node')).strip() or 'node'
+        status = str(candidate.get('status') or 'in_progress').strip() or 'in_progress'
+        output = str(self._repair_legacy_display_text(
+            candidate.get('final_output')
+            or candidate.get('output')
+            or candidate.get('failure_reason')
+            or ''
+        )).strip()
+        if not output and frontier:
+            output = str(self._repair_legacy_display_text(frontier[0].get('stage_goal') or frontier[0].get('phase') or '')).strip()
         text = f'{title} [{status}]'
         if output:
             text = f'{text}: {output}'
         return text[:240]
 
-    @staticmethod
-    def _task_stall_runtime_summary(detail: dict[str, Any]) -> str:
-        progress = detail.get('progress') if isinstance(detail.get('progress'), dict) else {}
-        live_state = progress.get('live_state') if isinstance(progress.get('live_state'), dict) else {}
-        frames = [item for item in list(live_state.get('frames') or []) if isinstance(item, dict)]
+    def _task_stall_runtime_summary(self, detail: dict[str, Any]) -> str:
+        payload = detail if isinstance(detail, dict) else {}
+        frames = [item for item in list(payload.get('frontier') or []) if isinstance(item, dict)]
         parts: list[str] = []
         for frame in frames[:3]:
             node_id = str(frame.get('node_id') or '').strip() or 'node'
@@ -1366,6 +1851,336 @@ class MainRuntimeService:
                 summary = f'{summary} children_running={running_children}/{len(child_pipelines)}'
             parts.append(summary)
         return '; '.join(parts)[:320]
+
+    def _enqueue_task_worker_status_callback(self, payload: dict[str, Any] | None) -> None:
+        if self.execution_mode != 'worker':
+            return
+        normalized = normalize_task_event_payload(
+            {
+                'event_type': 'task.worker.status',
+                'session_id': 'all',
+                'data': dict(payload or {}),
+            }
+        )
+        if not normalized:
+            return
+        data = dict(normalized.get('data') or {})
+        worker = dict(data.get('worker') or {}) if isinstance(data.get('worker'), dict) else {}
+        worker_id = str(worker.get('worker_id') or '').strip()
+        if not worker_id:
+            return
+        created_at = str(worker.get('updated_at') or now_iso()).strip() or now_iso()
+        try:
+            self.store.put_task_worker_status_outbox(
+                worker_id=worker_id,
+                created_at=created_at,
+                payload=normalized,
+            )
+        except Exception:
+            logger.exception('failed to persist worker status outbox for {}', worker_id)
+            return
+        self._schedule_task_worker_status_delivery(worker_id)
+
+    def _summary_stats_snapshot(self) -> dict[str, float]:
+        snapshot = {key: float(value or 0.0) for key, value in dict(self._task_summary_stats or {}).items()}
+        snapshot['task_summary_pending_count'] = float(len(self._pending_task_summaries))
+        return snapshot
+
+    def _increment_summary_stat(self, key: str, amount: float = 1.0) -> None:
+        normalized_key = str(key or '').strip()
+        if not normalized_key:
+            return
+        current = float(self._task_summary_stats.get(normalized_key, 0.0) or 0.0)
+        self._task_summary_stats[normalized_key] = current + float(amount or 0.0)
+
+    @staticmethod
+    def _summary_payload_task_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+        data = dict((payload or {}).get('data') or {})
+        return dict(data.get('task') or {}) if isinstance(data.get('task'), dict) else {}
+
+    def _summary_payload_requires_immediate(self, task_id: str, task_payload: dict[str, Any]) -> bool:
+        previous = dict(self._last_summary_payloads.get(task_id) or {})
+        if not previous:
+            return True
+        for key in ('status', 'is_paused', 'is_unread'):
+            if previous.get(key) != task_payload.get(key):
+                return True
+        return False
+
+    def _ensure_task_summary_flush_task(self, task_id: str) -> None:
+        key = self.normalize_task_id(str(task_id or '').strip())
+        if self.execution_mode != 'worker' or not key:
+            return
+        current = self._task_summary_flush_tasks.get(key)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._flush_task_summary_to_outbox(key)
+            return
+        task = loop.create_task(self._run_task_summary_flush(key), name=f'main-runtime-task-summary-flush:{key}')
+        self._task_summary_flush_tasks[key] = task
+        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_summary_flush_task(stored_key, done_task))
+
+    def _clear_task_summary_flush_task(self, task_id: str, done_task: asyncio.Task[Any]) -> None:
+        current = self._task_summary_flush_tasks.get(task_id)
+        if current is done_task:
+            self._task_summary_flush_tasks.pop(task_id, None)
+
+    def _enqueue_task_summary_callback(self, payload: dict[str, Any] | None, *, immediate: bool = False) -> None:
+        if self.execution_mode != 'worker':
+            return
+        normalized = normalize_task_event_payload(payload)
+        if not normalized or str(normalized.get('event_type') or '').strip() != 'task.summary.patch':
+            return
+        task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip())
+        if not task_id:
+            return
+        task_payload = self._summary_payload_task_payload(normalized)
+        if not task_payload:
+            return
+        self._increment_summary_stat('task_summary_dirty_count')
+        if immediate or self._summary_payload_requires_immediate(task_id, task_payload):
+            self._flush_task_summary_to_outbox(task_id, normalized)
+            return
+        now_mono = time.monotonic()
+        current = self._pending_task_summaries.get(task_id)
+        if current is None:
+            self._pending_task_summaries[task_id] = {
+                'payload': normalized,
+                'first_dirty_mono': now_mono,
+                'last_dirty_mono': now_mono,
+            }
+        else:
+            current['payload'] = normalized
+            current['last_dirty_mono'] = now_mono
+        self._ensure_task_summary_flush_task(task_id)
+
+    def _schedule_pending_task_worker_status_callbacks(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        for entry in self.store.list_pending_task_worker_status_outbox(limit=500):
+            worker_id = str(entry.get('worker_id') or '').strip()
+            if worker_id:
+                self._schedule_task_worker_status_delivery(worker_id)
+
+    def _schedule_pending_task_summary_callbacks(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        for entry in self.store.list_pending_task_summary_outbox(limit=500):
+            task_id = str(entry.get('task_id') or '').strip()
+            if task_id:
+                self._schedule_task_summary_delivery(task_id)
+
+    async def _run_task_summary_flush(self, task_id: str) -> None:
+        key = self.normalize_task_id(str(task_id or '').strip())
+        if not key:
+            return
+        while True:
+            current = dict(self._pending_task_summaries.get(key) or {})
+            if not current:
+                return
+            first_dirty_mono = float(current.get('first_dirty_mono') or time.monotonic())
+            last_dirty_mono = float(current.get('last_dirty_mono') or first_dirty_mono)
+            due_mono = min(
+                last_dirty_mono + _TASK_SUMMARY_DEBOUNCE_SECONDS,
+                first_dirty_mono + _TASK_SUMMARY_MAX_WAIT_SECONDS,
+            )
+            delay_seconds = max(0.0, due_mono - time.monotonic())
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+                continue
+            self._flush_task_summary_to_outbox(key)
+
+    def _flush_task_summary_to_outbox(self, task_id: str, payload: dict[str, Any] | None = None) -> None:
+        key = self.normalize_task_id(str(task_id or '').strip())
+        if self.execution_mode != 'worker' or not key:
+            return
+        pending_entry = self._pending_task_summaries.pop(key, None)
+        normalized = normalize_task_event_payload(payload) if payload is not None else dict(
+            (pending_entry or {}).get('payload') or {}
+        )
+        if not normalized or str(normalized.get('event_type') or '').strip() != 'task.summary.patch':
+            return
+        session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
+        task_payload = self._summary_payload_task_payload(normalized)
+        created_at = str(task_payload.get('updated_at') or now_iso()).strip() or now_iso()
+        try:
+            self.store.put_task_summary_outbox(
+                task_id=key,
+                session_id=session_id,
+                created_at=created_at,
+                payload=normalized,
+            )
+        except Exception:
+            logger.exception('failed to persist task summary outbox for {}', key)
+            return
+        self._last_summary_payloads[key] = dict(task_payload)
+        self._increment_summary_stat('task_summary_flush_count')
+        self._increment_summary_stat('task_summary_outbox_write_count')
+        self._schedule_task_summary_delivery(key)
+
+    def _schedule_task_summary_delivery(self, _task_id: str | None = None) -> None:
+        if self.execution_mode != 'worker':
+            return
+        current = self._task_summary_delivery_task
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._task_summary_delivery_task = loop.create_task(
+            self._deliver_task_summary_batches(),
+            name=f'main-runtime-task-summary-batch:{self.worker_id or "worker"}',
+        )
+
+    async def _deliver_task_summary_batches(self) -> None:
+        retry_delays = list(_WORKER_STATUS_CALLBACK_RETRY_DELAYS or [0.0, 0.5, 2.0, 5.0])
+        if not retry_delays:
+            retry_delays = [0.0]
+        attempt_index = 0
+        while True:
+            delay_seconds = _TASK_SUMMARY_BATCH_WINDOW_SECONDS if attempt_index == 0 else float(
+                retry_delays[min(attempt_index, len(retry_delays) - 1)] or 0.0
+            )
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            entries = list(self.store.list_pending_task_summary_outbox(limit=max(_TASK_SUMMARY_BATCH_MAX_ITEMS * 2, 256)) or [])
+            if not entries:
+                return
+            batch_entries: list[dict[str, Any]] = []
+            batch_items: list[dict[str, Any]] = []
+            bytes_total = 0
+            for entry in entries:
+                payload = dict(entry.get('payload') or {})
+                encoded_size = len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+                if batch_entries and (
+                    len(batch_entries) >= _TASK_SUMMARY_BATCH_MAX_ITEMS
+                    or bytes_total + encoded_size > _TASK_SUMMARY_BATCH_MAX_BYTES
+                ):
+                    break
+                batch_entries.append(entry)
+                batch_items.append(payload)
+                bytes_total += encoded_size
+            if not batch_entries:
+                return
+            callback_url = resolve_task_event_batch_callback_url(workspace=Path.cwd())
+            if not callback_url:
+                for entry in batch_entries:
+                    self.store.mark_task_summary_outbox_attempt(
+                        str(entry.get('task_id') or ''),
+                        attempted_at=now_iso(),
+                        error_text='task_event_batch_callback_url_unavailable',
+                        expected_version=int(entry.get('version') or 0),
+                    )
+                attempt_index += 1
+                continue
+            headers: dict[str, str] = {}
+            callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
+            if callback_token:
+                headers['x-g3ku-internal-token'] = callback_token
+            try:
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload={'items': batch_items},
+                    headers=headers,
+                    timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
+                )
+                if 200 <= int(response.status_code or 0) < 300:
+                    for entry in batch_entries:
+                        self.store.mark_task_summary_outbox_delivered(
+                            str(entry.get('task_id') or ''),
+                            delivered_at=now_iso(),
+                            expected_version=int(entry.get('version') or 0),
+                        )
+                    self._increment_summary_stat('task_summary_batch_request_count')
+                    self._increment_summary_stat('task_summary_batch_item_count', float(len(batch_entries)))
+                    attempt_index = 0
+                    continue
+                error_text = f'task_event_batch_callback_http_{int(response.status_code or 0)}'
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_text = str(exc or 'task_event_batch_callback_failed').strip() or 'task_event_batch_callback_failed'
+            for entry in batch_entries:
+                self.store.mark_task_summary_outbox_attempt(
+                    str(entry.get('task_id') or ''),
+                    attempted_at=now_iso(),
+                    error_text=error_text,
+                    expected_version=int(entry.get('version') or 0),
+                )
+            attempt_index += 1
+
+    async def _deliver_task_summary_outbox(self, task_id: str) -> None:
+        key = self.normalize_task_id(str(task_id or '').strip())
+        if not key:
+            return
+        if self.store.get_task_summary_outbox(key) is None:
+            return
+        await self._deliver_task_summary_batches()
+
+    def _schedule_task_worker_status_delivery(self, worker_id: str) -> None:
+        key = str(worker_id or '').strip()
+        if self.execution_mode != 'worker' or not key:
+            return
+        current = self._task_worker_status_delivery_tasks.get(key)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._deliver_task_worker_status_outbox(key), name=f'main-runtime-worker-status:{key}')
+        self._task_worker_status_delivery_tasks[key] = task
+        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_worker_status_delivery_task(stored_key, done_task))
+
+    def _clear_task_worker_status_delivery_task(self, worker_id: str, done_task: asyncio.Task[Any]) -> None:
+        current = self._task_worker_status_delivery_tasks.get(worker_id)
+        if current is done_task:
+            self._task_worker_status_delivery_tasks.pop(worker_id, None)
+
+    async def _deliver_task_worker_status_outbox(self, worker_id: str) -> None:
+        for delay_seconds in _WORKER_STATUS_CALLBACK_RETRY_DELAYS:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            entry = self.store.get_task_worker_status_outbox(worker_id)
+            if not entry:
+                return
+            if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+                return
+            payload = dict(entry.get('payload') or {})
+            callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
+            if not callback_url:
+                self.store.mark_task_worker_status_outbox_attempt(
+                    worker_id,
+                    attempted_at=now_iso(),
+                    error_text='task_event_callback_url_unavailable',
+                )
+                return
+            callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
+            headers = self._callback_headers(token=callback_token)
+            try:
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
+                )
+                if 200 <= int(response.status_code or 0) < 300:
+                    self.store.mark_task_worker_status_outbox_delivered(worker_id, delivered_at=now_iso())
+                    return
+                error_text = f'task_event_callback_http_{int(response.status_code or 0)}'
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_text = str(exc or 'task_event_callback_failed').strip() or 'task_event_callback_failed'
+            self.store.mark_task_worker_status_outbox_attempt(
+                worker_id,
+                attempted_at=now_iso(),
+                error_text=error_text,
+            )
 
     def _enqueue_task_stall_callback(self, payload: dict[str, Any]) -> None:
         if self.execution_mode != 'worker':
@@ -1437,13 +2252,15 @@ class MainRuntimeService:
                     error_text='task_stall_callback_url_unavailable',
                 )
                 return
-            headers: dict[str, str] = {}
             callback_token = resolve_task_stall_callback_token(workspace=Path.cwd())
-            if callback_token:
-                headers['x-g3ku-internal-token'] = callback_token
+            headers = self._callback_headers(token=callback_token)
             try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    response = await client.post(callback_url, json=payload, headers=headers)
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=2.0,
+                )
                 if 200 <= int(response.status_code or 0) < 300:
                     self.store.mark_task_stall_outbox_delivered(dedupe_key, delivered_at=now_iso())
                     return
@@ -1505,13 +2322,15 @@ class MainRuntimeService:
                     error_text='task_terminal_callback_url_unavailable',
                 )
                 return
-            headers: dict[str, str] = {}
             callback_token = resolve_task_terminal_callback_token(workspace=Path.cwd())
-            if callback_token:
-                headers['x-g3ku-internal-token'] = callback_token
+            headers = self._callback_headers(token=callback_token)
             try:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    response = await client.post(callback_url, json=payload, headers=headers)
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=2.0,
+                )
                 if 200 <= int(response.status_code or 0) < 300:
                     self.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
                     return
@@ -1540,6 +2359,111 @@ class MainRuntimeService:
         if not enabled:
             return False, 1, 1
         return True, max_parallel_tool_calls, max_parallel_child_pipelines
+
+    @staticmethod
+    def _node_dispatch_concurrency_settings(config: Any | None) -> dict[str, int]:
+        if config is not None and hasattr(config, 'get_node_dispatch_concurrency'):
+            try:
+                execution = int(config.get_node_dispatch_concurrency('execution'))
+                inspection = int(config.get_node_dispatch_concurrency('inspection'))
+                return {
+                    'execution': max(1, execution),
+                    'inspection': max(1, inspection),
+                }
+            except Exception:
+                pass
+        main_runtime = getattr(config, 'main_runtime', None) if config is not None else None
+        dispatch_config = getattr(main_runtime, 'node_dispatch_concurrency', None) if main_runtime is not None else None
+        execution = getattr(dispatch_config, 'execution', 8) if dispatch_config is not None else 8
+        inspection = getattr(dispatch_config, 'inspection', 4) if dispatch_config is not None else 4
+        return {
+            'execution': max(1, int(execution or 8)),
+            'inspection': max(1, int(inspection or 4)),
+        }
+
+    @staticmethod
+    def _event_history_settings(config: Any | None) -> dict[str, Any]:
+        main_runtime = getattr(config, 'main_runtime', None) if config is not None else None
+        history = getattr(main_runtime, 'event_history', None) if main_runtime is not None else None
+        return {
+            'enabled': bool(getattr(history, 'enabled', True)) if history is not None else True,
+            'dir': str(getattr(history, 'dir', '.g3ku/main-runtime/event-history') or '.g3ku/main-runtime/event-history'),
+            'live_patch_persist_window_ms': max(
+                0,
+                int(getattr(history, 'live_patch_persist_window_ms', 1000) or 1000),
+            ),
+            'archive_encoding': str(getattr(history, 'archive_encoding', 'gzip') or 'gzip').strip().lower() or 'gzip',
+        }
+
+    @staticmethod
+    def _adaptive_tool_budget_settings(config: Any | None) -> dict[str, Any]:
+        agents = getattr(config, 'agents', None) if config is not None else None
+        parallelism = getattr(agents, 'node_parallelism', None) if agents is not None else None
+        return {
+            'enabled': bool(getattr(parallelism, 'adaptive_total_tool_budget_enabled', True)) if parallelism is not None else True,
+            'normal_limit': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_normal_limit', 6) or 6)),
+            'throttled_limit': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_throttled_limit', 2) or 2)),
+            'critical_limit': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_critical_limit', getattr(parallelism, 'adaptive_total_tool_budget_safe_limit', 1)) or 1)),
+            'step_up': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_step_up', 1) or 1)),
+            'sample_seconds': max(0.1, float(getattr(parallelism, 'adaptive_total_tool_budget_sample_seconds', 1.0) or 1.0)),
+            'recover_window_seconds': max(0.1, float(getattr(parallelism, 'adaptive_total_tool_budget_recover_window_seconds', 1.0) or 1.0)),
+            'warn_consecutive_samples': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_warn_consecutive_samples', 3) or 3)),
+            'safe_consecutive_samples': max(1, int(getattr(parallelism, 'adaptive_total_tool_budget_safe_consecutive_samples', 3) or 3)),
+            'pressure_snapshot_stale_after_seconds': max(0.1, float(getattr(parallelism, 'adaptive_pressure_snapshot_stale_after_seconds', 3.0) or 3.0)),
+            'event_loop_warn_ms': max(0.0, float(getattr(parallelism, 'adaptive_event_loop_warn_ms', 250.0) or 250.0)),
+            'event_loop_safe_ms': max(0.0, float(getattr(parallelism, 'adaptive_event_loop_safe_ms', 100.0) or 100.0)),
+            'event_loop_critical_ms': max(0.0, float(getattr(parallelism, 'adaptive_event_loop_critical_ms', 1500.0) or 1500.0)),
+            'writer_queue_warn': max(1, int(getattr(parallelism, 'adaptive_writer_queue_warn', 50) or 50)),
+            'writer_queue_safe': max(1, int(getattr(parallelism, 'adaptive_writer_queue_safe', 10) or 10)),
+            'writer_queue_critical': max(1, int(getattr(parallelism, 'adaptive_writer_queue_critical', 100) or 100)),
+            'sqlite_write_wait_warn_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_write_wait_warn_ms', 200.0) or 200.0)),
+            'sqlite_write_wait_safe_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_write_wait_safe_ms', 50.0) or 50.0)),
+            'sqlite_write_wait_critical_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_write_wait_critical_ms', 250.0) or 250.0)),
+            'sqlite_query_warn_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_query_warn_ms', 150.0) or 150.0)),
+            'sqlite_query_safe_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_query_safe_ms', 30.0) or 30.0)),
+            'sqlite_query_critical_ms': max(0.0, float(getattr(parallelism, 'adaptive_sqlite_query_critical_ms', 250.0) or 250.0)),
+            'machine_cpu_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_warn_percent', 85.0) or 85.0)),
+            'machine_cpu_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_safe_percent', 55.0) or 55.0)),
+            'machine_cpu_critical_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_critical_percent', 95.0) or 95.0)),
+            'machine_memory_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_warn_percent', 88.0) or 88.0)),
+            'machine_memory_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_safe_percent', 75.0) or 75.0)),
+            'machine_memory_critical_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_critical_percent', 94.0) or 94.0)),
+            'machine_disk_busy_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_warn_percent', 70.0) or 70.0)),
+            'machine_disk_busy_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_safe_percent', 35.0) or 35.0)),
+            'machine_disk_busy_critical_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_critical_percent', 90.0) or 90.0)),
+            'process_cpu_warn_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_warn_ratio', 0.85) or 0.85)),
+            'process_cpu_safe_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_safe_ratio', 0.50) or 0.50)),
+        }
+
+    @staticmethod
+    def _repair_legacy_display_text(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        text = str(value or '')
+        if not text:
+            return text
+        text = re.sub(r'^鏈€缁堥獙鏀(?:讹細|:|：|\?)?', '最终验收:', text)
+        replacements = (
+            ('鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?', '核对最终结果是否满足要求。'),
+            ('妫€鏌ユ渶缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?', '检查最终结果是否满足要求。'),
+            ('妫€鏌?child 杈撳嚭銆?', '检查 child 输出。'),
+            ('妫€鏌ュ叕鍛婅崏绋挎槸鍚︽弧瓒充氦浠樿姹傘€?', '检查公告草稿是否满足交付要求。'),
+            ('楠屾敹閫氳繃', '验收通过'),
+            ('鑷富鎵ц', '自主执行'),
+            ('杩涜涓?', '进行中'),
+            ('鏈€鏂伴樁娈电洰鏍?', '最新阶段目标'),
+        )
+        for source, target in replacements:
+            text = text.replace(source, target)
+        return text
+
+    @classmethod
+    def _repair_legacy_display_payload(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: cls._repair_legacy_display_payload(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._repair_legacy_display_payload(item) for item in value]
+        return cls._repair_legacy_display_text(value)
 
     @staticmethod
     def _normalize_optional_parallel_limit(value: Any) -> int | None:
@@ -1572,13 +2496,64 @@ class MainRuntimeService:
         self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
         self.node_runner._execution_max_iterations = config.get_role_max_iterations('execution')
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
-        self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
-        self.node_runner._acceptance_max_concurrency = config.get_role_max_concurrency('inspection')
+        self.node_runner._execution_max_concurrency = None
+        self.node_runner._acceptance_max_concurrency = None
+        node_dispatch_limits = self._node_dispatch_concurrency_settings(config)
+        self.task_actor_service.configure_node_dispatch_limits(
+            execution=None,
+            inspection=None,
+        )
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(config)
         self._react_loop._parallel_tool_calls_enabled = parallel_enabled
         self._react_loop._max_parallel_tool_calls = max_parallel_tool_calls
         self.node_runner._max_parallel_child_pipelines = max_parallel_child_pipelines
         self.node_runner._parallel_child_pipelines_enabled = parallel_enabled
+        adaptive_budget_settings = self._adaptive_tool_budget_settings(config)
+        if self.adaptive_tool_budget_controller is not None:
+            self.adaptive_tool_budget_controller.configure(
+                normal_limit=int(adaptive_budget_settings['normal_limit']),
+                throttled_limit=int(adaptive_budget_settings['throttled_limit']),
+                critical_limit=int(adaptive_budget_settings['critical_limit']),
+                step_up=int(adaptive_budget_settings['step_up']),
+            )
+        if self.model_key_concurrency_controller is not None:
+            self.model_key_concurrency_controller.configure(
+                resolve_model_limits=self._resolve_model_limit_payload,
+                on_availability_changed=self.node_turn_controller.poke if self.node_turn_controller is not None else None,
+            )
+        if self.node_turn_controller is not None:
+            self.node_turn_controller.configure(gate_supplier=self._node_turn_gate_allowed)
+        if self.tool_pressure_monitor is not None:
+            self.tool_pressure_monitor.configure(
+                sample_seconds=float(adaptive_budget_settings['sample_seconds']),
+                recover_window_seconds=float(adaptive_budget_settings['recover_window_seconds']),
+                warn_consecutive_samples=int(adaptive_budget_settings['warn_consecutive_samples']),
+                safe_consecutive_samples=int(adaptive_budget_settings['safe_consecutive_samples']),
+                pressure_snapshot_stale_after_seconds=float(adaptive_budget_settings['pressure_snapshot_stale_after_seconds']),
+                event_loop_warn_ms=float(adaptive_budget_settings['event_loop_warn_ms']),
+                event_loop_safe_ms=float(adaptive_budget_settings['event_loop_safe_ms']),
+                event_loop_critical_ms=float(adaptive_budget_settings['event_loop_critical_ms']),
+                writer_queue_warn=int(adaptive_budget_settings['writer_queue_warn']),
+                writer_queue_safe=int(adaptive_budget_settings['writer_queue_safe']),
+                writer_queue_critical=int(adaptive_budget_settings['writer_queue_critical']),
+                sqlite_write_wait_warn_ms=float(adaptive_budget_settings['sqlite_write_wait_warn_ms']),
+                sqlite_write_wait_safe_ms=float(adaptive_budget_settings['sqlite_write_wait_safe_ms']),
+                sqlite_write_wait_critical_ms=float(adaptive_budget_settings['sqlite_write_wait_critical_ms']),
+                sqlite_query_warn_ms=float(adaptive_budget_settings['sqlite_query_warn_ms']),
+                sqlite_query_safe_ms=float(adaptive_budget_settings['sqlite_query_safe_ms']),
+                sqlite_query_critical_ms=float(adaptive_budget_settings['sqlite_query_critical_ms']),
+                machine_cpu_warn_percent=float(adaptive_budget_settings['machine_cpu_warn_percent']),
+                machine_cpu_safe_percent=float(adaptive_budget_settings['machine_cpu_safe_percent']),
+                machine_cpu_critical_percent=float(adaptive_budget_settings['machine_cpu_critical_percent']),
+                machine_memory_warn_percent=float(adaptive_budget_settings['machine_memory_warn_percent']),
+                machine_memory_safe_percent=float(adaptive_budget_settings['machine_memory_safe_percent']),
+                machine_memory_critical_percent=float(adaptive_budget_settings['machine_memory_critical_percent']),
+                machine_disk_busy_warn_percent=float(adaptive_budget_settings['machine_disk_busy_warn_percent']),
+                machine_disk_busy_safe_percent=float(adaptive_budget_settings['machine_disk_busy_safe_percent']),
+                machine_disk_busy_critical_percent=float(adaptive_budget_settings['machine_disk_busy_critical_percent']),
+                process_cpu_warn_ratio=float(adaptive_budget_settings['process_cpu_warn_ratio']),
+                process_cpu_safe_ratio=float(adaptive_budget_settings['process_cpu_safe_ratio']),
+            )
         # Resource manager config binding and reload are handled by refresh_loop_runtime_config().
         # Rebinding here clears dynamic tool instances before CEO exposure is assembled.
         self.resource_registry.refresh_from_current_resources()
@@ -2596,94 +3571,15 @@ class MainRuntimeService:
         return changed
 
     def _tool_family_executor_name(self, family) -> str:
-        primary = str(getattr(family, 'primary_executor_name', '') or '').strip()
-        if primary:
-            return primary
-        for action in list(getattr(family, 'actions', []) or []):
-            for executor_name in list(getattr(action, 'executor_names', []) or []):
-                name = str(executor_name or '').strip()
-                if name:
-                    return name
-        fallback = str(getattr(family, 'tool_id', '') or '').strip()
-        if self._resource_manager is not None and fallback:
-            descriptor = self._resource_manager.get_tool_descriptor(fallback)
-            if descriptor is not None:
-                return fallback
-        return ''
-
-    @staticmethod
-    def _tool_family_executor_names(family) -> list[str]:
-        names: list[str] = []
-        for action in list(getattr(family, 'actions', []) or []):
-            for executor_name in list(getattr(action, 'executor_names', []) or []):
-                name = str(executor_name or '').strip()
-                if name and name not in names:
-                    names.append(name)
-        return names
-
-    def _resolve_tool_toolskill_target(self, tool_id: str):
-        requested = str(tool_id or '').strip()
-        family = self._raw_tool_family(requested)
-        if family is not None:
-            return family, requested, self._tool_family_executor_name(family)
-        if requested:
-            for item in self.resource_registry.list_tool_families():
-                for executor_name in self._tool_family_executor_names(item):
-                    if requested == executor_name:
-                        return item, requested, executor_name
-        return None, requested, ''
+        return resolve_primary_executor_name(family, resource_manager=self._resource_manager)
 
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
-        family, requested_tool_id, executor_name = self._resolve_tool_toolskill_target(tool_id)
-        if family is None:
-            return None
-        family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        family_primary_executor = self._tool_family_executor_name(family)
-        resolved_tool_id = (
-            executor_name
-            if requested_tool_id and executor_name and requested_tool_id == executor_name and executor_name != family_tool_id
-            else family_tool_id
+        return build_tool_toolskill_payload(
+            tool_id,
+            raw_tool_family_getter=self._raw_tool_family,
+            resource_registry=self.resource_registry,
+            resource_manager=self._resource_manager,
         )
-        content = ''
-        path = ''
-        descriptor = None
-        if executor_name and self._resource_manager is not None:
-            try:
-                content = self._resource_manager.load_toolskill_body(executor_name)
-            except FileNotFoundError:
-                content = ''
-            descriptor = self._resource_manager.get_tool_descriptor(executor_name)
-            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
-                path = str(descriptor.toolskills_main_path)
-        if descriptor is None and self._resource_manager is not None:
-            descriptor = self._resource_manager.get_tool_descriptor(str(getattr(family, 'tool_id', '') or '').strip())
-            if descriptor is not None and getattr(descriptor, 'toolskills_main_path', None) is not None:
-                path = str(descriptor.toolskills_main_path)
-        tool_type = str(getattr(family, 'tool_type', getattr(descriptor, 'tool_type', 'internal')) or 'internal')
-        install_dir = str(
-            getattr(family, 'install_dir', None)
-            or getattr(descriptor, 'install_dir', '')
-            or ''
-        ).strip() or None
-        callable_flag = bool(getattr(family, 'callable', getattr(descriptor, 'callable', True)))
-        repair_required = callable_flag and not bool(getattr(family, 'available', getattr(descriptor, 'available', True)))
-        return {
-            'tool_id': resolved_tool_id or family_tool_id,
-            'family_tool_id': family_tool_id,
-            'requested_tool_id': requested_tool_id or family_tool_id,
-            'primary_executor_name': family_primary_executor,
-            'resolved_executor_name': executor_name or family_primary_executor,
-            'content': content,
-            'path': path,
-            'description': family.description,
-            'tool_type': tool_type,
-            'install_dir': install_dir,
-            'callable': callable_flag,
-            'available': bool(getattr(family, 'available', getattr(descriptor, 'available', True))),
-            'repair_required': repair_required,
-            'warnings': list(getattr(family, 'metadata', {}).get('warnings') or []),
-            'errors': list(getattr(family, 'metadata', {}).get('errors') or []),
-        }
 
     def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
         family = self._raw_tool_family(tool_id)
@@ -2876,26 +3772,93 @@ class MainRuntimeService:
         items = await manager.read_trace_file(trace_kind=trace_kind, limit=max(1, int(limit)))
         return {'ok': True, 'items': items, 'trace_kind': trace_kind, 'limit': max(1, int(limit))}
 
-    def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False) -> dict[str, Any] | None:
+    def get_task_detail_payload(
+        self,
+        task_id: str,
+        *,
+        mark_read: bool = False,
+    ) -> dict[str, Any] | None:
         task_id = self.normalize_task_id(task_id)
-        self.log_service.ensure_task_projection(task_id)
-        payload = self.query_service.get_task_snapshot(task_id, mark_read=mark_read)
+        payload = self.query_service.get_task_snapshot(
+            task_id,
+            mark_read=mark_read,
+        )
         if payload is None:
             return None
         return payload
 
+    def get_task_tree_snapshot_payload(self, task_id: str) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        snapshot = self.query_service.get_tree_snapshot(normalized_task_id)
+        if snapshot is None:
+            return None
+        return {'ok': True, **snapshot.model_dump(mode='json')}
+
+    def get_task_tree_subtree_payload(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        round_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        snapshot = self.query_service.get_tree_subtree(
+            normalized_task_id,
+            node_id,
+            round_id=round_id,
+        )
+        if snapshot is None:
+            return None
+        return {'ok': True, **snapshot.model_dump(mode='json')}
+
     def get_node_detail_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         normalized_task_id = self.normalize_task_id(task_id)
-        self.log_service.ensure_task_projection(normalized_task_id)
         detail = self.query_service.get_node_detail(normalized_task_id, node_id)
         if detail is None:
             return None
+        item = self._repair_legacy_display_payload(detail.model_dump(mode='json'))
         return {
             'ok': True,
             'task_id': normalized_task_id,
             'node_id': node_id,
-            'item': detail.model_dump(mode='json'),
+            'item': item,
         }
+
+    def get_node_latest_context_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        node = self.store.get_node(node_id)
+        if task is None or node is None or str(node.task_id or '').strip() != normalized_task_id:
+            return None
+        frame = self.store.get_task_runtime_frame(normalized_task_id, node_id)
+        ref = ''
+        if frame is not None:
+            ref = str((frame.payload or {}).get('messages_ref') or '').strip()
+        if not ref:
+            metadata = dict(node.metadata or {})
+            ref = str(metadata.get('latest_runtime_messages_ref') or '').strip()
+        resolver = getattr(self.log_service, 'resolve_content_ref', None)
+        content = str(resolver(ref) or '') if callable(resolver) and ref else ''
+        return {
+            'ok': True,
+            'task_id': normalized_task_id,
+            'node_id': node_id,
+            'title': str(self._repair_legacy_display_text(node.goal or node.node_id)),
+            'node_kind': str(node.node_kind or 'execution'),
+            'status': str(node.status or 'in_progress'),
+            'updated_at': str(node.updated_at or ''),
+            'ref': ref,
+            'content': content,
+        }
+
+    def record_node_file_change(self, task_id: str, node_id: str, *, path: str, change_type: str) -> None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        self.log_service.record_node_file_change(
+            normalized_task_id,
+            node_id,
+            path=path,
+            change_type=change_type,
+        )
 
     def node_detail(self, task_id: str, node_id: str) -> dict[str, Any] | str:
         normalized_task_id = self.normalize_task_id(task_id)
@@ -3055,12 +4018,11 @@ class MainRuntimeService:
         task = self.get_task(task_id)
         self.refresh_resource_paths([target_path], trigger='artifact-apply', session_id=(task.session_id if task is not None else 'web:shared'))
         if task is not None:
-            self.store.append_task_event(
+            self.log_service.append_task_event(
                 task_id=task.task_id,
                 session_id=task.session_id,
                 event_type='task.artifact.applied',
-                created_at=now_iso(),
-                payload={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True, 'task_id': task.task_id},
+                data={'artifact_id': artifact.artifact_id, 'path': str(target_path), 'applied': True, 'task_id': task.task_id},
             )
             self._publish_task_artifact_applied_event(
                 task=task,
@@ -3134,11 +4096,6 @@ class MainRuntimeService:
             if not isinstance(payload, dict):
                 continue
             payload['visible_skills'] = skill_items
-            payload['skill_usage_rules'] = {
-                'visible_only': True,
-                'skill_discovery_allowed': False,
-                'load_skill_context_requires_visible_skill_id': True,
-            }
             enriched[index] = {
                 **message,
                 'content': json.dumps(payload, ensure_ascii=False, indent=2),
@@ -3207,7 +4164,6 @@ class MainRuntimeService:
 
     def failed_node_ids(self, task_id: str) -> str:
         task_id = self.normalize_task_id(task_id)
-        self.log_service.ensure_task_projection(task_id)
         failed_node_ids = self.query_service.failed_node_ids(task_id)
         if failed_node_ids is None:
             return f'Error: Task not found: {task_id}'
@@ -3243,20 +4199,51 @@ class MainRuntimeService:
         if stall_delivery_tasks:
             await asyncio.gather(*stall_delivery_tasks, return_exceptions=True)
         self._task_stall_delivery_tasks.clear()
+        worker_status_delivery_tasks = [task for task in self._task_worker_status_delivery_tasks.values() if task is not None and not task.done()]
+        for task in worker_status_delivery_tasks:
+            task.cancel()
+        if worker_status_delivery_tasks:
+            await asyncio.gather(*worker_status_delivery_tasks, return_exceptions=True)
+        self._task_worker_status_delivery_tasks.clear()
+        task_summary_flush_tasks = [task for task in self._task_summary_flush_tasks.values() if task is not None and not task.done()]
+        for task in task_summary_flush_tasks:
+            task.cancel()
+        if task_summary_flush_tasks:
+            await asyncio.gather(*task_summary_flush_tasks, return_exceptions=True)
+        self._task_summary_flush_tasks.clear()
+        if self._pending_task_summaries:
+            for task_id in list(self._pending_task_summaries.keys()):
+                self._flush_task_summary_to_outbox(task_id)
+        task_summary_delivery_task = self._task_summary_delivery_task
+        if task_summary_delivery_task is not None and not task_summary_delivery_task.done():
+            task_summary_delivery_task.cancel()
+            await asyncio.gather(task_summary_delivery_task, return_exceptions=True)
+        self._task_summary_delivery_task = None
         callback_tasks = [task for task in list(self._task_event_dispatch_tasks) if task is not None and not task.done()]
         for task in callback_tasks:
             task.cancel()
         if callback_tasks:
             await asyncio.gather(*callback_tasks, return_exceptions=True)
         self._task_event_dispatch_tasks.clear()
+        callback_client = self._callback_client
+        self._callback_client = None
+        if callback_client is not None:
+            await callback_client.aclose()
+        if self.tool_pressure_monitor is not None:
+            await self.tool_pressure_monitor.close()
+        if getattr(self, 'task_governance_manager', None) is not None:
+            await self.task_governance_manager.close()
+        if self.node_turn_controller is not None:
+            await self.node_turn_controller.close()
+        await self.worker_heartbeat_service.close()
         await self.task_stall_notifier.close()
-        if self.execution_mode == 'worker' and self.worker_id:
+        if self.execution_mode == 'worker' and self.worker_id and self._worker_lease_acquired:
             stopped_item = {
                 'worker_id': self.worker_id,
                 'role': 'task_worker',
                 'status': 'stopped',
                 'updated_at': now_iso(),
-                'payload': {'execution_mode': self.execution_mode},
+                'payload': {'execution_mode': self.execution_mode, 'worker_heartbeat_at': now_iso(), 'debug': {'recent_long_blocks': self.runtime_debug_recorder.snapshot()}, **self._tool_pressure_snapshot()},
             }
             self.store.upsert_worker_status(
                 worker_id=str(stopped_item['worker_id']),
@@ -3266,10 +4253,150 @@ class MainRuntimeService:
                 payload=dict(stopped_item['payload']),
             )
             self.publish_worker_status_event(item=stopped_item)
-        await self.task_runner.close()
+            self.store.release_worker_lease(role=_WORKER_LEASE_ROLE, worker_id=str(self.worker_id))
+            self._worker_lease_acquired = False
+        await self.global_scheduler.close()
+        self.log_service.close()
         await self.registry.close()
         self.governance_store.close()
         self.store.close()
+
+    def _tool_pressure_snapshot(self) -> dict[str, Any]:
+        summary_stats = self._summary_stats_snapshot()
+        node_turn_snapshot = self._node_turn_snapshot()
+        if self.tool_pressure_monitor is not None:
+            return {**dict(self.tool_pressure_monitor.snapshot() or {}), **node_turn_snapshot, **summary_stats}
+        if self.adaptive_tool_budget_controller is not None:
+            return {**dict(self.adaptive_tool_budget_controller.snapshot() or {}), **node_turn_snapshot, **summary_stats}
+        return {**node_turn_snapshot, **summary_stats}
+
+    def _node_turn_snapshot(self) -> dict[str, Any]:
+        controller = getattr(self, 'node_turn_controller', None)
+        if controller is None:
+            return {
+                'node_queue_running_count': 0,
+                'node_queue_waiting_count': 0,
+                'node_queue_oldest_wait_ms': 0.0,
+            }
+        try:
+            payload = dict(controller.snapshot() or {})
+        except Exception:
+            payload = {}
+        return {
+            'node_queue_running_count': int(payload.get('node_queue_running_count') or 0),
+            'node_queue_waiting_count': int(payload.get('node_queue_waiting_count') or 0),
+            'node_queue_frozen_count': int(payload.get('node_queue_frozen_count') or 0),
+            'node_queue_oldest_wait_ms': float(payload.get('node_queue_oldest_wait_ms') or 0.0),
+        }
+
+    def _node_turn_gate_allowed(self) -> bool:
+        monitor = getattr(self, 'tool_pressure_monitor', None)
+        if monitor is None:
+            return True
+        try:
+            snapshot = dict(monitor.snapshot() or {})
+        except Exception:
+            return True
+        budget_state = str(snapshot.get('budget_state') or snapshot.get('tool_pressure_state') or 'normal').strip().lower()
+        machine_state = str(snapshot.get('machine_pressure_state') or '').strip().lower()
+        local_state = str(snapshot.get('local_pressure_state') or '').strip().lower()
+        return budget_state != 'critical' and machine_state != 'critical' and local_state != 'critical'
+
+    def _resolve_model_limit_payload(self, model_ref: str) -> dict[str, Any]:
+        config = self._app_config
+        normalized_model_ref = str(model_ref or '').strip()
+        if config is None or not normalized_model_ref:
+            return {'key_count': 1, 'per_key_limit': None}
+        try:
+            target = resolve_chat_target(config, normalized_model_ref, workspace=config.workspace_path)
+        except Exception:
+            return {'key_count': 1, 'per_key_limit': None}
+        raw_api_key = str((dict(getattr(target, 'secret_payload', {}) or {})).get('api_key', '') or '')
+        key_count = max(1, len(parse_api_keys(raw_api_key)))
+        raw_limit = getattr(target, 'single_api_key_max_concurrency', None)
+        return {
+            'key_count': key_count,
+            'per_key_limit': None if raw_limit in (None, '') else max(1, int(raw_limit)),
+        }
+
+    def _tool_pressure_status_payload(self, item: dict[str, Any] | None) -> dict[str, Any]:
+        current_payload = dict(item.get('payload') or {}) if isinstance(item, dict) else {}
+        live_snapshot = self._tool_pressure_snapshot() if self.execution_mode == 'worker' else {}
+        merged = {**current_payload, **live_snapshot}
+        summary_stats = self._summary_stats_snapshot()
+        for key in list(summary_stats.keys()):
+            if key in merged:
+                try:
+                    summary_stats[key] = float(merged.get(key) or 0.0)
+                except Exception:
+                    summary_stats[key] = 0.0
+        sample_at = str(merged.get('pressure_sample_at') or merged.get('tool_pressure_sample_at') or '')
+        sample_age_ms: float | None
+        sample_dt = self._parse_worker_timestamp(sample_at)
+        if sample_dt is None:
+            sample_age_ms = None
+        else:
+            sample_age_ms = max(0.0, (datetime.now(timezone.utc) - sample_dt).total_seconds() * 1000.0)
+        stale_after_seconds = float(
+            self._adaptive_tool_budget_settings(self._app_config).get('pressure_snapshot_stale_after_seconds', 3.0)
+        )
+        pressure_snapshot_fresh = bool(
+            sample_age_ms is not None
+            and bool(merged.get('machine_pressure_available'))
+            and sample_age_ms <= (stale_after_seconds * 1000.0)
+        )
+        heartbeat_at = str(merged.get('worker_heartbeat_at') or (item.get('updated_at') if isinstance(item, dict) else '') or '')
+        heartbeat_dt = self._parse_worker_timestamp(heartbeat_at)
+        if heartbeat_dt is None:
+            heartbeat_age_ms = None
+        else:
+            heartbeat_age_ms = max(0.0, (datetime.now(timezone.utc) - heartbeat_dt).total_seconds() * 1000.0)
+        heartbeat_fresh = bool(
+            heartbeat_age_ms is not None
+            and heartbeat_age_ms <= (self._worker_status_stale_after_seconds(item if isinstance(item, dict) else None) * 1000.0)
+        )
+        return {
+            'tool_pressure_state': str(merged.get('tool_pressure_state') or 'normal'),
+            'tool_pressure_target_limit': int(merged.get('tool_pressure_target_limit') or 0),
+            'tool_pressure_running_count': int(merged.get('tool_pressure_running_count') or 0),
+            'tool_pressure_waiting_count': int(merged.get('tool_pressure_waiting_count') or 0),
+            'tool_queue_running_count': int(merged.get('tool_queue_running_count') or merged.get('tool_pressure_running_count') or 0),
+            'tool_queue_waiting_count': int(merged.get('tool_queue_waiting_count') or merged.get('tool_pressure_waiting_count') or 0),
+            'tool_pressure_event_loop_lag_ms': float(merged.get('tool_pressure_event_loop_lag_ms') or 0.0),
+            'tool_pressure_writer_queue_depth': int(merged.get('tool_pressure_writer_queue_depth') or 0),
+            'tool_pressure_process_cpu_ratio': float(merged.get('tool_pressure_process_cpu_ratio') or 0.0),
+            'tool_pressure_last_transition_at': str(merged.get('tool_pressure_last_transition_at') or ''),
+            'tool_pressure_throttled_since': str(merged.get('tool_pressure_throttled_since') or ''),
+            'tool_pressure_critical_since': str(merged.get('tool_pressure_critical_since') or ''),
+            'worker_execution_state': str(merged.get('worker_execution_state') or merged.get('tool_pressure_state') or 'normal'),
+            'worker_execution_target_limit': int(merged.get('worker_execution_target_limit') or merged.get('tool_pressure_target_limit') or 0),
+            'worker_execution_running_count': int(merged.get('worker_execution_running_count') or merged.get('tool_pressure_running_count') or 0),
+            'worker_execution_waiting_count': int(merged.get('worker_execution_waiting_count') or merged.get('tool_pressure_waiting_count') or 0),
+            'worker_execution_oldest_wait_ms': float(merged.get('worker_execution_oldest_wait_ms') or 0.0),
+            'node_queue_running_count': int(merged.get('node_queue_running_count') or 0),
+            'node_queue_waiting_count': int(merged.get('node_queue_waiting_count') or 0),
+            'node_queue_oldest_wait_ms': float(merged.get('node_queue_oldest_wait_ms') or 0.0),
+            'machine_pressure_state': str(merged.get('machine_pressure_state') or 'unknown'),
+            'local_pressure_state': str(merged.get('local_pressure_state') or 'unknown'),
+            'budget_state': str(merged.get('budget_state') or merged.get('tool_pressure_state') or 'normal'),
+            'machine_pressure_available': bool(merged.get('machine_pressure_available')),
+            'machine_pressure_cpu_percent': float(merged.get('machine_pressure_cpu_percent') or 0.0),
+            'machine_pressure_memory_percent': float(merged.get('machine_pressure_memory_percent') or 0.0),
+            'machine_pressure_disk_busy_percent': float(merged.get('machine_pressure_disk_busy_percent') or 0.0),
+            'machine_pressure_disk_busy_available': bool(merged.get('machine_pressure_disk_busy_available')),
+            'machine_pressure_disk_read_bytes_per_sec': float(merged.get('machine_pressure_disk_read_bytes_per_sec') or 0.0),
+            'machine_pressure_disk_write_bytes_per_sec': float(merged.get('machine_pressure_disk_write_bytes_per_sec') or 0.0),
+            'sqlite_write_wait_ms': float(merged.get('sqlite_write_wait_ms') or 0.0),
+            'sqlite_query_latency_ms': float(merged.get('sqlite_query_latency_ms') or 0.0),
+            'pressure_sample_at': sample_at,
+            'pressure_sample_age_ms': round(sample_age_ms, 3) if sample_age_ms is not None else None,
+            'pressure_snapshot_fresh': pressure_snapshot_fresh,
+            'worker_heartbeat_at': heartbeat_at,
+            'worker_heartbeat_age_ms': round(heartbeat_age_ms, 3) if heartbeat_age_ms is not None else None,
+            'worker_heartbeat_fresh': heartbeat_fresh,
+            **summary_stats,
+            'debug': dict(merged.get('debug') or {}) if isinstance(merged.get('debug'), dict) else {},
+        }
 
     def _clamp_depth(self, requested: int | None) -> int:
         if requested is None:

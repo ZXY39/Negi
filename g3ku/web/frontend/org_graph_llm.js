@@ -30,6 +30,7 @@
       initialJsonText: "",
       retryOn: [...DEFAULT_RETRY_ON],
       retryCount: 0,
+      singleApiKeyMaxConcurrency: "",
       description: "",
       validation: null,
       probe: null,
@@ -383,8 +384,37 @@
     return trim(section.jsonText) !== trim(section.initialJsonText);
   }
 
+  function memorySectionNeedsInitialSave(section) {
+    if (!section) return false;
+    return !trim(section.configId) && !trim(section.error) && !!trim(section.jsonText);
+  }
+
+  function memorySectionHasPendingChanges(section) {
+    return memorySectionNeedsInitialSave(section) || memorySectionIsModified(section);
+  }
+
   function modifiedMemorySectionKeys(memory = llmState().editor.memory) {
-    return ["embedding", "rerank"].filter((sectionKey) => memorySectionIsModified(memory?.[sectionKey]));
+    return ["embedding", "rerank"].filter((sectionKey) => memorySectionHasPendingChanges(memory?.[sectionKey]));
+  }
+
+  function memorySectionKeyFromTextareaId(elementId) {
+    const text = trim(elementId);
+    if (!text.startsWith("llm-memory-") || !text.endsWith("-json")) return "";
+    return trim(text.slice("llm-memory-".length, -"-json".length));
+  }
+
+  function refreshMemorySaveButtonState() {
+    const button = U.llmEditorShell?.querySelector('[data-llm-action="save-memory"]');
+    if (!button) return;
+    button.disabled = !canSaveMemoryEditor() || !!llmState().saving;
+  }
+
+  function handleMemorySectionInput(sectionKey) {
+    const section = syncMemorySectionText(sectionKey);
+    if (!section) return;
+    section.validation = null;
+    section.probe = null;
+    refreshMemorySaveButtonState();
   }
 
   function setMemorySectionValidationError(section, message, field = "json") {
@@ -507,6 +537,7 @@
       initialJsonText: jsonText,
       retryOn: Array.isArray(binding.retry_on) ? binding.retry_on.map((item) => trim(item)).filter(Boolean) : [...DEFAULT_RETRY_ON],
       retryCount: Number.isInteger(Number(binding.retry_count)) ? Math.max(0, Number(binding.retry_count)) : 0,
+      singleApiKeyMaxConcurrency: binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? "",
       description: trim(binding.description),
     };
     renderAll();
@@ -618,12 +649,18 @@
     const modelKeyInput = document.getElementById("llm-model-key-input");
     const retryOnInput = document.getElementById("llm-binding-retry-on");
     const retryCountInput = document.getElementById("llm-binding-retry-count");
+    const singleApiKeyMaxConcurrencyInput = document.getElementById("llm-binding-single-api-key-max-concurrency");
     const descriptionInput = document.getElementById("llm-binding-description");
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
     if (retryOnInput) editor.retryOn = parseBindingRetryOn(retryOnInput.value || "");
     if (retryCountInput) {
       const parsed = Number.parseInt(String(retryCountInput.value || "").trim(), 10);
       editor.retryCount = Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+    }
+    if (singleApiKeyMaxConcurrencyInput) {
+      const raw = String(singleApiKeyMaxConcurrencyInput.value || "").trim();
+      const parsed = Number.parseInt(raw, 10);
+      editor.singleApiKeyMaxConcurrency = Number.isInteger(parsed) && parsed >= 1 ? parsed : "";
     }
     if (descriptionInput) editor.description = trim(descriptionInput.value || "");
     return editor;
@@ -634,15 +671,23 @@
     const modelKey = trim(editor?.modelKey);
     const retryOn = Array.isArray(editor?.retryOn) ? editor.retryOn.map((item) => trim(item)).filter(Boolean) : [];
     const retryCount = Number.parseInt(String(editor?.retryCount ?? 0), 10);
+    const rawSingleApiKeyMaxConcurrency = String(editor?.singleApiKeyMaxConcurrency ?? "").trim();
+    const singleApiKeyMaxConcurrency = rawSingleApiKeyMaxConcurrency
+      ? Number.parseInt(rawSingleApiKeyMaxConcurrency, 10)
+      : null;
     const description = trim(editor?.description);
     if (requireModelKey && !modelKey) throw new Error("模型 Key 不能为空");
     if (!Number.isInteger(retryCount) || retryCount < 0) {
       throw new Error("重试次数必须是不小于 0 的整数");
     }
+    if (singleApiKeyMaxConcurrency !== null && (!Number.isInteger(singleApiKeyMaxConcurrency) || singleApiKeyMaxConcurrency < 1)) {
+      throw new Error("single_api_key_max_concurrency must be >= 1");
+    }
     return {
       modelKey,
       retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
       retryCount,
+      singleApiKeyMaxConcurrency,
       description,
     };
   }
@@ -658,6 +703,10 @@
         <label class="resource-field">
           <span class="resource-field-label">重试次数</span>
           <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
+        </label>
+        <label class="resource-field">
+          <span class="resource-field-label">单 API key 最大并发数</span>
+          <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="number" min="1" step="1" inputmode="numeric" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制">
         </label>
       </div>
       <p class="llm-muted">多个 API Key 时，"retry_count" 表示完整轮过所有 key 的次数，不是单次请求重试次数。</p>
@@ -1012,6 +1061,7 @@
           description: bindingDraft.description,
           retry_on: [...bindingDraft.retryOn],
           retry_count: bindingDraft.retryCount,
+          single_api_key_max_concurrency: bindingDraft.singleApiKeyMaxConcurrency,
         },
         draft,
       });
@@ -1068,6 +1118,9 @@
     const bindingPatch = {};
     if (JSON.stringify(bindingDraft.retryOn) !== JSON.stringify(binding.retry_on || [])) bindingPatch.retry_on = bindingDraft.retryOn;
     if (bindingDraft.retryCount !== Number.parseInt(String(binding.retry_count ?? 0), 10)) bindingPatch.retry_count = bindingDraft.retryCount;
+    if ((bindingDraft.singleApiKeyMaxConcurrency ?? null) !== (binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? null)) {
+      bindingPatch.single_api_key_max_concurrency = bindingDraft.singleApiKeyMaxConcurrency;
+    }
     if (bindingDraft.description !== trim(binding.description)) bindingPatch.description = bindingDraft.description;
     state.saving = true;
     renderAll();
@@ -1381,6 +1434,11 @@
       const memoryTemplateSection = event.target?.dataset?.llmMemoryTemplate;
       if (memoryTemplateSection) void handleMemoryTemplateChange(memoryTemplateSection);
     });
+    U.llmEditorShell?.addEventListener("input", (event) => {
+      const sectionKey = memorySectionKeyFromTextareaId(event.target?.id);
+      if (!sectionKey) return;
+      handleMemorySectionInput(sectionKey);
+    });
     U.llmEditorShell?.addEventListener("click", (event) => {
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
       if (!action) return;
@@ -1430,14 +1488,16 @@
         kind: "success",
         persistent: true,
       });
-      let routes = null;
-      for (const scope of MODEL_SCOPES.map((item) => item.key)) {
-        routes = await ApiClient.updateLlmRoute(scope, {
-          modelKeys: normalizeModelRoleChain(S.modelCatalog.roleDrafts[scope] || []),
-          maxIterations: modelScopeIterations(scope, "draft"),
-          maxConcurrency: modelScopeConcurrency(scope, "draft"),
-        });
-      }
+      const routes = await ApiClient.updateLlmRoutes(Object.fromEntries(
+        MODEL_SCOPES.map((item) => [
+          item.key,
+          {
+            modelKeys: normalizeModelRoleChain(S.modelCatalog.roleDrafts[item.key] || []),
+            maxIterations: modelScopeIterations(item.key, "draft"),
+            maxConcurrency: modelScopeConcurrency(item.key, "draft"),
+          },
+        ])
+      ));
       llmState().routes = normalizeAllModelRoles(routes?.routes || EMPTY_MODEL_ROLES());
       llmState().roleIterations = normalizeRoleIterations(routes?.roleIterations || DEFAULT_ROLE_ITERATIONS());
       llmState().roleConcurrency = normalizeRoleConcurrency(routes?.roleConcurrency || routes?.role_concurrency || DEFAULT_ROLE_CONCURRENCY());

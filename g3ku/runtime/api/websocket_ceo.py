@@ -12,12 +12,13 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
-from g3ku.runtime.frontdoor.interaction_trace import normalize_interaction_trace
 from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_ceo_session_catalog,
+    build_local_ceo_session_item,
     build_session_summary,
+    ceo_session_family,
     create_web_ceo_session,
     ensure_active_web_ceo_session,
     ensure_ceo_session_metadata,
@@ -25,6 +26,7 @@ from g3ku.runtime.web_ceo_sessions import (
     is_internal_ceo_user_message,
     list_web_ceo_sessions,
     read_inflight_turn_snapshot,
+    resolve_execution_snapshot,
     resolve_active_ceo_session_id,
     upload_dir_for_session,
     workspace_path,
@@ -92,7 +94,7 @@ def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, 
                 'items': catalog.get('items') or [],
                 'channel_groups': catalog.get('channel_groups') or [],
                 'active_session_id': active_session_id,
-                'active_session_family': catalog.get('active_session_family') or 'local',
+                'active_session_family': catalog.get('active_session_family') or ceo_session_family(active_session_id),
             },
         )
     )
@@ -115,15 +117,15 @@ def _publish_ceo_session_patch(
     key = str(session_id or '').strip()
     if not key:
         return
-    session = transcript_store.get_or_create(key)
     active_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
-    catalog = build_ceo_session_catalog(
+    item = build_local_ceo_session_item(
         transcript_store,
+        key,
         active_session_id=active_session_id,
-        is_running_resolver=lambda session_key: _session_is_running(runtime_manager, session_key),
+        is_running=_session_is_running(runtime_manager, key) if is_running is None else bool(is_running),
     )
-    item = find_ceo_session_catalog_item(catalog, key)
     if item is None:
+        session = transcript_store.get_or_create(key)
         item = build_session_summary(
             session,
             is_active=key == active_session_id,
@@ -142,7 +144,7 @@ def _publish_ceo_session_patch(
             data={
                 'item': item,
                 'active_session_id': active_session_id,
-                'active_session_family': catalog.get('active_session_family') or 'local',
+                'active_session_family': ceo_session_family(active_session_id),
             },
         )
     )
@@ -277,20 +279,28 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
     )
 
 
-def _build_inflight_turn_snapshot(session: Any, session_id: str) -> dict[str, Any] | None:
-    getter = getattr(session, 'inflight_turn_snapshot', None)
-    if not callable(getter):
-        snapshot = read_inflight_turn_snapshot(session_id)
-    else:
-        snapshot = getter()
-        if not isinstance(snapshot, dict):
+def _build_inflight_turn_snapshot(
+    session: Any,
+    session_id: str,
+    persisted_session: Any | None = None,
+) -> dict[str, Any] | None:
+    snapshot: dict[str, Any] | None = None
+    try:
+        resolved_snapshot, _resolved_source = resolve_execution_snapshot(session, persisted_session)
+        if isinstance(resolved_snapshot, dict):
+            snapshot = resolved_snapshot
+    except Exception:
+        snapshot = None
+    if not isinstance(snapshot, dict):
+        getter = getattr(session, 'inflight_turn_snapshot', None)
+        if not callable(getter):
             snapshot = read_inflight_turn_snapshot(session_id)
+        else:
+            snapshot = getter()
+            if not isinstance(snapshot, dict):
+                snapshot = read_inflight_turn_snapshot(session_id)
     if not isinstance(snapshot, dict):
         return None
-    interaction_trace = snapshot.get('interaction_trace')
-    if isinstance(interaction_trace, dict):
-        snapshot = dict(snapshot)
-        snapshot['interaction_trace'] = normalize_interaction_trace(interaction_trace)
     return snapshot
 
 
@@ -403,13 +413,6 @@ def _normalize_snapshot_tool_events(raw_events: Any) -> list[dict[str, Any]]:
     return items
 
 
-def _normalize_snapshot_interaction_trace(raw_trace: Any) -> dict[str, Any] | None:
-    if not isinstance(raw_trace, dict):
-        return None
-    normalized = normalize_interaction_trace(raw_trace)
-    return normalized if normalized.get('stages') else None
-
-
 def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for raw in list(messages or []):
@@ -428,8 +431,7 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
                 content = raw_text.strip()
         attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
         tool_events = _normalize_snapshot_tool_events(raw.get('tool_events')) if role == 'assistant' else []
-        interaction_trace = _normalize_snapshot_interaction_trace(raw.get('interaction_trace')) if role == 'assistant' else None
-        if not content and not attachments and not tool_events and interaction_trace is None:
+        if not content and not attachments and not tool_events:
             continue
         item = {'role': role, 'content': content}
         timestamp = raw.get('timestamp')
@@ -439,8 +441,6 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             item['attachments'] = attachments
         if tool_events:
             item['tool_events'] = tool_events
-        if interaction_trace is not None:
-            item['interaction_trace'] = interaction_trace
         items.append(item)
     return items
 
@@ -499,13 +499,6 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
     return text != _HEARTBEAT_OK
 
 
-def _serialize_interaction_trace(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    normalized = normalize_interaction_trace(value)
-    return normalized if normalized.get('stages') else None
-
-
 @router.websocket('/ws/ceo')
 async def ceo_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -546,15 +539,23 @@ async def ceo_websocket(websocket: WebSocket):
         return
     state_store = WebCeoStateStore(workspace_path())
     requested_session_id = str(websocket.query_params.get('session_id') or '').strip()
-    fallback_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
-    requested_catalog = build_ceo_session_catalog(
+    initial_catalog = build_ceo_session_catalog(
         transcript_store,
-        active_session_id=requested_session_id or fallback_session_id,
+        active_session_id=requested_session_id,
         is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
     )
-    if requested_session_id and find_ceo_session_catalog_item(requested_catalog, requested_session_id) is None:
+    requested_item = find_ceo_session_catalog_item(initial_catalog, requested_session_id) if requested_session_id else None
+    fallback_session_id = ''
+    if requested_item is not None:
+        session_id = str(requested_item.get('session_id') or requested_session_id).strip()
+    elif requested_session_id:
         if str(requested_session_id or '').strip().startswith('web:'):
-            create_web_ceo_session(transcript_store, session_id=requested_session_id)
+            if list(initial_catalog.get('items') or []):
+                fallback_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
+                session_id = fallback_session_id
+            else:
+                create_web_ceo_session(transcript_store, session_id=requested_session_id)
+                session_id = requested_session_id
         else:
             try:
                 await websocket_send_json(
@@ -565,7 +566,9 @@ async def ceo_websocket(websocket: WebSocket):
             except WebSocketChannelClosed:
                 return
             return
-    session_id = requested_session_id or fallback_session_id
+    else:
+        fallback_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
+        session_id = fallback_session_id
     session_path = transcript_store.get_path(session_id)
     is_channel_session = _is_channel_session_id(session_id)
     if is_channel_session:
@@ -661,7 +664,6 @@ async def ceo_websocket(websocket: WebSocket):
                 {
                     'code': 'turn_failed',
                     'message': str(exc),
-                    'interaction_trace': _serialize_interaction_trace((snapshot or {}).get('interaction_trace')),
                     'source': str((snapshot or {}).get('source') or 'user').strip().lower() or 'user',
                 },
             )
@@ -715,8 +717,6 @@ async def ceo_websocket(websocket: WebSocket):
                 {
                     'text': text,
                     'source': str(payload.get('source') or 'user').strip().lower() or 'user',
-                    'interaction_trace': _serialize_interaction_trace(payload.get('interaction_trace')),
-                    'stage': dict(payload.get('stage') or {}) if isinstance(payload.get('stage'), dict) else None,
                 },
             )
             persisted = transcript_store.get_or_create(session_id)
@@ -743,7 +743,7 @@ async def ceo_websocket(websocket: WebSocket):
     global_sender_task = asyncio.create_task(sender(global_queue))
     stream_task = asyncio.create_task(sender(stream_queue))
     try:
-        inflight_turn = _build_inflight_turn_snapshot(session, session_id)
+        inflight_turn = _build_inflight_turn_snapshot(session, session_id, persisted_session)
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
         await _safe_send(
             build_envelope(
@@ -768,7 +768,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'items': initial_catalog.get('items', []),
                     'channel_groups': initial_catalog.get('channel_groups', []),
                     'active_session_id': initial_catalog.get('active_session_id') or session_id,
-                    'active_session_family': initial_catalog.get('active_session_family') or ('channel' if is_channel_session else 'local'),
+                    'active_session_family': initial_catalog.get('active_session_family') or ceo_session_family(initial_catalog.get('active_session_id') or session_id),
                 },
             )
         )

@@ -92,12 +92,24 @@ class ExecutionStageRound(Model):
     budget_counted: bool = False
 
 
+class ExecutionStageKeyRef(Model):
+    ref: str = ''
+    note: str = ''
+
+
 class ExecutionStageRecord(Model):
     stage_id: str = ''
     stage_index: int = 0
+    stage_kind: Literal['normal', 'compression'] = 'normal'
+    system_generated: bool = False
     mode: Literal['自主执行', '包含派生'] = '自主执行'
     status: Literal['进行中', '完成', '失败'] = '进行中'
     stage_goal: str = ''
+    completed_stage_summary: str = ''
+    key_refs: list[ExecutionStageKeyRef] = Field(default_factory=list)
+    archive_ref: str = ''
+    archive_stage_index_start: int = 0
+    archive_stage_index_end: int = 0
     tool_round_budget: int = 0
     tool_rounds_used: int = 0
     created_at: str = ''
@@ -167,6 +179,11 @@ class TaskArtifactRecord(Model):
     created_at: str
 
 
+class NodeToolFileChange(Model):
+    path: str = ''
+    change_type: Literal['created', 'modified'] = 'modified'
+
+
 class TaskRecord(Model):
     task_id: str
     session_id: str = 'web:shared'
@@ -186,9 +203,6 @@ class TaskRecord(Model):
     final_output: str = ''
     final_output_ref: str = ''
     failure_reason: str = ''
-    runtime_state_path: str = ''
-    tree_snapshot_path: str = ''
-    tree_text_path: str = ''
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -292,6 +306,13 @@ def normalize_execution_stage_metadata(value: Any) -> ExecutionStageState:
                 update={
                     'tool_round_budget': tool_round_budget,
                     'tool_rounds_used': tool_rounds_used,
+                    'archive_stage_index_start': max(0, int(stage.archive_stage_index_start or 0)),
+                    'archive_stage_index_end': max(0, int(stage.archive_stage_index_end or 0)),
+                    'completed_stage_summary': str(stage.completed_stage_summary or ''),
+                    'key_refs': [
+                        ExecutionStageKeyRef.model_validate(key_ref)
+                        for key_ref in list(stage.key_refs or [])
+                    ],
                 }
             )
         )
@@ -302,6 +323,32 @@ def normalize_execution_stage_metadata(value: Any) -> ExecutionStageState:
         transition_required=transition_required,
         stages=stages,
     )
+
+
+def normalize_tool_file_changes(value: Any) -> list[NodeToolFileChange]:
+    changes: list[NodeToolFileChange] = []
+    for item in list(value or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            change = NodeToolFileChange.model_validate(item)
+        except Exception:
+            continue
+        path = str(change.path or '').strip()
+        change_type = str(change.change_type or 'modified').strip().lower()
+        if not path:
+            continue
+        if change_type not in {'created', 'modified'}:
+            change_type = 'modified'
+        changes.append(
+            change.model_copy(
+                update={
+                    'path': path,
+                    'change_type': change_type,
+                }
+            )
+        )
+    return changes
 
 
 def normalize_result_payload(value: Any) -> NodeFinalResult | None:

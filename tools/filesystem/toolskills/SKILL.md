@@ -6,7 +6,8 @@
 
 - 需要确认目录结构时，用 `action=list`。
 - 需要搜索单文件或整个目录树时，用 `action=search`。
-- 需要读取局部内容时，用 `action=describe`、`action=open`、`action=head`、`action=tail`。
+- 需要确认文件概况时，用 `action=describe`。
+- 需要读取文件局部内容时，用 `action=open`、`action=head`、`action=tail`。
 - 需要直接落盘修改时，用 `action=write`、`action=edit`、`action=delete`。
 - 需要先产出补丁提案而不是直接改文件时，用 `action=propose_patch`。
 
@@ -22,8 +23,11 @@
 ## 使用原则
 
 - 先用绝对路径确认目标目录或文件，再做搜索和局部打开。
+- 如果拿到的是 `artifact:` / content 引用，不要把它塞进 `path`；改用 `content` 工具并通过 `ref` 读取。
 - `action=search` 同时支持单文件和目录递归搜索；目录搜索会跳过二进制文件和无法解码的文件。
 - 搜索目录时优先缩小到目标子目录，不要把整个仓库当成默认搜索范围。
+- 如果调用方开启了 `restrict_to_workspace`，所有 `path` 都必须留在允许的工作区范围内。
+- 如果 `action=search` 返回 `requires_refine=true` 或 `overflow=true`，先缩小路径、范围或关键词，再继续；不要重复相同的超限查询。
 - 单文件阅读优先使用 `search` + `open` 的组合，而不是一次性请求完整文件。
 - 要落盘前先判断文件属于哪一类：
   - 业务代码、配置、文档：写到它们原本所在的位置。

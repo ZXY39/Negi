@@ -15,6 +15,11 @@ type PendingTurn = {
   counts: { final: number };
 };
 
+type LateDeliverRoute = {
+  deliver: (payload: unknown, info?: { kind?: string }) => Promise<void> | void;
+  onError?: (err: unknown, info: { kind: string }) => void;
+};
+
 type RuntimeBridgeOptions = {
   host: string;
   port: number;
@@ -65,6 +70,7 @@ export class G3kuRuntimeBridge {
   private wss: WebSocketServer | null = null;
   private client: WebSocket | null = null;
   private pending = new Map<string, PendingTurn>();
+  private lateDeliverRoutes = new Map<string, LateDeliverRoute>();
   private readonly channelsConfig: Record<string, any>;
   readonly runtime: Record<string, unknown>;
   readonly channelRuntime: Record<string, unknown>;
@@ -134,10 +140,26 @@ export class G3kuRuntimeBridge {
 
   private async handleFrame(frame: BridgeFrame): Promise<void> {
     if (frame.type === "deliver_message") {
-      const pending = this.pending.get(frame.event_id);
-      if (!pending) return;
       const mode = String(frame.payload?.mode || "progress");
       if (mode !== "final") return;
+      const pending = this.pending.get(frame.event_id);
+      if (!pending) {
+        const lateRoute = this.resolveLateDeliverRoute(frame);
+        if (!lateRoute) return;
+        try {
+          await lateRoute.deliver(
+            {
+              text: frame.payload?.text,
+              mediaUrls: undefined,
+              mediaUrl: undefined,
+            },
+            { kind: "final" },
+          );
+        } catch (err) {
+          lateRoute.onError?.(err, { kind: "final" });
+        }
+        return;
+      }
       const info = { kind: "final" as const };
       pending.counts.final += 1;
       try {
@@ -238,6 +260,7 @@ export class G3kuRuntimeBridge {
     const channel = String(ctx.OriginatingChannel || ctx.channel || "").trim();
     const accountId = String(ctx.AccountId || ctx.accountId || "default").trim() || "default";
     const to = String(ctx.OriginatingTo || ctx.To || "").trim();
+    const threadId = String(ctx.ThreadId || ctx.threadId || "").trim() || undefined;
     const peer = to.startsWith("user:")
       ? { kind: "user", id: to.slice(5) }
       : to.startsWith("chat:") || to.startsWith("group:")
@@ -256,12 +279,22 @@ export class G3kuRuntimeBridge {
         counts: { final: 0 },
       });
     });
+    this.rememberLateDeliverRoute({
+      ctx,
+      channel,
+      accountId,
+      peer,
+      threadId,
+      deliver,
+      onError: params.dispatcherOptions?.onError,
+    });
     this.send({
       type: "inbound_message",
       event_id: eventId,
       channel,
       account_id: accountId,
       peer,
+      ...(threadId ? { thread_id: threadId } : {}),
       message: {
         id: messageId,
         text,
@@ -274,5 +307,87 @@ export class G3kuRuntimeBridge {
       },
     });
     return pending;
+  }
+
+  private rememberLateDeliverRoute(params: {
+    ctx: Record<string, any>;
+    channel: string;
+    accountId: string;
+    peer: { kind: string; id: string };
+    threadId?: string;
+    deliver: (payload: unknown, info?: { kind?: string }) => Promise<void> | void;
+    onError?: (err: unknown, info: { kind: string }) => void;
+  }): void {
+    const keys = this.collectSessionKeys(params);
+    if (keys.length === 0) return;
+    const route: LateDeliverRoute = {
+      deliver: params.deliver,
+      onError: params.onError,
+    };
+    for (const key of keys) {
+      this.lateDeliverRoutes.set(key, route);
+    }
+  }
+
+  private resolveLateDeliverRoute(frame: Extract<BridgeFrame, { type: "deliver_message" }>): LateDeliverRoute | null {
+    const metadata = frame.metadata && typeof frame.metadata === "object" ? frame.metadata : {};
+    const metadataSessionKey = String((metadata as Record<string, unknown>).session_key || "").trim();
+    if (metadataSessionKey) {
+      const direct = this.lateDeliverRoutes.get(metadataSessionKey);
+      if (direct) return direct;
+    }
+    const canonicalKey = this.buildCanonicalSessionKey({
+      channel: String(frame.channel || "").trim(),
+      accountId: String(frame.account_id || "default").trim() || "default",
+      peer: {
+        kind: String(frame.target?.kind || "user").trim() || "user",
+        id: String(frame.target?.id || "").trim(),
+      },
+      threadId: String((metadata as Record<string, unknown>).thread_id || (metadata as Record<string, unknown>)._china_thread_id || "").trim() || undefined,
+    });
+    if (!canonicalKey) return null;
+    return this.lateDeliverRoutes.get(canonicalKey) ?? null;
+  }
+
+  private collectSessionKeys(params: {
+    ctx: Record<string, any>;
+    channel: string;
+    accountId: string;
+    peer: { kind: string; id: string };
+    threadId?: string;
+  }): string[] {
+    const keys = new Set<string>();
+    const sessionKey = String(params.ctx.SessionKey || params.ctx.sessionKey || "").trim();
+    if (sessionKey) keys.add(sessionKey);
+    const mainSessionKey = String(params.ctx.MainSessionKey || params.ctx.mainSessionKey || "").trim();
+    if (mainSessionKey) keys.add(mainSessionKey);
+    const canonicalKey = this.buildCanonicalSessionKey({
+      channel: params.channel,
+      accountId: params.accountId,
+      peer: params.peer,
+      threadId: params.threadId,
+    });
+    if (canonicalKey) keys.add(canonicalKey);
+    return [...keys];
+  }
+
+  private buildCanonicalSessionKey(params: {
+    channel: string;
+    accountId: string;
+    peer: { kind: string; id: string };
+    threadId?: string;
+  }): string {
+    const channel = String(params.channel || "").trim();
+    const accountId = String(params.accountId || "default").trim() || "default";
+    const rawKind = String(params.peer?.kind || "user").trim().toLowerCase();
+    const isGroup = rawKind === "group" || rawKind === "chat" || rawKind === "channel";
+    const threadSuffix = params.threadId ? `:thread:${params.threadId}` : "";
+    if (!channel) return "";
+    if (!isGroup) {
+      return `china:${channel}:${accountId}:dm${threadSuffix}`;
+    }
+    const peerId = String(params.peer?.id || "").trim();
+    if (!peerId) return "";
+    return `china:${channel}:${accountId}:group:${peerId}${threadSuffix}`;
   }
 }

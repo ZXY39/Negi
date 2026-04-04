@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 name: filesystem
 display_name: Filesystem
-description: Describe, search, and open files or directories by local excerpt, plus write, edit, delete, and patch actions.
+description: Read and search local files, recursively search directories, list directories, plus write, edit, delete, and patch actions.
 source:
   type: ''
   url: ''
@@ -57,7 +57,7 @@ parameters:
       description: Filesystem action to execute.
     path:
       type: string
-      description: Target file or directory path. Provide an absolute path. When restrict_to_workspace is enabled, the path must stay inside the workspace.
+      description: Target absolute path. `describe`/`open`/`head`/`tail`/`write`/`edit`/`delete`/`propose_patch` require a file path, `list` requires a directory path, and `search` accepts either a file or directory path. When restrict_to_workspace is enabled, the path must stay inside the workspace.
     query:
       type: string
       description: Required when action=search on a file or directory.
@@ -106,7 +106,7 @@ parameters:
 governance:
   family: filesystem
   display_name: Filesystem
-  description: Describe, search, and open files or directories by local excerpt, plus write, edit, delete, and patch actions.
+  description: Read and search local files, recursively search directories, list directories, plus write, edit, delete, and patch actions.
   actions:
     - id: describe
       label: Describe File

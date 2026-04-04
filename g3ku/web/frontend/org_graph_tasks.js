@@ -1,6 +1,8 @@
 // Task list, task detail loading, and task event orchestration extracted from org_graph_app.js.
 // Loaded after org_graph_app.js and before org_graph_llm.js.
 
+const TASK_SUMMARY_IDLE_RECONCILE_MS = 15_000;
+
 
 function taskStatusLabel(task) {
     return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
@@ -126,9 +128,344 @@ function taskSessionQueryValue() {
     return "all";
 }
 
+function compareTaskListOrder(left, right) {
+    const timeDiff = taskCreatedSortValue(right) - taskCreatedSortValue(left);
+    if (timeDiff !== 0) return timeDiff;
+    const rightCreatedAt = String(right?.created_at || "");
+    const leftCreatedAt = String(left?.created_at || "");
+    if (rightCreatedAt !== leftCreatedAt) return rightCreatedAt.localeCompare(leftCreatedAt);
+    return String(left?.task_id || "").localeCompare(String(right?.task_id || ""));
+}
+
+function syncTaskNormalizedState(items = []) {
+    const normalized = [...(Array.isArray(items) ? items : [])]
+        .filter((item) => item && typeof item === "object" && String(item.task_id || "").trim())
+        .sort(compareTaskListOrder);
+    const tasksById = {};
+    const orderedTaskIds = [];
+    normalized.forEach((item) => {
+        const taskId = String(item.task_id || "").trim();
+        if (!taskId) return;
+        tasksById[taskId] = item;
+        orderedTaskIds.push(taskId);
+    });
+    S.tasksById = tasksById;
+    S.orderedTaskIds = orderedTaskIds;
+    S.tasks = normalized;
+    return normalized;
+}
+
+function syncTaskArrayFromState() {
+    const items = (Array.isArray(S.orderedTaskIds) ? S.orderedTaskIds : [])
+        .map((taskId) => S.tasksById?.[taskId] || null)
+        .filter(Boolean);
+    S.tasks = items;
+    return items;
+}
+
+function upsertTaskState(task) {
+    const taskId = String(task?.task_id || "").trim();
+    if (!taskId) return null;
+    const previousTask = S.tasksById?.[taskId] || null;
+    const nextTask = previousTask ? { ...previousTask, ...task } : { ...task };
+    const tasksById = { ...(S.tasksById || {}), [taskId]: nextTask };
+    let orderedTaskIds = Array.isArray(S.orderedTaskIds) ? [...S.orderedTaskIds] : [];
+    let added = false;
+    let orderChanged = false;
+    if (!previousTask) {
+        added = true;
+        let insertAt = orderedTaskIds.length;
+        for (let index = 0; index < orderedTaskIds.length; index += 1) {
+            const existing = tasksById[orderedTaskIds[index]];
+            if (compareTaskListOrder(nextTask, existing) < 0) {
+                insertAt = index;
+                break;
+            }
+        }
+        orderedTaskIds.splice(insertAt, 0, taskId);
+        orderChanged = true;
+    } else if (String(previousTask.created_at || "") !== String(nextTask.created_at || "")) {
+        orderedTaskIds = orderedTaskIds
+            .filter((item) => item !== taskId)
+            .concat(taskId)
+            .sort((leftId, rightId) => compareTaskListOrder(tasksById[leftId], tasksById[rightId]));
+        orderChanged = true;
+    }
+    S.tasksById = tasksById;
+    S.orderedTaskIds = orderedTaskIds;
+    syncTaskArrayFromState();
+    return { taskId, previousTask, nextTask, added, orderChanged };
+}
+
+function removeTaskState(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key || !S.tasksById?.[key]) return false;
+    const tasksById = { ...(S.tasksById || {}) };
+    delete tasksById[key];
+    S.tasksById = tasksById;
+    S.orderedTaskIds = (Array.isArray(S.orderedTaskIds) ? S.orderedTaskIds : []).filter((item) => item !== key);
+    syncTaskArrayFromState();
+    return true;
+}
+
+function taskListViewVisible() {
+    return !!U.viewTasks?.classList.contains("active") && document.visibilityState !== "hidden";
+}
+
+function noteTaskHallHiddenDefer() {
+    S.taskListDirtyWhileHidden = true;
+    const next = { ...(S.taskHallStats || {}) };
+    next.task_hall_hidden_defer_count = Number(next.task_hall_hidden_defer_count || 0) + 1;
+    S.taskHallStats = next;
+}
+
+function trackTaskCardPatchQueueAge(taskId) {
+    const queuedAt = Number(S.taskCardPatchQueuedAt?.[taskId] || 0);
+    if (!Number.isFinite(queuedAt) || queuedAt <= 0) return;
+    const ageMs = Math.max(0, Date.now() - queuedAt);
+    const next = { ...(S.taskHallStats || {}) };
+    next.task_hall_max_patch_queue_age_ms = Math.max(Number(next.task_hall_max_patch_queue_age_ms || 0), ageMs);
+    S.taskHallStats = next;
+}
+
+function taskMetricSnapshotValue(task) {
+    const tokenUsage = taskTokenUsage(task);
+    return tokenUsage.tracked ? {
+        input_tokens: Number(tokenUsage.input_tokens || 0),
+        output_tokens: Number(tokenUsage.output_tokens || 0),
+        cache_hit_tokens: Number(tokenUsage.cache_hit_tokens || 0),
+    } : null;
+}
+
+function taskCardPatchEligible(previousTask, nextTask) {
+    if (!previousTask || !nextTask) return false;
+    return String(previousTask.status || "") === String(nextTask.status || "")
+        && !!previousTask.is_paused === !!nextTask.is_paused
+        && !!previousTask.is_unread === !!nextTask.is_unread
+        && String(previousTask.title || "") === String(nextTask.title || "")
+        && String(previousTask.brief || "") === String(nextTask.brief || "")
+        && Number(previousTask.max_depth || 0) === Number(nextTask.max_depth || 0);
+}
+
+function patchTaskCardElement(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return false;
+    const task = S.tasksById?.[key];
+    if (!task) return false;
+    const card = U.taskGrid?.querySelector?.(`.project-card[data-task-id="${CSS.escape(key)}"]`);
+    if (!(card instanceof HTMLElement)) return false;
+    const titleEl = card.querySelector("[data-task-title]");
+    if (titleEl) {
+        const title = String(task.title || key);
+        titleEl.textContent = title;
+        titleEl.setAttribute("title", title);
+    }
+    const tokenUsage = taskTokenUsage(task);
+    const previousMetrics = S.taskMetricSnapshot?.[key] || null;
+    const nextMetrics = taskMetricSnapshotValue(task);
+    ["input_tokens", "output_tokens", "cache_hit_tokens"].forEach((metricKey) => {
+        const valueEl = card.querySelector(`[data-task-metric-value="${metricKey}"]`);
+        const wrapEl = card.querySelector(`[data-task-metric="${metricKey}"]`);
+        if (!valueEl || !wrapEl) return;
+        const metricValue = tokenUsage.tracked ? Number(tokenUsage[metricKey] || 0) : null;
+        const previousValue = previousMetrics && Number.isFinite(previousMetrics[metricKey]) ? previousMetrics[metricKey] : null;
+        const isIncreasing = previousValue !== null && Number.isFinite(metricValue) && metricValue > previousValue;
+        valueEl.textContent = Number.isFinite(metricValue) ? formatTokenCount(metricValue) : "--";
+        wrapEl.classList.toggle("is-increasing", !!isIncreasing);
+        valueEl.classList.toggle("is-increasing", !!isIncreasing);
+    });
+    S.taskMetricSnapshot = {
+        ...(S.taskMetricSnapshot || {}),
+        [key]: nextMetrics,
+    };
+    const nextStats = { ...(S.taskHallStats || {}) };
+    nextStats.task_hall_card_patch_count = Number(nextStats.task_hall_card_patch_count || 0) + 1;
+    S.taskHallStats = nextStats;
+    trackTaskCardPatchQueueAge(key);
+    const nextQueued = { ...(S.taskCardPatchQueuedAt || {}) };
+    delete nextQueued[key];
+    S.taskCardPatchQueuedAt = nextQueued;
+    return true;
+}
+
+function flushQueuedTaskCardPatches() {
+    if (S.taskCardPatchFlushId) {
+        window.clearTimeout(S.taskCardPatchFlushId);
+        S.taskCardPatchFlushId = null;
+    }
+    if (!taskListViewVisible()) {
+        noteTaskHallHiddenDefer();
+        return;
+    }
+    const pendingIds = [...(S.pendingTaskCardPatchIds || new Set())];
+    if (!pendingIds.length) return;
+    const nextPending = new Set();
+    pendingIds.forEach((taskId) => {
+        if (!patchTaskCardElement(taskId)) nextPending.add(taskId);
+    });
+    S.pendingTaskCardPatchIds = nextPending;
+    if (nextPending.size) {
+        renderTasks();
+        return;
+    }
+    const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
+    S.taskGridSignature = taskGridRenderSignature(meta);
+}
+
+function queueTaskCardPatch(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return;
+    const nextPending = new Set(S.pendingTaskCardPatchIds || []);
+    nextPending.add(key);
+    S.pendingTaskCardPatchIds = nextPending;
+    S.taskCardPatchQueuedAt = {
+        ...(S.taskCardPatchQueuedAt || {}),
+        [key]: S.taskCardPatchQueuedAt?.[key] || Date.now(),
+    };
+    if (!taskListViewVisible()) {
+        noteTaskHallHiddenDefer();
+        return;
+    }
+    if (!S.taskCardPatchFlushId) {
+        S.taskCardPatchFlushId = window.setTimeout(() => {
+            flushQueuedTaskCardPatches();
+        }, 200);
+    }
+}
+
+function ensureTaskListVisibleReconcile() {
+    if (!S.taskListDirtyWhileHidden || !taskListViewVisible()) return;
+    S.taskListDirtyWhileHidden = false;
+    S.taskGridSignature = "";
+    renderTasks();
+}
+
+function renderTasksIfVisible() {
+    if (taskListViewVisible()) renderTasks();
+    else noteTaskHallHiddenDefer();
+}
+
+function normalizeTaskWorkerState(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (["starting", "online", "stale", "stopped", "offline"].includes(normalized)) return normalized;
+    return normalized === "dead" ? "stopped" : "offline";
+}
+
+function taskWorkerControlsAvailable() {
+    return normalizeTaskWorkerState(S.tasksWorkerState) === "online";
+}
+
+function taskWorkerNoticeText(state = S.tasksWorkerState) {
+    const normalized = normalizeTaskWorkerState(state);
+    if (normalized === "starting") return "Task worker is starting. You can browse records while controls warm up.";
+    if (normalized === "stale") return "Task worker status is temporarily stale. You can browse records while controls wait for reconnection.";
+    if (normalized === "stopped" || normalized === "offline") return "Task worker is offline. You can still browse records, but create/resume controls are unavailable.";
+    return "";
+}
+
 function taskSessionEmptyText() {
-    if (S.tasksWorkerOnline === false) return "Worker is offline. Task control is unavailable.";
+    const message = taskWorkerNoticeText();
+    if (message) return message;
     return "No tasks yet.";
+}
+
+function taskWorkerStatusMetrics() {
+    const topLevel = S.tasksWorkerStatusPayload && typeof S.tasksWorkerStatusPayload === "object"
+        ? S.tasksWorkerStatusPayload
+        : {};
+    const workerPayload = S.tasksWorker?.payload && typeof S.tasksWorker.payload === "object"
+        ? S.tasksWorker.payload
+        : {};
+    return { ...workerPayload, ...topLevel };
+}
+
+function taskWorkerPressureSampleAgeMs(metrics = taskWorkerStatusMetrics()) {
+    const sampleAt = String(metrics?.pressure_sample_at || metrics?.tool_pressure_sample_at || "").trim();
+    const parsedMs = sampleAt ? Date.parse(sampleAt) : Number.NaN;
+    if (Number.isFinite(parsedMs)) return Math.max(0, Date.now() - parsedMs);
+    const rawAge = Number(metrics?.pressure_sample_age_ms);
+    return Number.isFinite(rawAge) && rawAge >= 0 ? rawAge : null;
+}
+
+function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
+    if (metrics?.pressure_snapshot_fresh != null) return !!metrics.pressure_snapshot_fresh;
+    const ageMs = taskWorkerPressureSampleAgeMs(metrics);
+    if (ageMs == null) return false;
+    return ageMs <= 3000 && metrics?.machine_pressure_available !== false;
+}
+
+function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
+    const ageMs = taskWorkerPressureSampleAgeMs(metrics);
+    if (ageMs == null) return "未采样";
+    if (!taskWorkerPressureSnapshotFresh(metrics)) return "监控过期";
+    if (ageMs < 1000) return "刚刚更新";
+    if (ageMs < 60_000) {
+        const seconds = ageMs / 1000;
+        return seconds < 10 ? `${seconds.toFixed(1)}s 前` : `${Math.round(seconds)}s 前`;
+    }
+    const minutes = ageMs / 60_000;
+    return `${minutes < 10 ? minutes.toFixed(1) : Math.round(minutes)}m 前`;
+}
+
+function formatTaskWorkerPercent(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? `${Math.round(numeric)}%` : "--";
+}
+
+function queueMetricCount(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? String(Math.max(0, Math.trunc(numeric))) : "--";
+}
+
+function taskWorkerPressureStateMeta(metrics = taskWorkerStatusMetrics()) {
+    const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
+    if (workerState === "offline" || workerState === "stopped") return { key: "offline", label: "离线" };
+    if (workerState === "starting") return { key: "starting", label: "启动中" };
+    if (workerState === "stale") return { key: "stale", label: "连接过期" };
+    if (!taskWorkerPressureSnapshotFresh(metrics)) return { key: "unfresh", label: "监控过期" };
+    const state = String(metrics?.budget_state || metrics?.tool_pressure_state || metrics?.worker_execution_state || "normal").trim().toLowerCase();
+    if (state === "critical") return { key: "critical", label: "强收紧" };
+    if (state === "throttled") return { key: "throttled", label: "收紧中" };
+    if (state === "easing") return { key: "easing", label: "放宽中" };
+    return { key: "normal", label: "正常" };
+}
+
+function renderTaskPerformanceBar() {
+    if (!U.taskPerformanceBar) return;
+    const metrics = taskWorkerStatusMetrics();
+    const pressureState = taskWorkerPressureStateMeta(metrics);
+    const cpuText = formatTaskWorkerPercent(metrics?.machine_pressure_cpu_percent);
+    const memoryText = formatTaskWorkerPercent(metrics?.machine_pressure_memory_percent);
+    const diskText = metrics?.machine_pressure_disk_busy_available === false
+        ? "--"
+        : formatTaskWorkerPercent(metrics?.machine_pressure_disk_busy_percent);
+    const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
+    const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
+    const nodeRunningText = queueMetricCount(metrics?.node_queue_running_count);
+    const nodeWaitingText = queueMetricCount(metrics?.node_queue_waiting_count);
+    U.taskPerformanceBar.hidden = false;
+    U.taskPerformanceBar.innerHTML = `
+        <div class="task-performance-item task-performance-item--state" data-state="${esc(pressureState.key)}">
+            <span class="task-performance-label">压力状态</span>
+            <strong class="task-performance-value">${esc(pressureState.label)}</strong>
+        </div>
+        <div class="task-performance-item">
+            <span class="task-performance-label">CPU/内存/磁盘</span>
+            <strong class="task-performance-value">${esc(`${cpuText} / ${memoryText} / ${diskText}`)}</strong>
+        </div>
+        <div class="task-performance-item">
+            <span class="task-performance-label">工具队列</span>
+            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(toolRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(toolWaitingText)}</span>等待</strong>
+        </div>
+        <div class="task-performance-item">
+            <span class="task-performance-label">节点队列</span>
+            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(nodeRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(nodeWaitingText)}</span>等待</strong>
+        </div>
+        <div class="task-performance-item">
+            <span class="task-performance-label">监控新鲜度</span>
+            <strong class="task-performance-value">${esc(formatTaskWorkerSampleFreshness(metrics))}</strong>
+        </div>
+    `;
 }
 
 function renderTaskSessionScope() {
@@ -184,8 +521,9 @@ function taskGridRenderSignature(meta) {
         total: Number(meta?.total || 0),
         currentPage: Number(meta?.currentPage || 1),
         pageSize: Number(S.taskPageSize || 0),
-        workerOnline: S.tasksWorkerOnline !== false,
-        workerState: String(S.tasksWorker?.status || S.tasksWorker?.state || ""),
+        workerOnline: taskWorkerControlsAvailable(),
+        workerState: normalizeTaskWorkerState(S.tasksWorkerState),
+        workerLastSeenAt: String(S.tasksWorkerLastSeenAt || ""),
         taskBusy: !!S.taskBusy,
         multiSelectMode: !!S.multiSelectMode,
         emptyText: taskSessionEmptyText(),
@@ -212,7 +550,9 @@ function taskGridRenderSignature(meta) {
 function renderTasks() {
     const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
     S.taskPage = meta.currentPage;
+    S.visibleTaskIds = meta.items.map((task) => String(task?.task_id || "").trim()).filter(Boolean);
     syncTaskPagination(meta);
+    renderTaskPerformanceBar();
     const signature = taskGridRenderSignature(meta);
     if (signature === S.taskGridSignature) {
         S.taskMetricAnimationTaskIds?.clear?.();
@@ -220,17 +560,23 @@ function renderTasks() {
         return;
     }
     S.taskGridSignature = signature;
+    S.taskHallStats = {
+        ...(S.taskHallStats || {}),
+        task_hall_full_render_count: Number(S.taskHallStats?.task_hall_full_render_count || 0) + 1,
+    };
     U.taskGrid.innerHTML = "";
     const metricAnimationTaskIds = S.taskMetricAnimationTaskIds || new Set();
-    if (S.tasksWorkerOnline === false) {
+    const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
+    const workerNotice = taskWorkerNoticeText(workerState);
+    if (workerNotice) {
         const warning = document.createElement("div");
-        warning.className = "empty-state error";
+        warning.className = `empty-state${workerState === "stale" || workerState === "starting" ? "" : " error"}`;
         warning.style.gridColumn = "1/-1";
-        warning.textContent = "Task worker is offline. You can still browse records, but create/resume controls are unavailable.";
+        warning.textContent = workerNotice;
         U.taskGrid.appendChild(warning);
     }
     if (!meta.total) {
-        if (S.tasksWorkerOnline === false) {
+        if (workerNotice) {
             const empty = document.createElement("div");
             empty.className = "empty-state";
             empty.style.gridColumn = "1/-1";
@@ -251,7 +597,7 @@ function renderTasks() {
         const metricItems = [
             { key: "input_tokens", label: "输入Token", value: tokenUsage.tracked ? tokenUsage.input_tokens : null },
             { key: "output_tokens", label: "输出Token", value: tokenUsage.tracked ? tokenUsage.output_tokens : null },
-            { key: "cache_hit_tokens", label: "缓存命中Token", value: tokenUsage.tracked ? tokenUsage.cache_hit_tokens : null },
+            { key: "cache_hit_tokens", label: "缓存命中", value: tokenUsage.tracked ? tokenUsage.cache_hit_tokens : null },
         ];
         nextTaskMetricSnapshot[taskId] = tokenUsage.tracked ? {
             input_tokens: Number(tokenUsage.input_tokens || 0),
@@ -262,17 +608,18 @@ function renderTasks() {
             const hasValue = Number.isFinite(item.value);
             const previousValue = previousMetrics && Number.isFinite(previousMetrics[item.key]) ? previousMetrics[item.key] : null;
             const isIncreasing = metricAnimationTaskIds.has(taskId) && previousValue !== null && hasValue && item.value > previousValue;
-            return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
+            return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}" data-task-metric="${item.key}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}" data-task-metric-value="${item.key}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
         }).join("");
         const cardActions = taskCardActions(task);
         const el = document.createElement("div");
         el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
+        el.dataset.taskId = taskId;
         el.innerHTML = `
             <div class="pc-topbar">
                 <div class="pc-topbar-left">
                     <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
                     <div class="pc-topbar-meta">
-                        <span class="status-badge" data-status="${esc(statusKey)}">${esc(taskStatusLabel(task))}</span>
+                        <span class="status-badge" data-status="${esc(statusKey)}" data-task-status>${esc(taskStatusLabel(task))}</span>
                         <span class="pc-task-id-chip">
                             <span class="pc-task-id-label">Task</span>
                             <span class="pc-task-id-value">${esc(taskId)}</span>
@@ -293,7 +640,7 @@ function renderTasks() {
                     </div>
                 ` : ""}
             </div>
-            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
+            <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
             <div class="pc-created-at"><span class="pc-field-label">创建时间</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
             <div class="pc-metrics">${metricsMarkup}</div>
         `;
@@ -332,12 +679,18 @@ function renderTasks() {
         U.taskGrid.appendChild(el);
     });
     S.taskMetricSnapshot = nextTaskMetricSnapshot;
+    S.pendingTaskCardPatchIds = new Set([...(S.pendingTaskCardPatchIds || new Set())].filter((taskId) => !S.visibleTaskIds.includes(taskId)));
+    const nextQueuedAt = { ...(S.taskCardPatchQueuedAt || {}) };
+    S.visibleTaskIds.forEach((taskId) => { delete nextQueuedAt[taskId]; });
+    S.taskCardPatchQueuedAt = nextQueuedAt;
     S.taskMetricAnimationTaskIds?.clear?.();
     updateTaskToolbar();
     icons();
 }
 
 async function loadTasks() {
+    if (S.taskListReconcileBusy) return;
+    S.taskListReconcileBusy = true;
     if (!(S.tasks || []).length) {
         S.taskGridSignature = "";
         U.taskGrid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">Loading tasks...</div>';
@@ -352,6 +705,8 @@ async function loadTasks() {
             U.taskGrid.innerHTML = `<div class="empty-state error" style="grid-column: 1/-1;">任务加载失败：${esc(ApiClient.friendlyErrorMessage(e, e.message || "未知错误"))}</div>`;
         }
         showToast({ title: "加载失败", text: ApiClient.friendlyErrorMessage(e, e.message || "未知错误"), kind: "error" });
+    } finally {
+        S.taskListReconcileBusy = false;
     }
 }
 
@@ -370,13 +725,14 @@ function updateTaskToolbar() {
     const batchButtons = [...(U.taskBatchMenu?.querySelectorAll("[data-batch-action]") || [])];
     batchButtons.forEach((button) => {
         const action = button.dataset.batchAction;
-        const enabled = action === "pause"
+        const workerReady = !["pause", "resume", "retry"].includes(String(action || "")) || taskWorkerControlsAvailable();
+        const enabled = workerReady && (action === "pause"
             ? selected.some((task) => canPause(task))
             : action === "resume"
                 ? selected.some((task) => canResume(task))
                 : action === "retry"
                     ? selected.some((task) => canRetry(task))
-                    : selected.some((task) => canDelete(task));
+                    : selected.some((task) => canDelete(task)));
         button.disabled = S.taskBusy || !enabled;
     });
     setTaskMenuVisibility();
@@ -390,17 +746,17 @@ function taskActionTone(action) {
 
 function taskCardActions(task) {
     const actions = [];
-    if (canPause(task)) actions.push("pause");
-    if (canResume(task)) actions.push("resume");
-    if (canRetry(task)) actions.push("retry");
+    if (taskWorkerControlsAvailable() && canPause(task)) actions.push("pause");
+    if (taskWorkerControlsAvailable() && canResume(task)) actions.push("resume");
+    if (taskWorkerControlsAvailable() && canRetry(task)) actions.push("retry");
     if (canDelete(task)) actions.push("delete");
     return actions.map((action) => ({ action, label: taskActionText(action), tone: taskActionTone(action) }));
 }
 
 function primaryTaskAction(task) {
-    if (canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
-    if (canResume(task)) return { action: "resume", label: "开始", tone: "success" };
-    if (canRetry(task)) return { action: "retry", label: "重试", tone: "success" };
+    if (taskWorkerControlsAvailable() && canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
+    if (taskWorkerControlsAvailable() && canResume(task)) return { action: "resume", label: "开始", tone: "success" };
+    if (taskWorkerControlsAvailable() && canRetry(task)) return { action: "retry", label: "重试", tone: "success" };
     return null;
 }
 
@@ -430,6 +786,10 @@ function taskActionErrorText(action, error) {
     return message || "Unknown error";
 }
 
+function taskActionRequiresWorker(action) {
+    return ["pause", "resume", "retry"].includes(String(action || "").trim().toLowerCase());
+}
+
 async function requestTaskAction(taskId, action) {
     if (action === "pause") return ApiClient.pauseTask(taskId);
     if (action === "resume") return ApiClient.resumeTask(taskId);
@@ -456,8 +816,13 @@ async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
 
 async function performTaskAction(taskId, action) {
     if (!taskId || !action) return;
+    if (taskActionRequiresWorker(action) && !taskWorkerControlsAvailable()) {
+        showToast({ title: taskActionFailureTitle(action), text: taskWorkerNoticeText(), kind: "warn" });
+        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        return;
+    }
     S.taskBusy = true;
-    renderTasks();
+    renderTasksIfVisible();
     try {
         const result = await requestTaskAction(taskId, action);
         const successText = action === "retry" ? (result?.task_id || taskId) : taskId;
@@ -470,10 +835,11 @@ async function performTaskAction(taskId, action) {
             await loadTaskArtifacts();
         }
     } catch (e) {
+        if (Number(e?.status || 0) === 503) void refreshTaskWorkerStatus({ render: S.view === "tasks" });
         showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, e), kind: "error" });
     } finally {
         S.taskBusy = false;
-        renderTasks();
+        renderTasksIfVisible();
     }
 }
 
@@ -506,8 +872,13 @@ async function runTaskBatchAction(action, { returnFocus = null } = {}) {
 }
 
 async function performTaskBatchAction(action, eligible) {
+    if (taskActionRequiresWorker(action) && !taskWorkerControlsAvailable()) {
+        showToast({ title: taskActionFailureTitle(action), text: taskWorkerNoticeText(), kind: "warn" });
+        void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        return;
+    }
     S.taskBusy = true;
-    renderTasks();
+    renderTasksIfVisible();
     try {
         const results = await Promise.allSettled(eligible.map((task) => requestTaskAction(task.task_id, action)));
         const succeeded = results
@@ -524,6 +895,9 @@ async function performTaskBatchAction(action, eligible) {
             await loadTaskArtifacts();
         }
         if (failed.length && !succeeded.length) {
+            if (failed.some((item) => Number(item?.error?.status || 0) === 503)) {
+                void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+            }
             showToast({
                 title: taskActionFailureTitle(action),
                 text: taskActionErrorText(action, failed[0].error),
@@ -549,9 +923,12 @@ async function performTaskBatchAction(action, eligible) {
             text: successText,
             kind: "success",
         });
+        if (failed.some((item) => Number(item?.error?.status || 0) === 503)) {
+            void refreshTaskWorkerStatus({ render: S.view === "tasks" });
+        }
     } finally {
         S.taskBusy = false;
-        renderTasks();
+        renderTasksIfVisible();
     }
 }
 
@@ -562,19 +939,24 @@ function resetTaskView() {
     }
     clearTaskDetailSession();
     S.currentTask = null;
-    S.currentTaskProgress = null;
-    S.currentTaskTreeRoot = null;
-    S.currentTaskRuntimeSummary = null;
+    S.taskGovernance = null;
+    S.taskSummary = null;
+    S.rootNode = null;
+    S.frontier = [];
+    S.recentModelCalls = [];
+    S.liveFrameMap = {};
     S.currentNodeDetail = null;
     S.taskNodeDetails = {};
     S.taskNodeDetailRequests = {};
+    S.taskNodeLatestContexts = {};
+    S.taskNodeLatestContextRequests = {};
+    if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();
     S.taskNodeBusy = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
     S.artifactContent = "";
-    S.tree = null;
     S.treeView = null;
-    S.treeRoundSelectionsByNodeId = {};
+    S.treeSelectedRoundByNodeId = {};
     S.selectedNodeId = null;
     S.treePan.active = false;
     S.treePan.originNodeId = null;
@@ -593,6 +975,7 @@ function resetTaskView() {
         U.taskTreeResetRounds.classList.remove("active");
         U.taskTreeResetRounds.title = "轮次信息加载中";
     }
+    if (typeof renderTaskGovernancePanel === "function") renderTaskGovernancePanel();
     if (U.tdPromptDisclosure) U.tdPromptDisclosure.open = false;
     if (U.tdTitle) {
         U.tdTitle.textContent = "正在加载...";
@@ -606,9 +989,9 @@ function resetTaskView() {
     if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
     if (U.adRoundSummary) U.adRoundSummary.textContent = "默认显示：最新树";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
-    if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No artifacts yet.</div>';
-    if (U.artifactContent) U.artifactContent.textContent = "Select an artifact to view details.";
-    if (U.artifactApply) U.artifactApply.hidden = true;
+    if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No file changes yet.</div>';
+    if (U.artifactContent) U.artifactContent.textContent = "展开后查看节点完整上下文。";
+    if (U.nodeContextDisclosure) U.nodeContextDisclosure.open = false;
     renderFlowHeading(0);
     renderArtifactHeading(0);
     syncTaskTreeHeaderState(null);
@@ -633,7 +1016,7 @@ function setTaskTokenStatsOpen(open) {
 
 function renderTaskTokenStats() {
     if (!U.taskTokenContent || !U.taskTokenSummaryText) return;
-    const summary = taskTokenUsage(S.currentTask, S.currentTaskProgress);
+    const summary = taskTokenUsage(S.currentTask, null);
     U.taskTokenSummaryText.textContent = taskTokenSummaryLine(summary);
     if (U.taskTokenButton) U.taskTokenButton.title = taskTokenSummaryLine(summary);
     if (!summary.tracked) {
@@ -644,15 +1027,15 @@ function renderTaskTokenStats() {
         `;
         return;
     }
-    const modelRows = Array.isArray(S.currentTaskProgress?.token_usage_by_model)
-        ? S.currentTaskProgress.token_usage_by_model.map(normalizeModelTokenUsage).sort((a, b) => {
+    const modelRows = Array.isArray(S.taskSummary?.token_usage_by_model)
+        ? S.taskSummary.token_usage_by_model.map(normalizeModelTokenUsage).sort((a, b) => {
             const delta = tokenKnownTotal(b) - tokenKnownTotal(a);
             if (delta !== 0) return delta;
             return String(a.model_key || "").localeCompare(String(b.model_key || ""));
         })
         : [];
-    const recentModelCalls = Array.isArray(S.currentTaskProgress?.model_calls)
-        ? S.currentTaskProgress.model_calls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
+    const recentModelCalls = Array.isArray(S.recentModelCalls)
+        ? S.recentModelCalls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
         : [];
     const partialNote = summary.is_partial
         ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
@@ -769,6 +1152,7 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
         S.taskWs = new WebSocket(ApiClient.getTaskWsUrl(taskId));
         S.taskWs.onmessage = (ev) => handleTaskEvent(JSON.parse(ev.data));
     }
+    await loadTaskTreeSnapshot(taskId);
     return payload;
 }
 
@@ -778,7 +1162,8 @@ async function restoreTaskDetailSession() {
     try {
         await loadTaskDetail(snapshot.currentTaskId);
         S.taskDetailViewStates = snapshot.nodeViewStates || {};
-        S.treeRoundSelectionsByNodeId = pruneTreeRoundSelections(S.tree, snapshot.treeRoundSelectionsByNodeId);
+        S.treeSelectedRoundByNodeId = normalizeTreeRoundSelections(snapshot.treeSelectedRoundByNodeId);
+        if (String(S.treeRootNodeId || "").trim()) renderTree();
         S.selectedArtifactId = snapshot.selectedArtifactId || "";
         if (snapshot.selectedNodeId) {
             const pendingViewState = getStoredTaskDetailViewState(snapshot.currentTaskId, snapshot.selectedNodeId);
@@ -807,51 +1192,110 @@ async function openTask(taskId) {
 }
 
 function handleTaskEvent(payload) {
-    if (payload.type === "snapshot.task" || payload.type === "task.snapshot") {
-        applyTaskPayload(payload.data || {});
+    if (payload.type === "task.summary.patch" && payload.data?.task) {
+        S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
+        if (payload.data?.task?.governance) {
+            S.taskGovernance = normalizeTaskGovernanceState(payload.data.task.governance);
+        }
+        S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
+        patchTaskListItem(payload.data.task);
+        renderTaskDetailHeader();
+        if (typeof renderTaskGovernancePanel === "function") renderTaskGovernancePanel();
+        renderTaskTokenStats();
         return;
     }
-    if (payload.type === "task.summary.updated" && payload.data?.task) {
-        S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
-        renderTaskDetailHeader();
-        renderTaskTokenStats();
+    if (payload.type === "task.governance.patch") {
+        S.taskGovernance = normalizeTaskGovernanceState(payload.data?.governance || {});
+        if (S.currentTask && typeof S.currentTask === "object") {
+            S.currentTask = { ...(S.currentTask || {}), governance: S.taskGovernance };
+        }
+        if (typeof renderTaskGovernancePanel === "function") renderTaskGovernancePanel();
         return;
     }
     if (payload.type === "task.model.call") {
         const nextCall = normalizeTaskModelCall(payload.data || {});
-        const existing = Array.isArray(S.currentTaskProgress?.model_calls) ? S.currentTaskProgress.model_calls : [];
+        const existing = Array.isArray(S.recentModelCalls) ? S.recentModelCalls : [];
         const withoutSame = existing.filter((item) => Number(item?.call_index || 0) !== Number(nextCall.call_index || 0));
         const merged = [...withoutSame, nextCall]
             .sort((a, b) => Number(a?.call_index || 0) - Number(b?.call_index || 0))
             .slice(-50);
-        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), model_calls: merged };
+        S.recentModelCalls = merged;
         renderTaskTokenStats();
         return;
     }
-    if (payload.type === "task.tree.updated") {
-        S.tree = payload.data?.tree_root || null;
-        S.currentTaskTreeRoot = S.tree;
-        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), root: S.tree };
-        renderTree();
+    if (payload.type === "task.live.patch") {
+        const runtimeSummary = payload.data?.runtime_summary || {};
+        const frames = Array.isArray(runtimeSummary?.frames) ? runtimeSummary.frames : [];
+        const activeNodeIds = Array.isArray(runtimeSummary?.active_node_ids) ? runtimeSummary.active_node_ids : [];
+        const runnableNodeIds = Array.isArray(runtimeSummary?.runnable_node_ids) ? runtimeSummary.runnable_node_ids : [];
+        const waitingNodeIds = Array.isArray(runtimeSummary?.waiting_node_ids) ? runtimeSummary.waiting_node_ids : [];
+        const hasTreeContext = !!String(S.treeRootNodeId || "").trim();
+        S.frontier = frames;
+        S.liveFrameMap = indexTaskLiveFrames(frames);
+        S.taskSummary = {
+            ...(S.taskSummary || {}),
+            active_node_count: hasTreeContext
+                ? normalizeInt(S.taskSummary?.active_node_count, 0)
+                : activeNodeIds.length,
+            runnable_node_count: runnableNodeIds.length,
+            waiting_node_count: waitingNodeIds.length,
+        };
+        if (String(S.treeRootNodeId || "").trim()) {
+            const candidateNodeIds = [...new Set([...activeNodeIds, ...runnableNodeIds, ...waitingNodeIds]
+                .map((item) => String(item || "").trim())
+                .filter(Boolean))];
+            candidateNodeIds
+                .filter((item) => !treeSnapshotNode(item))
+                .slice(0, 3)
+                .forEach((item) => { void reconcileTaskTreeForNode(item); });
+            if (typeof scheduleRenderedTreeNodeStatusRefresh === "function") scheduleRenderedTreeNodeStatusRefresh();
+        }
         return;
     }
-    if (payload.type === "task.runtime.updated") {
-        S.currentTaskRuntimeSummary = payload.data?.runtime_summary || null;
-        S.currentTaskProgress = { ...(S.currentTaskProgress || {}), live_state: S.currentTaskRuntimeSummary };
-        if (S.tree) renderTree();
-        return;
-    }
-    if (payload.type === "task.node.updated") {
-        const nodeId = String(payload.data?.node_id || "").trim();
+    if (payload.type === "task.node.patch") {
+        const nextNode = payload.data?.node && typeof payload.data.node === "object" ? payload.data.node : {};
+        const nodeId = String(nextNode?.node_id || "").trim();
         if (nodeId) {
+            const parentNodeId = String(nextNode?.parent_node_id || "").trim();
+            const rootNodeId = String(S.rootNode?.node_id || "").trim();
+            if (rootNodeId && rootNodeId === nodeId) {
+                S.rootNode = { ...(S.rootNode || {}), ...nextNode };
+            }
+            if (S.taskNodeDetails[nodeId]) {
+                S.taskNodeDetails = {
+                    ...(S.taskNodeDetails || {}),
+                    [nodeId]: { ...(S.taskNodeDetails[nodeId] || {}), ...nextNode },
+                };
+            }
+            if (String(S.treeRootNodeId || "").trim()) {
+                const existingTreeNode = treeSnapshotNode(nodeId);
+                if (existingTreeNode) {
+                    const previousFingerprint = String(existingTreeNode?.children_fingerprint || "").trim();
+                    S.treeNodesById = {
+                        ...(S.treeNodesById || {}),
+                        [nodeId]: normalizeTaskTreeSnapshotNode({
+                            ...existingTreeNode,
+                            ...nextNode,
+                        }, existingTreeNode),
+                    };
+                    if (typeof refreshRenderedTreeNodeStatus === "function") refreshRenderedTreeNodeStatus(nodeId);
+                    if (previousFingerprint !== String(nextNode?.children_fingerprint || "").trim()) {
+                        scheduleTaskTreeBranchSync(nodeId);
+                    }
+                } else if (parentNodeId) {
+                    scheduleTaskTreeBranchSync(parentNodeId);
+                }
+            }
             if (String(S.selectedNodeId || "") === nodeId) {
                 const currentViewState = captureTaskDetailViewState();
                 stashTaskDetailViewState({ nodeId, viewState: currentViewState });
                 S.pendingTaskDetailRestore = { nodeId, viewState: currentViewState };
-                const selected = findTreeNode(S.treeView || S.tree, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
+                const selected = findTreeNode(S.treeView, nodeId) || { node_id: nodeId, title: nodeId, state: "in_progress" };
                 void showAgent(selected, { preserveViewState: true, forceRefresh: true });
             } else {
-                delete S.taskNodeDetails[nodeId];
+                const nextDetails = { ...(S.taskNodeDetails || {}) };
+                delete nextDetails[nodeId];
+                S.taskNodeDetails = nextDetails;
             }
         }
         return;
@@ -866,6 +1310,7 @@ function handleTaskEvent(payload) {
     }
     if (payload.type === "task.terminal" && payload.data?.task) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
+        S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
         renderTaskTokenStats();
     }
 }
@@ -876,69 +1321,113 @@ function isAbortLike(error) {
 
 function applyTaskListResponse(payload = {}) {
     const items = Array.isArray(payload?.items) ? payload.items : [];
-    S.tasks = items;
+    syncTaskNormalizedState(items);
+    S.lastTaskSummaryPatchAt = new Date().toISOString();
+    S.taskListDirtyWhileHidden = false;
+    S.taskListReconnectNeedsReconcile = false;
     applyTaskWorkerStatus(payload || {}, { render: false });
     syncTaskSelection();
     renderTaskSessionScope();
-    renderTasks();
+    if (taskListViewVisible()) renderTasks();
+    else noteTaskHallHiddenDefer();
 }
 
-function resolveTaskWorkerOnlineState({
+function resolveTaskWorkerState({
     worker = S.tasksWorker,
-    reportedOnline = S.tasksWorkerReportedOnline,
+    reportedState = S.tasksWorkerReportedState,
     staleAfterSeconds = S.tasksWorkerStaleAfterSeconds,
+    lastSeenAt = S.tasksWorkerLastSeenAt,
 } = {}) {
     const record = worker && typeof worker === "object" ? worker : null;
-    const status = String(record?.status || record?.state || "").trim().toLowerCase();
-    if (["stopped", "offline", "dead"].includes(status)) return false;
-    const updatedAt = String(record?.updated_at || "").trim();
+    const normalizedReportedState = normalizeTaskWorkerState(
+        reportedState
+        || record?.worker_state
+        || record?.state
+        || (S.tasksWorkerReportedOnline === false ? "offline" : "online")
+    );
+    if (["starting", "stopped", "offline"].includes(normalizedReportedState)) return normalizedReportedState;
+    const updatedAt = String(lastSeenAt || record?.updated_at || "").trim();
     const staleWindowSeconds = Number(staleAfterSeconds);
     if (updatedAt && Number.isFinite(staleWindowSeconds) && staleWindowSeconds > 0) {
         const updatedMs = Date.parse(updatedAt);
-        if (Number.isFinite(updatedMs)) {
-            return Math.max(0, Date.now() - updatedMs) <= staleWindowSeconds * 1000;
+        if (Number.isFinite(updatedMs) && Math.max(0, Date.now() - updatedMs) > staleWindowSeconds * 1000) {
+            return "stale";
         }
     }
-    return reportedOnline !== false;
+    return normalizedReportedState === "stale" ? "stale" : "online";
 }
 
-function refreshTaskWorkerOnlineState({ render = true, force = false } = {}) {
-    const next = resolveTaskWorkerOnlineState();
-    const changed = next !== S.tasksWorkerOnline;
-    S.tasksWorkerOnline = next;
+function refreshTaskWorkerState({ render = true, force = false } = {}) {
+    const next = resolveTaskWorkerState();
+    const changed = next !== normalizeTaskWorkerState(S.tasksWorkerState);
+    S.tasksWorkerState = next;
+    S.tasksWorkerOnline = next === "online";
+    S.tasksWorkerControlAvailable = next === "online";
     if (render && (force || changed)) renderTasks();
     return changed;
+}
+
+function refreshTaskWorkerOnlineState(options = {}) {
+    return refreshTaskWorkerState(options);
 }
 
 function applyTaskWorkerStatus(payload = {}, { render = true } = {}) {
     S.tasksWorkerReportedOnline = payload?.worker_online !== false;
     S.tasksWorker = payload?.worker || null;
+    S.tasksWorkerStatusPayload = payload && typeof payload === "object" ? payload : null;
+    S.tasksWorkerReportedState = normalizeTaskWorkerState(
+        payload?.worker_state
+        || S.tasksWorker?.worker_state
+        || S.tasksWorker?.state
+        || (payload?.worker_online === false ? "offline" : "online")
+    );
+    S.tasksWorkerLastSeenAt = String(payload?.worker_last_seen_at || S.tasksWorker?.updated_at || "").trim();
     const staleAfterSeconds = Number(payload?.worker_stale_after_seconds);
     if (Number.isFinite(staleAfterSeconds) && staleAfterSeconds > 0) {
         S.tasksWorkerStaleAfterSeconds = staleAfterSeconds;
     }
-    refreshTaskWorkerOnlineState({ render, force: true });
+    renderTaskPerformanceBar();
+    refreshTaskWorkerState({ render, force: true });
+}
+
+async function refreshTaskWorkerStatus({ render = true } = {}) {
+    try {
+        const payload = await ApiClient.getTaskWorkerStatus();
+        applyTaskWorkerStatus(payload || {}, { render });
+    } catch (error) {
+        if (isAbortLike(error)) return;
+    }
 }
 
 function patchTaskListItem(task) {
-    const taskId = String(task?.task_id || "").trim();
+    const change = upsertTaskState(task);
+    const taskId = String(change?.taskId || "").trim();
     if (!taskId) return;
-    const next = [...(S.tasks || [])];
-    const index = next.findIndex((item) => String(item?.task_id || "").trim() === taskId);
-    if (index >= 0) next[index] = { ...next[index], ...task };
-    else next.unshift(task);
-    S.tasks = next;
+    S.lastTaskSummaryPatchAt = new Date().toISOString();
     S.taskMetricAnimationTaskIds = new Set([taskId]);
     syncTaskSelection();
-    renderTasks();
+    if (!taskListViewVisible()) {
+        noteTaskHallHiddenDefer();
+        return;
+    }
+    const visibleIds = new Set(Array.isArray(S.visibleTaskIds) ? S.visibleTaskIds : []);
+    if (change.added || change.orderChanged || !visibleIds.has(taskId) || !taskCardPatchEligible(change.previousTask, change.nextTask)) {
+        renderTasks();
+        return;
+    }
+    queueTaskCardPatch(taskId);
 }
 
 function removeTaskListItem(taskId) {
     const key = String(taskId || "").trim();
     if (!key) return;
-    S.tasks = (S.tasks || []).filter((item) => String(item?.task_id || "").trim() !== key);
+    if (!removeTaskState(key)) return;
     handleDeletedTasks([key]);
     syncTaskSelection();
+    if (!taskListViewVisible()) {
+        noteTaskHallHiddenDefer();
+        return;
+    }
     renderTasks();
 }
 
@@ -950,23 +1439,77 @@ function closeTasksWs() {
     socket.close();
 }
 
+function startTaskWorkerStatusPolling() {
+    if (!S.taskWorkerStatusPollId) {
+        void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
+        S.taskWorkerStatusPollId = window.setInterval(() => {
+            void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
+            const lastSummaryPatchMs = S.lastTaskSummaryPatchAt ? Date.parse(S.lastTaskSummaryPatchAt) : Number.NaN;
+            const lastTokenPatchMs = S.lastTaskTokenPatchAt ? Date.parse(S.lastTaskTokenPatchAt) : Number.NaN;
+            const lastPatchMs = Math.max(
+                Number.isFinite(lastSummaryPatchMs) ? lastSummaryPatchMs : -Infinity,
+                Number.isFinite(lastTokenPatchMs) ? lastTokenPatchMs : -Infinity,
+            );
+            const hasRunningTasks = (S.tasks || []).some((task) => taskStatusKey(task) === "in_progress");
+            if (
+                taskListViewVisible()
+                && hasRunningTasks
+                && (!Number.isFinite(lastPatchMs) || (Date.now() - lastPatchMs) > TASK_SUMMARY_IDLE_RECONCILE_MS)
+            ) {
+                void loadTasks();
+            }
+        }, 5000);
+    }
+    if (!S.taskPerformanceRefreshId) {
+        renderTaskPerformanceBar();
+        S.taskPerformanceRefreshId = window.setInterval(() => {
+            renderTaskPerformanceBar();
+            refreshTaskWorkerState({ render: !!U.viewTasks?.classList.contains("active") });
+            ensureTaskListVisibleReconcile();
+        }, 1000);
+    }
+}
+
+function stopTaskWorkerStatusPolling() {
+    if (S.taskWorkerStatusPollId) {
+        window.clearInterval(S.taskWorkerStatusPollId);
+        S.taskWorkerStatusPollId = null;
+    }
+    if (S.taskPerformanceRefreshId) {
+        window.clearInterval(S.taskPerformanceRefreshId);
+        S.taskPerformanceRefreshId = null;
+    }
+}
+
 function initTasksWs() {
     if (S.tasksWs && S.tasksWs.readyState <= 1) return;
     closeTasksWs();
     const socket = new WebSocket(ApiClient.getTasksWsUrl(taskSessionQueryValue()));
     S.tasksWs = socket;
+    socket.onopen = () => {
+        void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
+        if (S.taskListReconnectNeedsReconcile) {
+            S.taskListReconnectNeedsReconcile = false;
+            void loadTasks();
+        }
+    };
     socket.onmessage = (event) => {
         const payload = JSON.parse(event.data || "{}");
-        if (payload.type === "task.list.snapshot") {
-            applyTaskListResponse(payload.data || {});
-            return;
-        }
         if (payload.type === "task.worker.status") {
             applyTaskWorkerStatus(payload.data || {});
             return;
         }
-        if (payload.type === "task.list.patch") {
+        if (payload.type === "task.summary.patch") {
             patchTaskListItem(payload.data?.task || {});
+            return;
+        }
+        if (payload.type === "task.token.patch") {
+            S.lastTaskTokenPatchAt = new Date().toISOString();
+            patchTaskListItem({
+                task_id: payload.data?.task_id || payload.task_id || "",
+                updated_at: payload.data?.updated_at || "",
+                token_usage: payload.data?.token_usage || {},
+            });
             return;
         }
         if (payload.type === "task.deleted") {
@@ -974,9 +1517,11 @@ function initTasksWs() {
         }
     };
     socket.onclose = () => {
-        if (S.view !== "tasks") return;
+        if (!U.viewTasks?.classList.contains("active")) return;
+        S.taskListReconnectNeedsReconcile = true;
+        void refreshTaskWorkerStatus({ render: !!U.viewTasks?.classList.contains("active") });
         window.setTimeout(() => {
-            if (S.view === "tasks") initTasksWs();
+            if (U.viewTasks?.classList.contains("active")) initTasksWs();
         }, 1000);
     };
 }

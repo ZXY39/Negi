@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from g3ku.china_bridge.session_keys import build_session_key, parse_china_session_key
-from g3ku.config.loader import load_config
+from g3ku.config.loader import get_config_path, load_config
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
@@ -17,52 +18,117 @@ DEFAULT_CEO_SESSION_TITLE = "新会话"
 WEB_CEO_STATE_FILE = Path(".g3ku") / "web-ceo-state.json"
 WEB_CEO_UPLOAD_ROOT = Path(".g3ku") / "web-ceo-uploads"
 WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
+WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
-DEFAULT_FRONTDOOR_RAW_TAIL_TURNS = 4
-FRONTDOOR_CONTEXT_VERSION = 1
-FRONTDOOR_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
+DEFAULT_LIVE_RAW_TAIL_TURNS = 4
 TASK_MEMORY_VERSION = 2
-TASK_MEMORY_PREFIX = '[[G3KU_TASK_MEMORY_V1]]'
-ACTIVE_TASKS_PREFIX = '[[G3KU_ACTIVE_TASKS_V1]]'
-TASK_META_PREFIX = '[[G3KU_TASK_META_V1]]'
-TOOL_TRACE_PREFIX = '[[G3KU_TOOL_TRACE_V1]]'
-STAGE_TRACE_PREFIX = '[[G3KU_STAGE_TRACE_V1]]'
-_FRONTDOOR_ROUTE_KINDS = {"direct_reply", "self_execute", "task_dispatch", "stage_only"}
-_FRONTDOOR_SUMMARY_MAX_CHARS = 2_400
-_FRONTDOOR_TURN_SUMMARY_MAX_CHARS = 240
 _TASK_MEMORY_MAX_IDS = 3
 _TASK_ID_PATTERN = re.compile(r'task:[A-Za-z0-9][\w:-]*')
 _RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
 _RECENT_HISTORY_TOOL_TEXT_MAX_CHARS = 96
-_RECENT_HISTORY_STAGE_GOAL_MAX_CHARS = 120
 _TASK_RESULT_OUTPUT_MAX_CHARS = 480
 _TASK_RESULT_REASON_MAX_CHARS = 180
+_CEO_CONFIG_CACHE_LOCK = threading.RLock()
+_CEO_CONFIG_CACHE: dict[str, Any] = {
+    'token': None,
+    'workspace_path': None,
+    'depth_limits': None,
+    'enabled_channel_accounts': None,
+}
 
 
-def _normalize_frontdoor_route_kind(value: Any) -> str:
-    route_kind = str(value or "").strip().lower()
-    return route_kind if route_kind in _FRONTDOOR_ROUTE_KINDS else ""
+def _channel_accounts_from_config(cfg: Any) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    channels_cfg = getattr(getattr(cfg, "china_bridge", None), "channels", None)
+    if channels_cfg is None:
+        return rows
+    for spec in CHINA_SESSION_CHANNEL_SPECS:
+        channel_cfg = getattr(channels_cfg, spec["attr"], None)
+        payload = _top_level_channel_payload(channel_cfg)
+        if not bool(payload.get("enabled")):
+            continue
+        accounts = payload.get("accounts") if isinstance(payload.get("accounts"), dict) else {}
+        seen_accounts: set[str] = set()
+        if _has_base_channel_account(channel_cfg):
+            rows.append(
+                {
+                    "channel_id": spec["channel_id"],
+                    "label": spec["label"],
+                    "account_id": "default",
+                }
+            )
+            seen_accounts.add("default")
+        for account_id, account_payload in sorted(accounts.items()):
+            if not isinstance(account_payload, dict):
+                continue
+            normalized_account_id = str(account_id or "").strip() or "default"
+            if normalized_account_id in seen_accounts:
+                continue
+            if account_payload.get("enabled") is False:
+                continue
+            rows.append(
+                {
+                    "channel_id": spec["channel_id"],
+                    "label": spec["label"],
+                    "account_id": normalized_account_id,
+                }
+            )
+            seen_accounts.add(normalized_account_id)
+        if not rows or rows[-1]["channel_id"] != spec["channel_id"]:
+            if not accounts:
+                rows.append(
+                    {
+                        "channel_id": spec["channel_id"],
+                        "label": spec["label"],
+                        "account_id": "default",
+                    }
+                )
+    return rows
 
 
-def normalize_frontdoor_context(payload: Any, *, raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS) -> dict[str, Any]:
-    source = dict(payload or {}) if isinstance(payload, dict) else {}
+def _ceo_config_snapshot() -> dict[str, Any]:
+    config_path = get_config_path()
     try:
-        summary_turn_count = int(source.get("summary_turn_count", 0) or 0)
-    except (TypeError, ValueError):
-        summary_turn_count = 0
+        token = (str(config_path.resolve()), config_path.stat().st_mtime_ns, id(load_config))
+    except FileNotFoundError:
+        token = (str(config_path.resolve()), None, id(load_config))
+    with _CEO_CONFIG_CACHE_LOCK:
+        cached_token = _CEO_CONFIG_CACHE.get('token')
+        if cached_token == token:
+            return {
+                'workspace_path': _CEO_CONFIG_CACHE.get('workspace_path'),
+                'depth_limits': dict(_CEO_CONFIG_CACHE.get('depth_limits') or {}),
+                'enabled_channel_accounts': list(_CEO_CONFIG_CACHE.get('enabled_channel_accounts') or []),
+            }
     try:
-        normalized_tail_turns = int(source.get("raw_tail_turns", raw_tail_turns) or raw_tail_turns)
-    except (TypeError, ValueError):
-        normalized_tail_turns = int(raw_tail_turns)
-    summary_text = str(source.get("summary_text") or "").strip()
+        cfg = load_config()
+        workspace = Path(getattr(cfg, 'workspace_path', Path.cwd())).resolve()
+        default_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH)
+        hard_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH)
+        enabled_channel_accounts = _channel_accounts_from_config(cfg)
+    except Exception:
+        workspace = Path.cwd().resolve()
+        default_max_depth = DEFAULT_TASK_MAX_DEPTH
+        hard_max_depth = DEFAULT_TASK_HARD_MAX_DEPTH
+        enabled_channel_accounts = []
+    snapshot = {
+        'workspace_path': workspace,
+        'depth_limits': {
+            'default_max_depth': max(0, default_max_depth),
+            'hard_max_depth': max(max(0, default_max_depth), hard_max_depth),
+        },
+        'enabled_channel_accounts': enabled_channel_accounts,
+    }
+    with _CEO_CONFIG_CACHE_LOCK:
+        _CEO_CONFIG_CACHE['token'] = token
+        _CEO_CONFIG_CACHE['workspace_path'] = snapshot['workspace_path']
+        _CEO_CONFIG_CACHE['depth_limits'] = dict(snapshot['depth_limits'])
+        _CEO_CONFIG_CACHE['enabled_channel_accounts'] = list(snapshot['enabled_channel_accounts'])
     return {
-        "version": FRONTDOOR_CONTEXT_VERSION,
-        "summary_text": summary_text,
-        "summary_turn_count": max(0, summary_turn_count),
-        "last_route_kind": _normalize_frontdoor_route_kind(source.get("last_route_kind")),
-        "last_updated_at": str(source.get("last_updated_at") or "").strip(),
-        "raw_tail_turns": max(1, normalized_tail_turns),
+        'workspace_path': snapshot['workspace_path'],
+        'depth_limits': dict(snapshot['depth_limits']),
+        'enabled_channel_accounts': list(snapshot['enabled_channel_accounts']),
     }
 
 
@@ -142,8 +208,6 @@ def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TAS
         if not isinstance(item, dict):
             continue
         task_ids.extend(_extract_task_ids_from_text(item.get('text'), limit=limit))
-    interaction_trace = message.get('interaction_trace') if isinstance(message.get('interaction_trace'), dict) else {}
-    task_ids.extend(_extract_task_ids_from_text(interaction_trace.get('final_output'), limit=limit))
     return _normalize_task_ids(task_ids, limit=limit)
 
 
@@ -199,58 +263,128 @@ def build_last_task_memory(session: Any) -> dict[str, Any]:
     )
 
 
-def build_task_memory_message(task_memory: Any) -> dict[str, Any] | None:
-    normalized = normalize_task_memory(task_memory)
-    if not normalized['task_ids']:
+def _normalize_execution_snapshot(snapshot: Any) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict) or not snapshot:
         return None
-    payload = {
-        'kind': 'task_memory',
-        'task_ids': list(normalized['task_ids']),
-    }
-    if normalized['source']:
-        payload['source'] = normalized['source']
-    if normalized['reason']:
-        payload['reason'] = normalized['reason']
-    if normalized['task_results']:
-        payload['task_results'] = list(normalized['task_results'])
-    return {
-        'role': 'assistant',
-        'content': f"{TASK_MEMORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}",
-    }
+    return dict(snapshot)
 
 
-def build_active_tasks_message(active_tasks: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> dict[str, Any] | None:
-    items = list(active_tasks or []) if isinstance(active_tasks, (list, tuple)) else [active_tasks]
-    normalized: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for raw in items:
+def _session_key_for_execution_sources(runtime_session: Any | None, persisted_session: Any | None) -> str:
+    session_key = str(
+        getattr(getattr(runtime_session, 'state', None), 'session_key', '')
+        or getattr(persisted_session, 'key', '')
+        or ''
+    ).strip()
+    return session_key
+
+
+def _runtime_execution_snapshot(runtime_session: Any | None) -> tuple[dict[str, Any] | None, str]:
+    if runtime_session is None:
+        return None, ''
+    snapshot_supplier = getattr(runtime_session, 'inflight_turn_snapshot', None)
+    snapshot = snapshot_supplier() if callable(snapshot_supplier) else None
+    normalized_snapshot = _normalize_execution_snapshot(snapshot)
+    if normalized_snapshot is not None:
+        return normalized_snapshot, 'live_runtime'
+    paused_supplier = getattr(runtime_session, 'paused_execution_context_snapshot', None)
+    paused_snapshot = paused_supplier() if callable(paused_supplier) else None
+    normalized_paused = _normalize_execution_snapshot(paused_snapshot)
+    if normalized_paused is not None:
+        return normalized_paused, 'paused_execution'
+    return None, ''
+
+
+def resolve_execution_snapshot(
+    runtime_session: Any | None,
+    persisted_session: Any | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    runtime_snapshot, runtime_source = _runtime_execution_snapshot(runtime_session)
+    if runtime_snapshot is not None:
+        return runtime_snapshot, runtime_source
+    session_key = _session_key_for_execution_sources(runtime_session, persisted_session)
+    if session_key:
+        paused_snapshot = read_paused_execution_context(session_key)
+        normalized_paused = _normalize_execution_snapshot(paused_snapshot)
+        if normalized_paused is not None:
+            return normalized_paused, 'paused_execution'
+    return None, ''
+
+
+def _execution_snapshot_history_messages(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    normalized_snapshot = _normalize_execution_snapshot(snapshot)
+    if normalized_snapshot is None:
+        return []
+    messages: list[dict[str, Any]] = []
+    user_message = normalized_snapshot.get('user_message')
+    if isinstance(user_message, dict):
+        user_content = str(user_message.get('content') or '').strip()
+        if user_content:
+            messages.append({'role': 'user', 'content': user_content})
+    assistant_message: dict[str, Any] = {'role': 'assistant'}
+    assistant_text = summarize_preview_text(normalized_snapshot.get('assistant_text') or '', max_chars=480)
+    if assistant_text:
+        assistant_message['content'] = assistant_text
+    tool_events = normalized_snapshot.get('tool_events')
+    if isinstance(tool_events, list) and tool_events:
+        assistant_message['tool_events'] = list(tool_events)
+    if assistant_message.get('content') or assistant_message.get('tool_events'):
+        messages.append(_history_entry_from_message(assistant_message))
+    return messages
+
+
+def _snapshot_has_material_live_history(
+    snapshot: dict[str, Any] | None,
+    *,
+    require_active_stage: bool,
+) -> bool:
+    normalized_snapshot = _normalize_execution_snapshot(snapshot)
+    if normalized_snapshot is None:
+        return False
+    if require_active_stage:
+        return False
+    assistant_text = str(normalized_snapshot.get('assistant_text') or '').strip()
+    tool_events = normalized_snapshot.get('tool_events')
+    has_tool_events = isinstance(tool_events, list) and bool(tool_events)
+    if has_tool_events or assistant_text:
+        return True
+    return False
+
+
+def _build_task_memory_from_messages(
+    messages: list[dict[str, Any]],
+    *,
+    source: str,
+    reason: str,
+    updated_at: str,
+) -> dict[str, Any]:
+    remembered: list[str] = []
+    remembered_results: list[dict[str, str]] = []
+    for raw in reversed(list(messages or [])):
         if not isinstance(raw, dict):
             continue
-        task_id = str(raw.get('task_id') or '').strip()
-        if not task_id or task_id in seen:
+        task_ids = _extract_task_ids_from_message(raw)
+        if not task_ids:
             continue
-        seen.add(task_id)
-        item = {
-            'task_id': task_id,
-            'title': summarize_preview_text(raw.get('title') or '', max_chars=96),
-            'core_requirement': summarize_preview_text(raw.get('core_requirement') or '', max_chars=140),
-            'continuation_of_task_id': str(raw.get('continuation_of_task_id') or '').strip(),
-            'status': str(raw.get('status') or '').strip(),
-            'updated_at': str(raw.get('updated_at') or '').strip(),
-        }
-        normalized.append({key: value for key, value in item.items() if value})
-        if len(normalized) >= max(1, int(limit or _TASK_MEMORY_MAX_IDS)):
+        for task_id in task_ids:
+            if task_id not in remembered:
+                remembered.append(task_id)
+                if len(remembered) >= _TASK_MEMORY_MAX_IDS:
+                    break
+        metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
+        for item in _normalize_task_results(metadata.get('task_results')):
+            if item not in remembered_results:
+                remembered_results.append(item)
+        if len(remembered) >= _TASK_MEMORY_MAX_IDS:
             break
-    if not normalized:
-        return None
-    payload = {
-        'kind': 'active_tasks',
-        'tasks': normalized,
-    }
-    return {
-        'role': 'assistant',
-        'content': f"{ACTIVE_TASKS_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}",
-    }
+    return normalize_task_memory(
+        {
+            'task_ids': remembered,
+            'source': source,
+            'reason': reason,
+            'updated_at': updated_at,
+            'task_results': remembered_results,
+        }
+    )
 
 
 def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -278,8 +412,6 @@ def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]
         if not isinstance(item, dict):
             continue
         tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
-        if tool_name == 'submit_next_stage':
-            continue
         status = str(item.get('status') or '').strip().lower()
         if status not in {'success', 'error'}:
             continue
@@ -290,25 +422,6 @@ def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]
     return summaries[-_RECENT_HISTORY_TOOL_TRACE_LIMIT:]
 
 
-def _compact_stage_trace_payload(message: dict[str, Any]) -> dict[str, Any] | None:
-    interaction_trace = message.get('interaction_trace') if isinstance(message.get('interaction_trace'), dict) else {}
-    stages = [item for item in list(interaction_trace.get('stages') or []) if isinstance(item, dict)]
-    if not stages:
-        return None
-    latest = stages[-1]
-    payload: dict[str, Any] = {}
-    status = str(latest.get('status') or '').strip()
-    if status:
-        payload['status'] = status
-    stage_goal = summarize_preview_text(latest.get('stage_goal') or '', max_chars=_RECENT_HISTORY_STAGE_GOAL_MAX_CHARS)
-    if stage_goal:
-        payload['stage_goal'] = stage_goal
-    tool_rounds_used = latest.get('tool_rounds_used')
-    if isinstance(tool_rounds_used, int):
-        payload['tool_rounds_used'] = tool_rounds_used
-    return payload or None
-
-
 def _history_content_from_message(message: dict[str, Any]) -> str:
     blocks: list[str] = []
     content = str(message.get('content') or '').strip()
@@ -316,13 +429,31 @@ def _history_content_from_message(message: dict[str, Any]) -> str:
         blocks.append(content)
     task_meta = _compact_task_meta_payload(message)
     if task_meta is not None:
-        blocks.append(f"{TASK_META_PREFIX}\n{json.dumps(task_meta, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}")
+        lines = ['Task metadata:']
+        task_ids = list(task_meta.get('task_ids') or [])
+        if task_ids:
+            lines.append(f"- task_ids: {', '.join(task_ids)}")
+        if task_meta.get('source'):
+            lines.append(f"- source: {task_meta['source']}")
+        if task_meta.get('reason'):
+            lines.append(f"- reason: {task_meta['reason']}")
+        for result in list(task_meta.get('task_results') or [])[:2]:
+            task_id = str(result.get('task_id') or '').strip()
+            excerpt = summarize_preview_text(
+                result.get('output_excerpt') or result.get('failure_reason') or result.get('check_result') or '',
+                max_chars=_TASK_RESULT_REASON_MAX_CHARS,
+            )
+            if task_id and excerpt:
+                lines.append(f"- {task_id}: {excerpt}")
+        blocks.append('\n'.join(lines))
     tool_trace = _compact_tool_trace_payload(message)
     if tool_trace:
-        blocks.append(f"{TOOL_TRACE_PREFIX}\n{json.dumps(tool_trace, ensure_ascii=False, separators=(',', ':'))}")
-    stage_trace = _compact_stage_trace_payload(message)
-    if stage_trace is not None:
-        blocks.append(f"{STAGE_TRACE_PREFIX}\n{json.dumps(stage_trace, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}")
+        lines = ['Recent tool results:']
+        for item in tool_trace:
+            lines.append(
+                f"- {item.get('tool', 'tool')} ({item.get('status', 'info')}): {item.get('text', '')}"
+            )
+        blocks.append('\n'.join(lines))
     return '\n'.join(block for block in blocks if block).strip()
 
 
@@ -335,6 +466,79 @@ def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
         if key in message:
             entry[key] = message[key]
     return entry
+
+
+def transcript_messages(session: Any) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in list(getattr(session, 'messages', []) or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get('role') or '').strip().lower() in {'user', 'assistant'}
+            and not is_internal_ceo_user_message(item)
+        )
+    ]
+
+
+def extract_live_raw_tail_context(
+    session: Any | None,
+    *,
+    turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
+) -> tuple[list[dict[str, Any]], str]:
+    if session is None:
+        return [], ''
+    messages = transcript_messages(session)
+    normalized_turns = max(1, int(turn_limit or DEFAULT_LIVE_RAW_TAIL_TURNS))
+    if not messages:
+        return [], 'transcript'
+    turn_start_indexes: list[int] = []
+    current_user_index: int | None = None
+    for index, message in enumerate(messages):
+        role = str(message.get('role') or '').strip().lower()
+        if role == 'user':
+            current_user_index = index
+            continue
+        if role == 'assistant' and current_user_index is not None:
+            turn_start_indexes.append(current_user_index)
+            current_user_index = None
+    if turn_start_indexes:
+        start_index = (
+            turn_start_indexes[-normalized_turns]
+            if len(turn_start_indexes) >= normalized_turns
+            else turn_start_indexes[0]
+        )
+    else:
+        start_index = max(0, len(messages) - max(1, normalized_turns * 2))
+    return [_history_entry_from_message(message) for message in messages[start_index:]], 'transcript'
+
+
+def extract_live_raw_tail(
+    session: Any,
+    *,
+    turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
+) -> list[dict[str, Any]]:
+    return extract_live_raw_tail_context(session, turn_limit=turn_limit)[0]
+
+
+def extract_execution_live_raw_tail(
+    runtime_session: Any | None,
+    persisted_session: Any | None,
+    *,
+    turn_limit: int = DEFAULT_LIVE_RAW_TAIL_TURNS,
+    require_active_stage: bool,
+) -> tuple[list[dict[str, Any]], str]:
+    snapshot, source = resolve_execution_snapshot(runtime_session, persisted_session)
+    normalized_snapshot = _normalize_execution_snapshot(snapshot)
+    if _snapshot_has_material_live_history(
+        normalized_snapshot,
+        require_active_stage=require_active_stage,
+    ):
+        messages = _execution_snapshot_history_messages(normalized_snapshot)
+        if messages:
+            return messages, source
+    if persisted_session is None:
+        return [], ''
+    return extract_live_raw_tail_context(persisted_session, turn_limit=turn_limit)
 
 
 def _complete_transcript_turns(session: Any) -> list[list[dict[str, Any]]]:
@@ -359,129 +563,8 @@ def count_frontdoor_turns(session: Any) -> int:
     return len(_complete_transcript_turns(session))
 
 
-def _render_frontdoor_summary(turns: list[list[dict[str, Any]]]) -> str:
-    if not turns:
-        return ""
-    lines: list[str] = []
-    used_chars = 0
-    for turn_index, turn in enumerate(turns, start=1):
-        user_text = summarize_preview_text(turn[0].get("content") or "", max_chars=_FRONTDOOR_TURN_SUMMARY_MAX_CHARS)
-        assistant_text = summarize_preview_text(turn[1].get("content") or "", max_chars=_FRONTDOOR_TURN_SUMMARY_MAX_CHARS)
-        if user_text and assistant_text:
-            line = f"Earlier turn {turn_index}: user={user_text}; assistant={assistant_text}"
-        elif user_text:
-            line = f"Earlier turn {turn_index}: user={user_text}"
-        elif assistant_text:
-            line = f"Earlier turn {turn_index}: assistant={assistant_text}"
-        else:
-            continue
-        next_chars = used_chars + len(line) + (1 if lines else 0)
-        if next_chars > _FRONTDOOR_SUMMARY_MAX_CHARS:
-            remaining = max(0, len(turns) - turn_index + 1)
-            if remaining > 0:
-                lines.append(f"... plus {remaining} earlier summarized turns.")
-            break
-        lines.append(line)
-        used_chars = next_chars
-    return "\n".join(lines).strip()
-
-
-def build_frontdoor_context(
-    session: Any,
-    *,
-    raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
-    route_kind: str | None = None,
-) -> dict[str, Any]:
-    turns = _complete_transcript_turns(session)
-    normalized_tail_turns = max(1, int(raw_tail_turns or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS))
-    summarized_turns = turns[:-normalized_tail_turns] if len(turns) > normalized_tail_turns else []
-    metadata = dict(getattr(session, "metadata", {}) or {})
-    existing = normalize_frontdoor_context(metadata.get("frontdoor_context"), raw_tail_turns=normalized_tail_turns)
-    updated_at = getattr(session, "updated_at", None)
-    last_updated_at = updated_at.isoformat() if isinstance(updated_at, datetime) else datetime.now().isoformat()
-    return normalize_frontdoor_context(
-        {
-            "summary_text": _render_frontdoor_summary(summarized_turns),
-            "summary_turn_count": len(summarized_turns),
-            "last_route_kind": _normalize_frontdoor_route_kind(route_kind) or existing["last_route_kind"],
-            "last_updated_at": last_updated_at,
-            "raw_tail_turns": normalized_tail_turns,
-        },
-        raw_tail_turns=normalized_tail_turns,
-    )
-
-
-def resolve_frontdoor_context(
-    session: Any,
-    *,
-    raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
-) -> tuple[dict[str, Any], str]:
-    metadata = dict(getattr(session, "metadata", {}) or {})
-    normalized_tail_turns = max(1, int(raw_tail_turns or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS))
-    stored = normalize_frontdoor_context(metadata.get("frontdoor_context"), raw_tail_turns=normalized_tail_turns)
-    total_turns = count_frontdoor_turns(session)
-    covered_turns = int(stored["summary_turn_count"]) + min(int(stored["raw_tail_turns"]), total_turns)
-    if total_turns <= covered_turns:
-        return stored, "metadata"
-    return build_frontdoor_context(
-        session,
-        raw_tail_turns=normalized_tail_turns,
-        route_kind=stored["last_route_kind"],
-    ), "fallback"
-
-
-def extract_frontdoor_recent_history(session: Any, *, raw_tail_turns: int = DEFAULT_FRONTDOOR_RAW_TAIL_TURNS) -> list[dict[str, Any]]:
-    messages = [
-        item
-        for item in list(getattr(session, 'messages', []) or [])
-        if (
-            isinstance(item, dict)
-            and str(item.get('role') or '').strip().lower() in {'user', 'assistant'}
-            and not is_internal_ceo_user_message(item)
-        )
-    ]
-    normalized_tail_turns = max(1, int(raw_tail_turns or DEFAULT_FRONTDOOR_RAW_TAIL_TURNS))
-    if not messages:
-        return []
-    turn_start_indexes: list[int] = []
-    current_user_index: int | None = None
-    for index, message in enumerate(messages):
-        role = str(message.get('role') or '').strip().lower()
-        if role == 'user':
-            current_user_index = index
-            continue
-        if role == 'assistant' and current_user_index is not None:
-            turn_start_indexes.append(current_user_index)
-            current_user_index = None
-    if turn_start_indexes:
-        start_index = turn_start_indexes[-normalized_tail_turns] if len(turn_start_indexes) >= normalized_tail_turns else turn_start_indexes[0]
-    else:
-        start_index = max(0, len(messages) - max(1, normalized_tail_turns * 2))
-    return [_history_entry_from_message(message) for message in messages[start_index:]]
-
-
-def build_frontdoor_compact_history_message(frontdoor_context: Any) -> dict[str, Any] | None:
-    normalized = normalize_frontdoor_context(frontdoor_context)
-    if not normalized["summary_text"] or int(normalized["summary_turn_count"]) <= 0:
-        return None
-    payload = {
-        "kind": "frontdoor_context",
-        "summary": normalized["summary_text"],
-        "summary_turn_count": int(normalized["summary_turn_count"]),
-        "last_route_kind": normalized["last_route_kind"],
-        "raw_tail_turns": int(normalized["raw_tail_turns"]),
-    }
-    return {
-        "role": "assistant",
-        "content": f"{FRONTDOOR_COMPACT_HISTORY_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}",
-    }
-
-
 def workspace_path() -> Path:
-    try:
-        return Path(load_config().workspace_path).resolve()
-    except Exception:
-        return Path.cwd().resolve()
+    return Path(_ceo_config_snapshot().get('workspace_path') or Path.cwd()).resolve()
 
 
 def new_web_ceo_session_id() -> str:
@@ -529,19 +612,10 @@ def latest_llm_output_at(session: Any) -> str:
 
 
 def main_runtime_depth_limits() -> dict[str, int]:
-    try:
-        cfg = load_config()
-        default_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH)
-        hard_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH)
-    except Exception:
-        default_max_depth = DEFAULT_TASK_MAX_DEPTH
-        hard_max_depth = DEFAULT_TASK_HARD_MAX_DEPTH
-    default_max_depth = max(0, default_max_depth)
-    hard_max_depth = max(default_max_depth, hard_max_depth)
-    return {
-        "default_max_depth": default_max_depth,
-        "hard_max_depth": hard_max_depth,
-    }
+    return dict(_ceo_config_snapshot().get('depth_limits') or {
+        "default_max_depth": DEFAULT_TASK_MAX_DEPTH,
+        "hard_max_depth": DEFAULT_TASK_HARD_MAX_DEPTH,
+    })
 
 
 def normalize_task_defaults(
@@ -560,13 +634,18 @@ def normalize_task_defaults(
     return {"max_depth": max_depth}
 
 
-def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]:
+def normalize_ceo_metadata(
+    metadata: Any,
+    *,
+    session_key: str,
+    depth_limits: dict[str, int] | None = None,
+) -> dict[str, Any]:
     payload = dict(metadata or {}) if isinstance(metadata, dict) else {}
+    payload.pop("frontdoor_context", None)
     title = str(payload.get("title") or "").strip() or DEFAULT_CEO_SESSION_TITLE
     preview_text = summarize_preview_text(payload.get("last_preview_text") or payload.get("preview_text") or "")
-    frontdoor_context = normalize_frontdoor_context(payload.get("frontdoor_context"))
     manual_pause_waiting_reason = bool(payload.get("manual_pause_waiting_reason"))
-    depth_limits = main_runtime_depth_limits()
+    resolved_depth_limits = dict(depth_limits or main_runtime_depth_limits())
     if str(session_key or "").startswith("web:"):
         memory_scope = normalize_memory_scope(
             payload.get("memory_scope"),
@@ -577,15 +656,14 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
         memory_scope = normalize_memory_scope(payload.get("memory_scope"), fallback_session_key=session_key)
     task_defaults = normalize_task_defaults(
         payload.get("task_defaults", payload.get("taskDefaults")),
-        default_max_depth=depth_limits["default_max_depth"],
-        hard_max_depth=depth_limits["hard_max_depth"],
+        default_max_depth=int(resolved_depth_limits.get("default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH),
+        hard_max_depth=int(resolved_depth_limits.get("hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH),
     )
     last_task_memory = normalize_task_memory(payload.get('last_task_memory', payload.get('lastTaskMemory')))
     return {
         **payload,
         "title": title,
         "last_preview_text": preview_text,
-        "frontdoor_context": frontdoor_context,
         "memory_scope": memory_scope,
         "task_defaults": task_defaults,
         "manual_pause_waiting_reason": manual_pause_waiting_reason,
@@ -594,7 +672,10 @@ def normalize_ceo_metadata(metadata: Any, *, session_key: str) -> dict[str, Any]
 
 
 def ensure_ceo_session_metadata(session: Any) -> bool:
-    normalized = normalize_ceo_metadata(getattr(session, "metadata", None), session_key=str(getattr(session, "key", "") or ""))
+    normalized = normalize_ceo_metadata(
+        getattr(session, "metadata", None),
+        session_key=str(getattr(session, "key", "") or ""),
+    )
     current = getattr(session, "metadata", None)
     if current == normalized:
         return False
@@ -621,13 +702,8 @@ def update_ceo_session_after_turn(
     if metadata.get("last_preview_text") != next_preview:
         metadata["last_preview_text"] = next_preview
         changed = True
-    next_frontdoor_context = build_frontdoor_context(
-        session,
-        raw_tail_turns=DEFAULT_FRONTDOOR_RAW_TAIL_TURNS,
-        route_kind=route_kind,
-    )
-    if metadata.get("frontdoor_context") != next_frontdoor_context:
-        metadata["frontdoor_context"] = next_frontdoor_context
+    if 'frontdoor_context' in metadata:
+        metadata.pop('frontdoor_context', None)
         changed = True
     next_task_memory = build_last_task_memory(session)
     if metadata.get('last_task_memory') != next_task_memory:
@@ -647,6 +723,13 @@ def upload_dir_for_session(session_id: str, *, create: bool = True) -> Path:
 def inflight_snapshot_path_for_session(session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
     root = workspace_path() / WEB_CEO_INFLIGHT_ROOT
+    directory = ensure_dir(root) if create else root
+    return directory / f"{safe_session}.json"
+
+
+def paused_execution_context_path_for_session(session_id: str, *, create: bool = True) -> Path:
+    safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
+    root = workspace_path() / WEB_CEO_PAUSED_ROOT
     directory = ensure_dir(root) if create else root
     return directory / f"{safe_session}.json"
 
@@ -687,6 +770,36 @@ def write_inflight_turn_snapshot(session_id: str, snapshot: dict[str, Any] | Non
 
 def clear_inflight_turn_snapshot(session_id: str) -> None:
     path = inflight_snapshot_path_for_session(session_id, create=False)
+    path.unlink(missing_ok=True)
+
+
+def read_paused_execution_context(session_id: str) -> dict[str, Any] | None:
+    path = paused_execution_context_path_for_session(session_id, create=False)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if is_restorable_inflight_turn_snapshot(payload) else None
+
+
+def write_paused_execution_context(session_id: str, snapshot: dict[str, Any] | None) -> None:
+    key = str(session_id or "").strip()
+    if not key:
+        return
+    path = paused_execution_context_path_for_session(key)
+    if not isinstance(snapshot, dict) or not snapshot:
+        path.unlink(missing_ok=True)
+        return
+    payload = dict(snapshot)
+    payload["session_id"] = key
+    payload["persisted_at"] = datetime.now().isoformat()
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clear_paused_execution_context(session_id: str) -> None:
+    path = paused_execution_context_path_for_session(session_id, create=False)
     path.unlink(missing_ok=True)
 
 
@@ -772,14 +885,20 @@ def build_session_summary(
     is_active: bool,
     is_running: bool = False,
     inflight_turn: dict[str, Any] | None = None,
+    normalized_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    ensure_ceo_session_metadata(session)
+    session_key = str(getattr(session, "key", "") or "")
+    metadata = (
+        dict(normalized_metadata)
+        if isinstance(normalized_metadata, dict)
+        else normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session_key)
+    )
     messages = [
         item
         for item in list(getattr(session, "messages", []) or [])
         if isinstance(item, dict) and not is_internal_ceo_user_message(item)
     ]
-    preview_text = str(session.metadata.get("last_preview_text") or "").strip()
+    preview_text = str(metadata.get("last_preview_text") or "").strip()
     if not preview_text:
         for item in reversed(messages):
             content = item.get("content")
@@ -795,7 +914,7 @@ def build_session_summary(
     updated_at_text = updated_at.isoformat() if isinstance(updated_at, datetime) else str(updated_at or "")
     if inflight_updated_at and inflight_updated_at > updated_at_text:
         updated_at_text = inflight_updated_at
-    title = str(session.metadata.get("title") or DEFAULT_CEO_SESSION_TITLE)
+    title = str(metadata.get("title") or DEFAULT_CEO_SESSION_TITLE)
     if title == DEFAULT_CEO_SESSION_TITLE:
         user_message = _inflight_user_message(inflight_turn)
         if user_message is not None:
@@ -807,7 +926,7 @@ def build_session_summary(
         message_count += 1
     last_llm_output = latest_llm_output_at(session)
     return {
-        "session_id": str(getattr(session, "key", "") or ""),
+        "session_id": session_key,
         "title": title,
         "preview_text": preview_text,
         "message_count": message_count,
@@ -816,13 +935,47 @@ def build_session_summary(
         "last_llm_output_at": last_llm_output,
         "is_active": bool(is_active),
         "is_running": bool(is_running),
-        "task_defaults": dict(session.metadata.get("task_defaults") or {}),
+        "task_defaults": dict(metadata.get("task_defaults") or {}),
         "session_family": "local",
         "session_origin": "web",
         "is_readonly": False,
         "can_rename": True,
         "can_delete": True,
     }
+
+
+def ceo_session_family(session_id: str) -> str:
+    return "channel" if str(session_id or "").strip().startswith("china:") else "local"
+
+
+def build_local_ceo_session_item(
+    session_manager: Any,
+    session_id: str,
+    *,
+    active_session_id: str,
+    is_running: bool = False,
+    inflight_turn: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    key = str(session_id or "").strip()
+    if not key.startswith("web:") or not _local_session_exists(session_manager, key):
+        return None
+    try:
+        session = session_manager.get_or_create(key)
+    except Exception:
+        return None
+    resolved_inflight_turn = inflight_turn if isinstance(inflight_turn, dict) else read_inflight_turn_snapshot(key)
+    normalized_metadata = normalize_ceo_metadata(
+        getattr(session, "metadata", None),
+        session_key=key,
+        depth_limits=main_runtime_depth_limits(),
+    )
+    return build_session_summary(
+        session,
+        is_active=key == str(active_session_id or "").strip(),
+        is_running=bool(is_running),
+        inflight_turn=resolved_inflight_turn,
+        normalized_metadata=normalized_metadata,
+    )
 
 
 CHINA_SESSION_CHANNEL_SPECS = (
@@ -942,53 +1095,7 @@ def _has_base_channel_account(channel_cfg: Any) -> bool:
 
 
 def _iter_enabled_channel_accounts() -> list[dict[str, str]]:
-    cfg = load_config()
-    rows: list[dict[str, str]] = []
-    channels_cfg = getattr(getattr(cfg, "china_bridge", None), "channels", None)
-    if channels_cfg is None:
-        return rows
-    for spec in CHINA_SESSION_CHANNEL_SPECS:
-        channel_cfg = getattr(channels_cfg, spec["attr"], None)
-        payload = _top_level_channel_payload(channel_cfg)
-        if not bool(payload.get("enabled")):
-            continue
-        accounts = payload.get("accounts") if isinstance(payload.get("accounts"), dict) else {}
-        seen_accounts: set[str] = set()
-        if _has_base_channel_account(channel_cfg):
-            rows.append(
-                {
-                    "channel_id": spec["channel_id"],
-                    "label": spec["label"],
-                    "account_id": "default",
-                }
-            )
-            seen_accounts.add("default")
-        for account_id, account_payload in sorted(accounts.items()):
-            if not isinstance(account_payload, dict):
-                continue
-            normalized_account_id = str(account_id or "").strip() or "default"
-            if normalized_account_id in seen_accounts:
-                continue
-            if account_payload.get("enabled") is False:
-                continue
-            rows.append(
-                {
-                    "channel_id": spec["channel_id"],
-                    "label": spec["label"],
-                    "account_id": normalized_account_id,
-                }
-            )
-            seen_accounts.add(normalized_account_id)
-        if not rows or rows[-1]["channel_id"] != spec["channel_id"]:
-            if not accounts:
-                rows.append(
-                    {
-                        "channel_id": spec["channel_id"],
-                        "label": spec["label"],
-                        "account_id": "default",
-                    }
-                )
-    return rows
+    return list(_ceo_config_snapshot().get('enabled_channel_accounts') or [])
 
 
 def _channel_session_summary_from_entry(
@@ -1036,7 +1143,7 @@ def list_local_ceo_sessions(
     is_running_resolver: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    changed_keys: list[str] = []
+    depth_limits = main_runtime_depth_limits()
     persisted_keys = {
         str(item.get("key") or "").strip()
         for item in session_manager.list_sessions()
@@ -1051,9 +1158,11 @@ def list_local_ceo_sessions(
             session = session_manager.get_or_create(key)
         except Exception:
             continue
-        if ensure_ceo_session_metadata(session):
-            if key in persisted_keys:
-                changed_keys.append(key)
+        normalized_metadata = normalize_ceo_metadata(
+            getattr(session, "metadata", None),
+            session_key=key,
+            depth_limits=depth_limits,
+        )
         is_running = False
         if callable(is_running_resolver):
             try:
@@ -1066,10 +1175,9 @@ def list_local_ceo_sessions(
                 is_active=key == active_session_id,
                 is_running=is_running,
                 inflight_turn=inflight_by_session.get(key),
+                normalized_metadata=normalized_metadata,
             )
         )
-    for key in changed_keys:
-        session_manager.save(session_manager.get_or_create(key))
     rows.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("session_id") or "")), reverse=True)
     return rows
 
@@ -1263,6 +1371,7 @@ def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str) -
         path.unlink()
     session_manager.invalidate(session_id)
     clear_inflight_turn_snapshot(session_id)
+    clear_paused_execution_context(session_id)
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)
@@ -1281,14 +1390,82 @@ def list_web_ceo_sessions(
     )
 
 
+def _local_session_exists(session_manager: Any, session_id: str) -> bool:
+    key = str(session_id or "").strip()
+    if not key.startswith("web:"):
+        return False
+    if hasattr(session_manager, '_cache') and isinstance(getattr(session_manager, '_cache', None), dict):
+        if key in getattr(session_manager, '_cache'):
+            return True
+    path_getter = getattr(session_manager, 'get_path', None)
+    if callable(path_getter):
+        try:
+            if path_getter(key).exists():
+                return True
+        except Exception:
+            pass
+    return (
+        read_inflight_turn_snapshot(key) is not None
+        or read_paused_execution_context(key) is not None
+    )
+
+
+def _recent_local_session_keys(session_manager: Any) -> list[str]:
+    persisted_keys = [
+        str(item.get("key") or "").strip()
+        for item in session_manager.list_sessions()
+        if str(item.get("key") or "").strip().startswith("web:")
+    ]
+    if persisted_keys:
+        return persisted_keys
+    inflight_by_session = list_inflight_web_ceo_sessions()
+    if not inflight_by_session:
+        return []
+    return sorted(
+        inflight_by_session.keys(),
+        key=lambda key: (_inflight_updated_at(inflight_by_session.get(key)), key),
+        reverse=True,
+    )
+
+
+def _channel_session_exists(session_manager: Any, session_id: str) -> bool:
+    target = str(session_id or "").strip()
+    if not target.startswith("china:"):
+        return False
+    try:
+        parsed = parse_china_session_key(target)
+    except Exception:
+        parsed = None
+    if parsed is None:
+        return False
+    if parsed.chat_type == 'dm':
+        for account in _iter_enabled_channel_accounts():
+            if (
+                str(account.get('channel_id') or '').strip() == str(parsed.channel or '').strip()
+                and str(account.get('account_id') or '').strip() == str(parsed.account_id or '').strip()
+            ):
+                return True
+    for item in session_manager.list_sessions():
+        key = str(item.get("key") or "").strip()
+        if not key.startswith("china:"):
+            continue
+        if key == target:
+            return True
+        candidate = parse_china_session_key(key)
+        if candidate is None:
+            continue
+        if _canonical_china_session_id(candidate) == target:
+            return True
+    return False
+
+
 def resolve_active_ceo_session_id(session_manager: Any, state_store: WebCeoStateStore) -> str:
     requested = state_store.get_active_session_id()
-    catalog = build_ceo_session_catalog(session_manager, active_session_id=requested)
-    if find_ceo_session_catalog_item(catalog, requested) is not None:
+    if _local_session_exists(session_manager, requested) or _channel_session_exists(session_manager, requested):
         return requested
-    local_items = list(catalog.get("items") or [])
-    if local_items:
-        fallback = str(local_items[0].get("session_id") or "").strip()
+    local_session_keys = _recent_local_session_keys(session_manager)
+    if local_session_keys:
+        fallback = str(local_session_keys[0] or "").strip()
         state_store.set_active_session_id(fallback)
         return fallback
     created = create_web_ceo_session(session_manager)
@@ -1298,13 +1475,11 @@ def resolve_active_ceo_session_id(session_manager: Any, state_store: WebCeoState
 
 def ensure_active_web_ceo_session(session_manager: Any, state_store: WebCeoStateStore) -> str:
     active_session_id = state_store.get_active_session_id()
-    catalog = build_ceo_session_catalog(session_manager, active_session_id=active_session_id)
-    local_items = list(catalog.get("items") or [])
-    available_ids = [str(item.get("session_id") or "").strip() for item in local_items if str(item.get("session_id") or "").strip()]
-    if active_session_id and active_session_id in available_ids:
+    if _local_session_exists(session_manager, active_session_id):
         return active_session_id
-    if available_ids:
-        fallback = available_ids[0]
+    local_session_keys = _recent_local_session_keys(session_manager)
+    if local_session_keys:
+        fallback = str(local_session_keys[0] or "").strip()
         state_store.set_active_session_id(fallback)
         return fallback
     created = create_web_ceo_session(session_manager)

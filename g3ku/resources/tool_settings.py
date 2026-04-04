@@ -21,6 +21,9 @@ class ExecToolSettings(Base):
 
 class FilesystemToolSettings(Base):
     restrict_to_workspace: bool = False
+    search_timeout_seconds: float = 3.0
+    search_max_files: int = 400
+    search_max_bytes: int = 10_000_000
     edit_validation_enabled: bool = True
     edit_validation_timeout_seconds: int = 20
     edit_validation_rollback_on_failure: bool = True

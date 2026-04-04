@@ -6,6 +6,8 @@ import difflib
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -116,7 +118,7 @@ class FilesystemTool:
             if operation == 'describe':
                 return self._describe(path)
             if operation == 'search':
-                return self._search(path, kwargs.get('query'), kwargs.get('limit'), kwargs.get('before'), kwargs.get('after'))
+                return await self._search(path, kwargs.get('query'), kwargs.get('limit'), kwargs.get('before'), kwargs.get('after'))
             if operation == 'open':
                 return self._open(path, kwargs.get('start_line'), kwargs.get('end_line'), kwargs.get('around_line'), kwargs.get('window'))
             if operation == 'head':
@@ -126,7 +128,7 @@ class FilesystemTool:
             if operation == 'list':
                 return self._list(path)
             if operation == 'write':
-                return await self._write(path, content)
+                return await self._write(path, content, runtime=runtime)
             if operation == 'edit':
                 return await self._edit(path, old_text, new_text, runtime=runtime, **kwargs)
             if operation == 'delete':
@@ -308,7 +310,7 @@ class FilesystemTool:
         _raise_if_content_ref_path(path)
         return json.dumps(self._navigator().describe(path=path), ensure_ascii=False)
 
-    def _search(self, path: str, query: Any, limit: Any, before: Any, after: Any) -> str:
+    async def _search(self, path: str, query: Any, limit: Any, before: Any, after: Any) -> str:
         resolved = _resolve_path(path, self._workspace, self._allowed_dir)
         needle = str(query or '').strip()
         if not needle:
@@ -320,37 +322,14 @@ class FilesystemTool:
             missing_kind = 'Directory' if str(path).endswith(('\\', '/')) or not Path(path).suffix else 'File'
             raise FileNotFoundError(f'{missing_kind} not found: {path}')
         if resolved.is_dir():
-            hits, overflow = self._search_directory(resolved, query=needle, limit=max_hits)
-            if overflow:
-                return json.dumps(
-                    self._search_refine_payload(
-                        query=needle,
-                        cap=max_hits,
-                        scope_type='directory',
-                        path=str(resolved),
-                    ),
-                    ensure_ascii=False,
-                )
-            return json.dumps(
-                {
-                    'ok': True,
-                    'path': str(resolved),
-                    'query': needle,
-                    'scope_type': 'directory',
-                    'hits': hits,
-                    'count': len(hits),
-                    'overflow': False,
-                    'requires_refine': False,
-                    'cap': max_hits,
-                    'overflow_lower_bound': None,
-                    'message': '',
-                    'suggestions': [],
-                },
-                ensure_ascii=False,
-            )
+            result = await self._search_directory_async(resolved, query=needle, limit=max_hits)
+            result['path'] = str(resolved)
+            result['query'] = needle
+            return json.dumps(result, ensure_ascii=False)
         if not resolved.is_file():
             raise ValueError(f'path is neither a file nor a directory: {path}')
-        result = self._navigator().search(
+        result = await asyncio.to_thread(
+            self._navigator().search,
             path=str(resolved),
             query=needle,
             limit=max_hits,
@@ -359,6 +338,13 @@ class FilesystemTool:
         )
         result['scope_type'] = 'file'
         result['path'] = str(resolved)
+        result.setdefault('backend', 'file')
+        result.setdefault('timed_out', False)
+        result.setdefault('scanned_files', 1)
+        try:
+            result.setdefault('scanned_bytes', max(0, int(resolved.stat().st_size)))
+        except OSError:
+            result.setdefault('scanned_bytes', 0)
         for hit in list(result.get('hits') or []):
             if isinstance(hit, dict):
                 hit.setdefault('path', str(resolved))
@@ -396,7 +382,7 @@ class FilesystemTool:
             return f'Directory {path} is empty'
         return '\n'.join(items)
 
-    async def _write(self, path: str, content: str | None) -> str:
+    async def _write(self, path: str, content: str | None, *, runtime: dict[str, Any]) -> str:
         if content is None:
             return 'Error: content is required when action=write'
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
@@ -420,6 +406,11 @@ class FilesystemTool:
         )
         if validation_result is not None:
             return validation_result
+        self._record_node_file_change(
+            runtime=runtime,
+            path=file_path,
+            change_type='modified' if existed_before else 'created',
+        )
         self._notify_resource_change(file_path, trigger='tool:filesystem.write')
         validated_count = int(self._validation_success_count(
             enabled=bool(self._settings.write_validation_enabled),
@@ -487,6 +478,11 @@ class FilesystemTool:
         )
         if validation_result is not None:
             return validation_result
+        self._record_node_file_change(
+            runtime=runtime,
+            path=file_path,
+            change_type='modified',
+        )
         self._notify_resource_change(file_path, trigger='tool:filesystem.edit')
         validated_count = int(self._validation_success_count(
             enabled=bool(self._settings.edit_validation_enabled),
@@ -636,40 +632,169 @@ class FilesystemTool:
             artifact_lookup=self._main_task_service or artifact_store,
         )
 
-    @staticmethod
-    def _search_directory(path: Path, *, query: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
-        try:
-            pattern = re.compile(query, re.IGNORECASE)
-        except re.error:
-            pattern = re.compile(re.escape(query), re.IGNORECASE)
+    async def _search_directory_async(self, path: Path, *, query: str, limit: int) -> dict[str, Any]:
+        rg_executable = shutil.which('rg')
+        if not rg_executable:
+            return self._search_refine_payload(
+                query=query,
+                cap=limit,
+                scope_type='directory',
+                path=str(path),
+                reason='backend_unavailable',
+                timed_out=False,
+                scanned_files=None,
+                scanned_bytes=None,
+                backend='unavailable',
+            )
+        return await asyncio.to_thread(
+            self._search_directory_with_rg_sync,
+            path=path,
+            query=query,
+            limit=limit,
+            rg_executable=rg_executable,
+        )
 
+    def _search_directory_with_rg_sync(
+        self,
+        *,
+        path: Path,
+        query: str,
+        limit: int,
+        rg_executable: str,
+    ) -> dict[str, Any]:
+        timeout_seconds = max(0.1, float(self._settings.search_timeout_seconds or 3.0))
+        try:
+            re.compile(query, re.IGNORECASE)
+            use_fixed_string = False
+        except re.error:
+            use_fixed_string = True
+        args = [rg_executable, '-l', '-m', '1', '--threads', '1', '--hidden', '--no-messages', '--color', 'never']
+        if use_fixed_string:
+            args.append('-F')
+        else:
+            args.append('-i')
+        args.extend([query, str(path)])
+        try:
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return self._search_refine_payload(
+                query=query,
+                cap=limit,
+                scope_type='directory',
+                path=str(path),
+                reason='timed_out',
+                timed_out=True,
+                scanned_files=None,
+                scanned_bytes=None,
+                backend='rg',
+            )
+        if int(completed.returncode or 0) not in {0, 1}:
+            return self._search_refine_payload(
+                query=query,
+                cap=limit,
+                scope_type='directory',
+                path=str(path),
+                reason='backend_unavailable',
+                timed_out=False,
+                scanned_files=None,
+                scanned_bytes=None,
+                backend='rg',
+            )
+        matched_files = [
+            str(line or '').strip()
+            for line in str(completed.stdout or '').splitlines()
+            if str(line or '').strip()
+        ]
+        if len(matched_files) > limit:
+            return self._search_refine_payload(
+                query=query,
+                cap=limit,
+                scope_type='directory',
+                path=str(path),
+                reason='overflow',
+                timed_out=False,
+                scanned_files=None,
+                scanned_bytes=None,
+                backend='rg',
+            )
+        hits = self._search_directory_hit_previews(matched_files=matched_files, query=query)
+        return {
+            'ok': True,
+            'path': str(path),
+            'query': query,
+            'scope_type': 'directory',
+            'hits': hits,
+            'count': len(hits),
+            'overflow': False,
+            'requires_refine': False,
+            'cap': limit,
+            'overflow_lower_bound': None,
+            'message': '',
+            'suggestions': [],
+            'timed_out': False,
+            'scanned_files': None,
+            'scanned_bytes': None,
+            'backend': 'rg',
+        }
+
+    def _search_directory_hit_previews(self, *, matched_files: list[str], query: str) -> list[dict[str, Any]]:
         hits: list[dict[str, Any]] = []
-        total_matches = 0
-        for file_path in sorted(path.rglob('*')):
-            if not file_path.is_file():
+        navigator = self._navigator()
+        for raw_path in list(matched_files or []):
+            candidate = str(raw_path or '').strip()
+            if not candidate:
                 continue
             try:
-                with file_path.open('r', encoding='utf-8') as handle:
-                    for line_number, line in enumerate(handle, start=1):
-                        if '\x00' in line:
-                            raise UnicodeDecodeError('utf-8', b'\x00', 0, 1, 'binary content')
-                        if not pattern.search(line):
-                            continue
-                        total_matches += 1
-                        if total_matches > limit:
-                            return hits, True
-                        hits.append(
-                            {
-                                'path': str(file_path.resolve()),
-                                'line': line_number,
-                                'preview': line.strip()[:240],
-                            }
-                        )
-            except (OSError, UnicodeDecodeError):
+                payload = navigator.search(
+                    path=candidate,
+                    query=query,
+                    limit=1,
+                    before=0,
+                    after=0,
+                )
+            except Exception:
                 continue
-        return hits, False
+            result_hits = list(payload.get('hits') or []) if isinstance(payload, dict) else []
+            first_hit = next((item for item in result_hits if isinstance(item, dict)), None)
+            if first_hit is None:
+                hits.append(
+                    {
+                        'path': str(Path(candidate).resolve()),
+                        'line': 0,
+                        'preview': '',
+                    }
+                )
+                continue
+            hits.append(
+                {
+                    'path': str(first_hit.get('path') or Path(candidate).resolve()),
+                    'line': int(first_hit.get('line') or 0),
+                    'preview': str(first_hit.get('preview') or '').strip()[:240],
+                }
+            )
+        return hits
 
-    def _search_refine_payload(self, *, query: str, cap: int, scope_type: str, path: str) -> dict[str, Any]:
+    @staticmethod
+    def _search_refine_payload(
+        *,
+        query: str,
+        cap: int,
+        scope_type: str,
+        path: str,
+        reason: str = 'overflow',
+        timed_out: bool = False,
+        scanned_files: int | None = None,
+        scanned_bytes: int | None = None,
+        backend: str = '',
+    ) -> dict[str, Any]:
         suggestions = [
             'Use a more specific symbol, function name, or field name.',
             'Narrow the path to a smaller file or directory before searching again.',
@@ -677,8 +802,16 @@ class FilesystemTool:
         if scope_type == 'file':
             suggestions.append('Open a local excerpt first, then search within that smaller context.')
         else:
-            suggestions.append('List or describe the directory first, then search a smaller subtree.')
+            suggestions.append('List the directory first, then search a smaller subtree.')
             suggestions.append('Limit the query to a filename pattern or extension before retrying.')
+        if reason == 'timed_out':
+            message = 'Search timed out. Too many files may match this scope; refine the query before retrying.'
+        elif reason == 'backend_unavailable':
+            message = 'Directory search backend is unavailable. Refine the path or install rg before retrying.'
+        elif reason == 'too_many_files':
+            message = 'Search scanned too many files. Refine the query before retrying.'
+        else:
+            message = f'Search matched more than {cap} results. Refine the query before retrying.'
         return {
             'ok': True,
             'path': path,
@@ -686,12 +819,16 @@ class FilesystemTool:
             'scope_type': scope_type,
             'hits': [],
             'count': 0,
-            'overflow': True,
+            'overflow': reason == 'overflow',
             'requires_refine': True,
             'cap': cap,
-            'overflow_lower_bound': cap + 1,
-            'message': f'Search matched more than {cap} results. Refine the query before retrying.',
+            'overflow_lower_bound': cap + 1 if reason == 'overflow' else None,
+            'message': message,
             'suggestions': suggestions,
+            'timed_out': bool(timed_out),
+            'scanned_files': scanned_files,
+            'scanned_bytes': scanned_bytes,
+            'backend': str(backend or ''),
         }
 
     async def _validate_file(
@@ -875,6 +1012,19 @@ class FilesystemTool:
         session_id = 'web:shared'
         try:
             service.refresh_resource_paths([path], trigger=trigger, session_id=session_id)
+        except Exception:
+            return
+
+    def _record_node_file_change(self, *, runtime: dict[str, Any], path: Path, change_type: str) -> None:
+        service = self._main_task_service
+        if service is None or not hasattr(service, 'record_node_file_change'):
+            return
+        task_id = _runtime_task_id(runtime)
+        node_id = _runtime_node_id(runtime)
+        if not task_id or not node_id:
+            return
+        try:
+            service.record_node_file_change(task_id, node_id, path=str(path), change_type=change_type)
         except Exception:
             return
 

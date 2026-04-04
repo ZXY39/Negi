@@ -11,9 +11,9 @@ from typing import Any
 from langchain_core.language_models.chat_models import BaseChatModel
 from loguru import logger
 
-from g3ku.integrations.langchain_runtime import ProviderChatModelAdapter
 from g3ku.config.schema import Config, ProviderConfig
 from g3ku.providers.fallback import FallbackProvider
+from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.litellm_provider import LiteLLMProvider
 from g3ku.providers.openai_codex_provider import OpenAICodexProvider
 from g3ku.providers.registry import ProviderSpec, find_by_name
@@ -45,12 +45,12 @@ def build_chat_model(
         raise ValueError(f"No model configured for {target_label}.")
 
     provider = FallbackProvider(config=config, model_chain=chain or [default_key], default_model_ref=default_key)
-    return ProviderChatModelAdapter(
-        provider=provider,
+    return G3kuChatModelAdapter(
+        chat_backend=provider,
         default_model=default_key,
-        default_temperature=config.agents.defaults.temperature,
-        default_max_tokens=config.agents.defaults.max_tokens,
-        default_reasoning_effort=config.agents.defaults.reasoning_effort,
+        default_temperature=None,
+        default_max_tokens=None,
+        default_reasoning_effort=None,
     )
 
 
@@ -95,12 +95,12 @@ def _build_special_provider_bridge(
     else:  # pragma: no cover - defensive branch
         raise ValueError(f"Unsupported special bridge provider: {provider_id}")
 
-    return ProviderChatModelAdapter(
-        provider=provider,
+    return G3kuChatModelAdapter(
+        chat_backend=provider,
         default_model=provider.get_default_model(),
-        default_temperature=config.agents.defaults.temperature,
-        default_max_tokens=config.agents.defaults.max_tokens,
-        default_reasoning_effort=config.agents.defaults.reasoning_effort,
+        default_temperature=None,
+        default_max_tokens=None,
+        default_reasoning_effort=None,
     )
 
 

@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import uuid
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -17,14 +18,14 @@ from g3ku.core.state import AgentState, StructuredError
 from g3ku.runtime.cancellation import ToolCancellationToken
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
+_TRANSCRIPT_TURN_ID_KEY = "_transcript_turn_id"
+_TRANSCRIPT_STATE_KEY = "_transcript_state"
+_TRANSCRIPT_STATE_PENDING = "pending"
+_TRANSCRIPT_STATE_COMPLETED = "completed"
 
 
 class RuntimeAgentSession:
     """Primary AgentSession implementation backed by the runtime engine."""
-
-    _MANUAL_PAUSE_FOLLOW_UP_TEXT = (
-        "我先不继续自动分析或续跑任务。请告诉我为什么想暂停，我会根据你的原因再决定下一步。"
-    )
 
     def __init__(
         self,
@@ -56,8 +57,8 @@ class RuntimeAgentSession:
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
         self._preserved_inflight_turn: dict[str, Any] | None = None
-        self._interaction_trace: dict[str, Any] | None = None
-        self._current_stage: dict[str, Any] | None = None
+        self._paused_execution_context: dict[str, Any] | None = None
+        self._active_turn_id: str | None = None
         self._turn_lock = asyncio.Lock()
 
     @property
@@ -78,28 +79,33 @@ class RuntimeAgentSession:
         data["pending_tool_calls"] = sorted(self._state.pending_tool_calls)
         if self._state.last_error is not None:
             data["last_error"] = asdict(self._state.last_error)
-        if isinstance(self._current_stage, dict) and self._current_stage:
-            data["stage"] = copy.deepcopy(self._current_stage)
         return data
 
-    def set_interaction_trace(self, trace: dict[str, Any] | None, *, stage: dict[str, Any] | None = None) -> None:
-        self._interaction_trace = copy.deepcopy(trace) if isinstance(trace, dict) and trace else None
-        self._current_stage = copy.deepcopy(stage) if isinstance(stage, dict) and stage else None
-        self._sync_persisted_inflight_turn()
-
-    def clear_interaction_trace(self) -> None:
-        self._interaction_trace = None
-        self._current_stage = None
-
-    def interaction_trace_snapshot(self) -> dict[str, Any] | None:
-        if not isinstance(self._interaction_trace, dict) or not self._interaction_trace:
+    def paused_execution_context_snapshot(self) -> dict[str, Any] | None:
+        if self._paused_execution_context is not None:
+            return copy.deepcopy(self._paused_execution_context)
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
             return None
-        return copy.deepcopy(self._interaction_trace)
+        try:
+            from g3ku.runtime.web_ceo_sessions import read_paused_execution_context
 
-    def current_stage_snapshot(self) -> dict[str, Any] | None:
-        if not isinstance(self._current_stage, dict) or not self._current_stage:
+            snapshot = read_paused_execution_context(session_key)
+        except Exception:
+            logger.debug("paused execution context restore skipped for {}", session_key)
             return None
-        return copy.deepcopy(self._current_stage)
+        if isinstance(snapshot, dict) and snapshot:
+            self._paused_execution_context = copy.deepcopy(snapshot)
+            return copy.deepcopy(self._paused_execution_context)
+        return None
+
+    def _set_paused_execution_context(self, snapshot: dict[str, Any] | None) -> None:
+        self._paused_execution_context = copy.deepcopy(snapshot) if isinstance(snapshot, dict) and snapshot else None
+        self._sync_persisted_paused_execution_context()
+
+    def clear_paused_execution_context(self) -> None:
+        self._paused_execution_context = None
+        self._sync_persisted_paused_execution_context()
 
     def _normalize_live_context(self, live_context: dict[str, str] | None) -> dict[str, str]:
         current_channel = str(getattr(self, "_channel", "") or "cli").strip() or "cli"
@@ -149,6 +155,118 @@ class RuntimeAgentSession:
                     parts.append(text.strip())
             return "\n".join(parts).strip()
         return str(content or "")
+
+    @staticmethod
+    def _turn_metadata_value(message: dict[str, Any], key: str) -> str:
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        return str(metadata.get(key) or "").strip()
+
+    @classmethod
+    def _message_turn_id(cls, message: dict[str, Any]) -> str:
+        return cls._turn_metadata_value(message, _TRANSCRIPT_TURN_ID_KEY)
+
+    @classmethod
+    def _message_transcript_state(cls, message: dict[str, Any]) -> str:
+        return cls._turn_metadata_value(message, _TRANSCRIPT_STATE_KEY)
+
+    @staticmethod
+    def _build_turn_metadata(metadata: dict[str, Any] | None, *, turn_id: str, transcript_state: str) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        payload[_TRANSCRIPT_TURN_ID_KEY] = str(turn_id or "").strip()
+        payload[_TRANSCRIPT_STATE_KEY] = str(transcript_state or "").strip()
+        return payload
+
+    @staticmethod
+    def _new_turn_id() -> str:
+        return uuid.uuid4().hex[:16]
+
+    def _ensure_user_turn_id(self, user_input: UserInputMessage) -> str:
+        metadata = dict(user_input.metadata or {})
+        turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or self._active_turn_id or "").strip()
+        if not turn_id:
+            turn_id = self._new_turn_id()
+        if metadata.get(_TRANSCRIPT_TURN_ID_KEY) != turn_id:
+            metadata[_TRANSCRIPT_TURN_ID_KEY] = turn_id
+            user_input.metadata = metadata
+        self._active_turn_id = turn_id
+        return turn_id
+
+    @classmethod
+    def _find_transcript_user_index(cls, persisted_session: Any, *, turn_id: str) -> int | None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return None
+        messages = list(getattr(persisted_session, "messages", []) or [])
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").strip().lower() != "user":
+                continue
+            if cls._message_turn_id(message) != normalized_turn_id:
+                continue
+            return index
+        return None
+
+    def _upsert_transcript_user_message(
+        self,
+        *,
+        persisted_session: Any,
+        user_input: UserInputMessage,
+        user_text: str,
+        transcript_state: str,
+    ) -> None:
+        turn_id = self._ensure_user_turn_id(user_input)
+        metadata = self._build_turn_metadata(
+            dict(user_input.metadata or {}),
+            turn_id=turn_id,
+            transcript_state=transcript_state,
+        )
+        user_input.metadata = metadata
+        existing_index = self._find_transcript_user_index(persisted_session, turn_id=turn_id)
+        if existing_index is None:
+            persisted_session.add_message(
+                "user",
+                user_text,
+                attachments=list(user_input.attachments or []),
+                metadata=metadata,
+            )
+            return
+        existing = dict(persisted_session.messages[existing_index])
+        existing["content"] = user_text
+        existing["attachments"] = list(user_input.attachments or [])
+        existing["metadata"] = metadata
+        if not str(existing.get("timestamp") or "").strip():
+            existing["timestamp"] = self._now()
+        persisted_session.messages[existing_index] = existing
+        if hasattr(persisted_session, "updated_at"):
+            persisted_session.updated_at = datetime.now()
+
+    async def _persist_pending_user_message(self, *, user_input: UserInputMessage, user_text: str) -> Any | None:
+        if not user_text.strip() and not user_input.attachments:
+            return None
+        persisted_session = None
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            self._upsert_transcript_user_message(
+                persisted_session=persisted_session,
+                user_input=user_input,
+                user_text=user_text,
+                transcript_state=_TRANSCRIPT_STATE_PENDING,
+            )
+            if self._state.session_key.startswith("web:"):
+                from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
+
+                update_ceo_session_after_turn(
+                    persisted_session,
+                    user_text=user_text,
+                    assistant_text="",
+                    route_kind="",
+                )
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            logger.debug("Pending transcript persistence skipped for {}", self._state.session_key)
+        return persisted_session
 
     @staticmethod
     def _normalize_web_uploads(uploads: Any) -> list[dict[str, Any]]:
@@ -269,6 +387,34 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("manual pause metadata sync skipped for {}", session_key)
 
+    def _persisted_manual_pause_waiting_reason(self) -> bool:
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return False
+        try:
+            from g3ku.runtime.web_ceo_sessions import normalize_ceo_metadata
+
+            persisted_session = self._loop.sessions.get_or_create(session_key)
+            metadata = normalize_ceo_metadata(getattr(persisted_session, "metadata", None), session_key=session_key)
+        except Exception:
+            logger.debug("manual pause persisted metadata read skipped for {}", session_key)
+            return False
+        return bool(metadata.get("manual_pause_waiting_reason"))
+
+    def _clear_manual_pause_waiting_reason_for_user_turn(self) -> None:
+        session_key = str(self._state.session_key or "").strip()
+        if not (self.manual_pause_waiting_reason() or self._persisted_manual_pause_waiting_reason()):
+            return
+        self._set_manual_pause_waiting_reason(False)
+        heartbeat = getattr(self._loop, "web_session_heartbeat", None)
+        replay = getattr(heartbeat, "replay_pending_outbox", None) if heartbeat is not None else None
+        if not callable(replay):
+            return
+        try:
+            replay(session_id=session_key)
+        except Exception:
+            logger.debug("heartbeat pending outbox replay skipped for {}", session_key)
+
     def _resolve_progress_tool_target(self, data: dict[str, Any]) -> tuple[str, str]:
         tool_name = str(data.get("tool_name") or "").strip()
         tool_call_id = str(data.get("tool_call_id") or "").strip()
@@ -310,10 +456,15 @@ class RuntimeAgentSession:
             execution_id,
         )
 
-    def _current_inflight_turn_snapshot(self) -> dict[str, Any] | None:
-        if self.manual_pause_waiting_reason():
+    def _build_execution_context_snapshot(
+        self,
+        *,
+        allow_manual_pause: bool = False,
+        status_override: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not allow_manual_pause and self.manual_pause_waiting_reason():
             return None
-        status = str(self._state.status or "").strip().lower()
+        status = str(status_override or self._state.status or "").strip().lower()
         if not (self._state.is_running or status in {"paused", "error"}):
             return None
         snapshot: dict[str, Any] = {
@@ -331,22 +482,17 @@ class RuntimeAgentSession:
             snapshot["assistant_text"] = str(self._state.latest_message)
         if self._state.last_error is not None:
             snapshot["last_error"] = asdict(self._state.last_error)
-        interaction_trace = self.interaction_trace_snapshot()
-        if interaction_trace is not None:
-            snapshot["interaction_trace"] = interaction_trace
-        stage = self.current_stage_snapshot()
-        if stage is not None:
-            snapshot["stage"] = stage
         if (
             not snapshot["tool_events"]
             and "user_message" not in snapshot
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
-            and "interaction_trace" not in snapshot
-            and "stage" not in snapshot
         ):
             return None
         return snapshot
+
+    def _current_inflight_turn_snapshot(self) -> dict[str, Any] | None:
+        return self._build_execution_context_snapshot()
 
     def inflight_turn_snapshot(self) -> dict[str, Any] | None:
         if self.manual_pause_waiting_reason():
@@ -418,6 +564,23 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("Skipped persisted inflight turn sync for {}", session_key)
 
+    def _sync_persisted_paused_execution_context(self) -> None:
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return
+        try:
+            from g3ku.runtime.web_ceo_sessions import (
+                is_restorable_inflight_turn_snapshot,
+                write_paused_execution_context,
+            )
+
+            snapshot = copy.deepcopy(self._paused_execution_context)
+            if not is_restorable_inflight_turn_snapshot(snapshot):
+                snapshot = None
+            write_paused_execution_context(session_key, snapshot)
+        except Exception:
+            logger.debug("Skipped paused execution context sync for {}", session_key)
+
     async def _persist_turn_transcript(
         self,
         *,
@@ -425,7 +588,6 @@ class RuntimeAgentSession:
         user_text: str,
         assistant_text: str,
         interaction_flow: list[dict[str, Any]],
-        interaction_trace: dict[str, Any] | None,
         internal_source: str | None,
         route_kind: str,
         assistant_metadata: dict[str, Any] | None = None,
@@ -434,17 +596,15 @@ class RuntimeAgentSession:
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
             if internal_source is None:
-                persisted_session.add_message(
-                    "user",
-                    user_text,
-                    attachments=list(user_input.attachments or []),
-                    metadata=dict(user_input.metadata or {}),
+                self._upsert_transcript_user_message(
+                    persisted_session=persisted_session,
+                    user_input=user_input,
+                    user_text=user_text,
+                    transcript_state=_TRANSCRIPT_STATE_COMPLETED,
                 )
             assistant_payload: dict[str, Any] = {}
             if interaction_flow:
                 assistant_payload["tool_events"] = interaction_flow
-            if interaction_trace is not None:
-                assistant_payload["interaction_trace"] = interaction_trace
             metadata_payload = dict(assistant_metadata or {})
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
@@ -472,36 +632,39 @@ class RuntimeAgentSession:
         self._sync_persisted_inflight_turn()
         await self._emit("state_snapshot", state=self.state_dict())
 
-    async def _emit_manual_pause_follow_up(self, text: str | None = None) -> None:
-        follow_up_text = str(text or self._MANUAL_PAUSE_FOLLOW_UP_TEXT).strip() or self._MANUAL_PAUSE_FOLLOW_UP_TEXT
+    async def _persist_manual_pause_user_message(self) -> None:
         prompt = self._last_prompt
         user_input = prompt if isinstance(prompt, UserInputMessage) else UserInputMessage(content=self._history_text(prompt))
-        internal_source = self._internal_prompt_source(user_input)
-        interaction_flow = self._interaction_flow_snapshot()
-        interaction_trace = self.interaction_trace_snapshot()
-        stage_snapshot = self.current_stage_snapshot()
+        if self._internal_prompt_source(user_input) is not None:
+            return
         user_text = self._history_text(user_input.content)
-        self._state.latest_message = follow_up_text
-        await self._persist_turn_transcript(
-            user_input=user_input,
-            user_text=user_text,
-            assistant_text=follow_up_text,
-            interaction_flow=interaction_flow,
-            interaction_trace=interaction_trace,
-            internal_source=internal_source,
-            route_kind="manual_pause_follow_up",
-            assistant_metadata={"source": "manual_pause_follow_up"},
-        )
-        await self._emit(
-            "message_end",
-            role="assistant",
-            text=follow_up_text,
-            heartbeat_internal=False,
-            source=internal_source or "user",
-            interaction_trace=interaction_trace,
-            stage=stage_snapshot,
-        )
-        self.clear_interaction_trace()
+        if not user_text.strip() and not user_input.attachments:
+            return
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            self._upsert_transcript_user_message(
+                persisted_session=persisted_session,
+                user_input=user_input,
+                user_text=user_text,
+                transcript_state=_TRANSCRIPT_STATE_PENDING,
+            )
+            if self._state.session_key.startswith("web:"):
+                from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
+
+                update_ceo_session_after_turn(
+                    persisted_session,
+                    user_text=user_text,
+                    assistant_text="",
+                    route_kind="",
+                )
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            await self._emit(
+                "message_delta",
+                channel="analysis",
+                kind="persistence_warning",
+                text="Manual pause transcript persistence failed; the paused user message is still available in-memory.",
+            )
 
     async def _handle_progress(
         self,
@@ -733,8 +896,8 @@ class RuntimeAgentSession:
             internal_source = self._internal_prompt_source(user_input)
             heartbeat_internal = internal_source == "heartbeat"
             cron_internal = internal_source == "cron"
-            if internal_source is None and self.manual_pause_waiting_reason():
-                self._set_manual_pause_waiting_reason(False)
+            if internal_source is None:
+                self._clear_manual_pause_waiting_reason_for_user_turn()
             if internal_source is not None:
                 current_snapshot = self._current_inflight_turn_snapshot()
                 current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
@@ -745,6 +908,7 @@ class RuntimeAgentSession:
             cancel_token = self._loop.create_session_cancellation_token(self._state.session_key)
             self._active_cancel_token = cancel_token
             try:
+                self._ensure_user_turn_id(user_input)
                 self._last_prompt = user_input
                 self._event_log = []
                 self._pending_tool_names.clear()
@@ -754,8 +918,11 @@ class RuntimeAgentSession:
                 self._state.latest_message = ""
                 self._state.last_error = None
                 self._state.pending_tool_calls.clear()
-                if not heartbeat_internal:
-                    self.clear_interaction_trace()
+                if persist_transcript and internal_source is None:
+                    await self._persist_pending_user_message(
+                        user_input=user_input,
+                        user_text=self._history_text(user_input.content),
+                    )
 
                 await self._emit("agent_start", session_key=self._state.session_key, trigger="prompt")
                 await self._emit("turn_start", session_key=self._state.session_key)
@@ -781,7 +948,6 @@ class RuntimeAgentSession:
                 error_reply = f"运行出错：{error.message}"
                 self._state.latest_message = error_reply
                 interaction_flow = self._interaction_flow_snapshot()
-                interaction_trace = self.interaction_trace_snapshot()
                 user_text = self._history_text(user_input.content)
                 if persist_transcript:
                     assistant_metadata = {
@@ -797,7 +963,6 @@ class RuntimeAgentSession:
                         user_text=user_text,
                         assistant_text=error_reply,
                         interaction_flow=interaction_flow,
-                        interaction_trace=interaction_trace,
                         internal_source=internal_source,
                         route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                         assistant_metadata=assistant_metadata,
@@ -821,7 +986,6 @@ class RuntimeAgentSession:
                 self._state.pending_tool_calls.clear()
                 user_text = self._history_text(user_input.content)
                 interaction_flow = self._interaction_flow_snapshot()
-                interaction_trace = self.interaction_trace_snapshot()
                 if getattr(self._loop, "prompt_trace", False):
                     logger.info(render_output_trace(output))
                 persisted_session = None
@@ -837,7 +1001,6 @@ class RuntimeAgentSession:
                         user_text=user_text,
                         assistant_text=output,
                         interaction_flow=interaction_flow,
-                        interaction_trace=interaction_trace,
                         internal_source=internal_source,
                         route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                         assistant_metadata=assistant_metadata,
@@ -860,33 +1023,15 @@ class RuntimeAgentSession:
                                 kind="persistence_warning",
                                 text="Memory ingest failed; turn history is still available in session transcript.",
                             )
-                    if persisted_session is not None and getattr(self._loop, "commit_service", None) is not None:
-                        try:
-                            artifact = await self._loop.commit_service.maybe_commit(
-                                session=persisted_session,
-                                channel=self._memory_channel,
-                                chat_id=self._memory_chat_id,
-                            )
-                            if artifact is not None:
-                                self._loop.sessions.save(persisted_session)
-                        except Exception:
-                            await self._emit(
-                                "message_delta",
-                                channel="analysis",
-                                kind="persistence_warning",
-                                text="Memory commit pipeline failed; new turns remain available in session transcript.",
-                            )
-                stage_snapshot = self.current_stage_snapshot()
                 await self._emit(
                     "message_end",
                     role="assistant",
                     text=output,
                     heartbeat_internal=heartbeat_internal,
                     source=internal_source or "user",
-                    interaction_trace=interaction_trace,
-                    stage=stage_snapshot,
                 )
-                self.clear_interaction_trace()
+                if internal_source is None:
+                    self.clear_paused_execution_context()
                 await self._emit("turn_end", session_key=self._state.session_key, status="completed")
                 await self._emit("agent_end", session_key=self._state.session_key, status="completed")
                 await self._emit_state_snapshot()
@@ -894,6 +1039,7 @@ class RuntimeAgentSession:
             finally:
                 if self._active_cancel_token is cancel_token:
                     self._active_cancel_token = None
+                self._active_turn_id = None
                 self._loop.release_session_cancellation_token(self._state.session_key, cancel_token)
 
     async def continue_(self, *, live_context: dict[str, str] | None = None) -> RunResult:
@@ -908,10 +1054,17 @@ class RuntimeAgentSession:
         self._state.queued_follow_up_messages.append(UserInputMessage(content=content))
 
     async def pause(self, *, manual: bool = False) -> None:
-        self._set_manual_pause_waiting_reason(manual)
         self._state.paused = True
         self._state.is_running = False
         self._state.status = "paused"
+        paused_snapshot = (
+            self._build_execution_context_snapshot(allow_manual_pause=True, status_override="paused")
+            if manual
+            else None
+        )
+        if manual:
+            self._set_paused_execution_context(paused_snapshot)
+        self._set_manual_pause_waiting_reason(manual)
         await self._emit_safe_stop_notice("pause")
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason="用户已请求暂停，正在安全停止...")
@@ -926,6 +1079,13 @@ class RuntimeAgentSession:
                     heartbeat.clear_session(self._state.session_key)
                 except Exception:
                     logger.debug("manual pause heartbeat clear skipped for {}", self._state.session_key)
+            await self._persist_manual_pause_user_message()
+            # Manual pause persists the current prompt's transcript state using the
+            # existing turn id so the pending user message can be updated in place.
+            # Clear the active turn binding again afterwards so the next real user
+            # message starts a fresh transcript turn instead of overwriting the
+            # paused request that was just preserved.
+            self._active_turn_id = None
         await self._emit(
             "control_ack",
             action="pause",
@@ -934,8 +1094,6 @@ class RuntimeAgentSession:
             manual_pause_waiting_reason=manual,
         )
         await self._emit_state_snapshot()
-        if manual:
-            await self._emit_manual_pause_follow_up()
 
     async def resume(self, *, replan: bool = False, additional_context: str | None = None) -> RunResult:
         self._set_manual_pause_waiting_reason(False)
@@ -954,7 +1112,7 @@ class RuntimeAgentSession:
         await self._loop.cancel_session_tasks(self._state.session_key)
         self._set_manual_pause_waiting_reason(False)
         self._preserved_inflight_turn = None
-        self.clear_interaction_trace()
+        self.clear_paused_execution_context()
         self._state.is_running = False
         self._state.paused = False
         self._state.status = "idle"

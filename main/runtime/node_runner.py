@@ -11,7 +11,7 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
-from main.errors import TaskPausedError
+from main.errors import TaskPausedError, describe_exception
 from main.ids import new_node_id
 from main.models import (
     NodeFinalResult,
@@ -26,36 +26,12 @@ from main.models import (
     normalize_result_payload,
 )
 from main.prompts import load_prompt
-from main.runtime.internal_tools import SpawnChildNodesTool, SubmitNextStageTool
-from main.runtime.stage_messages import build_execution_stage_result_block_message
+from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
 _RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
-ACCEPTANCE_REF_GUIDANCE = (
-    'If more detail is needed, use content.search first and then content.open for targeted reads. '
-    'Do not request the full document body.'
-)
-ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE = (
-    'Evidence consistency check: when the child output or evidence notes cite concrete identifiers '
-    'such as function, method, class, field, config key, CLI command, or search keyword names, '
-    'verify that those identifiers actually appear in the cited file lines or a targeted reopened local slice. '
-    'If the cited identifiers drift from the cited source, reject the deliverable with failed+final.'
-)
-CORE_REQUIREMENT_NOTICE_PREFIXES = (
-    '注意：你正在完成的任务是核心需求【',
-    '你正在完成的任务是核心需求【',
-)
-CORE_REQUIREMENT_NOTICE_FOCUS_TEMPLATE = (
-    '你正在完成的任务是核心需求【{core_requirement}】的细分任务之一。'
-    '只允许抓最关键事实、做最高价值行为和完成当前目标所必需的验证，'
-    '不得额外扩展范围、补做边缘分支或系统性全量操作。'
-)
-CORE_REQUIREMENT_NOTICE_COVERAGE_TEMPLATE = (
-    '你正在完成的任务是核心需求【{core_requirement}】的细分任务之一。'
-    '优先抓最关键事实、做最高价值行为和完成当前目标所必需的验证，'
-    '必要时额外扩展范围、补做边缘分支或系统性全量操作。'
-)
+_SUPERSEDED_SPAWN_REASON_PREFIX = 'superseded by newer spawn round'
 
 
 _UNSET = object()
@@ -96,7 +72,13 @@ class NodeRunner:
             default=self._execution_max_concurrency,
         )
         self._parallel_child_pipelines_enabled = True
+        self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
+        self.nested_node_executor = None
+        self.cancel_node_subtree_executor = None
+        self.governance_child_created_observer = None
+        self.governance_spawn_refusal_supplier = None
+        self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def _normalized_status(value: Any) -> str:
@@ -135,6 +117,121 @@ class NodeRunner:
             failure_info=self._runtime_spawn_failure_info(error_text),
         )
 
+    @staticmethod
+    def _spawn_operation_lock_key(parent_node_id: str) -> str:
+        return str(parent_node_id or '').strip()
+
+    def _spawn_operation_lock(self, parent_node_id: str) -> asyncio.Lock:
+        key = self._spawn_operation_lock_key(parent_node_id)
+        lock = self._spawn_operation_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._spawn_operation_locks[key] = lock
+        return lock
+
+    @staticmethod
+    def _spawn_round_superseded_reason(replacement_round_id: str) -> str:
+        round_id = str(replacement_round_id or '').strip()
+        if round_id:
+            return f'{_SUPERSEDED_SPAWN_REASON_PREFIX}: {round_id}'
+        return _SUPERSEDED_SPAWN_REASON_PREFIX
+
+    @staticmethod
+    def _spawn_exception_text(exc: BaseException | None) -> str:
+        return f'Error: {describe_exception(exc)}'
+
+    def _spawn_runtime_result(self, goal: str, *, error_text: str) -> SpawnChildResult:
+        normalized_error_text = str(error_text or 'Error: runtime failure').strip() or 'Error: runtime failure'
+        return SpawnChildResult(
+            goal=goal,
+            check_result=normalized_error_text,
+            node_output='',
+            node_output_summary='',
+            node_output_ref='',
+            failure_info=self._runtime_spawn_failure_info(normalized_error_text),
+        )
+
+    def _should_propagate_child_pipeline_cancellation(self, *, task_id: str, parent_node_id: str) -> bool:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
+        if bool(task.pause_requested) or bool(task.cancel_requested):
+            return True
+        if self._task_terminal_reason(task_id, task=task):
+            return True
+        parent = self._store.get_node(parent_node_id)
+        return bool(
+            self._node_terminal_reason(
+                parent,
+                default_failed='parent node failed',
+                default_success='parent node already completed',
+            )
+        )
+
+    def _spawn_spec_payload(self, spec: SpawnChildSpec | dict[str, Any] | Any) -> dict[str, Any] | None:
+        try:
+            normalized_spec = spec if isinstance(spec, SpawnChildSpec) else SpawnChildSpec.model_validate(spec)
+        except Exception:
+            return None
+        normalized_policy = normalize_execution_policy_metadata(
+            normalized_spec.execution_policy.model_dump(mode='json')
+        ).model_dump(mode='json')
+        return {
+            'goal': str(normalized_spec.goal or ''),
+            'prompt': str(normalized_spec.prompt or ''),
+            'execution_policy': normalized_policy,
+            'acceptance_prompt': str(normalized_spec.acceptance_prompt or ''),
+            'requires_acceptance': bool(self._requires_acceptance(normalized_spec)),
+        }
+
+    def _spawn_specs_fingerprint(self, specs: list[SpawnChildSpec] | list[dict[str, Any]] | Any) -> str:
+        normalized_specs: list[dict[str, Any]] = []
+        for item in list(specs or []):
+            payload = self._spawn_spec_payload(item)
+            if payload is None:
+                return ''
+            normalized_specs.append(payload)
+        if not normalized_specs:
+            return ''
+        return json.dumps(normalized_specs, ensure_ascii=False, sort_keys=True)
+
+    def _completed_successful_spawn_results(
+        self,
+        *,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        exclude_cache_key: str = '',
+    ) -> list[SpawnChildResult] | None:
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return None
+        target_fingerprint = self._spawn_specs_fingerprint(specs)
+        if not target_fingerprint:
+            return None
+        for cache_key, payload in reversed(list(operations.items())):
+            if str(cache_key or '').strip() == str(exclude_cache_key or '').strip():
+                continue
+            if not isinstance(payload, dict) or not bool(payload.get('completed')):
+                continue
+            if self._spawn_specs_fingerprint(payload.get('specs') or []) != target_fingerprint:
+                continue
+            entries = [item for item in list(payload.get('entries') or []) if isinstance(item, dict)]
+            if len(entries) != len(specs):
+                continue
+            if any(self._normalized_status(item.get('status')) != 'success' for item in entries):
+                continue
+            raw_results = list(payload.get('results') or [])
+            if len(raw_results) != len(specs):
+                continue
+            try:
+                results = [SpawnChildResult.model_validate(item) for item in raw_results]
+            except Exception:
+                continue
+            if any(result.failure_info is not None for result in results):
+                continue
+            return results
+        return None
+
     async def run_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         task = self._store.get_task(task_id)
         node = self._store.get_node(node_id)
@@ -159,6 +256,7 @@ class NodeRunner:
                 messages=list(react_state.get('messages') or []),
                 tools=tools,
                 model_refs=self._model_refs_for(node),
+                model_refs_supplier=lambda current_node=node: self._model_refs_for(current_node),
                 runtime_context=self._runtime_context(task=task, node=node),
                 max_iterations=self._max_iterations_for(node),
                 max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),
@@ -183,17 +281,20 @@ class NodeRunner:
                 raise TaskPausedError(task_id)
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
-            return self._mark_failed(task_id, node.node_id, reason=str(exc))
+            return self._mark_failed(task_id, node.node_id, reason=describe_exception(exc))
+
+    async def _run_nested_node(self, task_id: str, node_id: str) -> NodeFinalResult:
+        executor = self.nested_node_executor
+        if callable(executor):
+            return await executor(task_id, node_id)
+        return await self.run_node(task_id, node_id)
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
-        state = self._log_service.read_runtime_state(task.task_id) or {}
-        for frame in list(state.get('frames') or []):
-            if str(frame.get('node_id') or '') != node.node_id:
-                continue
-            if isinstance(frame.get('messages'), list) and frame.get('messages'):
-                return {
-                    'messages': list(frame.get('messages') or []),
-                }
+        frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
+        if isinstance(frame.get('messages'), list) and frame.get('messages'):
+            return {
+                'messages': list(frame.get('messages') or []),
+            }
         return {
             'messages': await self._build_messages(task=task, node=node),
         }
@@ -202,100 +303,36 @@ class NodeRunner:
         latest = self._store.get_node(node_id)
         if latest is None or latest.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return None
-
-        candidate_text = self._latest_output_candidate_text(latest)
-        if not str(candidate_text or '').strip():
-            return None
-
-        parsed = self._react_loop._parse_final_result(candidate_text)
-        if parsed is None:
-            return None
-
-        stage_gate = self._react_loop._execution_stage_gate(
-            task_id=task_id,
-            node_id=node_id,
-            node_kind=latest.node_kind,
-        )
-        if build_execution_stage_result_block_message(
-            node_kind=latest.node_kind,
-            stage_gate=stage_gate,
-        ):
-            return None
-
-        result, raw_payload = parsed
-        messages = self._runtime_frame_messages(task_id=task_id, node_id=node_id)
-        has_tool_results = self._react_loop._has_tool_results(messages)
-        if not has_tool_results:
-            has_tool_results = any(list(getattr(entry, 'tool_calls', []) or []) for entry in list(latest.output or []))
-        violations = self._react_loop._validate_final_result(
-            result=result,
-            raw_payload=raw_payload,
-            has_tool_results=has_tool_results,
-        )
-        if violations:
-            return None
-        return self._mark_finished(task_id, node_id, result)
-
-    def _latest_output_candidate_text(self, node: NodeRecord) -> str:
-        for entry in reversed(list(node.output or [])):
-            ref = str(getattr(entry, 'content_ref', '') or '').strip()
-            if ref:
-                resolved = self._resolve_content_ref(ref)
-                if str(resolved or '').strip():
-                    return str(resolved or '')
-            text = str(getattr(entry, 'content', '') or '')
-            if text.strip():
-                return text
-
-        detail_getter = getattr(self._store, 'get_task_node_detail', None)
-        if callable(detail_getter):
-            detail = detail_getter(node.node_id)
-            if detail is not None:
-                ref = str(getattr(detail, 'output_ref', '') or '').strip()
-                if ref:
-                    resolved = self._resolve_content_ref(ref)
-                    if str(resolved or '').strip():
-                        return str(resolved or '')
-                text = str(getattr(detail, 'output_text', '') or '')
-                if text.strip():
-                    return text
-        return ''
-
-    def _resolve_content_ref(self, ref: str) -> str:
-        content_store = getattr(self._log_service, '_content_store', None)
-        resolver = getattr(content_store, '_resolve', None) if content_store is not None else None
-        if not callable(resolver):
-            return ''
-        try:
-            text, _handle = resolver(ref=ref, path=None)
-        except Exception:
-            return ''
-        return str(text or '')
+        _ = task_id
+        return None
 
     def _runtime_frame_messages(self, *, task_id: str, node_id: str) -> list[dict[str, Any]]:
-        state = self._log_service.read_runtime_state(task_id) or {}
-        for frame in list(state.get('frames') or []):
-            if str(frame.get('node_id') or '') != str(node_id or ''):
-                continue
-            messages = frame.get('messages')
-            if isinstance(messages, list):
-                return [item for item in messages if isinstance(item, dict)]
-            return []
+        frame = self._log_service.read_runtime_frame(task_id, node_id) or {}
+        messages = frame.get('messages')
+        if isinstance(messages, list):
+            return [item for item in messages if isinstance(item, dict)]
         return []
 
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             tools['submit_next_stage'] = SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget: self._submit_next_stage(
+                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs: self._submit_next_stage(
                     task_id=task.task_id,
                     node_id=node.node_id,
                     stage_goal=stage_goal,
                     tool_round_budget=tool_round_budget,
+                    completed_stage_summary=completed_stage_summary,
+                    key_refs=key_refs,
                 )
+            )
+            tools['submit_final_result'] = SubmitFinalResultTool(
+                lambda payload: self._submit_final_result(payload),
+                node_kind=node.node_kind,
             )
         else:
             tools.pop('submit_next_stage', None)
+            tools.pop('submit_final_result', None)
         if node.node_kind == KIND_EXECUTION:
             if node.can_spawn_children:
                 tools['spawn_child_nodes'] = SpawnChildNodesTool(
@@ -323,11 +360,7 @@ class NodeRunner:
             'depth': node.depth,
             'can_spawn_children': bool(node.can_spawn_children),
             'goal': node.goal,
-            'prompt': self._inject_core_requirement_notice(
-                node.prompt,
-                core_requirement,
-                execution_policy.mode,
-            ),
+            'prompt': str(node.prompt or ''),
             'core_requirement': core_requirement,
             'execution_policy': execution_policy.model_dump(mode='json'),
             'runtime_environment': self._runtime_environment_payload(),
@@ -352,9 +385,7 @@ class NodeRunner:
 
     def _build_system_prompt(self, *, node: NodeRecord) -> str:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
-        prompt = load_prompt(system_name).strip()
-        environment_guidance = self._environment_context_guidance(node=node)
-        return f'{prompt}\n\n{environment_guidance}'
+        return load_prompt(system_name).strip()
 
     def _execution_stage_payload(self, *, task, node: NodeRecord) -> dict[str, Any]:
         return self._log_service.execution_stage_prompt_payload(task.task_id, node.node_id)
@@ -413,6 +444,11 @@ class NodeRunner:
             'project_path_entries': list(project_environment.get('project_path_entries') or []),
             'project_virtual_env': str(project_environment.get('project_virtual_env') or ''),
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
+            'tool_snapshot_supplier': (
+                (lambda current_task_id=task.task_id: self._tool_snapshot_supplier(current_task_id))
+                if callable(getattr(self, '_tool_snapshot_supplier', None))
+                else None
+            ),
         }
 
     @staticmethod
@@ -469,49 +505,18 @@ class NodeRunner:
                 'exec_requires_explicit_working_dir_for_target_dir': True,
             },
             'tool_guidance': {
-                'filesystem': 'Use absolute paths. Prefer filesystem.search for recursive directory searches.',
-                'content': 'Use ref navigation or absolute file paths for a single content body; do not expect directory search here.',
+                'filesystem': '使用绝对路径。需要递归搜索目录时，优先使用 filesystem.search。',
+                'content': '单个内容体优先用 ref 导航或绝对文件路径；不要把它当成目录搜索工具。',
                 'exec': (
-                    'Exec runs in PowerShell on Windows and in the host shell elsewhere. '
-                    'It inherits the same Python environment as the current G3KU process and injects '
-                    'that interpreter onto PATH. Do not assume bash heredocs, rg, or Unix shell '
-                    'builtins such as `true` are available. Pass an explicit working_dir when you '
-                    f"need a specific directory. When exact interpreter choice matters, prefer `{project_environment.get('project_python_hint') or 'python'}` "
-                    'instead of assuming bare `python` resolves correctly.'
+                    'Windows 上的 exec 运行在 PowerShell 中，其他系统运行在宿主 shell 中。'
+                    '它会继承当前 G3KU 进程使用的同一套 Python 环境，并把该解释器注入 PATH。'
+                    '不要假设 bash heredoc、rg 或 `true` 这类 Unix shell 内建一定可用。'
+                    '需要特定目录时，显式传入 working_dir。'
+                    f"当解释器选择必须精确一致时，优先使用 `{project_environment.get('project_python_hint') or 'python'}`，"
+                    '不要假设裸 `python` 一定会解析到正确解释器。'
                 ),
             },
         }
-
-    def _environment_context_guidance(self, *, node: NodeRecord) -> str:
-        env = self._runtime_environment_payload()
-        path_policy = env['path_policy']
-        tool_guidance = env['tool_guidance']
-        lines = [
-            'Runtime environment:',
-            f"- OS family: {env['os_family']}",
-            f"- Shell family for `exec`: {env['shell_family']}",
-            f"- Current process cwd: {env['process_cwd']}",
-            f"- Workspace root: {env['workspace_root']}",
-            f"- Project Python for exact `exec` calls: {env['project_python']}",
-            f"- Project Python shell hint: {env['project_python_hint']}",
-            '- Relative path policy: Do not assume relative paths bind to workspace. '
-            f"`filesystem` absolute-only={str(path_policy['filesystem_requires_absolute_path']).lower()}, "
-            f"`content` absolute-only={str(path_policy['content_requires_absolute_path']).lower()}, "
-            f"`exec` default working_dir={path_policy['exec_default_working_dir']}.",
-            '- Tool usage guidance:',
-        ]
-        if str(env.get('project_virtual_env') or '').strip():
-            lines.append(f"- Active virtual environment: {env['project_virtual_env']}")
-        lines.extend(
-            [
-                f"- `filesystem`: {tool_guidance['filesystem']}",
-                f"- `content`: {tool_guidance['content']}",
-                f"- `exec`: {tool_guidance['exec']}",
-                '- If the real target project is outside the current workspace, use explicit absolute paths to that '
-                'target instead of broad fallback searches inside the current repo.',
-            ]
-        )
-        return '\n'.join(lines)
 
     @staticmethod
     def _actor_role_for_node(node: NodeRecord) -> str:
@@ -525,24 +530,58 @@ class NodeRunner:
         specs: list[SpawnChildSpec],
         call_id: str | None,
     ) -> list[SpawnChildResult]:
+        async with self._spawn_operation_lock(parent_node_id):
+            return await self._spawn_children_locked(
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                specs=specs,
+                call_id=call_id,
+            )
+
+    async def _spawn_children_locked(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        specs: list[SpawnChildSpec],
+        call_id: str | None,
+    ) -> list[SpawnChildResult]:
         task = self._store.get_task(task_id)
         parent = self._store.get_node(parent_node_id)
         if task is None or parent is None:
             raise ValueError('parent task or node missing')
+        governance_refusal = ''
+        if callable(self.governance_spawn_refusal_supplier):
+            governance_refusal = str(
+                self.governance_spawn_refusal_supplier(
+                    task_id=task.task_id,
+                    parent_depth=int(parent.depth or 0),
+                )
+                or ''
+            ).strip()
+        if governance_refusal:
+            raise ValueError(governance_refusal)
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
-        task_execution_policy = self._resolve_execution_policy(task, node=parent)
-        for index, spec in enumerate(list(specs or [])):
-            spec_execution_policy = normalize_execution_policy_metadata(spec.execution_policy)
-            if spec_execution_policy.mode != task_execution_policy.mode:
-                raise ValueError(
-                    f'children[{index}].execution_policy.mode must match parent task execution_policy.mode'
-                )
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = str(call_id or f'call:{len(specs)}')
+        await self._settle_superseded_spawn_operations(
+            task=task,
+            parent=parent,
+            exclude_cache_key=cache_key,
+            replacement_round_id=cache_key,
+        )
+        parent = self._store.get_node(parent_node_id) or parent
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
             return [SpawnChildResult.model_validate(item) for item in list(cached.get('results') or [])]
+        reused_results = self._completed_successful_spawn_results(
+            parent=parent,
+            specs=specs,
+            exclude_cache_key=cache_key,
+        )
+        if reused_results is not None:
+            return reused_results
 
         cached_payload = copy.deepcopy(cached) if isinstance(cached, dict) else {
             'specs': [item.model_dump(mode='json') for item in specs],
@@ -561,6 +600,20 @@ class NodeRunner:
         cached_payload['completed'] = False
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
 
+        await self._admit_spawn_batch(
+            task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            cache_key=cache_key,
+            spec_count=len(specs),
+        )
+        self._materialize_spawn_batch_children(
+            task=task,
+            parent=parent,
+            specs=specs,
+            cache_key=cache_key,
+            cached_payload=cached_payload,
+        )
+
         semaphore = asyncio.Semaphore(
             self._parallel_slot_count(
                 self._max_parallel_child_pipelines_for(parent),
@@ -571,14 +624,52 @@ class NodeRunner:
 
         async def _run_spec(index: int, spec: SpawnChildSpec) -> SpawnChildResult:
             async with semaphore:
-                return await self._run_child_pipeline(
-                    task=task,
-                    parent=parent,
-                    spec=spec,
-                    cache_key=cache_key,
-                    cached_payload=cached_payload,
-                    index=index,
-                )
+                try:
+                    return await self._run_child_pipeline(
+                        task=task,
+                        parent=parent,
+                        spec=spec,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                    )
+                except TaskPausedError:
+                    raise
+                except asyncio.CancelledError as exc:
+                    if self._should_propagate_child_pipeline_cancellation(
+                        task_id=task.task_id,
+                        parent_node_id=parent.node_id,
+                    ):
+                        raise
+                    error_text = self._spawn_exception_text(exc)
+                    result = self._spawn_runtime_result(spec.goal, error_text=error_text)
+                    self._update_spawn_entry(
+                        task_id=task.task_id,
+                        parent_node_id=parent.node_id,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                        status='error',
+                        finished_at=_now(),
+                        check_status='failed',
+                        result=result.model_dump(mode='json', exclude_none=True),
+                    )
+                    return result
+                except Exception as exc:
+                    error_text = self._spawn_exception_text(exc)
+                    result = self._spawn_runtime_result(spec.goal, error_text=error_text)
+                    self._update_spawn_entry(
+                        task_id=task.task_id,
+                        parent_node_id=parent.node_id,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                        status='error',
+                        finished_at=_now(),
+                        check_status='failed',
+                        result=result.model_dump(mode='json', exclude_none=True),
+                    )
+                    return result
 
         results = await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
         cached_payload['results'] = [item.model_dump(mode='json', exclude_none=True) for item in results]
@@ -603,6 +694,301 @@ class NodeRunner:
         if limit is None:
             return max(1, item_count)
         return max(1, int(limit) if int(limit) > 0 else 1)
+
+    def _spawn_entry_node_ids(self, entry: dict[str, Any]) -> list[str]:
+        node_ids: list[str] = []
+        for field in ('child_node_id', 'acceptance_node_id'):
+            node_id = str(entry.get(field) or '').strip()
+            if node_id:
+                node_ids.append(node_id)
+        return node_ids
+
+    def _spawn_entry_is_active(self, entry: dict[str, Any]) -> bool:
+        status = str(entry.get('status') or '').strip().lower()
+        if status in {'queued', 'running'}:
+            return True
+        for node_id in self._spawn_entry_node_ids(entry):
+            node = self._store.get_node(node_id)
+            if node is None:
+                continue
+            if self._normalized_status(getattr(node, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
+                return True
+        return False
+
+    def _active_prior_spawn_operations(
+        self,
+        *,
+        parent: NodeRecord,
+        exclude_cache_key: str,
+    ) -> list[tuple[str, dict[str, Any], list[int]]]:
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return []
+        active_operations: list[tuple[str, dict[str, Any], list[int]]] = []
+        excluded = str(exclude_cache_key or '').strip()
+        for cache_key, payload in operations.items():
+            normalized_cache_key = str(cache_key or '').strip()
+            if normalized_cache_key == excluded or not isinstance(payload, dict):
+                continue
+            payload_copy = copy.deepcopy(payload)
+            active_indexes: list[int] = []
+            for index, entry in enumerate(list(payload_copy.get('entries') or [])):
+                if isinstance(entry, dict) and self._spawn_entry_is_active(entry):
+                    active_indexes.append(index)
+            if active_indexes:
+                active_operations.append((normalized_cache_key, payload_copy, active_indexes))
+        return active_operations
+
+    def _collect_descendant_node_ids(self, root_node_ids: list[str] | set[str]) -> set[str]:
+        pending = [str(node_id or '').strip() for node_id in list(root_node_ids or []) if str(node_id or '').strip()]
+        collected: set[str] = set()
+        while pending:
+            node_id = pending.pop()
+            if not node_id or node_id in collected:
+                continue
+            collected.add(node_id)
+            for child in list(self._store.list_children(node_id) or []):
+                child_id = str(child.node_id or '').strip()
+                if child_id and child_id not in collected:
+                    pending.append(child_id)
+        return collected
+
+    async def _cancel_spawn_subtrees(self, *, task_id: str, node_ids: set[str]) -> None:
+        targets = sorted(str(node_id or '').strip() for node_id in list(node_ids or []) if str(node_id or '').strip())
+        if not targets:
+            return
+        executor = self.cancel_node_subtree_executor
+        if not callable(executor):
+            return
+        try:
+            await executor(task_id, targets)
+        except TaskPausedError:
+            raise
+        except asyncio.CancelledError:
+            raise
+
+    async def _wait_for_terminal_nodes(self, *, node_ids: set[str], timeout_seconds: float = 2.0) -> set[str]:
+        pending = {
+            str(node_id or '').strip()
+            for node_id in list(node_ids or [])
+            if str(node_id or '').strip()
+            and self._normalized_status(getattr(self._store.get_node(str(node_id or '').strip()), 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}
+        }
+        if not pending:
+            return set()
+        deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout_seconds or 0.0))
+        while pending and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+            pending = {
+                node_id
+                for node_id in pending
+                if self._normalized_status(getattr(self._store.get_node(node_id), 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}
+            }
+        return pending
+
+    def _force_superseded_nodes_terminal(self, *, task_id: str, node_ids: set[str], reason_text: str) -> None:
+        terminal_result = NodeFinalResult(
+            status=STATUS_FAILED,
+            delivery_status='blocked',
+            summary=reason_text,
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=reason_text,
+        )
+        nodes: list[NodeRecord] = []
+        for node_id in list(node_ids or []):
+            node = self._store.get_node(str(node_id or '').strip())
+            if node is None:
+                continue
+            nodes.append(node)
+        nodes.sort(key=lambda item: (int(item.depth or 0), str(item.node_id or '')), reverse=True)
+        for node in nodes:
+            latest = self._store.get_node(node.node_id) or node
+            if self._normalized_status(getattr(latest, 'status', '')) == STATUS_SUCCESS:
+                continue
+            self._mark_finished(task_id, latest.node_id, terminal_result)
+
+    def _rebuild_spawn_entry_result(
+        self,
+        *,
+        task_id: str,
+        entry: dict[str, Any],
+        fallback_goal: str,
+        fallback_reason: str,
+        error_source: str = 'runtime',
+    ) -> tuple[SpawnChildResult, str, str, str | None]:
+        goal = str(entry.get('goal') or fallback_goal or '').strip()
+        requires_acceptance = bool(entry.get('requires_acceptance'))
+        child_node_id = str(entry.get('child_node_id') or '').strip()
+        acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
+        child = self._store.get_node(child_node_id) if child_node_id else None
+        acceptance = self._store.get_node(acceptance_node_id) if acceptance_node_id else None
+        child_summary = ''
+        child_ref = ''
+        if child is not None:
+            child_handoff = self._child_handoff_payload(
+                task_id=task_id,
+                node=child,
+                fallback_output='',
+            )
+            child_summary = str(child_handoff.get('summary') or '')
+            child_ref = str(child_handoff.get('output_ref') or '')
+
+        if requires_acceptance:
+            if acceptance is not None and self._normalized_status(getattr(acceptance, 'status', '')) == STATUS_SUCCESS:
+                check_result = str(
+                    acceptance.final_output
+                    or acceptance.failure_reason
+                    or (self._result_from_record(acceptance).summary if acceptance is not None else '')
+                    or SKIPPED_CHECK_RESULT
+                ).strip() or SKIPPED_CHECK_RESULT
+                return (
+                    SpawnChildResult(
+                        goal=goal,
+                        check_result=check_result,
+                        node_output=child_summary,
+                        node_output_summary=child_summary,
+                        node_output_ref=child_ref,
+                    ),
+                    'success',
+                    'passed',
+                    check_result,
+                )
+            if acceptance is not None:
+                check_result = str(
+                    acceptance.final_output
+                    or acceptance.failure_reason
+                    or (self._result_from_record(acceptance).summary if acceptance is not None else '')
+                    or fallback_reason
+                ).strip() or fallback_reason
+                return (
+                    SpawnChildResult(
+                        goal=goal,
+                        check_result=check_result,
+                        node_output=child_summary,
+                        node_output_summary=child_summary,
+                        node_output_ref=child_ref,
+                        failure_info=self._spawn_failure_info_from_node(
+                            task_id=task_id,
+                            node=acceptance,
+                            fallback_output=check_result,
+                            source=error_source,
+                        ),
+                    ),
+                    'error',
+                    'failed',
+                    check_result,
+                )
+            fallback_error = str(fallback_reason or self._spawn_exception_text(RuntimeError('acceptance node missing'))).strip()
+            result = self._spawn_runtime_result(goal, error_text=fallback_error)
+            return result, 'error', 'failed', fallback_error
+
+        if child is not None and self._normalized_status(getattr(child, 'status', '')) == STATUS_SUCCESS:
+            return (
+                SpawnChildResult(
+                    goal=goal,
+                    check_result=SKIPPED_CHECK_RESULT,
+                    node_output=child_summary,
+                    node_output_summary=child_summary,
+                    node_output_ref=child_ref,
+                ),
+                'success',
+                'skipped',
+                SKIPPED_CHECK_RESULT,
+            )
+        if child is not None:
+            return (
+                SpawnChildResult(
+                    goal=goal,
+                    check_result=SKIPPED_CHECK_RESULT,
+                    node_output=child_summary,
+                    node_output_summary=child_summary,
+                    node_output_ref=child_ref,
+                    failure_info=self._spawn_failure_info_from_node(
+                        task_id=task_id,
+                        node=child,
+                        fallback_output=fallback_reason,
+                        source=error_source,
+                    ),
+                ),
+                'error',
+                'skipped',
+                SKIPPED_CHECK_RESULT,
+            )
+        fallback_error = str(fallback_reason or self._spawn_exception_text(RuntimeError('child node missing'))).strip()
+        result = self._spawn_runtime_result(goal, error_text=fallback_error)
+        return result, 'error', 'failed', fallback_error
+
+    async def _settle_superseded_spawn_operations(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        exclude_cache_key: str,
+        replacement_round_id: str,
+    ) -> None:
+        active_operations = self._active_prior_spawn_operations(parent=parent, exclude_cache_key=exclude_cache_key)
+        if not active_operations:
+            return
+        reason_text = self._spawn_round_superseded_reason(replacement_round_id)
+        active_root_node_ids: set[str] = set()
+        preterminal_node_ids: set[str] = set()
+        for _cache_key, payload, active_indexes in active_operations:
+            for index in active_indexes:
+                entries = list(payload.get('entries') or [])
+                if index >= len(entries) or not isinstance(entries[index], dict):
+                    continue
+                entry = dict(entries[index] or {})
+                for node_id in self._spawn_entry_node_ids(entry):
+                    active_root_node_ids.add(node_id)
+        subtree_node_ids = self._collect_descendant_node_ids(active_root_node_ids)
+        for node_id in list(subtree_node_ids):
+            node = self._store.get_node(node_id)
+            if node is None:
+                continue
+            if self._normalized_status(getattr(node, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
+                preterminal_node_ids.add(node_id)
+
+        await self._cancel_spawn_subtrees(task_id=task.task_id, node_ids=subtree_node_ids)
+        await self._wait_for_terminal_nodes(node_ids=subtree_node_ids)
+        self._force_superseded_nodes_terminal(
+            task_id=task.task_id,
+            node_ids=preterminal_node_ids,
+            reason_text=reason_text,
+        )
+
+        for cache_key, payload, active_indexes in active_operations:
+            specs = list(payload.get('specs') or [])
+            for index in active_indexes:
+                spec_payload = specs[index] if index < len(specs) and isinstance(specs[index], dict) else {}
+                result, status, check_status, child_check_result = self._rebuild_spawn_entry_result(
+                    task_id=task.task_id,
+                    entry=dict((list(payload.get('entries') or []) or [])[index] or {}),
+                    fallback_goal=str(spec_payload.get('goal') or ''),
+                    fallback_reason=self._spawn_exception_text(RuntimeError(reason_text)),
+                    error_source='runtime',
+                )
+                child_node_id = str(((list(payload.get('entries') or []) or [])[index] or {}).get('child_node_id') or '').strip()
+                if child_node_id and child_check_result is not None:
+                    self._log_service.update_node_check_result(task.task_id, child_node_id, child_check_result)
+                self._update_spawn_entry(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    cached_payload=payload,
+                    index=index,
+                    status=status,
+                    finished_at=_now(),
+                    check_status=check_status,
+                    result=result.model_dump(mode='json', exclude_none=True),
+                )
+            payload['completed'] = not any(
+                self._spawn_entry_is_active(item)
+                for item in list(payload.get('entries') or [])
+                if isinstance(item, dict)
+            )
+            self._save_spawn_cache(task.task_id, parent.node_id, cache_key, payload)
 
     async def _run_child_pipeline(
         self,
@@ -663,7 +1049,7 @@ class NodeRunner:
                     child_node_id=child.node_id,
                 )
 
-            child_result = await self.run_node(task.task_id, child.node_id)
+            child_result = await self._run_nested_node(task.task_id, child.node_id)
             child = self._store.get_node(child.node_id) or child
             child_handoff = self._child_handoff_payload(
                 task_id=task.task_id,
@@ -734,6 +1120,13 @@ class NodeRunner:
             acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
             acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
             if acceptance is None:
+                await self._admit_spawn_expansion(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    cache_key=cache_key,
+                    index=index,
+                    phase='acceptance',
+                )
                 acceptance_goal = f'accept:{spec.goal}'
                 acceptance_prompt = str(spec.acceptance_prompt or '')
                 acceptance = self._find_reusable_acceptance_node(
@@ -762,7 +1155,7 @@ class NodeRunner:
                     check_status='running',
                 )
 
-            acceptance_result = await self.run_node(task.task_id, acceptance.node_id)
+            acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
             acceptance = self._store.get_node(acceptance.node_id) or acceptance
             check_result = str(acceptance_result.summary or acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
             self._log_service.update_node_check_result(task.task_id, child.node_id, check_result)
@@ -797,17 +1190,29 @@ class NodeRunner:
             return result
         except TaskPausedError:
             raise
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            result = SpawnChildResult(
-                goal=spec.goal,
-                check_result=f'Error: {exc}',
-                node_output='',
-                node_output_summary='',
-                node_output_ref='',
-                failure_info=self._runtime_spawn_failure_info(f'Error: {exc}'),
+        except asyncio.CancelledError as exc:
+            if self._should_propagate_child_pipeline_cancellation(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+            ):
+                raise
+            error_text = self._spawn_exception_text(exc)
+            result = self._spawn_runtime_result(spec.goal, error_text=error_text)
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                status='error',
+                finished_at=_now(),
+                check_status='failed',
+                result=result.model_dump(mode='json', exclude_none=True),
             )
+            return result
+        except Exception as exc:
+            error_text = self._spawn_exception_text(exc)
+            result = self._spawn_runtime_result(spec.goal, error_text=error_text)
             self._update_spawn_entry(
                 task_id=task.task_id,
                 parent_node_id=parent.node_id,
@@ -899,8 +1304,7 @@ class NodeRunner:
         if parent is None:
             return
         child_pipelines, pending_specs, partial_results, has_active = self._parent_spawn_frame_state(parent)
-        state = self._log_service.read_runtime_state(task_id) or {}
-        frame_exists = any(str(item.get('node_id') or '') == parent_node_id for item in list(state.get('frames') or []))
+        frame_exists = self._log_service.read_runtime_frame(task_id, parent_node_id) is not None
         if not frame_exists and not child_pipelines:
             return
 
@@ -969,6 +1373,87 @@ class NodeRunner:
         has_active = any(str(item.get('status') or '').strip().lower() in {'queued', 'running'} for item in child_pipelines)
         return child_pipelines, pending_specs, partial_results, has_active
 
+    async def _admit_spawn_batch(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        spec_count: int,
+    ) -> None:
+        controller = self._adaptive_tool_budget_controller
+        if controller is None:
+            return
+        lease = await controller.acquire_work_slot(
+            task_id=task_id,
+            node_id=parent_node_id,
+            work_kind='spawn_child_nodes',
+            work_id=f'{cache_key}:batch:{max(0, int(spec_count))}',
+        )
+        controller.release_work_slot(lease)
+
+    def _materialize_spawn_batch_children(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        cache_key: str,
+        cached_payload: dict[str, Any],
+    ) -> None:
+        stop_reason = self._task_terminal_reason(task.task_id, task=task) or self._node_terminal_reason(
+            self._store.get_node(parent.node_id) or parent,
+            default_failed='parent node failed',
+            default_success='parent node already completed',
+        )
+        if stop_reason:
+            return
+        entries = list(cached_payload.get('entries') or [])
+        for index, spec in enumerate(list(specs or [])):
+            if index >= len(entries):
+                break
+            entry = dict(entries[index] or {})
+            child_id = str(entry.get('child_node_id') or '').strip()
+            if child_id:
+                continue
+            child = self._find_reusable_execution_child(
+                task=task,
+                parent=parent,
+                spec=spec,
+                exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='child_node_id', skip_index=index),
+            )
+            if child is None:
+                child = self._create_execution_child(task=task, parent=parent, spec=spec)
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                child_node_id=child.node_id,
+            )
+            entries = list(cached_payload.get('entries') or [])
+
+    async def _admit_spawn_expansion(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        index: int,
+        phase: str,
+    ) -> None:
+        controller = self._adaptive_tool_budget_controller
+        if controller is None:
+            return
+        lease = await controller.acquire_work_slot(
+            task_id=task_id,
+            node_id=parent_node_id,
+            work_kind='spawn_child_nodes',
+            work_id=f'{cache_key}:{phase}:{int(index)}',
+        )
+        controller.release_work_slot(lease)
+
     def _requires_acceptance(self, spec: SpawnChildSpec) -> bool:
         if spec.requires_acceptance is True:
             return True
@@ -997,11 +1482,7 @@ class NodeRunner:
         spec: SpawnChildSpec,
         exclude_node_ids: set[str],
     ) -> NodeRecord | None:
-        expected_prompt = self._inject_core_requirement_notice(
-            spec.prompt,
-            self._resolve_core_requirement(task),
-            normalize_execution_policy_metadata(spec.execution_policy).mode,
-        )
+        expected_prompt = str(spec.prompt or '')
         expected_fingerprint = self._execution_child_recovery_fingerprint(
             parent_node_id=parent.node_id,
             goal=spec.goal,
@@ -1038,8 +1519,6 @@ class NodeRunner:
             node_output_ref=str(child_handoff.get('output_ref') or ''),
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
-            core_requirement=self._resolve_core_requirement(task),
-            execution_policy_mode=self._resolve_execution_policy(task, node=accepted_node).mode,
         )
         expected_fingerprint = self._acceptance_node_recovery_fingerprint(
             parent_node_id=parent_node_id,
@@ -1128,15 +1607,6 @@ class NodeRunner:
             }
         )
 
-    @staticmethod
-    def _core_requirement_notice(core_requirement: str, execution_policy_mode: str) -> str:
-        template = (
-            CORE_REQUIREMENT_NOTICE_COVERAGE_TEMPLATE
-            if str(execution_policy_mode or '').strip().lower() == 'coverage'
-            else CORE_REQUIREMENT_NOTICE_FOCUS_TEMPLATE
-        )
-        return template.format(core_requirement=str(core_requirement or '').strip())
-
     def _resolve_core_requirement(self, task) -> str:
         metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
         return str(metadata.get('core_requirement') or getattr(task, 'user_request', '') or getattr(task, 'title', '') or '').strip()
@@ -1148,29 +1618,9 @@ class NodeRunner:
             node_metadata.get('execution_policy', task_metadata.get('execution_policy'))
         )
 
-    def _inject_core_requirement_notice(self, prompt: str, core_requirement: str, execution_policy_mode: str) -> str:
-        normalized_core_requirement = str(core_requirement or '').strip()
-        base_lines = []
-        for line in str(prompt or '').splitlines():
-            stripped = str(line or '').strip()
-            if any(stripped.startswith(prefix) for prefix in CORE_REQUIREMENT_NOTICE_PREFIXES):
-                continue
-            base_lines.append(line)
-        base_prompt = '\n'.join(base_lines).strip()
-        if not normalized_core_requirement:
-            return base_prompt
-        notice = self._core_requirement_notice(normalized_core_requirement, execution_policy_mode)
-        if not base_prompt:
-            return notice
-        return f'{notice}\n\n{base_prompt}'
-
     def _create_execution_child(self, *, task, parent: NodeRecord, spec: SpawnChildSpec) -> NodeRecord:
         execution_policy = normalize_execution_policy_metadata(spec.execution_policy)
-        child_prompt = self._inject_core_requirement_notice(
-            spec.prompt,
-            self._resolve_core_requirement(task),
-            execution_policy.mode,
-        )
+        child_prompt = str(spec.prompt or '')
         metadata = {
             'execution_policy': execution_policy.model_dump(mode='json'),
             _RECOVERY_FINGERPRINT_KEY: self._execution_child_recovery_fingerprint(
@@ -1200,7 +1650,13 @@ class NodeRunner:
             token_usage_by_model=[],
             metadata=metadata,
         )
-        return self._log_service.create_node(task.task_id, child)
+        created = self._log_service.create_node(task.task_id, child)
+        if callable(self.governance_child_created_observer):
+            try:
+                self.governance_child_created_observer(task_id=task.task_id, child_node=created)
+            except Exception:
+                pass
+        return created
 
     def create_acceptance_node(
         self,
@@ -1224,8 +1680,6 @@ class NodeRunner:
             node_output_ref=str(child_handoff.get('output_ref') or ''),
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
-            core_requirement=self._resolve_core_requirement(task),
-            execution_policy_mode=execution_policy.mode,
         )
         base_metadata = {
             'accepted_node_id': accepted_node.node_id,
@@ -1268,20 +1722,16 @@ class NodeRunner:
         node_output_ref: str,
         result_payload_ref: str,
         evidence_summary: str,
-        core_requirement: str,
-        execution_policy_mode: str,
     ) -> str:
+        normalized_acceptance_prompt = str(acceptance_prompt or '').strip()
         prompt = (
-            f'{acceptance_prompt}\n\n'
-            f'Child node output summary:\n{node_output or "(empty)"}\n\n'
-            f'Child node output ref: {node_output_ref or "(none)"}\n'
-            f'Child node result payload ref: {result_payload_ref or "(none)"}\n'
-            f'Child node evidence summary:\n{evidence_summary or "(none)"}\n'
+            f'{normalized_acceptance_prompt}\n\n'
+            f'子节点输出摘要：\n{node_output or "(empty)"}\n\n'
+            f'子节点输出 ref：{node_output_ref or "(none)"}\n'
+            f'子节点结果载荷 ref：{result_payload_ref or "(none)"}\n'
+            f'子节点证据摘要：\n{evidence_summary or "(none)"}\n'
         )
-        if node_output_ref or result_payload_ref:
-            prompt = f'{prompt}\n{ACCEPTANCE_REF_GUIDANCE}\n'
-        prompt = f'{prompt}\n{ACCEPTANCE_EVIDENCE_CONSISTENCY_GUIDANCE}\n'
-        return self._inject_core_requirement_notice(prompt, core_requirement, execution_policy_mode)
+        return prompt
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:
         latest = self._log_service.ensure_node_output_externalized(task_id, node.node_id) or self._store.get_node(node.node_id) or node
@@ -1332,7 +1782,7 @@ class NodeRunner:
 
     @staticmethod
     def _runtime_spawn_failure_info(error_text: str) -> SpawnChildFailureInfo:
-        text = str(error_text or 'Error: child pipeline failed').strip() or 'Error: child pipeline failed'
+        text = str(error_text or '错误：子节点流水线失败').strip() or '错误：子节点流水线失败'
         return SpawnChildFailureInfo(
             source='runtime',
             summary=text,
@@ -1350,22 +1800,31 @@ class NodeRunner:
         node_id: str,
         stage_goal: str,
         tool_round_budget: int,
+        completed_stage_summary: str,
+        key_refs: list[dict[str, Any]],
     ) -> dict[str, Any]:
         stage = self._log_service.submit_next_stage(
             task_id,
             node_id,
             stage_goal=str(stage_goal or '').strip(),
             tool_round_budget=int(tool_round_budget or 0),
+            completed_stage_summary=str(completed_stage_summary or '').strip(),
+            key_refs=[dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
         )
         return {
             'stage_id': str(stage.get('stage_id') or ''),
             'stage_index': int(stage.get('stage_index') or 0),
+            'stage_kind': str(stage.get('stage_kind') or 'normal'),
             'mode': str(stage.get('mode') or ''),
             'status': str(stage.get('status') or ''),
             'stage_goal': str(stage.get('stage_goal') or ''),
             'tool_round_budget': int(stage.get('tool_round_budget') or 0),
             'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
         }
+
+    @staticmethod
+    async def _submit_final_result(payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(payload or {})
 
     def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED

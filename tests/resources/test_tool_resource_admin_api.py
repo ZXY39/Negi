@@ -26,6 +26,10 @@ from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+async def _noop_enqueue_task(_task_id: str) -> None:
+    return None
+
+
 def _mock_ceo_catalog_config(monkeypatch) -> None:
     monkeypatch.setattr(
         web_ceo_sessions,
@@ -274,6 +278,56 @@ async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_pa
         assert payload['tool_type'] == 'internal'
         assert payload['install_dir'] is None
         assert payload['callable'] is True
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_load_tool_context_prefers_requested_executor_toolskill_over_family_primary(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'memory_search', 'memory_write', 'memory_runtime')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-service-bind')
+    service.bind_resource_manager(manager)
+
+    try:
+        await service.startup()
+
+        toolskill = service.get_tool_toolskill('memory_write')
+        assert toolskill is not None
+        assert toolskill['tool_id'] == 'memory_write'
+        assert toolskill['family_tool_id'] == 'memory'
+        assert toolskill['toolskill_source_name'] == 'memory_write'
+        assert toolskill['available'] is False
+        assert toolskill['repair_required'] is True
+        assert 'tool_handler_unavailable' in toolskill['errors']
+        assert '# memory_write' in toolskill['content']
+        assert '# memory_search' not in toolskill['content']
+
+        payload = service.load_tool_context(
+            actor_role='ceo',
+            session_id='web:shared',
+            tool_id='memory_write',
+        )
+        assert payload['ok'] is True
+        assert payload['tool_id'] == 'memory_write'
+        assert payload['available'] is False
+        assert '# memory_write' in payload['content']
     finally:
         await service.close()
         manager.close()
@@ -532,17 +586,11 @@ def test_main_runtime_service_normalizes_short_task_id_for_failed_node_lookup():
             captured['failed_task_id'] = task_id
             return ['node:1', 'node:2']
 
-    class _LogService:
-        def ensure_task_projection(self, task_id: str) -> None:
-            captured['projection_task_id'] = task_id
-
     service = object.__new__(MainRuntimeService)
     service.query_service = _QueryService()
-    service.log_service = _LogService()
 
     result = service.failed_node_ids('demo')
 
-    assert captured['projection_task_id'] == 'task:demo'
     assert captured['failed_task_id'] == 'task:demo'
     assert result == '- node:1\n- node:2'
 
@@ -795,7 +843,7 @@ async def test_create_async_task_tool_creates_continuation_task_with_metadata_wh
         governance_store_path=tmp_path / 'governance.sqlite3',
         execution_mode='embedded',
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         tool = CreateAsyncTaskTool(service)
@@ -828,7 +876,7 @@ async def test_create_async_task_tool_keeps_session_task_count_when_reusing_exis
         governance_store_path=tmp_path / 'governance.sqlite3',
         execution_mode='embedded',
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         original = await service.create_task(
@@ -882,7 +930,7 @@ async def test_main_runtime_service_prefers_latest_reusable_continuation_task(tm
         governance_store_path=tmp_path / 'governance.sqlite3',
         execution_mode='embedded',
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         original = await service.create_task(
@@ -935,7 +983,7 @@ async def test_main_runtime_service_falls_back_core_requirement_to_task_prompt(t
         governance_store_path=tmp_path / 'governance.sqlite3',
         execution_mode='embedded',
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
 
     try:
         record = await service.create_task('整理需求', session_id='web:shared', metadata={})
@@ -1508,6 +1556,104 @@ def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: 
     }
 
 
+def _build_inflight_only_ceo_session_delete_client(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+    from g3ku.session.manager import SessionManager
+
+    manager = SessionManager(tmp_path)
+    current = Session(key='web:ceo-active-current', metadata={'title': 'Current Session'})
+    manager.save(current)
+    target_id = 'web:ceo-inflight-only'
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(web_ceo_sessions, 'workspace_path', lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+    web_ceo_sessions.write_inflight_turn_snapshot(
+        target_id,
+        {
+            'status': 'running',
+            'started_at': datetime.now().isoformat(),
+            'user_message': {'role': 'user', 'content': 'Delete the inflight-only session'},
+        },
+    )
+
+    class _TaskService:
+        async def startup(self) -> None:
+            return None
+
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return []
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            _ = session_id
+            return {'total': 0, 'unfinished': 0, 'in_progress': 0, 'paused': 0, 'terminal': 0, 'deletable': 0}
+
+    class _RuntimeManager:
+        def get(self, session_id: str):
+            _ = session_id
+            return None
+
+        def remove(self, session_id: str):
+            captured['removed_session'] = session_id
+            return None
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        captured['cancelled_session'] = session_key
+        return 0
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    monkeypatch.setattr(
+        ceo_sessions,
+        'get_agent',
+        lambda: SimpleNamespace(
+            sessions=manager,
+            main_task_service=_TaskService(),
+            cancel_session_tasks=_cancel_session_tasks,
+        ),
+    )
+    monkeypatch.setattr(ceo_sessions, 'get_runtime_manager', lambda _agent: _RuntimeManager())
+    monkeypatch.setattr(ceo_sessions, 'get_web_heartbeat_service', lambda _agent: None)
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+    inflight_path = web_ceo_sessions.inflight_snapshot_path_for_session(target_id, create=False)
+    return client, current, target_id, captured, inflight_path
+
+
+def test_ceo_session_delete_check_accepts_inflight_only_session(tmp_path: Path, monkeypatch):
+    client, _current, target_id, _captured, inflight_path = _build_inflight_only_ceo_session_delete_client(tmp_path, monkeypatch)
+
+    response = client.get(f'/api/ceo/sessions/{target_id}/delete-check')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['session_id'] == target_id
+    assert payload['can_delete'] is True
+    assert payload['related_tasks']['total'] == 0
+    assert inflight_path.exists()
+
+
+def test_ceo_session_delete_accepts_inflight_only_session(tmp_path: Path, monkeypatch):
+    client, current, target_id, captured, inflight_path = _build_inflight_only_ceo_session_delete_client(tmp_path, monkeypatch)
+
+    response = client.delete(f'/api/ceo/sessions/{target_id}')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['deleted'] is True
+    assert payload['session_id'] == target_id
+    assert payload['active_session_id'] == current.key
+    assert captured == {
+        'removed_session': target_id,
+        'cancelled_session': target_id,
+    }
+    assert not inflight_path.exists()
+
+
 def test_task_rest_endpoint_normalizes_short_task_id():
     captured: dict[str, str] = {}
 
@@ -1521,7 +1667,7 @@ def test_task_rest_endpoint_normalizes_short_task_id():
 
         def get_task_detail_payload(self, task_id: str, *, mark_read: bool = False):
             captured['detail_task_id'] = task_id
-            return {'task': {'task_id': task_id}, 'progress': {'task_id': task_id, 'mark_read': mark_read}}
+            return {'task': {'task_id': task_id}, 'summary': {'task_id': task_id}}
 
     from main.api import rest as task_rest
 
@@ -1610,7 +1756,7 @@ def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
             'web': {'host': '127.0.0.1', 'port': 1},
             'tools': {'exec': {'timeout': 10}},
             'resources': {'enabled': True, 'skillsDir': 'skills', 'toolsDir': 'tools', 'manifestName': 'resource.yaml', 'reload': {'enabled': True, 'pollIntervalMs': 1000, 'debounceMs': 400, 'lazyReloadOnAccess': True, 'keepLastGoodVersion': True}, 'locks': {'lockDir': '.g3ku/resource-locks', 'logicalDeleteGuard': True, 'windowsFsLock': True}, 'statePath': '.g3ku/resources.state.json'},
-            'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4},
+            'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4, 'nodeDispatchConcurrency': {'execution': 8, 'inspection': 4}},
         }),
         encoding='utf-8',
     )
@@ -1637,10 +1783,6 @@ def test_admin_memory_trace_endpoints_return_payload():
     assert retrieval.status_code == 200
     assert retrieval.json()['items'][0]['trace_kind'] == 'retrieval'
 
-    assembly = client.get('/api/memory/context-assembly-traces?limit=2')
-    assert assembly.status_code == 200
-    assert assembly.json()['items'][0]['trace_kind'] == 'context_assembly'
-
 
 def _write_runtime_config(workspace: Path) -> None:
     (workspace / '.g3ku').mkdir(parents=True, exist_ok=True)
@@ -1652,7 +1794,7 @@ def _write_runtime_config(workspace: Path) -> None:
             'web': {'host': '127.0.0.1', 'port': 1},
             'toolSecrets': {},
             'resources': {'enabled': True, 'skillsDir': 'skills', 'toolsDir': 'tools', 'manifestName': 'resource.yaml', 'reload': {'enabled': True, 'pollIntervalMs': 1000, 'debounceMs': 400, 'lazyReloadOnAccess': True, 'keepLastGoodVersion': True}, 'locks': {'lockDir': '.g3ku/resource-locks', 'logicalDeleteGuard': True, 'windowsFsLock': True}, 'statePath': '.g3ku/resources.state.json'},
-            'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4},
+            'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4, 'nodeDispatchConcurrency': {'execution': 8, 'inspection': 4}},
             'chinaBridge': {
                 'enabled': False,
                 'bindHost': '0.0.0.0',
@@ -1730,6 +1872,46 @@ def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path,
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['models']['catalog'][0]['retryCount'] == 3
+
+
+def test_model_update_returns_503_when_worker_runtime_refresh_ack_fails(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        _ = force, reason
+        return True
+
+    class _StubService:
+        execution_mode = 'web'
+
+        def is_worker_online(self, **kwargs) -> bool:
+            _ = kwargs
+            return True
+
+        async def request_worker_runtime_refresh(self, *, reason: str):
+            raise TimeoutError(f'{reason}:worker_runtime_refresh_timeout')
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(admin_rest, '_service', lambda: _StubService())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/models/m', json={'retryCount': 4})
+
+    assert response.status_code == 503
+    detail = response.json()['detail']
+    assert detail['code'] == 'worker_runtime_refresh_failed'
+    assert detail['saved'] is True
+    assert detail['web_refreshed'] is True
+    assert detail['worker_refresh_acked'] is False
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['catalog'][0]['retryCount'] == 4
 
 
 def test_llm_config_update_refreshes_runtime(monkeypatch):
@@ -1983,6 +2165,86 @@ def test_llm_routes_endpoint_updates_role_concurrency(tmp_path: Path, monkeypatc
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['agents']['roleConcurrency']['execution'] == 3
+
+
+def test_llm_routes_bulk_endpoint_updates_multiple_scopes_with_single_refresh(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    refresh_calls: list[str] = []
+
+    async def _fake_refresh(reason: str):
+        refresh_calls.append(reason)
+
+    monkeypatch.setattr(admin_rest, '_refresh_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/llm/routes',
+        json={
+            'updates': {
+                'execution': {'model_keys': ['m'], 'max_iterations': 22},
+                'inspection': {'model_keys': ['m'], 'max_concurrency': 3},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['routes']['execution'] == ['m']
+    assert payload['routes']['inspection'] == ['m']
+    assert payload['role_iterations']['execution'] == 22
+    assert payload['role_concurrency']['inspection'] == 3
+    assert refresh_calls == ['admin_llm_route_update']
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['agents']['roleIterations']['execution'] == 22
+    assert saved['agents']['roleConcurrency']['inspection'] == 3
+
+
+def test_model_roles_bulk_endpoint_updates_multiple_scopes_with_single_refresh(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    refresh_calls: list[str] = []
+
+    async def _fake_refresh(reason: str):
+        refresh_calls.append(reason)
+
+    monkeypatch.setattr(admin_rest, '_refresh_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/models/routes/batch',
+        json={
+            'updates': {
+                'execution': {'model_keys': ['m'], 'max_iterations': 11},
+                'inspection': {'model_keys': ['m'], 'max_concurrency': 2},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['roles']['execution'] == ['m']
+    assert payload['roles']['inspection'] == ['m']
+    assert payload['role_iterations']['execution'] == 11
+    assert payload['role_concurrency']['inspection'] == 2
+    assert refresh_calls == ['admin_model_roles']
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['agents']['roleIterations']['execution'] == 11
+    assert saved['agents']['roleConcurrency']['inspection'] == 2
 
 
 def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path, monkeypatch):
@@ -2744,6 +3006,7 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     ensure_startup_config_ready()
     _write_skill(workspace, name='demo_skill')
     _write_external_tool(workspace, name='external_browser')
+    _copy_repo_tools(workspace, 'memory_search', 'memory_write', 'memory_runtime')
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -2771,6 +3034,16 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     toolskill_response = client.get('/api/resources/tools/external_browser/toolskill')
     assert toolskill_response.status_code == 200
     assert '# External Browser' in str(toolskill_response.json().get('content') or '')
+
+    memory_toolskill_response = client.get('/api/resources/tools/memory_write/toolskill')
+    assert memory_toolskill_response.status_code == 200
+    memory_payload = memory_toolskill_response.json()
+    assert memory_payload['tool_id'] == 'memory_write'
+    assert memory_payload['family_tool_id'] == 'memory'
+    assert memory_payload['toolskill_source_name'] == 'memory_write'
+    assert memory_payload['available'] is False
+    assert '# memory_write' in str(memory_payload.get('content') or '')
+    assert '# memory_search' not in str(memory_payload.get('content') or '')
 
 
 def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path, monkeypatch):

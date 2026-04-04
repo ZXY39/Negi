@@ -13,6 +13,7 @@ from g3ku.session.manager import SessionManager
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 from main.service.task_stall_callback import (
+    TASK_STALL_REASON_GOVERNANCE_REVIEW,
     TASK_STALL_REASON_SUSPECTED_STALL,
     TASK_STALL_REASON_USER_PAUSED,
     TASK_STALL_REASON_WORKER_UNAVAILABLE,
@@ -31,6 +32,10 @@ class _TaskStallRecorder:
     def enqueue_task_stall_payload(self, payload: dict[str, object] | None) -> bool:
         self.payloads.append(dict(payload or {}))
         return True
+
+
+async def _noop_enqueue_task(_task_id: str) -> None:
+    return None
 
 
 class _RuntimeManager:
@@ -133,6 +138,49 @@ async def test_task_stall_notifier_emits_and_resets_after_visible_output(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_task_stall_notifier_skips_governance_review_inflight(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    heartbeat = _TaskStallRecorder()
+    service.bind_runtime_loop(SimpleNamespace(web_session_heartbeat=heartbeat))
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    service.task_stall_notifier.minute_seconds = 0.01
+
+    try:
+        task = await service.create_task("governance review stall skip", session_id="web:stall-governance")
+        service.log_service.upsert_task_governance(
+            task.task_id,
+            {
+                "enabled": True,
+                "frozen": True,
+                "review_inflight": True,
+                "history": [],
+            },
+        )
+        service.task_stall_notifier.start_task(task.task_id)
+
+        assert service.classify_task_stall_reason(task.task_id) == TASK_STALL_REASON_GOVERNANCE_REVIEW
+
+        await asyncio.sleep(0.06)
+        await asyncio.sleep(0.06)
+
+        assert heartbeat.payloads == []
+        assert service.build_task_stall_payload(
+            task.task_id,
+            bucket_minutes=5,
+            last_visible_output_at="2000-01-01T00:00:00+00:00",
+        ) == {}
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_task_stall_heartbeat_prompt_includes_diagnostics_and_actions(tmp_path: Path) -> None:
     session_id = "web:ceo-stall"
     session_manager = SessionManager(tmp_path)
@@ -147,9 +195,9 @@ async def test_task_stall_heartbeat_prompt_includes_diagnostics_and_actions(tmp_
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="embedded",
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
     task = await service.create_task("stall heartbeat", session_id=session_id)
-    service.log_service.update_runtime_state(
+    service.log_service.update_task_runtime_meta(
         task.task_id,
         last_visible_output_at="2026-03-24T00:00:00+00:00",
         last_stall_notice_bucket_minutes=10,
@@ -198,7 +246,7 @@ async def test_task_stall_heartbeat_discards_stale_event_after_new_output(tmp_pa
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="embedded",
     )
-    service.task_runner.start_background = lambda task_id: None
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
     task = await service.create_task("stale stall heartbeat", session_id=session_id)
     heartbeat = WebSessionHeartbeatService(
         workspace=tmp_path,
@@ -213,7 +261,7 @@ async def test_task_stall_heartbeat_discards_stale_event_after_new_output(tmp_pa
         last_visible_output_at="2026-03-24T00:00:00+00:00",
     )
     heartbeat.enqueue_task_stall_payload(payload)
-    service.log_service.update_runtime_state(
+    service.log_service.update_task_runtime_meta(
         task.task_id,
         last_visible_output_at=now_iso(),
         last_stall_notice_bucket_minutes=0,
@@ -243,7 +291,7 @@ async def test_web_mode_build_task_stall_payload_skips_when_worker_offline(tmp_p
     try:
         task = await service.create_task("worker offline should not look stalled", session_id="web:stall-worker-offline")
         stale_at = "2000-01-01T00:00:00+00:00"
-        service.log_service.update_runtime_state(
+        service.log_service.update_task_runtime_meta(
             task.task_id,
             last_visible_output_at=stale_at,
             last_stall_notice_bucket_minutes=0,

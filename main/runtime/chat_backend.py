@@ -2,23 +2,29 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Protocol
+from typing import Any, Protocol
 
 from g3ku.config.schema import Config
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
+    RETRYABLE_MODEL_CHAIN_MAX_ROUNDS,
     exhausted_model_chain_error,
     normalized_retry_count,
     response_requires_api_key_rotation,
+    response_requires_retry,
     response_requires_fallback,
     sanitize_terminal_model_error,
     should_rotate_api_key_error,
     should_fallback_model_error,
+    should_retry_model_chain_error,
 )
 from g3ku.utils.api_keys import iter_api_key_retry_slots
+from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
+from main.runtime.node_turn_controller import NodeTurnLease
 
-_COMPACT_HISTORY_PREFIX = '[[G3KU_COMPACT_HISTORY_V1]]'
+_STAGE_COMPACT_PREFIX = '[G3KU_STAGE_COMPACT_V1]'
+_STAGE_EXTERNALIZED_PREFIX = '[G3KU_STAGE_EXTERNALIZED_V1]'
 
 
 class ChatBackend(Protocol):
@@ -28,11 +34,14 @@ class ChatBackend(Protocol):
         messages: list[dict],
         tools: list[dict] | None,
         model_refs: list[str],
-        max_tokens: int = 1200,
-        temperature: float = 0.2,
+        tool_choice: str | dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         reasoning_effort: str | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
+        node_turn_lease: NodeTurnLease | None = None,
+        model_concurrency_controller: ModelKeyConcurrencyController | None = None,
     ) -> LLMResponse: ...
 
 
@@ -66,18 +75,21 @@ def _tool_signature(tools: list[dict] | None) -> list[dict[str, object]]:
     return signatures
 
 
-def _compact_history_digest(messages: list[dict]) -> str:
+def _stage_context_digest(messages: list[dict]) -> str:
+    found = False
+    digest = hashlib.sha256()
     for message in list(messages or []):
         if str(message.get('role') or '').strip().lower() != 'assistant':
             continue
         content = str(message.get('content') or '')
-        if not content.startswith(_COMPACT_HISTORY_PREFIX):
+        if not (
+            content.startswith(_STAGE_COMPACT_PREFIX)
+            or content.startswith(_STAGE_EXTERNALIZED_PREFIX)
+        ):
             continue
-        payload = content[len(_COMPACT_HISTORY_PREFIX) :].strip()
-        if not payload:
-            return ''
-        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
-    return ''
+        found = True
+        digest.update(content.encode('utf-8'))
+    return digest.hexdigest() if found else ''
 
 
 def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None, provider_model: str) -> str:
@@ -96,7 +108,7 @@ def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None
         'bootstrap_user': bootstrap_user,
         'tool_signatures': _tool_signature(tools),
         'provider_model': str(provider_model or '').strip(),
-        'compact_history_digest': _compact_history_digest(messages),
+        'stage_context_digest': _stage_context_digest(messages),
     }
     return hashlib.sha256(_json_compact(payload).encode('utf-8')).hexdigest()
 
@@ -119,6 +131,39 @@ def _message_stats(messages: list[dict]) -> tuple[int, int]:
     return len(message_list), len(payload)
 
 
+def _resolve_model_request_parameters(
+    target,
+    *,
+    max_tokens: int | None,
+    temperature: float | None,
+    reasoning_effort: str | None,
+) -> dict[str, Any]:
+    configured = dict(getattr(target, 'model_parameters', {}) or {})
+    if configured.get('max_tokens') is None and getattr(target, 'max_tokens_limit', None) is not None:
+        configured['max_tokens'] = getattr(target, 'max_tokens_limit', None)
+    if configured.get('temperature') is None and getattr(target, 'default_temperature', None) is not None:
+        configured['temperature'] = getattr(target, 'default_temperature', None)
+    if not str(configured.get('reasoning_effort') or '').strip() and getattr(target, 'default_reasoning_effort', None) is not None:
+        configured['reasoning_effort'] = getattr(target, 'default_reasoning_effort', None)
+    resolved: dict[str, Any] = {}
+    if max_tokens is not None:
+        resolved['max_tokens'] = max(1, int(max_tokens))
+    elif configured.get('max_tokens') is not None:
+        resolved['max_tokens'] = max(1, int(configured['max_tokens']))
+    if temperature is not None:
+        resolved['temperature'] = float(temperature)
+    elif configured.get('temperature') is not None:
+        resolved['temperature'] = float(configured['temperature'])
+    explicit_reasoning = str(reasoning_effort or '').strip()
+    if explicit_reasoning:
+        resolved['reasoning_effort'] = explicit_reasoning
+    else:
+        configured_reasoning = str(configured.get('reasoning_effort') or '').strip()
+        if configured_reasoning:
+            resolved['reasoning_effort'] = configured_reasoning
+    return resolved
+
+
 class ConfigChatBackend:
     def __init__(self, config: Config):
         self._config = config
@@ -129,11 +174,14 @@ class ConfigChatBackend:
         messages: list[dict],
         tools: list[dict] | None,
         model_refs: list[str],
-        max_tokens: int = 1200,
-        temperature: float = 0.2,
+        tool_choice: str | dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         reasoning_effort: str | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
+        node_turn_lease: NodeTurnLease | None = None,
+        model_concurrency_controller: ModelKeyConcurrencyController | None = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
@@ -141,90 +189,146 @@ class ConfigChatBackend:
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
         attempts: list[LLMModelAttempt] = []
-        for index, ref in enumerate(refs):
-            try:
-                base_target = build_provider_from_model_key(self._config, ref)
-            except Exception as exc:
-                last_error = exc
-                if should_fallback_model_error(exc) and index < len(refs) - 1:
-                    continue
-                if should_fallback_model_error(exc):
-                    raise exhausted_model_chain_error(exc) from exc
-                raise
-            retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
-            move_to_next_model = False
-            stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, base_target.model_id))
-            for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count):
-                target = base_target
-                request_messages = list(messages or [])
-                request_message_count, request_message_chars = _message_stats(request_messages)
-                try:
-                    target = base_target if slot.attempt_number == 1 else build_provider_from_model_key(
-                        self._config,
-                        ref,
-                        api_key_index=slot.key_index,
-                    )
-                    response = await target.provider.chat(
-                        messages=request_messages,
-                        tools=tools,
-                        model=target.model_id,
-                        max_tokens=max(1, min(int(max_tokens), int(target.max_tokens_limit))) if target.max_tokens_limit else max(1, int(max_tokens)),
-                        temperature=float(target.default_temperature) if target.default_temperature is not None else float(temperature),
-                        reasoning_effort=target.default_reasoning_effort or reasoning_effort,
-                        tool_choice='auto',
-                        parallel_tool_calls=parallel_tool_calls,
-                        prompt_cache_key=stable_prompt_cache_key,
-                    )
-                except Exception as exc:
-                    last_error = exc
-                    rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
-                    if rotate_key and not slot.is_last_key:
-                        continue
-                    if rotate_key and not slot.is_last_round:
-                        continue
-                    if should_fallback_model_error(exc) and index < len(refs) - 1:
-                        move_to_next_model = True
-                        break
-                    if should_fallback_model_error(exc):
-                        raise exhausted_model_chain_error(exc) from exc
-                    raise
-                response.usage = normalize_usage_payload(response.usage)
-                response.request_message_count = request_message_count
-                response.request_message_chars = request_message_chars
-                response_attempts = list(response.attempts or [])
-                if not response_attempts:
-                    response_attempts = [
-                        LLMModelAttempt(
-                            model_key=target.provider_ref,
-                            provider_id=target.provider_id,
-                            provider_model=target.model_id,
-                            usage=dict(response.usage or {}),
-                            finish_reason=str(response.finish_reason or 'stop'),
+        held_turn_lease = node_turn_lease
+        try:
+            for chain_round_index in range(RETRYABLE_MODEL_CHAIN_MAX_ROUNDS):
+                round_last_error: Exception | None = None
+                retry_full_chain = False
+                for index, ref in enumerate(refs):
+                    try:
+                        base_target = build_provider_from_model_key(self._config, ref)
+                    except Exception as exc:
+                        last_error = round_last_error = exc
+                        if should_fallback_model_error(exc) and index < len(refs) - 1:
+                            continue
+                        if should_fallback_model_error(exc):
+                            exhausted = exhausted_model_chain_error(exc)
+                            if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                                retry_full_chain = True
+                                break
+                            raise exhausted from exc
+                        raise
+                    retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
+                    move_to_next_model = False
+                    stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, base_target.model_id))
+                    for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count):
+                        target = base_target
+                        request_messages = list(messages or [])
+                        request_message_count, request_message_chars = _message_stats(request_messages)
+                        permit_lease: ModelKeyPermitLease | None = None
+                        use_held_turn_permit = bool(
+                            held_turn_lease is not None
+                            and held_turn_lease.initial_model_permit is not None
+                            and str(ref or '').strip() == str(held_turn_lease.model_ref or '').strip()
+                            and int(slot.key_index) == int(held_turn_lease.key_index)
+                            and int(slot.attempt_number) == 1
                         )
-                    ]
-                attempts.extend(response_attempts)
-                response.attempts = list(attempts)
-                last_response = response
-                rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
-                fallback_response = response_requires_fallback(response)
-                if rotate_key_response:
-                    if not slot.is_last_key:
+                        try:
+                            selected_api_key_index = int(held_turn_lease.key_index) if use_held_turn_permit and held_turn_lease is not None else int(slot.key_index)
+                            target = build_provider_from_model_key(
+                                self._config,
+                                ref,
+                                api_key_index=selected_api_key_index,
+                            )
+                            if use_held_turn_permit and held_turn_lease is not None:
+                                permit_lease = held_turn_lease.initial_model_permit
+                                held_turn_lease.initial_model_permit = None
+                            elif model_concurrency_controller is not None:
+                                permit_lease = await model_concurrency_controller.acquire_specific(
+                                    model_ref=target.provider_ref,
+                                    key_index=selected_api_key_index,
+                                )
+                            response = await target.provider.chat(
+                                **{
+                                    **{
+                                        'messages': request_messages,
+                                        'tools': tools,
+                                        'model': target.model_id,
+                                        'tool_choice': tool_choice if tool_choice is not None else 'auto',
+                                        'parallel_tool_calls': parallel_tool_calls,
+                                        'prompt_cache_key': stable_prompt_cache_key,
+                                    },
+                                    **_resolve_model_request_parameters(
+                                        target,
+                                        max_tokens=max_tokens,
+                                        temperature=temperature,
+                                        reasoning_effort=reasoning_effort,
+                                    ),
+                                },
+                            )
+                        except Exception as exc:
+                            last_error = round_last_error = exc
+                            rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
+                            if rotate_key and not slot.is_last_key:
+                                continue
+                            if rotate_key and not slot.is_last_round:
+                                continue
+                            if should_fallback_model_error(exc) and index < len(refs) - 1:
+                                move_to_next_model = True
+                                break
+                            if should_fallback_model_error(exc):
+                                exhausted = exhausted_model_chain_error(exc, retry_on=target.retry_on)
+                                if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                                    retry_full_chain = True
+                                    break
+                                raise exhausted from exc
+                            raise
+                        finally:
+                            if permit_lease is not None and model_concurrency_controller is not None:
+                                model_concurrency_controller.release(permit_lease)
+                        response.usage = normalize_usage_payload(response.usage)
+                        response.request_message_count = request_message_count
+                        response.request_message_chars = request_message_chars
+                        response_attempts = list(response.attempts or [])
+                        if not response_attempts:
+                            response_attempts = [
+                                LLMModelAttempt(
+                                    model_key=target.provider_ref,
+                                    provider_id=target.provider_id,
+                                    provider_model=target.model_id,
+                                    usage=dict(response.usage or {}),
+                                    finish_reason=str(response.finish_reason or 'stop'),
+                                )
+                            ]
+                        attempts.extend(response_attempts)
+                        response.attempts = list(attempts)
+                        last_response = response
+                        rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
+                        retryable_response = response_requires_retry(response, retry_on=target.retry_on)
+                        fallback_response = response_requires_fallback(response)
+                        if rotate_key_response:
+                            if not slot.is_last_key:
+                                continue
+                            if not slot.is_last_round:
+                                continue
+                        if fallback_response and index < len(refs) - 1:
+                            move_to_next_model = True
+                            break
+                        if fallback_response:
+                            last_response = sanitize_terminal_model_error(response)
+                            if retryable_response and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                                retry_full_chain = True
+                                break
+                            return last_response
+                        return response
+                    if retry_full_chain:
+                        break
+                    if move_to_next_model:
                         continue
-                    if not slot.is_last_round:
-                        continue
-                if fallback_response and index < len(refs) - 1:
-                    move_to_next_model = True
-                    break
-                if fallback_response:
-                    return sanitize_terminal_model_error(response)
-                return response
-            if move_to_next_model:
-                continue
-        if last_error is not None:
-            if should_fallback_model_error(last_error):
-                raise exhausted_model_chain_error(last_error) from last_error
-            raise last_error
-        if last_response is None:
-            raise RuntimeError('chat backend returned no response')
-        last_response.attempts = list(attempts)
-        return sanitize_terminal_model_error(last_response)
+                if retry_full_chain:
+                    continue
+                if round_last_error is not None and should_retry_model_chain_error(round_last_error) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                    continue
+                break
+            if last_error is not None:
+                if should_fallback_model_error(last_error):
+                    raise exhausted_model_chain_error(last_error) from last_error
+                raise last_error
+            if last_response is None:
+                raise RuntimeError('chat backend returned no response')
+            last_response.attempts = list(attempts)
+            return sanitize_terminal_model_error(last_response)
+        finally:
+            if held_turn_lease is not None and held_turn_lease.initial_model_permit is not None and model_concurrency_controller is not None:
+                model_concurrency_controller.release(held_turn_lease.initial_model_permit)
+                held_turn_lease.initial_model_permit = None

@@ -11,6 +11,8 @@ from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_s
 from .enums import AuthMode, ProbeStatus, ProtocolAdapter
 from .models import NormalizedProviderConfig, ProbeResult
 
+_PROBE_TIMEOUT_SECONDS = 8
+
 
 def _join_url(base_url: str, suffix: str) -> str:
     return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
@@ -451,8 +453,7 @@ def _probe_single_config(
     *,
     transport: httpx.BaseTransport | None = None,
 ) -> ProbeResult:
-    timeout_s = config.parameters.get("timeout_s", 8)
-    timeout_value = max(1, min(int(timeout_s), 20)) if isinstance(timeout_s, (int, float)) else 8
+    timeout_value = _PROBE_TIMEOUT_SECONDS
     try:
         with httpx.Client(timeout=timeout_value, transport=transport, follow_redirects=True) as client:
             if config.protocol_adapter in {

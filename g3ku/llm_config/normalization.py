@@ -85,13 +85,20 @@ def _base_url_endpoint_hint(value: str) -> str | None:
     return None
 
 
-def _coerce_field_value(field_type: FieldInputType, raw_value: Any, default: Any) -> Any:
+def _coerce_field_value(
+    field_type: FieldInputType,
+    raw_value: Any,
+    default: Any,
+    *,
+    constraints: dict[str, Any] | None = None,
+) -> Any:
     if raw_value is None:
         return default
     if field_type in {FieldInputType.TEXT, FieldInputType.SECRET, FieldInputType.URL, FieldInputType.SELECT}:
         return str(raw_value).strip()
     if field_type == FieldInputType.NUMBER:
-        parsed = _parse_number(raw_value, integer=isinstance(default, int) and not isinstance(default, bool))
+        expect_integer = bool((constraints or {}).get("integer")) if "integer" in dict(constraints or {}) else (isinstance(default, int) and not isinstance(default, bool))
+        parsed = _parse_number(raw_value, integer=expect_integer)
         return parsed if parsed is not None else raw_value
     if field_type == FieldInputType.BOOLEAN:
         parsed_bool = _parse_boolean(raw_value)
@@ -184,11 +191,18 @@ def normalize_draft(
         if field.key in NON_PARAMETER_FIELDS:
             continue
         raw_value = draft.parameters.get(field.key, field.default)
-        value = _coerce_field_value(field.input_type, raw_value, field.default)
+        value = _coerce_field_value(
+            field.input_type,
+            raw_value,
+            field.default,
+            constraints=field.constraints,
+        )
         if field.required and (value is None or value == ""):
             errors.append(
                 FieldError(field=field.key, code="required", message=f"{field.label} is required.")
             )
+            continue
+        if not field.required and (value is None or value == ""):
             continue
         if field.input_type == FieldInputType.SELECT:
             allowed_values = {option.value for option in field.options}
@@ -200,10 +214,12 @@ def normalize_draft(
             errors.append(
                 FieldError(field=field.key, code="invalid_number", message="Expected a numeric value.")
             )
+            continue
         if field.input_type == FieldInputType.BOOLEAN and not isinstance(value, bool):
             errors.append(
                 FieldError(field=field.key, code="invalid_boolean", message="Expected a boolean value.")
             )
+            continue
         parameters[field.key] = value
         errors.extend(_validate_field_constraints(field.key, value, field.constraints))
 

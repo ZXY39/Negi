@@ -12,7 +12,17 @@ from main.service.task_terminal_callback import (
 
 
 TASK_EVENT_CALLBACK_PATH = "/api/internal/task-event"
-_ALLOWED_TASK_EVENT_TYPES = {"task.snapshot", "task.list.patch", "task.worker.status"}
+TASK_EVENT_BATCH_CALLBACK_PATH = "/api/internal/task-event-batch"
+_ALLOWED_TASK_EVENT_TYPES = {
+    "task.summary.patch",
+    "task.token.patch",
+    "task.node.patch",
+    "task.live.patch",
+    "task.governance.patch",
+    "task.model.call",
+    "task.terminal",
+    "task.worker.status",
+}
 
 
 def _replace_callback_path(url: str, *, expected_path: str, target_path: str) -> str:
@@ -36,6 +46,15 @@ def resolve_task_event_callback_url(*, workspace: Path | str | None = None) -> s
         terminal_url,
         expected_path=TASK_TERMINAL_CALLBACK_PATH,
         target_path=TASK_EVENT_CALLBACK_PATH,
+    )
+
+
+def resolve_task_event_batch_callback_url(*, workspace: Path | str | None = None) -> str:
+    terminal_url = resolve_task_terminal_callback_url(workspace=workspace)
+    return _replace_callback_path(
+        terminal_url,
+        expected_path=TASK_TERMINAL_CALLBACK_PATH,
+        target_path=TASK_EVENT_BATCH_CALLBACK_PATH,
     )
 
 
@@ -65,19 +84,7 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
     session_id = str(source.get("session_id") or source.get("sessionId") or "").strip()
     task_id = _normalize_task_id(source.get("task_id") or source.get("taskId") or "")
 
-    if event_type == "task.snapshot":
-        if not task_id:
-            return {}
-        if not session_id:
-            session_id = str((data.get("task") or {}).get("session_id") or "web:shared").strip() or "web:shared"
-        return {
-            "event_type": event_type,
-            "session_id": session_id,
-            "task_id": task_id,
-            "data": data,
-        }
-
-    if event_type == "task.list.patch":
+    if event_type == "task.summary.patch":
         task_payload = dict(data.get("task") or {}) if isinstance(data.get("task"), dict) else {}
         task_id = _normalize_task_id(task_payload.get("task_id") or task_payload.get("taskId") or task_id)
         if not task_id:
@@ -91,6 +98,30 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
             "data": {"task": task_payload},
         }
 
+    if event_type in {"task.node.patch", "task.live.patch", "task.model.call", "task.terminal", "task.governance.patch"}:
+        if not task_id:
+            return {}
+        if not session_id:
+            session_id = "web:shared"
+        return {
+            "event_type": event_type,
+            "session_id": session_id,
+            "task_id": task_id,
+            "data": data,
+        }
+
+    if event_type == "task.token.patch":
+        if not task_id:
+            return {}
+        if not session_id:
+            session_id = "web:shared"
+        return {
+            "event_type": event_type,
+            "session_id": session_id,
+            "task_id": task_id,
+            "data": data,
+        }
+
     worker_payload = dict(data.get("worker") or {}) if isinstance(data.get("worker"), dict) else None
     normalized: dict[str, Any] = {
         "event_type": event_type,
@@ -98,6 +129,9 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
         "task_id": "",
         "data": {
             "worker_online": data.get("worker_online") is not False,
+            "worker_state": str(data.get("worker_state") or "").strip().lower(),
+            "worker_last_seen_at": str(data.get("worker_last_seen_at") or "").strip(),
+            "worker_control_available": data.get("worker_control_available") is True,
             "worker_stale_after_seconds": data.get("worker_stale_after_seconds"),
         },
     }

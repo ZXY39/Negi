@@ -18,12 +18,33 @@ from g3ku.llm_config.export import to_generic_runtime_config
 from g3ku.llm_config.repositories import EncryptedConfigRepository
 from g3ku.llm_config.secret_store import EncryptedFileSecretStore
 from g3ku.llm_config.service import ConfigService, TemplateService
-from g3ku.security import get_bootstrap_security_service
+from g3ku.security.bootstrap import get_bootstrap_security_service
 
 
 MASKED_SECRET_VALUE = "********"
 MEMORY_EMBEDDING_CONFIG_ID = "memory_embedding_default"
 MEMORY_RERANK_CONFIG_ID = "memory_rerank_default"
+
+
+def _runtime_model_parameters(parameters: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(parameters or {})
+    result: dict[str, Any] = {}
+    raw_max_tokens = payload.get("max_tokens")
+    if raw_max_tokens not in (None, ""):
+        try:
+            result["max_tokens"] = max(1, int(raw_max_tokens))
+        except Exception:
+            pass
+    raw_temperature = payload.get("temperature")
+    if raw_temperature not in (None, ""):
+        try:
+            result["temperature"] = float(raw_temperature)
+        except Exception:
+            pass
+    raw_reasoning = str(payload.get("reasoning_effort") or "").strip()
+    if raw_reasoning:
+        result["reasoning_effort"] = raw_reasoning
+    return result
 
 
 def _store_root(workspace: Path | None = None) -> Path:
@@ -111,7 +132,7 @@ class LLMConfigFacade:
 
     def update_config_record(self, config_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         current = self._hydrate_record_secrets(self.repository.get(config_id))
-        merged = self._merge_draft(current, payload)
+        merged = self._merge_draft(current, payload, replace_parameters=True)
         validation = self.config_service.validate_draft(merged)
         if not validation.valid or validation.normalized_preview is None:
             raise ValueError("Draft validation failed")
@@ -170,6 +191,7 @@ class LLMConfigFacade:
                 description=binding.description,
                 retry_on=binding.retry_on,
                 retry_count=binding.retry_count,
+                single_api_key_max_concurrency=binding.single_api_key_max_concurrency,
             )
         )
         return self.get_binding(config, binding.key)
@@ -191,12 +213,17 @@ class LLMConfigFacade:
             binding.retry_on = [str(item).strip() for item in draft_payload.get("retry_on") if str(item).strip()]
         if "retry_count" in draft_payload:
             binding.retry_count = int(draft_payload.get("retry_count") or 0)
+        if "single_api_key_max_concurrency" in draft_payload or "singleApiKeyMaxConcurrency" in draft_payload:
+            raw_limit = draft_payload.get("single_api_key_max_concurrency")
+            if raw_limit is None and "singleApiKeyMaxConcurrency" in draft_payload:
+                raw_limit = draft_payload.get("singleApiKeyMaxConcurrency")
+            binding.single_api_key_max_concurrency = None if raw_limit in (None, "") else max(1, int(raw_limit))
 
         if not any(key in draft_payload for key in config_fields):
             return self.get_binding(config, model_key)
 
         current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
-        merged = self._merge_draft(current, draft_payload)
+        merged = self._merge_draft(current, draft_payload, replace_parameters=False)
         validation = self.config_service.validate_draft(merged)
         if not validation.valid or validation.normalized_preview is None:
             raise ValueError("Draft validation failed")
@@ -299,6 +326,7 @@ class LLMConfigFacade:
             record=record,
             retry_on=[],
             retry_count=0,
+            single_api_key_max_concurrency=None,
         )
 
     def export_runtime_config(self, config_id: str) -> GenericRuntimeConfig:
@@ -314,6 +342,7 @@ class LLMConfigFacade:
             record=record,
             retry_on=list(getattr(binding, "retry_on", []) or []),
             retry_count=int(getattr(binding, "retry_count", 0) or 0),
+            single_api_key_max_concurrency=getattr(binding, "single_api_key_max_concurrency", None),
         )
 
     def _binding_payload(self, binding: Any, record: NormalizedProviderConfig) -> dict[str, Any]:
@@ -331,6 +360,7 @@ class LLMConfigFacade:
             "reasoning_effort": record.parameters.get("reasoning_effort"),
             "retry_on": list(binding.retry_on or []),
             "retry_count": int(getattr(binding, "retry_count", 0) or 0),
+            "single_api_key_max_concurrency": getattr(binding, "single_api_key_max_concurrency", None),
             "description": binding.description,
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
@@ -439,7 +469,9 @@ class LLMConfigFacade:
         record: NormalizedProviderConfig,
         retry_on: list[str],
         retry_count: int,
+        single_api_key_max_concurrency: int | None,
     ) -> RuntimeTarget:
+        model_parameters = _runtime_model_parameters(record.parameters)
         return RuntimeTarget(
             model_key=model_key,
             config_id=record.config_id,
@@ -451,24 +483,70 @@ class LLMConfigFacade:
             base_url=record.base_url,
             resolved_model=record.default_model,
             headers=dict(record.headers),
-            max_tokens_limit=int(record.parameters.get("max_tokens")) if record.parameters.get("max_tokens") else None,
-            default_temperature=float(record.parameters.get("temperature")) if record.parameters.get("temperature") is not None else None,
-            default_reasoning_effort=(
-                str(record.parameters.get("reasoning_effort"))
-                if record.parameters.get("reasoning_effort") is not None and str(record.parameters.get("reasoning_effort")).strip()
-                else None
-            ),
+            model_parameters=model_parameters,
+            max_tokens_limit=int(model_parameters.get("max_tokens")) if model_parameters.get("max_tokens") is not None else None,
+            default_temperature=float(model_parameters.get("temperature")) if model_parameters.get("temperature") is not None else None,
+            default_reasoning_effort=str(model_parameters.get("reasoning_effort")) if model_parameters.get("reasoning_effort") is not None else None,
             retry_on=list(retry_on),
             retry_count=max(0, int(retry_count or 0)),
+            single_api_key_max_concurrency=single_api_key_max_concurrency,
             extra_options=dict(record.extra_options),
         )
 
-    def _merge_draft(self, current: NormalizedProviderConfig, patch: dict[str, Any]) -> ProviderConfigDraft:
+    @staticmethod
+    def _sanitize_parameter_mapping(payload: dict[str, Any] | None) -> dict[str, Any]:
+        return {
+            str(key or '').strip(): value
+            for key, value in dict(payload or {}).items()
+            if str(key or '').strip() and value not in (None, '')
+        }
+
+    @classmethod
+    def _merge_parameter_patch(
+        cls,
+        current: dict[str, Any],
+        patch: dict[str, Any] | None,
+        *,
+        replace: bool,
+    ) -> dict[str, Any]:
+        if replace:
+            if patch is None:
+                return dict(current or {})
+            return cls._sanitize_parameter_mapping(patch)
+        next_payload = dict(current or {})
+        for key, value in dict(patch or {}).items():
+            clean_key = str(key or '').strip()
+            if not clean_key:
+                continue
+            if value in (None, ''):
+                next_payload.pop(clean_key, None)
+                continue
+            next_payload[clean_key] = value
+        return next_payload
+
+    def _merge_draft(
+        self,
+        current: NormalizedProviderConfig,
+        patch: dict[str, Any],
+        *,
+        replace_parameters: bool,
+    ) -> ProviderConfigDraft:
         api_key = patch.get("api_key")
         if api_key == MASKED_SECRET_VALUE:
             api_key = current.auth.get("api_key", "")
         elif api_key is None:
             api_key = current.auth.get("api_key", "")
+        parameter_patch = patch.get("parameters") if isinstance(patch.get("parameters"), dict) else None
+        extra_headers = (
+            dict(patch.get("extra_headers") or {})
+            if "extra_headers" in patch and isinstance(patch.get("extra_headers"), dict)
+            else dict(current.headers)
+        )
+        extra_options = (
+            dict(patch.get("extra_options") or {})
+            if "extra_options" in patch and isinstance(patch.get("extra_options"), dict)
+            else dict(current.extra_options)
+        )
         return ProviderConfigDraft(
             provider_id=str(patch.get("provider_id") or current.provider_id),
             capability=patch.get("capability", current.capability),
@@ -477,7 +555,11 @@ class LLMConfigFacade:
             api_key=str(api_key or ""),
             base_url=str(patch.get("base_url") or current.base_url),
             default_model=str(patch.get("default_model") or current.default_model),
-            parameters=dict(current.parameters | dict(patch.get("parameters") or {})),
-            extra_headers=dict(patch.get("extra_headers") or current.headers),
-            extra_options=dict(current.extra_options | dict(patch.get("extra_options") or {})),
+            parameters=self._merge_parameter_patch(
+                dict(current.parameters),
+                parameter_patch,
+                replace=replace_parameters,
+            ),
+            extra_headers=extra_headers,
+            extra_options=extra_options,
         )

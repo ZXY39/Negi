@@ -149,9 +149,9 @@
                 <header class="content-header task-list-header">
                     <div class="task-header-main">
                         <h1>任务大厅</h1>
-                        <p class="subtitle">查看当前会话中的任务摘要、批量操作与运行状态。</p>
                     </div>
                     <div class="task-header-actions">
+                        <div id="task-performance-bar" class="task-performance-bar" aria-live="polite"></div>
                         <button id="task-multi-toggle" class="toolbar-btn" type="button"
                             aria-pressed="false">多选</button>
                         <div class="task-toolbar-preferences">
@@ -173,7 +173,7 @@
                                         type="button">应用</button>
                                 </div>
                             </div>
-                            <span id="task-depth-hint" class="task-depth-hint">全局后续新任务会自动使用该深度，支持固定值 1-5，也可填写自定义非负整数。</span>
+                            <span id="task-depth-hint" class="task-depth-hint" hidden></span>
                         </div>
                     </div>
                 </header>
@@ -462,6 +462,21 @@
 
                 <div class="project-dashboard">
                     <div class="org-tree-panel panel">
+                        <div class="task-tree-floating-governance" aria-live="polite">
+                            <div id="task-governance-panel" class="task-governance-panel" hidden>
+                                <details id="task-governance-details" class="task-governance-card">
+                                    <summary class="task-governance-summary" aria-label="展开或折叠任务监管记录">
+                                        <span id="task-governance-status" class="task-governance-status">监管空闲</span>
+                                        <span id="task-governance-last-decision" class="task-governance-chip">暂无决策</span>
+                                        <span id="task-governance-history-count" class="task-governance-chip">0 次</span>
+                                    </summary>
+                                    <div class="task-governance-body">
+                                        <div id="task-governance-empty" class="task-governance-empty">暂无监管记录。</div>
+                                        <div id="task-governance-history" class="task-governance-history"></div>
+                                    </div>
+                                </details>
+                            </div>
+                        </div>
                         <div class="task-tree-floating-tools" aria-live="polite">
                             <button id="task-tree-reset-rounds-btn" class="toolbar-btn ghost small task-tree-floating-reset"
                                 type="button" hidden disabled>回到最新树</button>
@@ -515,13 +530,14 @@
                             <div class="agent-detail-section">
                                 <div class="agent-detail-section-header">
                                     <h4><i data-lucide="package"></i> 工件</h4>
-                                    <button id="artifact-apply-btn" class="toolbar-btn success" type="button"
-                                        hidden>应用补丁</button>
                                 </div>
                                 <div id="artifact-list" class="artifact-list">
                                     <div class="empty-state" style="padding: 10px;">暂无工件。</div>
                                 </div>
-                                <div class="code-block" id="artifact-content">选择一个工件查看详情。</div>
+                                <details id="node-context-disclosure" class="artifact-context-disclosure">
+                                    <summary>完整上下文</summary>
+                                    <div class="code-block" id="artifact-content">展开后查看节点完整上下文。</div>
+                                </details>
                             </div>
                         </div>
 

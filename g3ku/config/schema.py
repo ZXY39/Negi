@@ -27,6 +27,10 @@ DEFAULT_ROLE_MAX_CONCURRENCY = {
     "execution": None,
     "inspection": None,
 }
+DEFAULT_NODE_DISPATCH_CONCURRENCY = {
+    "execution": 8,
+    "inspection": 4,
+}
 
 
 def normalize_role_scope(value: str) -> str:
@@ -269,11 +273,12 @@ class ManagedModelConfig(Base):
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None
     enabled: bool = True
-    max_tokens: int = 4096
-    temperature: float = 0.1
+    max_tokens: int | None = None
+    temperature: float | None = None
     reasoning_effort: str | None = None
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
     retry_count: int = Field(default=0, ge=0)
+    single_api_key_max_concurrency: int | None = Field(default=None, ge=1)
     description: str = ""
 
     @field_validator("key")
@@ -324,6 +329,15 @@ class ManagedModelConfig(Base):
             return 0
         if isinstance(value, str) and not value.strip():
             return 0
+        return int(value)
+
+    @field_validator("single_api_key_max_concurrency", mode="before")
+    @classmethod
+    def _normalize_single_api_key_max_concurrency(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
         return int(value)
 
     @model_validator(mode="after")
@@ -407,13 +421,93 @@ class NodeParallelismConfig(Base):
     enabled: bool = True
     max_parallel_tool_calls_per_node: int | None = None
     max_parallel_child_pipelines_per_node: int | None = None
+    adaptive_total_tool_budget_enabled: bool = True
+    adaptive_total_tool_budget_normal_limit: int = 6
+    adaptive_total_tool_budget_throttled_limit: int = 2
+    adaptive_total_tool_budget_critical_limit: int = 1
+    adaptive_total_tool_budget_step_up: int = 1
+    adaptive_total_tool_budget_sample_seconds: float = 1.0
+    adaptive_total_tool_budget_recover_window_seconds: float = 1.0
+    adaptive_total_tool_budget_warn_consecutive_samples: int = 3
+    adaptive_total_tool_budget_safe_consecutive_samples: int = 3
+    adaptive_event_loop_warn_ms: float = 250.0
+    adaptive_event_loop_safe_ms: float = 100.0
+    adaptive_event_loop_critical_ms: float = 1500.0
+    adaptive_writer_queue_warn: int = 50
+    adaptive_writer_queue_safe: int = 10
+    adaptive_writer_queue_critical: int = 100
+    adaptive_pressure_snapshot_stale_after_seconds: float = 3.0
+    adaptive_machine_cpu_warn_percent: float = 85.0
+    adaptive_machine_cpu_safe_percent: float = 55.0
+    adaptive_machine_cpu_critical_percent: float = 95.0
+    adaptive_machine_memory_warn_percent: float = 88.0
+    adaptive_machine_memory_safe_percent: float = 75.0
+    adaptive_machine_memory_critical_percent: float = 94.0
+    adaptive_machine_disk_busy_warn_percent: float = 70.0
+    adaptive_machine_disk_busy_safe_percent: float = 35.0
+    adaptive_machine_disk_busy_critical_percent: float = 90.0
+    adaptive_sqlite_write_wait_warn_ms: float = 200.0
+    adaptive_sqlite_write_wait_safe_ms: float = 50.0
+    adaptive_sqlite_write_wait_critical_ms: float = 250.0
+    adaptive_sqlite_query_warn_ms: float = 150.0
+    adaptive_sqlite_query_safe_ms: float = 30.0
+    adaptive_sqlite_query_critical_ms: float = 250.0
+    adaptive_process_cpu_warn_ratio: float = 0.85
+    adaptive_process_cpu_safe_ratio: float = 0.50
 
-    @field_validator("max_parallel_tool_calls_per_node", "max_parallel_child_pipelines_per_node")
+    @field_validator(
+        "max_parallel_tool_calls_per_node",
+        "max_parallel_child_pipelines_per_node",
+    )
     @classmethod
     def _clamp_parallel_limit(cls, value: int | None) -> int | None:
         if value is None:
             return None
         return max(0, int(value))
+
+    @field_validator(
+        "adaptive_total_tool_budget_normal_limit",
+        "adaptive_total_tool_budget_throttled_limit",
+        "adaptive_total_tool_budget_critical_limit",
+        "adaptive_total_tool_budget_step_up",
+        "adaptive_total_tool_budget_warn_consecutive_samples",
+        "adaptive_total_tool_budget_safe_consecutive_samples",
+        "adaptive_writer_queue_warn",
+        "adaptive_writer_queue_safe",
+        "adaptive_writer_queue_critical",
+    )
+    @classmethod
+    def _clamp_positive_int(cls, value: int) -> int:
+        return max(1, int(value))
+
+    @field_validator(
+        "adaptive_total_tool_budget_sample_seconds",
+        "adaptive_total_tool_budget_recover_window_seconds",
+        "adaptive_pressure_snapshot_stale_after_seconds",
+        "adaptive_event_loop_warn_ms",
+        "adaptive_event_loop_safe_ms",
+        "adaptive_event_loop_critical_ms",
+        "adaptive_machine_cpu_warn_percent",
+        "adaptive_machine_cpu_safe_percent",
+        "adaptive_machine_cpu_critical_percent",
+        "adaptive_machine_memory_warn_percent",
+        "adaptive_machine_memory_safe_percent",
+        "adaptive_machine_memory_critical_percent",
+        "adaptive_machine_disk_busy_warn_percent",
+        "adaptive_machine_disk_busy_safe_percent",
+        "adaptive_machine_disk_busy_critical_percent",
+        "adaptive_sqlite_write_wait_warn_ms",
+        "adaptive_sqlite_write_wait_safe_ms",
+        "adaptive_sqlite_write_wait_critical_ms",
+        "adaptive_sqlite_query_warn_ms",
+        "adaptive_sqlite_query_safe_ms",
+        "adaptive_sqlite_query_critical_ms",
+        "adaptive_process_cpu_warn_ratio",
+        "adaptive_process_cpu_safe_ratio",
+    )
+    @classmethod
+    def _clamp_positive_float(cls, value: float) -> float:
+        return max(0.0, float(value))
 
 
 class AgentsConfig(Base):
@@ -547,13 +641,9 @@ class MemoryCostConfig(Base):
 
 
 class MemoryAssemblyConfig(Base):
-    """Prompt/context assembly controls for frontdoor orchestration."""
+    """Frontdoor dynamic tool and skill selection controls."""
 
-    recent_messages_limit: int = 24
-    archive_summary_top_k: int = 2
-    archive_summary_max_tokens: int = 320
     skill_inventory_top_k: int = 8
-    skill_inventory_max_tokens: int = 480
     extension_tool_top_k: int = 6
     core_tools: list[str] = Field(
         default_factory=lambda: [
@@ -634,6 +724,46 @@ class MainRuntimeConfig(Base):
     governance_store_path: str = '.g3ku/main-runtime/governance.sqlite3'
     default_max_depth: int = 1
     hard_max_depth: int = 4
+    event_history: "MainRuntimeEventHistoryConfig" = Field(default_factory=lambda: MainRuntimeEventHistoryConfig())
+    node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())
+
+
+class MainRuntimeEventHistoryConfig(Base):
+    enabled: bool = True
+    dir: str = '.g3ku/main-runtime/event-history'
+    live_patch_persist_window_ms: int = 1000
+    archive_encoding: str = 'gzip'
+
+    @field_validator("live_patch_persist_window_ms", mode="before")
+    @classmethod
+    def _normalize_live_patch_persist_window_ms(cls, value: Any) -> int:
+        if value is None:
+            return 1000
+        if isinstance(value, str) and not value.strip():
+            return 1000
+        return max(0, int(value))
+
+    @field_validator("archive_encoding", mode="before")
+    @classmethod
+    def _normalize_archive_encoding(cls, value: Any) -> str:
+        normalized = str(value or "gzip").strip().lower() or "gzip"
+        if normalized not in {"gzip", "plain"}:
+            return "gzip"
+        return normalized
+
+
+class NodeDispatchConcurrencyConfig(Base):
+    execution: int = Field(default=DEFAULT_NODE_DISPATCH_CONCURRENCY["execution"], ge=1)
+    inspection: int = Field(default=DEFAULT_NODE_DISPATCH_CONCURRENCY["inspection"], ge=1)
+
+    @field_validator("execution", "inspection", mode="before")
+    @classmethod
+    def _normalize_dispatch_concurrency(cls, value: Any, info: ValidationInfo) -> int:
+        if value is None:
+            return DEFAULT_NODE_DISPATCH_CONCURRENCY[info.field_name]
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_NODE_DISPATCH_CONCURRENCY[info.field_name]
+        return int(value)
 
 
 class ChinaBridgeConfig(Base):
@@ -766,6 +896,17 @@ class Config(BaseSettings):
         if value is None:
             return None
         return max(0, int(value))
+
+    def get_node_dispatch_concurrency(self, role: str) -> int:
+        normalized = normalize_role_scope(role)
+        if normalized not in DEFAULT_NODE_DISPATCH_CONCURRENCY:
+            raise ValueError(f"Invalid node dispatch scope: {role}")
+        value = getattr(
+            self.main_runtime.node_dispatch_concurrency,
+            normalized,
+            DEFAULT_NODE_DISPATCH_CONCURRENCY[normalized],
+        )
+        return max(1, int(value or DEFAULT_NODE_DISPATCH_CONCURRENCY[normalized]))
 
     def resolve_role_model_key(self, role: str) -> str:
         refs = self.get_role_model_keys(role)

@@ -1,16 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
 
 import g3ku_bootstrap
+import g3ku.agent as agent_exports
 import g3ku.china_bridge.supervisor as supervisor_module
+import g3ku.runtime as runtime_exports
+from g3ku.agent.chatmodel_utils import ensure_chat_model
 from g3ku.china_bridge.supervisor import ChinaBridgeSupervisor
-from g3ku.config.loader import _migrate_config, load_config
+from g3ku.config.loader import (
+    _migrate_config,
+    build_runtime_config_payload,
+    ensure_startup_config_ready,
+    load_config,
+    save_config,
+)
+from g3ku.config.schema import Config
+from g3ku.providers.base import LLMResponse
+from g3ku.providers.chatmodels import build_chat_model
+from g3ku.security import get_bootstrap_security_service
 
 
 def test_migrate_config_normalizes_china_bridge_channel_aliases():
@@ -90,6 +106,7 @@ def test_load_config_rejects_legacy_channels_config(tmp_path, monkeypatch):
                     "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
                     "defaultMaxDepth": 1,
                     "hardMaxDepth": 4,
+                    "nodeDispatchConcurrency": {"execution": 8, "inspection": 4},
                 },
                 "chinaBridge": {"enabled": False},
             }
@@ -156,6 +173,7 @@ def test_load_config_migrates_legacy_gateway_bind_config(tmp_path, monkeypatch):
                     "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
                     "defaultMaxDepth": 1,
                     "hardMaxDepth": 4,
+                    "nodeDispatchConcurrency": {"execution": 8, "inspection": 4},
                 },
                 "chinaBridge": {"enabled": False},
             }
@@ -171,6 +189,184 @@ def test_load_config_migrates_legacy_gateway_bind_config(tmp_path, monkeypatch):
     saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
     assert saved["web"] == {"host": "0.0.0.0", "port": 18790}
     assert "gateway" not in saved
+
+
+def test_load_config_removes_deprecated_langgraph_ceo_frontdoor_flag(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku").mkdir(parents=True, exist_ok=True)
+    config_path = workspace / ".g3ku" / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "workspace": ".",
+                        "runtime": "langgraph",
+                        "maxTokens": 1,
+                        "temperature": 0.1,
+                        "maxToolIterations": 1,
+                        "memoryWindow": 1,
+                        "reasoningEffort": "low",
+                    },
+                    "ceoFrontdoorImplementation": "langgraph",
+                    "multiAgent": {"orchestratorModelKey": None},
+                },
+                "models": {
+                    "catalog": [
+                        {
+                            "key": "m",
+                            "providerModel": "openai:gpt-4.1",
+                            "apiKey": "demo-key",
+                            "enabled": True,
+                            "maxTokens": 1,
+                            "temperature": 0.1,
+                            "retryOn": [],
+                            "description": "",
+                        }
+                    ],
+                    "roles": {"ceo": ["m"], "execution": ["m"], "inspection": ["m"]},
+                },
+                "providers": {"openai": {"apiKey": "", "apiBase": None, "extraHeaders": None}},
+                "web": {"host": "127.0.0.1", "port": 1},
+                "toolSecrets": {},
+                "resources": {
+                    "enabled": True,
+                    "skillsDir": "skills",
+                    "toolsDir": "tools",
+                    "manifestName": "resource.yaml",
+                    "reload": {"enabled": True, "pollIntervalMs": 1000, "debounceMs": 400, "lazyReloadOnAccess": True, "keepLastGoodVersion": True},
+                    "locks": {"lockDir": ".g3ku/resource-locks", "logicalDeleteGuard": True, "windowsFsLock": True},
+                    "statePath": ".g3ku/resources.state.json",
+                },
+                "mainRuntime": {
+                    "enabled": True,
+                    "storePath": ".g3ku/main-runtime/runtime.sqlite3",
+                    "filesBaseDir": ".g3ku/main-runtime/tasks",
+                    "artifactDir": ".g3ku/main-runtime/artifacts",
+                    "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
+                    "defaultMaxDepth": 1,
+                    "hardMaxDepth": 4,
+                    "nodeDispatchConcurrency": {"execution": 8, "inspection": 4},
+                },
+                "chinaBridge": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+
+    cfg = load_config()
+
+    assert cfg.agents.defaults.runtime == "langgraph"
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "ceoFrontdoorImplementation" not in saved.get("agents", {})
+
+
+def test_load_config_rejects_removed_legacy_ceo_frontdoor_flag(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku").mkdir(parents=True, exist_ok=True)
+    (workspace / ".g3ku" / "config.json").write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "workspace": ".",
+                        "runtime": "langgraph",
+                        "maxTokens": 1,
+                        "temperature": 0.1,
+                        "maxToolIterations": 1,
+                        "memoryWindow": 1,
+                        "reasoningEffort": "low",
+                    },
+                    "ceoFrontdoorImplementation": "legacy",
+                    "multiAgent": {"orchestratorModelKey": None},
+                },
+                "models": {
+                    "catalog": [
+                        {
+                            "key": "m",
+                            "providerModel": "openai:gpt-4.1",
+                            "apiKey": "demo-key",
+                            "enabled": True,
+                            "maxTokens": 1,
+                            "temperature": 0.1,
+                            "retryOn": [],
+                            "description": "",
+                        }
+                    ],
+                    "roles": {"ceo": ["m"], "execution": ["m"], "inspection": ["m"]},
+                },
+                "providers": {"openai": {"apiKey": "", "apiBase": None, "extraHeaders": None}},
+                "web": {"host": "127.0.0.1", "port": 1},
+                "toolSecrets": {},
+                "resources": {
+                    "enabled": True,
+                    "skillsDir": "skills",
+                    "toolsDir": "tools",
+                    "manifestName": "resource.yaml",
+                    "reload": {"enabled": True, "pollIntervalMs": 1000, "debounceMs": 400, "lazyReloadOnAccess": True, "keepLastGoodVersion": True},
+                    "locks": {"lockDir": ".g3ku/resource-locks", "logicalDeleteGuard": True, "windowsFsLock": True},
+                    "statePath": ".g3ku/resources.state.json",
+                },
+                "mainRuntime": {
+                    "enabled": True,
+                    "storePath": ".g3ku/main-runtime/runtime.sqlite3",
+                    "filesBaseDir": ".g3ku/main-runtime/tasks",
+                    "artifactDir": ".g3ku/main-runtime/artifacts",
+                    "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
+                    "defaultMaxDepth": 1,
+                    "hardMaxDepth": 4,
+                    "nodeDispatchConcurrency": {"execution": 8, "inspection": 4},
+                },
+                "chinaBridge": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+
+    with pytest.raises(ValueError, match="legacy CEO runner has been removed"):
+        load_config()
+
+
+def _prepare_runtime_config_with_qqbot_secret_overlay(workspace: Path, monkeypatch) -> object:
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workspace)
+    ensure_startup_config_ready()
+
+    cfg = load_config()
+    cfg.china_bridge.enabled = True
+    cfg.china_bridge.auto_start = True
+    cfg.china_bridge.node_bin = "node"
+    cfg.china_bridge.npm_client = "pnpm"
+    cfg.china_bridge.channels.qqbot.enabled = True
+    cfg.china_bridge.channels.qqbot.app_id = "1903529517"
+    save_config(cfg)
+
+    security = get_bootstrap_security_service(workspace)
+    security.setup_initial_realm(password="test-password")
+    security.set_overlay_values(
+        {"config.chinaBridge.channels.qqbot.clientSecret": "overlay-secret"}
+    )
+    return load_config()
+
+
+def test_build_runtime_config_payload_applies_china_bridge_secret_overlay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    cfg = _prepare_runtime_config_with_qqbot_secret_overlay(workspace, monkeypatch)
+
+    runtime_payload = build_runtime_config_payload(cfg)
+    saved_payload = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
+
+    assert (
+        saved_payload["chinaBridge"]["channels"]["qqbot"].get("clientSecret", "") == ""
+    )
+    assert runtime_payload["chinaBridge"]["channels"]["qqbot"]["clientSecret"] == "overlay-secret"
+    assert runtime_payload["chinaBridge"]["channels"]["qqbot"]["appId"] == "1903529517"
 
 
 class _BridgeTestTransport:
@@ -206,6 +402,63 @@ def _build_supervisor(workspace: Path) -> ChinaBridgeSupervisor:
         )
     )
     return ChinaBridgeSupervisor(app_config=config, workspace=workspace, transport=_BridgeTestTransport())
+
+
+@pytest.mark.asyncio
+async def test_supervisor_spawn_process_uses_resolved_runtime_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    cfg = _prepare_runtime_config_with_qqbot_secret_overlay(workspace, monkeypatch)
+    dist_entry = workspace / "subsystems" / "china_channels_host" / "dist" / "index.js"
+    dist_entry.parent.mkdir(parents=True, exist_ok=True)
+    dist_entry.write_text("export {};\n", encoding="utf-8")
+
+    supervisor = ChinaBridgeSupervisor(
+        app_config=cfg,
+        workspace=workspace,
+        transport=_BridgeTestTransport(),
+    )
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        pid = 4321
+        returncode = 0
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr(
+        supervisor_module.asyncio,
+        "create_subprocess_exec",
+        _fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        supervisor_module, "assign_process_to_kill_on_close_job", lambda _process: None
+    )
+
+    await supervisor._spawn_process(dist_entry)
+    supervisor._close_host_log_handles()
+
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert args[2] == "--config"
+
+    host_config_path = Path(str(args[3]))
+    payload = json.loads(host_config_path.read_text(encoding="utf-8"))
+
+    assert host_config_path == (
+        workspace / ".g3ku" / "china-bridge" / "host.config.json"
+    ).resolve()
+    assert host_config_path != (workspace / ".g3ku" / "config.json").resolve()
+    assert payload["chinaBridge"]["channels"]["qqbot"]["clientSecret"] == "overlay-secret"
+    assert payload["chinaBridge"]["channels"]["qqbot"]["appId"] == "1903529517"
+    assert supervisor.state.pid == 4321
 
 
 def test_supervisor_install_required_uses_dependency_stamp(tmp_path: Path) -> None:
@@ -389,4 +642,108 @@ def test_bootstrap_attempts_windows_node_install_when_missing(tmp_path: Path, mo
 
     assert installed["done"] is True
     assert added_paths == [node_path.parent, npm_path.parent]
+
+
+class _StubProvider:
+    async def chat(self, **kwargs):
+        _ = kwargs
+        return LLMResponse(content="ok", finish_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_ensure_chat_model_returns_valid_base_chat_model():
+    model = ensure_chat_model(
+        _StubProvider(),
+        default_model="demo-model",
+        default_temperature=0.1,
+        default_max_tokens=128,
+        default_reasoning_effort="low",
+    )
+
+    assert isinstance(model, BaseChatModel)
+    message = await model.ainvoke([{"role": "user", "content": "hi"}])
+    assert isinstance(message, AIMessage)
+    assert message.content == "ok"
+
+
+def test_build_chat_model_returns_valid_base_chat_model():
+    cfg = Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": ".", "runtime": "langgraph"}},
+            "models": {
+                "catalog": [
+                    {
+                        "key": "m",
+                        "providerModel": "openai:gpt-4.1",
+                        "apiKey": "demo-key",
+                        "enabled": True,
+                        "maxTokens": 64,
+                        "temperature": 0.1,
+                        "retryOn": [],
+                        "description": "",
+                    }
+                ],
+                "roles": {"ceo": ["m"], "execution": ["m"], "inspection": ["m"]},
+            },
+            "providers": {"openai": {"apiKey": "", "apiBase": None, "extraHeaders": None}},
+            "web": {"host": "127.0.0.1", "port": 18790},
+            "toolSecrets": {},
+            "resources": {
+                "enabled": True,
+                "skillsDir": "skills",
+                "toolsDir": "tools",
+                "manifestName": "resource.yaml",
+                "reload": {
+                    "enabled": True,
+                    "pollIntervalMs": 1000,
+                    "debounceMs": 400,
+                    "lazyReloadOnAccess": True,
+                    "keepLastGoodVersion": True,
+                },
+                "locks": {
+                    "lockDir": ".g3ku/resource-locks",
+                    "logicalDeleteGuard": True,
+                    "windowsFsLock": True,
+                },
+                "statePath": ".g3ku/resources.state.json",
+            },
+            "mainRuntime": {
+                "enabled": True,
+                "storePath": ".g3ku/main-runtime/runtime.sqlite3",
+                "filesBaseDir": ".g3ku/main-runtime/tasks",
+                "artifactDir": ".g3ku/main-runtime/artifacts",
+                "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
+                "defaultMaxDepth": 1,
+                "hardMaxDepth": 4,
+                "nodeDispatchConcurrency": {"execution": 8, "inspection": 4},
+            },
+            "chinaBridge": {"enabled": False},
+        }
+    )
+
+    model = build_chat_model(cfg, role="ceo")
+
+    assert isinstance(model, BaseChatModel)
+
+
+def test_deleted_public_exports_are_gone():
+    for module, names in (
+        (runtime_exports, ["LangGraphCeoRunner", "LoopRuntimeContext", "LoopRuntimeMiddleware", "ModelExecutionBridge", "ToolExecutionBridge"]),
+        (agent_exports, ["LangGraphMemoryConsolidator"]),
+    ):
+        for name in names:
+            with pytest.raises(AttributeError):
+                getattr(module, name)
+
+
+def test_deleted_compat_modules_cannot_be_imported():
+    for module_name in (
+        "g3ku.runtime.langgraph_ceo",
+        "g3ku.runtime.model_bridge",
+        "g3ku.runtime.tool_bridge",
+        "g3ku.integrations.langchain_runtime",
+        "g3ku.agent.langgraph_memory",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(module_name)
 

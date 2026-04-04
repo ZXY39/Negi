@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
@@ -7,6 +8,11 @@ from types import SimpleNamespace
 
 import g3ku.shells.web as web_shell
 import main.api.bootstrap_rest as bootstrap_rest
+from g3ku.bus.queue import MessageBus
+from g3ku.config.schema import MultiAgentConfig
+from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
+from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
+from g3ku.session.manager import SessionManager
 
 
 def _build_app() -> FastAPI:
@@ -277,3 +283,62 @@ def test_bootstrap_unlock_succeeds_when_runtime_start_is_deferred(monkeypatch):
     assert response.status_code == 200
     assert calls == ["unlock:demo"]
     assert response.json()["item"]["runtime_ready"] is False
+
+
+def test_bootstrap_bridge_uses_canonical_ceo_runner():
+    loop = SimpleNamespace(
+        multi_agent_config=MultiAgentConfig(),
+        app_config=SimpleNamespace(),
+    )
+
+    RuntimeBootstrapBridge(loop).init_multi_agent_runtime()
+
+    assert isinstance(loop.multi_agent_runner, CeoFrontDoorRunner)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_reply_notifier_publishes_china_channel_outbound(tmp_path):
+    bus = MessageBus()
+    session_manager = SessionManager(tmp_path)
+    session_id = "china:qqbot:default:dm"
+    session = session_manager.get_or_create(session_id)
+    session.add_message(
+        "user",
+        "hello",
+        metadata={
+            "_china_account_id": "default",
+            "_china_peer_kind": "user",
+            "_china_peer_id": "user-42",
+            "_china_event_id": "evt-42",
+            "message_id": "msg-42",
+        },
+    )
+    session_manager.save(session)
+
+    agent = SimpleNamespace(sessions=session_manager)
+    runtime_manager = SimpleNamespace(session_meta=lambda key: ("qqbot", "default:dm:user-42") if key == session_id else None)
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(web_shell, "_global_bus", bus)
+
+        await web_shell._notify_heartbeat_channel_reply(
+            session_id,
+            "async task finished",
+            agent=agent,
+            runtime_manager=runtime_manager,
+        )
+
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+    finally:
+        monkeypatch.undo()
+
+    assert outbound.channel == "qqbot"
+    assert outbound.chat_id == "default:dm:user-42"
+    assert outbound.content == "async task finished"
+    assert outbound.reply_to == "msg-42"
+    assert outbound.metadata["source"] == "heartbeat"
+    assert outbound.metadata["session_key"] == session_id
+    assert outbound.metadata["_china_account_id"] == "default"
+    assert outbound.metadata["_china_peer_kind"] == "user"
+    assert outbound.metadata["_china_peer_id"] == "user-42"

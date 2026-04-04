@@ -133,7 +133,11 @@
     "artifactDir": ".g3ku/main-runtime/artifacts",
     "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
     "defaultMaxDepth": 1,
-    "hardMaxDepth": 4
+    "hardMaxDepth": 4,
+    "nodeDispatchConcurrency": {
+      "execution": 8,
+      "inspection": 4
+    }
   },
   "chinaBridge": {
     "enabled": true,
