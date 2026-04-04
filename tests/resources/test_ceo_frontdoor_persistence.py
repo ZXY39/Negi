@@ -929,3 +929,45 @@ async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
     assert diagnostics["overlay_present"] is True
     assert diagnostics["overlay_section_count"] == 1
     assert str(diagnostics["overlay_text_hash"] or "").strip()
+
+
+@pytest.mark.asyncio
+async def test_graph_prepare_turn_uses_model_summarizer_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = SimpleNamespace(
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=True,
+                frontdoor_summarizer_model_key="summary-model",
+                frontdoor_summarizer_trigger_message_count=6,
+                frontdoor_summarizer_keep_message_count=4,
+            )
+        )
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _fake_summary(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            messages=[{"role": "assistant", "content": "## CEO Durable Summary"}],
+            summary_text="## CEO Durable Summary",
+            summary_payload={"stable_facts": ["fact"]},
+            summary_version=2,
+            summary_model_key="summary-model",
+        )
+
+    monkeypatch.setattr(runner, "_summarize_messages", _fake_summary)
+
+    result = await runner._graph_prepare_turn(
+        {
+            "messages": [{"role": "user", "content": f"message {idx}"} for idx in range(10)],
+            "user_input": {"content": "follow up", "metadata": {}},
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
+    )
+
+    assert result["summary_text"] == "## CEO Durable Summary"
+    assert result["summary_payload"] == {"stable_facts": ["fact"]}
+    assert result["summary_model_key"] == "summary-model"
+    assert result["messages"][0]["content"] == "## CEO Durable Summary"

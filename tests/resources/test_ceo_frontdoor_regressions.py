@@ -25,6 +25,7 @@ from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor._ceo_langgraph_impl import _build_args_schema
+from g3ku.runtime.frontdoor.history_compaction import FRONTDOOR_HISTORY_SUMMARY_MARKER
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
@@ -627,3 +628,29 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     assert "task:demo-123" in output
     assert "异步任务" in output
     assert len(backend.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summarizer_disabled() -> None:
+    loop = SimpleNamespace(
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=False,
+                frontdoor_summarizer_trigger_message_count=4,
+                frontdoor_summarizer_keep_message_count=3,
+            )
+        )
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    result = await runner._graph_prepare_turn(
+        {
+            "messages": [{"role": "user", "content": f"message {idx}"} for idx in range(6)],
+            "user_input": {"content": "follow up", "metadata": {}},
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
+    )
+
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
+    assert result["summary_payload"] == {}
+    assert result["summary_model_key"] == ""
