@@ -4,6 +4,7 @@ import pytest
 from langgraph.types import Command
 
 from g3ku.config.schema import MemoryAssemblyConfig
+from g3ku.runtime.frontdoor import ceo_runner
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 
@@ -70,6 +71,28 @@ def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None
     assert kwargs["context_schema"].__name__ == "CeoRuntimeContext"
     assert kwargs["state_schema"].__name__ == "CeoPersistentState"
     assert kwargs["middleware"]
+
+
+def test_ceo_runner_selects_create_agent_impl_when_flag_enabled(monkeypatch) -> None:
+    class _Legacy:
+        def __init__(self, *, loop) -> None:
+            self.loop = loop
+
+    class _New:
+        def __init__(self, *, loop) -> None:
+            self.loop = loop
+
+    monkeypatch.setattr(ceo_runner, "LegacyCeoFrontDoorRunner", _Legacy)
+    monkeypatch.setattr(ceo_runner, "CreateAgentCeoFrontDoorRunner", _New)
+
+    loop = SimpleNamespace(
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(frontdoor_create_agent_enabled=True)
+        )
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+
+    assert isinstance(runner._impl, _New)
 
 
 @pytest.mark.asyncio

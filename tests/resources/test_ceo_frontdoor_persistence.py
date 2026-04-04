@@ -24,6 +24,7 @@ if "litellm" not in sys.modules:
 from g3ku.agent.tools.base import Tool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor import _ceo_langgraph_impl as ceo_langgraph_impl
+from g3ku.runtime.frontdoor import checkpoint_inspection
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.history_compaction import (
     FRONTDOOR_HISTORY_SUMMARY_MARKER,
@@ -1199,3 +1200,55 @@ async def test_graph_finalize_turn_preserves_model_summary_state_on_direct_reply
         "narrative": "CEO frontdoor durable context.",
     }
     assert result["summary_model_key"] == "summary-model"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_inspection_uses_runner_graph_surface(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Graph:
+        async def aget_state(self, config, subgraphs=False):
+            captured["config"] = config
+            captured["subgraphs"] = subgraphs
+            return SimpleNamespace(
+                config=config,
+                parent_config={},
+                values={},
+                next=(),
+                metadata={},
+                created_at="",
+                tasks=(),
+            )
+
+    class _Runner:
+        def __init__(self, *, loop) -> None:
+            _ = loop
+
+        def _get_compiled_graph(self):
+            return _Graph()
+
+    monkeypatch.setattr(checkpoint_inspection, "CeoFrontDoorRunner", _Runner, raising=False)
+
+    result = await checkpoint_inspection.get_frontdoor_checkpoint(
+        SimpleNamespace(_ensure_checkpointer_ready=lambda: None),
+        session_id="web:shared",
+        checkpoint_id="checkpoint-1",
+        subgraphs=True,
+    )
+
+    assert captured["config"] == {
+        "configurable": {"thread_id": "web:shared", "checkpoint_id": "checkpoint-1"}
+    }
+    assert captured["subgraphs"] is True
+    assert result == {
+        "thread_id": "web:shared",
+        "checkpoint_id": "checkpoint-1",
+        "checkpoint_ns": "",
+        "parent_checkpoint_id": "",
+        "values": {},
+        "next": [],
+        "metadata": {},
+        "created_at": "",
+        "tasks": [],
+        "has_interrupts": False,
+    }
