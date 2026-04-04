@@ -56,6 +56,9 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
             )
         return self._agent
 
+    def _get_compiled_graph(self):
+        return self._get_agent()
+
     async def _ensure_ready(self) -> None:
         ensure_ready = getattr(self._loop, "_ensure_checkpointer_ready", None)
         if callable(ensure_ready):

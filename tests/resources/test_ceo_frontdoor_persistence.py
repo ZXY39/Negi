@@ -1252,3 +1252,60 @@ async def test_checkpoint_inspection_uses_runner_graph_surface(monkeypatch) -> N
         "tasks": [],
         "has_interrupts": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_inspection_supports_wrapper_selected_create_agent_runner(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _CreateAgentGraph:
+        async def aget_state(self, config, subgraphs=False):
+            captured["config"] = config
+            captured["subgraphs"] = subgraphs
+            return SimpleNamespace(
+                config=config,
+                parent_config={},
+                values={"agent_runtime": "create_agent"},
+                next=(),
+                metadata={},
+                created_at="",
+                tasks=(),
+            )
+
+    graph = _CreateAgentGraph()
+
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor._ceo_create_agent_impl.CreateAgentCeoFrontDoorRunner._get_agent",
+        lambda self: graph,
+    )
+
+    loop = SimpleNamespace(
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(frontdoor_create_agent_enabled=True)
+        ),
+        _ensure_checkpointer_ready=lambda: None,
+    )
+
+    result = await checkpoint_inspection.get_frontdoor_checkpoint(
+        loop,
+        session_id="web:shared",
+        checkpoint_id="checkpoint-1",
+        subgraphs=True,
+    )
+
+    assert captured["config"] == {
+        "configurable": {"thread_id": "web:shared", "checkpoint_id": "checkpoint-1"}
+    }
+    assert captured["subgraphs"] is True
+    assert result == {
+        "thread_id": "web:shared",
+        "checkpoint_id": "checkpoint-1",
+        "checkpoint_ns": "",
+        "parent_checkpoint_id": "",
+        "values": {"agent_runtime": "create_agent"},
+        "next": [],
+        "metadata": {},
+        "created_at": "",
+        "tasks": [],
+        "has_interrupts": False,
+    }
