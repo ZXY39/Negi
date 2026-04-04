@@ -132,6 +132,8 @@ async def get_frontdoor_checkpoint_history(
 def build_frontdoor_replay_diagnostics(snapshot: dict[str, Any]) -> dict[str, Any]:
     item = dict(snapshot or {})
     metadata = dict(item.get("metadata") or {})
+    values = dict(item.get("values") or {})
+    prompt_cache_diagnostics = _json_safe(dict(values.get("prompt_cache_diagnostics") or {}))
     configurable = {
         "thread_id": str(item.get("thread_id") or ""),
     }
@@ -141,7 +143,7 @@ def build_frontdoor_replay_diagnostics(snapshot: dict[str, Any]) -> dict[str, An
         configurable["checkpoint_id"] = checkpoint_id
     if checkpoint_ns:
         configurable["checkpoint_ns"] = checkpoint_ns
-    return {
+    result = {
         "thread_id": str(item.get("thread_id") or ""),
         "checkpoint_id": checkpoint_id,
         "parent_checkpoint_id": str(item.get("parent_checkpoint_id") or ""),
@@ -153,3 +155,6 @@ def build_frontdoor_replay_diagnostics(snapshot: dict[str, Any]) -> dict[str, An
             "configurable": configurable
         },
     }
+    if prompt_cache_diagnostics:
+        result["prompt_cache_diagnostics"] = prompt_cache_diagnostics
+    return result

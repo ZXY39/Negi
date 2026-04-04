@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from langgraph.types import Command
+from langchain_core.messages import AIMessage
 
 if "litellm" not in sys.modules:
     litellm_stub = types.ModuleType("litellm")
@@ -20,6 +21,7 @@ if "litellm" not in sys.modules:
     litellm_stub.drop_params = True
     sys.modules["litellm"] = litellm_stub
 
+from g3ku.agent.tools.base import Tool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor import _ceo_langgraph_impl as ceo_langgraph_impl
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
@@ -27,7 +29,11 @@ from g3ku.runtime.frontdoor.history_compaction import (
     FRONTDOOR_HISTORY_SUMMARY_MARKER,
     compact_frontdoor_history,
 )
-from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoRuntimeContext
+from g3ku.runtime.frontdoor.state_models import (
+    CeoFrontdoorInterrupted,
+    CeoPersistentState,
+    CeoRuntimeContext,
+)
 from g3ku.session.manager import SessionManager
 
 
@@ -299,7 +305,8 @@ def test_ceo_frontdoor_graph_compiles_with_checkpointer_and_store(monkeypatch: p
     result = ceo_langgraph_impl._build_langgraph_ceo_graph(runner)
 
     assert result is compiled_graph
-    assert captured["state_schema"] is ceo_langgraph_impl.CeoGraphState
+    assert captured["state_schema"] is ceo_langgraph_impl.CeoPersistentState
+    assert captured["state_schema"] is CeoPersistentState
     assert captured["init_kwargs"] == {"context_schema": ceo_langgraph_impl.CeoRuntimeContext}
     assert captured["compile_kwargs"] == {
         "name": "ceo-frontdoor",
@@ -464,6 +471,57 @@ async def test_ceo_frontdoor_prepare_turn_passes_checkpoint_messages_to_builder(
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+
+    async def _call_model_with_tools(**kwargs):
+        _ = kwargs
+        return AIMessage(
+            content="tool reply",
+            tool_calls=[{"id": "call-1", "name": "filesystem", "args": {"path": "."}}],
+            response_metadata={"finish_reason": "tool_calls"},
+            additional_kwargs={
+                "reasoning_content": "reasoning trace",
+                "thinking_blocks": [{"type": "thinking", "text": "step one"}],
+            },
+        )
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    update = await runner._graph_call_model(
+        {
+            "messages": [{"role": "user", "content": "list files"}],
+            "turn_overlay_text": None,
+            "repair_overlay_text": None,
+            "model_refs": ["openai_codex:gpt-test"],
+            "parallel_enabled": False,
+            "prompt_cache_key": "cache-key",
+            "iteration": 0,
+            "max_iterations": 4,
+        },
+        runtime=SimpleNamespace(context=CeoRuntimeContext(loop=None, session=None, session_key="web:shared", on_progress=None)),
+    )
+
+    assert update["iteration"] == 1
+    assert update["repair_overlay_text"] is None
+    assert "response_message" not in update
+    assert "response_content" not in update
+    assert update["response_payload"] == {
+        "content": "tool reply",
+        "tool_calls": [{"id": "call-1", "name": "filesystem", "arguments": {"path": "."}}],
+        "finish_reason": "tool_calls",
+        "error_text": "",
+        "reasoning_content": "reasoning trace",
+        "thinking_blocks": [{"type": "thinking", "text": "step one"}],
+    }
+    json.dumps(update)
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_finalize_turn_persists_direct_reply_into_checkpoint_messages(tmp_path) -> None:
     loop = SimpleNamespace(
         sessions=SessionManager(tmp_path),
@@ -523,6 +581,7 @@ def test_frontdoor_history_compaction_inserts_summary_marker_and_keeps_recent_ta
     summary_message = compacted[2]
     assert summary_message["role"] == "assistant"
     assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(summary_message["content"])
+    assert summary_message["metadata"]["summary_version"] == 1
     assert "question one" in str(summary_message["content"])
     assert "answer one" in str(summary_message["content"])
     assert "question two" not in str(summary_message["content"])
@@ -653,8 +712,220 @@ async def test_ceo_frontdoor_prepare_turn_compacts_history_into_summary_block(
     messages = list(state_update["messages"] or [])
     assert messages[0] == {"role": "system", "content": "SYSTEM PROMPT"}
     assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(messages[1]["content"])
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(state_update["summary_text"])
+    assert state_update["summary_version"] == 1
     assert messages[-3:] == [
         {"role": "user", "content": "question two"},
         {"role": "assistant", "content": "answer two"},
         {"role": "user", "content": "question three"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_finalize_turn_preserves_summary_state_from_compacted_messages(tmp_path) -> None:
+    loop = SimpleNamespace(
+        sessions=SessionManager(tmp_path),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    messages = compact_frontdoor_history(
+        [
+            {"role": "system", "content": "SYSTEM PROMPT"},
+            {"role": "assistant", "content": "## Retrieved Context\n- prior memory"},
+            {"role": "user", "content": "question one"},
+            {"role": "assistant", "content": "answer one"},
+            {"role": "user", "content": "question two"},
+            {"role": "assistant", "content": "answer two"},
+            {"role": "user", "content": "question three"},
+        ],
+        recent_message_count=3,
+        summary_trigger_message_count=4,
+    )
+
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": messages,
+            "final_output": "final answer",
+            "route_kind": "direct_reply",
+            "heartbeat_internal": False,
+            "query_text": "question three",
+        }
+    )
+
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
+    assert result["summary_version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_prompt_cache_key_changes_when_stable_prefix_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+
+    prompt_variants = iter(
+        [
+            SimpleNamespace(
+                tool_names=["message"],
+                model_messages=[
+                    {"role": "system", "content": "SYSTEM PROMPT A"},
+                    {"role": "user", "content": "same question"},
+                ],
+            ),
+            SimpleNamespace(
+                tool_names=["message"],
+                model_messages=[
+                    {"role": "system", "content": "SYSTEM PROMPT B"},
+                    {"role": "user", "content": "same question"},
+                ],
+            ),
+        ]
+    )
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return next(prompt_variants)
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    first = await runner._graph_prepare_turn(
+        {"user_input": SimpleNamespace(content="same question", metadata={})},
+        runtime=runtime,
+    )
+    second = await runner._graph_prepare_turn(
+        {"user_input": SimpleNamespace(content="same question", metadata={})},
+        runtime=runtime,
+    )
+
+    assert str(first["prompt_cache_key"] or "").strip()
+    assert str(second["prompt_cache_key"] or "").strip()
+    assert first["prompt_cache_key"] != second["prompt_cache_key"]
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    class _MessageTool(Tool):
+        @property
+        def name(self) -> str:
+            return "message"
+
+        @property
+        def description(self) -> str:
+            return "send message"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+                "required": ["content"],
+            }
+
+        async def execute(self, **kwargs):
+            return kwargs
+
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={"message": _MessageTool()},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["message"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM PROMPT"},
+                {"role": "user", "content": "question one"},
+            ],
+            turn_overlay_text="## Retrieved Context\n- memory",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=loop, session=session, session_key="web:shared", on_progress=None)
+    )
+
+    state_update = await runner._graph_prepare_turn(
+        {"user_input": SimpleNamespace(content="question one", metadata={})},
+        runtime=runtime,
+    )
+
+    diagnostics = dict(state_update["prompt_cache_diagnostics"] or {})
+    assert str(diagnostics["stable_prompt_signature"] or "").strip()
+    assert diagnostics["tool_signature_count"] == 1
+    assert str(diagnostics["tool_signature_hash"] or "").strip()
+    assert diagnostics["overlay_present"] is True
+    assert diagnostics["overlay_section_count"] == 1
+    assert str(diagnostics["overlay_text_hash"] or "").strip()

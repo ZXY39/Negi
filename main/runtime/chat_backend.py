@@ -113,12 +113,77 @@ def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None
     return hashlib.sha256(_json_compact(payload).encode('utf-8')).hexdigest()
 
 
-def build_session_prompt_cache_key(*, session_key: str, provider_model: str, scope: str = 'chat') -> str:
+def build_prompt_cache_diagnostics(
+    *,
+    stable_messages: list[dict] | None,
+    tool_schemas: list[dict] | None,
+    provider_model: str,
+    scope: str,
+    prompt_cache_key: str | None = None,
+    overlay_text: str | None = None,
+    overlay_section_count: int | None = None,
+) -> dict[str, object]:
+    normalized_messages = list(stable_messages or [])
+    normalized_tools = list(tool_schemas or []) or None
+    normalized_overlay = str(overlay_text or '').strip()
+    normalized_overlay_sections = [
+        section.strip()
+        for section in normalized_overlay.split('\n\n')
+        if section.strip()
+    ]
+    tool_signatures = _tool_signature(normalized_tools)
+    return {
+        'scope': str(scope or '').strip(),
+        'provider_model': str(provider_model or '').strip(),
+        'stable_prompt_signature': build_stable_prompt_cache_key(
+            normalized_messages,
+            normalized_tools,
+            str(provider_model or '').strip(),
+        ),
+        'stable_prefix_message_count': len(normalized_messages),
+        'tool_signature_count': len(tool_signatures),
+        'tool_signature_hash': (
+            hashlib.sha256(_json_compact(tool_signatures).encode('utf-8')).hexdigest()
+            if tool_signatures
+            else ''
+        ),
+        'overlay_present': bool(normalized_overlay),
+        'overlay_section_count': max(
+            len(normalized_overlay_sections),
+            max(0, int(overlay_section_count or 0)),
+        ),
+        'overlay_text_hash': (
+            hashlib.sha256(normalized_overlay.encode('utf-8')).hexdigest()
+            if normalized_overlay
+            else ''
+        ),
+        'prompt_cache_key_hash': (
+            hashlib.sha256(str(prompt_cache_key or '').encode('utf-8')).hexdigest()
+            if str(prompt_cache_key or '').strip()
+            else ''
+        ),
+    }
+
+
+def build_session_prompt_cache_key(
+    *,
+    session_key: str,
+    provider_model: str,
+    scope: str = 'chat',
+    stable_messages: list[dict] | None = None,
+    tool_schemas: list[dict] | None = None,
+) -> str:
     payload = {
         'scope': str(scope or '').strip() or 'chat',
         'session_key': str(session_key or '').strip(),
         'provider_model': str(provider_model or '').strip(),
     }
+    if stable_messages is not None or tool_schemas is not None:
+        payload['stable_prompt_signature'] = build_stable_prompt_cache_key(
+            list(stable_messages or []),
+            list(tool_schemas or []) or None,
+            str(provider_model or '').strip(),
+        )
     return hashlib.sha256(_json_compact(payload).encode('utf-8')).hexdigest()
 
 

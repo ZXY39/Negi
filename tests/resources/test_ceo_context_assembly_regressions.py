@@ -25,6 +25,35 @@ class _PromptBuilder:
         return "BASE PROMPT"
 
 
+class _SplitPromptBuilder:
+    def __init__(self) -> None:
+        self.base_calls = 0
+        self.skill_calls: list[list[str]] = []
+
+    def build(self, *, skills: list) -> str:
+        raise AssertionError("message builder should use split prompt builder methods")
+
+    def build_base_prompt(self) -> str:
+        self.base_calls += 1
+        return "BASE PROMPT"
+
+    def build_visible_skills_block(self, *, skills: list) -> str:
+        ids = [
+            str(getattr(item, "skill_id", "") or "").strip()
+            for item in list(skills or [])
+            if str(getattr(item, "skill_id", "") or "").strip()
+        ]
+        self.skill_calls.append(ids)
+        if not ids:
+            return ""
+        lines = [
+            "## Visible Skills For This Turn",
+            "- Only the listed skills are available in this turn.",
+        ]
+        lines.extend(f'- `{skill_id}` available for this turn.' for skill_id in ids)
+        return "\n".join(lines)
+
+
 class _MemoryManager:
     def __init__(self, response: str = "") -> None:
         self.calls: list[dict[str, object]] = []
@@ -262,6 +291,51 @@ async def test_message_builder_uses_memory_only_retrieval_for_memory_intent() ->
     assert memory_manager.calls[0]["search_context_types"] == ["memory"]
     assert memory_manager.calls[0]["allowed_context_types"] == ["memory"]
     assert result.trace["memory_write_hint"]["triggered"] is True
+
+
+@pytest.mark.asyncio
+async def test_message_builder_moves_turn_specific_context_into_overlay_for_stable_prefix() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="authoritative preference")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "prior question")
+    persisted_session.add_message("assistant", "prior answer")
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="from now on default to the focused browser workflow",
+        exposure={
+            "skills": [_skill("focused-skill", "Primary workflow")],
+            "tool_families": [_family("agent_browser", "Browser automation via semantic shortlist.")],
+            "tool_names": ["filesystem", "agent_browser", "memory_write"],
+        },
+        persisted_session=persisted_session,
+        user_content="from now on default to the focused browser workflow",
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    rendered_messages = "\n\n".join(contents)
+    overlay = str(getattr(result, "turn_overlay_text", "") or "")
+
+    assert contents[0] == "BASE PROMPT"
+    assert "## Retrieved Context" not in rendered_messages
+    assert "Visible Skills For This Turn" not in rendered_messages
+    assert "Long-Term Memory Write Hint" not in rendered_messages
+    assert contents[-3:] == [
+        "prior question",
+        "prior answer",
+        "from now on default to the focused browser workflow",
+    ]
+    assert "## Retrieved Context" in overlay
+    assert "Visible Skills For This Turn" in overlay
+    assert "Long-Term Memory Write Hint" in overlay
+    assert prompt_builder.base_calls == 1
+    assert prompt_builder.skill_calls == [["focused-skill"]]
+    assert result.trace["turn_overlay_present"] is True
+    assert result.trace["stable_prefix_message_count"] == len(result.model_messages)
+    assert result.trace["turn_overlay_character_count"] == len(overlay)
+    assert str(result.trace["turn_overlay_text_hash"] or "").strip()
 
 
 @pytest.mark.asyncio

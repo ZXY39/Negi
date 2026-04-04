@@ -593,6 +593,9 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
         max_iterations=8,
         resource_manager=None,
         tool_execution_manager=None,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(frontdoor_interrupt_tool_names=["message"])
+        ),
     )
     runner = CeoFrontDoorRunner(loop=loop)
 
