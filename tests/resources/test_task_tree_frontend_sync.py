@@ -490,6 +490,68 @@ def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_dupli
     assert result["containsToolOutput"] is True
 
 
+def test_summary_execution_trace_defaults_running_when_stage_or_tool_lacks_completion_signal() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:test",
+            goal: "inspect repository",
+          },
+          {
+            execution_trace_summary: {
+              stages: [
+                {
+                  stage_goal: "launch child researchers",
+                  tool_calls: [
+                    {
+                      tool_name: "spawn_child_nodes",
+                      arguments_text: "{\\"children\\": 3}",
+                      output_text: "",
+                      started_at: "2026-04-04T19:37:42+08:00",
+                      finished_at: "",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+
+        console.log(JSON.stringify({
+          stageStatus: trace.stages[0]?.status || "",
+          toolStatus: trace.stages[0]?.rounds?.[0]?.tools?.[0]?.status || "",
+        }));
+        """
+    )
+
+    assert result["stageStatus"] == "\u8fdb\u884c\u4e2d"
+    assert result["toolStatus"] == "running"
+
+
 def test_task_governance_view_model_marks_breathing_and_formats_history() -> None:
     result = _run_node_script(
         """

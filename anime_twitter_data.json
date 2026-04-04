@@ -1,0 +1,17 @@
+{
+  "https://www.animenewsnetwork.com/news": {
+    "status": 200,
+    "length": 233293,
+    "snippet": "<!DOCTYPE html>\n<html render_time=\"191.19744576037598\" lang=\"en\" class=\"skin-mode-1 mobile-mode-0 gutter-mode-2 sidebar-mode-1 menu-mode-0 grid-mode-3 grid-mode-not-1 js-off desktop-device touch-mode-0\"><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\">\n  <meta name=\"HandheldFriendly\" content=\"true\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <meta name=\"referrer\" content=\"origin-when-cross-origin\">\n  \n  <link rel=\"canonical\" href=\"https://www.animenewsnetwork.com/news/\">\n  \n  \n  \n  <link rel=\"stylesheet\" type=\"text/css\" href=\"/assets/ab85518f5293b2bf7befa908114c95ce30508a80.css\" cdn=\"no\">\n  <link rel=\"stylesheet\" type=\"text/css\" href=\"//cdn.animenewsnetwork.com/assets/9f68e933738bd3b5c9df1f8bac4713a427c6478a.css\" media=\"screen, projection, tv\">\n  <style class=\"easyread-style-sheet\">\n    html.mobile-mode-0 .easyread-width,\n    html.mobile-mode-0 .easyread-maxwidth { max-width: 50.0em; }\n    html.mobile-mode-0 .maincontent.forum { widt"
+  },
+  "https://myanimelist.net/news": {
+    "status": 200,
+    "length": 104637,
+    "snippet": "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\"><html lang=\"en\" class=\"appearance-none\"><head>  \n<link rel=\"preconnect\" href=\"//www.googletagmanager.com/\" crossorigin=\"anonymous\"/>\n<link rel=\"preconnect\" href=\"https://cdn.myanimelist.net\" crossorigin=\"anonymous\"/>\n<title>Anime &amp; Manga News - MyAnimeList.net\n</title>\n<meta name=\"description\" content=\"Read and discuss up to date anime and manga news with MyAnimeList, the largest online anime and manga database in the world. Join the online community, create your anime and manga list, read reviews, explore the forums, follow news, and so much more!\" />\n\n  \n<meta name=\"keywords\" content=\"anime, myanimelist, anime news, manga\" />\n  \n\n        \n          \n          \n  <link rel=\"next\" href=\"https://myanimelist.net/news?p=2\" />\n\n\n\n\n<meta property=\"og:locale\" content=\"en_US\"><meta property=\"fb:app_id\" content=\"360769957454434\"><meta property=\"og:site_name\" content=\"MyA"
+  },
+  "https://www.crunchyroll.com/news": {
+    "status": 403,
+    "length": 7050,
+    "snippet": "<!DOCTYPE html><html lang=\"en-US\"><head><title>Just a moment...</title><meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"><meta http-equiv=\"X-UA-Compatible\" content=\"IE=Edge\"><meta name=\"robots\" content=\"noindex,nofollow\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>*{box-sizing:border-box;margin:0;padding:0}html{line-height:1.15;-webkit-text-size-adjust:100%;color:#313131;font-family:system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,\"Noto Sans\",sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\",\"Segoe UI Symbol\",\"Noto Color Emoji\"}body{display:flex;flex-direction:column;height:100vh;min-height:100vh}.main-content{margin:8rem auto;padding-left:1.5rem;max-width:60rem}@media (width <= 720px){.main-content{margin-top:4rem}}#challenge-error-text{background-image:url(\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iI0IyMEYw"
+  }
+}

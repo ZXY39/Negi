@@ -2191,7 +2191,15 @@ class TaskLogService:
                         tool_calls.append(compact_step)
             stages_payload.append(
                 {
+                    'stage_id': str(stage.get('stage_id') or ''),
+                    'stage_index': int(stage.get('stage_index') or 0),
+                    'mode': str(stage.get('mode') or ''),
+                    'status': str(stage.get('status') or ''),
                     'stage_goal': str(stage.get('stage_goal') or ''),
+                    'tool_round_budget': int(stage.get('tool_round_budget') or 0),
+                    'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
+                    'created_at': str(stage.get('created_at') or ''),
+                    'finished_at': str(stage.get('finished_at') or ''),
                     'tool_calls': tool_calls,
                 }
             )
@@ -2211,10 +2219,15 @@ class TaskLogService:
         if not isinstance(step, dict):
             return None
         return {
+            'tool_call_id': str(step.get('tool_call_id') or '').strip(),
             'tool_name': str(step.get('tool_name') or '').strip() or 'tool',
             'arguments_text': str(step.get('arguments_text') or ''),
             'output_text': str(step.get('output_text') or ''),
             'output_ref': str(step.get('output_ref') or ''),
+            'status': str(step.get('status') or '').strip(),
+            'started_at': str(step.get('started_at') or ''),
+            'finished_at': str(step.get('finished_at') or ''),
+            'elapsed_seconds': step.get('elapsed_seconds'),
         }
 
     def _task_projection_round_records(self, node: NodeRecord) -> list[TaskProjectionRoundRecord]:

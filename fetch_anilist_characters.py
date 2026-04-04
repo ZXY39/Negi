@@ -5,6 +5,11 @@ Uses browser-like headers to avoid Cloudflare blocking.
 import json
 import urllib.request
 import urllib.error
+import sys
+import io
+
+# Set stdout to UTF-8 to avoid Windows GBK encoding issues
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 API_URL = "https://graphql.anilist.co"
 
@@ -120,6 +125,7 @@ def main():
                 "romaji": t.get("romaji", ""),
                 "english": t.get("english", ""),
                 "type": m.get("type", ""),
+                "format": m.get("format", ""),
                 "year": m.get("startDate", {}).get("year") if m.get("startDate") else None
             })
         
@@ -137,12 +143,14 @@ def main():
     with open("D:\\NewProjects\\G3KU\\anilist_female_characters.json", "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
     
-    print(f"\nTop {len(output)} female characters saved.")
+    print(f"\nTop {len(output)} female characters saved to anilist_female_characters.json")
     # Print top 20 for quick view
     for c in output[:20]:
-        print(f"{c['rank']}. {c['name_en']} ({c['name_native']}) - {c['favourites']} favourites")
-        for m in c['media'][:1]:
-            print(f"   From: {m.get('english') or m.get('romaji')} ({m.get('year', '?')})")
+        media_name = ""
+        if c['media']:
+            m = c['media'][0]
+            media_name = m.get('english') or m.get('romaji') or "?"
+        print(f"{c['rank']}. {c['name_en']} - {c['favourites']} favourites - {media_name}")
 
 if __name__ == "__main__":
     main()

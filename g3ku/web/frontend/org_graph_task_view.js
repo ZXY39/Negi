@@ -903,18 +903,31 @@ function buildLiveSectionStatus(items) {
 }
 
 function normalizeSummaryTraceToolCall(step, index = 0) {
+    const rawStatus = String(step?.status || "").trim().toLowerCase();
+    const explicitStatus = ({
+        queued: "running",
+        running: "running",
+        success: "success",
+        error: "error",
+    }[rawStatus] || "");
+    const outputText = String(step?.output_text || "");
+    const outputRef = String(step?.output_ref || "");
+    const startedAt = String(step?.started_at || "");
+    const finishedAt = String(step?.finished_at || "");
     return {
         tool_call_id: String(step?.tool_call_id || `summary-tool-${index + 1}`),
         tool_name: String(step?.tool_name || "tool"),
         arguments_text: String(step?.arguments_text || ""),
-        output_text: String(step?.output_text || ""),
-        output_ref: String(step?.output_ref || ""),
-        started_at: String(step?.started_at || ""),
-        finished_at: String(step?.finished_at || ""),
+        output_text: outputText,
+        output_ref: outputRef,
+        started_at: startedAt,
+        finished_at: finishedAt,
         elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
-        status: ["running", "success", "error"].includes(String(step?.status || ""))
-            ? String(step.status)
-            : (String(step?.output_text || "").trim() || String(step?.output_ref || "").trim() ? "success" : "info"),
+        status: explicitStatus || (finishedAt
+            ? "success"
+            : ((outputText.trim() || outputRef.trim())
+                ? "success"
+                : (startedAt ? "running" : "info"))),
     };
 }
 
@@ -931,7 +944,7 @@ function normalizeSummaryExecutionTrace(summary) {
             stage_id: String(stage?.stage_id || `summary-stage-${stageIndex + 1}`),
             stage_index: toInt(stage?.stage_index, stageIndex + 1),
             mode: String(stage?.mode || "执行摘要").trim() || "执行摘要",
-            status: String(stage?.status || (tools.length ? "完成" : "进行中")).trim() || "进行中",
+            status: String(stage?.status || (String(stage?.finished_at || "").trim() ? "完成" : "进行中")).trim() || "进行中",
             stage_goal: String(stage?.stage_goal || "").trim(),
             stage_total_steps: toInt(stage?.tool_round_budget, 0),
             tool_rounds_used: tools.length ? 1 : 0,

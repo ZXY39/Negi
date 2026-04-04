@@ -1,1 +1,1995 @@
-[]
+[
+  {
+    "rank": 1,
+    "name_en": "Emilia",
+    "name_native": "エミリア",
+    "alternatives": [
+      "Satella",
+      "Lia",
+      "Emilia-tan",
+      "Witch of Glaciation",
+      "Hyouketsu no Majo (氷結の魔女)",
+      "Witch of Frost",
+      "Han Ma (半魔)",
+      "Half-Devil",
+      "Mili",
+      "Emily",
+      "Majo no Musume (魔女の娘)",
+      "Witch's Daughter"
+    ],
+    "gender": "Female",
+    "favourites": 27625,
+    "media": [
+      {
+        "romaji": "Re:Zero kara Hajimeru Isekai Seikatsu",
+        "english": "Re:ZERO -Starting Life in Another World-",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2016
+      },
+      {
+        "romaji": "Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season",
+        "english": "Re:ZERO -Starting Life in Another World- Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2",
+        "english": "Re:ZERO -Starting Life in Another World- Season 2 Part 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      }
+    ],
+    "id": 88572
+  },
+  {
+    "rank": 2,
+    "name_en": "Mikasa Ackerman",
+    "name_native": "ミカサ・アッカーマン",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 27010,
+    "media": [
+      {
+        "romaji": "Shingeki no Kyojin",
+        "english": "Attack on Titan",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2013
+      },
+      {
+        "romaji": "Shingeki no Kyojin Season 2",
+        "english": "Attack on Titan Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2017
+      },
+      {
+        "romaji": "Shingeki no Kyojin Season 3",
+        "english": "Attack on Titan Season 3",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2018
+      }
+    ],
+    "id": 40881
+  },
+  {
+    "rank": 3,
+    "name_en": "Makima",
+    "name_native": "マキマ",
+    "alternatives": [
+      "Control Devil",
+      "Shihai no Akuma (支配の悪魔)",
+      "Conquest Devil",
+      "Devil of Domination"
+    ],
+    "gender": "Female",
+    "favourites": 21974,
+    "media": [
+      {
+        "romaji": "Chainsaw Man",
+        "english": "Chainsaw Man",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "Chainsaw Man",
+        "english": "Chainsaw Man",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2018
+      },
+      {
+        "romaji": "Chainsaw Man: Reze-hen",
+        "english": "Chainsaw Man – The Movie: Reze Arc",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2025
+      }
+    ],
+    "id": 137080
+  },
+  {
+    "rank": 4,
+    "name_en": "Kurisu Makise",
+    "name_native": "牧瀬紅莉栖",
+    "alternatives": [
+      "Christina",
+      "Assistant",
+      "American Virgin",
+      "Perverted Genius Girl",
+      "Celeb 17",
+      "The Zombie",
+      "Kuu-meow",
+      "k.makise",
+      "KuriGohan Kamehameha",
+      "Lab Member 004",
+      "KURI_KAME",
+      "Amadeus"
+    ],
+    "gender": "Female",
+    "favourites": 21967,
+    "media": [
+      {
+        "romaji": "Steins;Gate",
+        "english": "Steins;Gate",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2011
+      },
+      {
+        "romaji": "Steins;Gate 0",
+        "english": "Steins;Gate 0",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2018
+      },
+      {
+        "romaji": "Steins;Gate: Fuka Ryouiki no Déjà vu",
+        "english": "Steins;Gate The Movie – Load Region of Déjà Vu",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2013
+      }
+    ],
+    "id": 34470
+  },
+  {
+    "rank": 5,
+    "name_en": "Mai Sakurajima",
+    "name_native": "桜島麻衣",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 21568,
+    "media": [
+      {
+        "romaji": "Seishun Buta Yarou wa Bunny Girl Senpai no Yume wo Minai",
+        "english": "Rascal Does Not Dream of Bunny Girl Senpai",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2018
+      },
+      {
+        "romaji": "Seishun Buta Yarou wa Yumemiru Shoujo no Yume wo Minai",
+        "english": "Rascal Does Not Dream of a Dreaming Girl",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2019
+      },
+      {
+        "romaji": "Seishun Buta Yarou wa Odekake Sister no Yume wo Minai",
+        "english": "Rascal Does Not Dream of a Sister Venturing Out",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2023
+      }
+    ],
+    "id": 127222
+  },
+  {
+    "rank": 6,
+    "name_en": "Kaguya Shinomiya",
+    "name_native": "四宮かぐや",
+    "alternatives": [
+      "Muscle Queen",
+      "Auntie",
+      "Princess",
+      "Demon",
+      "Mistress Kaguya",
+      "Vice President",
+      "Kaguya Shirogane"
+    ],
+    "gender": "Female",
+    "favourites": 20778,
+    "media": [
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai?: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War?",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Ultra Romantic",
+        "english": "Kaguya-sama: Love is War -Ultra Romantic-",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      }
+    ],
+    "id": 120649
+  },
+  {
+    "rank": 7,
+    "name_en": "Frieren",
+    "name_native": "フリーレン",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 20760,
+    "media": [
+      {
+        "romaji": "Sousou no Frieren",
+        "english": "Frieren: Beyond Journey’s End",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      },
+      {
+        "romaji": "Sousou no Frieren 2nd Season",
+        "english": "Frieren: Beyond Journey’s End Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2026
+      },
+      {
+        "romaji": "Sousou no Frieren",
+        "english": "Frieren: Beyond Journey’s End",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2020
+      }
+    ],
+    "id": 176754
+  },
+  {
+    "rank": 8,
+    "name_en": "Violet Evergarden",
+    "name_native": "ヴァイオレット・エヴァーガーデン",
+    "alternatives": [
+      "Auto Memories Doll",
+      "Leidenschaftlich's Soldier Maiden",
+      "Vi"
+    ],
+    "gender": "Female",
+    "favourites": 20357,
+    "media": [
+      {
+        "romaji": "Violet Evergarden",
+        "english": "Violet Evergarden",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2018
+      },
+      {
+        "romaji": "Violet Evergarden Movie",
+        "english": "Violet Evergarden: the Movie",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2020
+      },
+      {
+        "romaji": "Violet Evergarden Gaiden: Eien to Jidou Shuki Ningyou",
+        "english": "Violet Evergarden: Eternity and the Auto Memory Doll",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2019
+      }
+    ],
+    "id": 90169
+  },
+  {
+    "rank": 9,
+    "name_en": "Maomao",
+    "name_native": "猫猫",
+    "alternatives": [
+      "Shaomao",
+      "Xiaomao",
+      "小猫",
+      "Miêu Miêu"
+    ],
+    "gender": "Female",
+    "favourites": 20201,
+    "media": [
+      {
+        "romaji": "Kusuriya no Hitorigoto",
+        "english": "The Apothecary Diaries",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      },
+      {
+        "romaji": "Kusuriya no Hitorigoto 2nd Season",
+        "english": "The Apothecary Diaries Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2025
+      },
+      {
+        "romaji": "Kusuriya no Hitorigoto",
+        "english": "The Apothecary Diaries",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2017
+      }
+    ],
+    "id": 126824
+  },
+  {
+    "rank": 10,
+    "name_en": "Power",
+    "name_native": "パワー",
+    "alternatives": [
+      "Powy",
+      "Blood Fiend",
+      "Chi no Majin (血の魔人)",
+      "Number One",
+      "Blood Devil"
+    ],
+    "gender": "Female",
+    "favourites": 19886,
+    "media": [
+      {
+        "romaji": "Chainsaw Man",
+        "english": "Chainsaw Man",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "Chainsaw Man",
+        "english": "Chainsaw Man",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2018
+      },
+      {
+        "romaji": "Chainsaw Man: Reze-hen",
+        "english": "Chainsaw Man – The Movie: Reze Arc",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2025
+      }
+    ],
+    "id": 137079
+  },
+  {
+    "rank": 11,
+    "name_en": "Sakura Matou",
+    "name_native": "間桐桜",
+    "alternatives": [
+      "Sakura Tohsaka (遠坂桜)",
+      "Sakura Tousaka",
+      "Dark Sakura"
+    ],
+    "gender": "Female",
+    "favourites": 18132,
+    "media": [
+      {
+        "romaji": "Fate/Zero",
+        "english": "Fate/Zero",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2011
+      },
+      {
+        "romaji": "Fate/stay night: Unlimited Blade Works",
+        "english": "Fate/stay night: Unlimited Blade Works",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2014
+      },
+      {
+        "romaji": "Fate/Zero 2nd Season",
+        "english": "Fate/Zero Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2012
+      }
+    ],
+    "id": 500
+  },
+  {
+    "rank": 12,
+    "name_en": "Megumin",
+    "name_native": "めぐみん",
+    "alternatives": [
+      "Crazy Explosion Girl",
+      "Psycho Girl"
+    ],
+    "gender": "Female",
+    "favourites": 16813,
+    "media": [
+      {
+        "romaji": "Kono Subarashii Sekai ni Shukufuku wo!",
+        "english": "KONOSUBA -God's blessing on this wonderful world!",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2016
+      },
+      {
+        "romaji": "Kono Subarashii Sekai ni Shukufuku wo! 2",
+        "english": "KONOSUBA -God's blessing on this wonderful world! 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2017
+      },
+      {
+        "romaji": "Kono Subarashii Sekai ni Shukufuku wo! Kurenai Densetsu",
+        "english": "KONOSUBA -God's blessing on this wonderful world!- Legend of Crimson",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2019
+      }
+    ],
+    "id": 89361
+  },
+  {
+    "rank": 13,
+    "name_en": "Chika Fujiwara",
+    "name_native": "藤原千花",
+    "alternatives": [
+      "Subject F",
+      "Love Detective Chika",
+      "Fortune Teller Chika",
+      "Secretary Fujiwara"
+    ],
+    "gender": "Female",
+    "favourites": 16696,
+    "media": [
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai?: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War?",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Ultra Romantic",
+        "english": "Kaguya-sama: Love is War -Ultra Romantic-",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      }
+    ],
+    "id": 121103
+  },
+  {
+    "rank": 14,
+    "name_en": "Ichigo",
+    "name_native": "イチゴ",
+    "alternatives": [
+      "015"
+    ],
+    "gender": "Female",
+    "favourites": 16229,
+    "media": [
+      {
+        "romaji": "Darling in the Franxx",
+        "english": "DARLING in the FRANXX",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2018
+      },
+      {
+        "romaji": "Darling in the Franxx",
+        "english": "DARLING in the FRANXX",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2018
+      },
+      {
+        "romaji": "Darling in the FranXX!",
+        "english": null,
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2018
+      }
+    ],
+    "id": 124382
+  },
+  {
+    "rank": 15,
+    "name_en": "Rem",
+    "name_native": "レム",
+    "alternatives": [
+      "Rem-rin"
+    ],
+    "gender": "Female",
+    "favourites": 16189,
+    "media": [
+      {
+        "romaji": "Re:Zero kara Hajimeru Isekai Seikatsu",
+        "english": "Re:ZERO -Starting Life in Another World-",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2016
+      },
+      {
+        "romaji": "Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season",
+        "english": "Re:ZERO -Starting Life in Another World- Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season Part 2",
+        "english": "Re:ZERO -Starting Life in Another World- Season 2 Part 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      }
+    ],
+    "id": 88575
+  },
+  {
+    "rank": 16,
+    "name_en": "Marin Kitagawa",
+    "name_native": "喜多川海夢",
+    "alternatives": [
+      "Marine (まりん)"
+    ],
+    "gender": "Female",
+    "favourites": 16094,
+    "media": [
+      {
+        "romaji": "Sono Bisque Doll wa Koi wo Suru",
+        "english": "My Dress-Up Darling",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "Sono Bisque Doll wa Koi wo Suru Season 2",
+        "english": "My Dress-Up Darling Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2025
+      },
+      {
+        "romaji": "Sono Bisque Doll wa Koi wo Suru",
+        "english": "My Dress-Up Darling",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2018
+      }
+    ],
+    "id": 133676
+  },
+  {
+    "rank": 17,
+    "name_en": "Nezuko Kamado",
+    "name_native": "竈門禰豆子",
+    "alternatives": [
+      "竈門禰?豆子",
+      "카마도 네즈코",
+      "The Chosen Demon (選ばれし鬼)",
+      "Erabareshi Oni"
+    ],
+    "gender": "Female",
+    "favourites": 15839,
+    "media": [
+      {
+        "romaji": "Kimetsu no Yaiba",
+        "english": "Demon Slayer: Kimetsu no Yaiba",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Kimetsu no Yaiba: Mugen Ressha-hen",
+        "english": "Demon Slayer -Kimetsu no Yaiba- The Movie: Mugen Train",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2020
+      },
+      {
+        "romaji": "Kimetsu no Yaiba: Yuukaku-hen",
+        "english": "Demon Slayer: Kimetsu no Yaiba Entertainment District Arc",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      }
+    ],
+    "id": 127518
+  },
+  {
+    "rank": 18,
+    "name_en": "Itsuki Nakano",
+    "name_native": "中野五月",
+    "alternatives": [
+      "いつき",
+      "May",
+      "Rena"
+    ],
+    "gender": "Female",
+    "favourites": 15733,
+    "media": [
+      {
+        "romaji": "Go-toubun no Hanayome",
+        "english": "The Quintessential Quintuplets",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Go-toubun no Hanayome ∬",
+        "english": "The Quintessential Quintuplets 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "Go-toubun no Hanayome Movie",
+        "english": "The Quintessential Quintuplets Movie",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2022
+      }
+    ],
+    "id": 126375
+  },
+  {
+    "rank": 19,
+    "name_en": "Zero Two",
+    "name_native": "ゼロツー",
+    "alternatives": [
+      "Code:002",
+      "Partner Killer (パートナー殺し)",
+      "9' Iota",
+      "Nine Iota (ナインイオタ)",
+      "9'ι"
+    ],
+    "gender": "Female",
+    "favourites": 15567,
+    "media": [
+      {
+        "romaji": "Darling in the Franxx",
+        "english": "DARLING in the FRANXX",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2018
+      },
+      {
+        "romaji": "Dosanko Gal wa Namara Menkoi",
+        "english": "Hokkaido Gals Are Super Adorable!",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2019
+      },
+      {
+        "romaji": "Darling in the Franxx",
+        "english": "DARLING in the FRANXX",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2018
+      }
+    ],
+    "id": 124381
+  },
+  {
+    "rank": 20,
+    "name_en": "Miko Iino",
+    "name_native": "伊井野ミコ",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 15557,
+    "media": [
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai?: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War?",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Ultra Romantic",
+        "english": "Kaguya-sama: Love is War -Ultra Romantic-",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      }
+    ],
+    "id": 125886
+  },
+  {
+    "rank": 21,
+    "name_en": "Hitagi Senjougahara",
+    "name_native": "戦場ヶ原ひたぎ",
+    "alternatives": [
+      "Tsundere-chan",
+      "Gahara-san"
+    ],
+    "gender": "Female",
+    "favourites": 14767,
+    "media": [
+      {
+        "romaji": "Bakemonogatari",
+        "english": "Bakemonogatari",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2009
+      },
+      {
+        "romaji": "Nisemonogatari",
+        "english": "Nisemonogatari",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2012
+      },
+      {
+        "romaji": "Monogatari Series: Second Season",
+        "english": "Monogatari Series Second Season",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2013
+      }
+    ],
+    "id": 22037
+  },
+  {
+    "rank": 22,
+    "name_en": "Robin Nico",
+    "name_native": "ニコロビン",
+    "alternatives": [
+      "Demon Child",
+      "Miss All Sunday",
+      "Light of the Revolution",
+      "O-Robi",
+      "Robiland",
+      "Ms. Sunday",
+      "Devil Child"
+    ],
+    "gender": "Female",
+    "favourites": 14198,
+    "media": [
+      {
+        "romaji": "ONE PIECE",
+        "english": "ONE PIECE",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 1999
+      },
+      {
+        "romaji": "ONE PIECE",
+        "english": "One Piece",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 1997
+      },
+      {
+        "romaji": "ONE PIECE FILM: RED",
+        "english": "One Piece Film: Red",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2022
+      }
+    ],
+    "id": 61
+  },
+  {
+    "rank": 23,
+    "name_en": "Asuka Langley Souryuu",
+    "name_native": "惣流・アスカ・ラングレー",
+    "alternatives": [
+      "Second Child",
+      "Asuka Langley Shikinami",
+      "Princess"
+    ],
+    "gender": "Female",
+    "favourites": 14053,
+    "media": [
+      {
+        "romaji": "Shin Seiki Evangelion",
+        "english": "Neon Genesis Evangelion",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 1995
+      },
+      {
+        "romaji": "Shin Seiki Evangelion Movie: Air / Magokoro wo, Kimi ni",
+        "english": "Neon Genesis Evangelion: The End of Evangelion",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 1997
+      },
+      {
+        "romaji": "Evangelion Shin Movie: Ha",
+        "english": "Evangelion: 2.0 You Can (Not) Advance",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2009
+      }
+    ],
+    "id": 94
+  },
+  {
+    "rank": 24,
+    "name_en": "Yor Forger",
+    "name_native": "ヨル・フォージャー",
+    "alternatives": [
+      "Yor Briar (ヨル・ブライア)",
+      "Thorn Princess (Ibara-hime‚ いばら姫)",
+      "Yorticia",
+      "Tornprinsessa"
+    ],
+    "gender": "Female",
+    "favourites": 14048,
+    "media": [
+      {
+        "romaji": "SPY×FAMILY",
+        "english": "SPY x FAMILY",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "SPY×FAMILY Part 2",
+        "english": "SPY x FAMILY Cour 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "SPY×FAMILY Season 2",
+        "english": "SPY x FAMILY Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      }
+    ],
+    "id": 138102
+  },
+  {
+    "rank": 25,
+    "name_en": "Nobara Kugisaki",
+    "name_native": "釘崎野薔薇",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 14044,
+    "media": [
+      {
+        "romaji": "Jujutsu Kaisen",
+        "english": "JUJUTSU KAISEN",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Jujutsu Kaisen 2nd Season",
+        "english": "JUJUTSU KAISEN Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      },
+      {
+        "romaji": "Jujutsu Kaisen",
+        "english": "Jujutsu Kaisen",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2018
+      }
+    ],
+    "id": 133700
+  },
+  {
+    "rank": 26,
+    "name_en": "Shinobu Oshino",
+    "name_native": "忍野忍",
+    "alternatives": [
+      "Kiss-Shot Acerola-Orion Heart-Under-Blade (キスショット・アセロラオリオン・ハートアンダーブレード)",
+      "Tekketsu ni shite Nekketsu ni shite Reiketsu no Kyuuketsuki (鉄血にして熱血にして冷血の吸血鬼)",
+      "The Iron-blooded‚ Hot-blooded‚ Cold-blooded Vampire",
+      "Beautiful Princess",
+      "Acerola",
+      "Laura"
+    ],
+    "gender": "Female",
+    "favourites": 13911,
+    "media": [
+      {
+        "romaji": "Bakemonogatari",
+        "english": "Bakemonogatari",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2009
+      },
+      {
+        "romaji": "Nisemonogatari",
+        "english": "Nisemonogatari",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2012
+      },
+      {
+        "romaji": "Monogatari Series: Second Season",
+        "english": "Monogatari Series Second Season",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2013
+      }
+    ],
+    "id": 23602
+  },
+  {
+    "rank": 27,
+    "name_en": "Anya Forger",
+    "name_native": "アーニャ・フォージャー",
+    "alternatives": [
+      "Test Subject 007",
+      "Anya Williams",
+      "Anya Levski",
+      "Anya Roche",
+      "Anya Klein",
+      "K-212",
+      "Princess Anya",
+      "Chihuahua Girl",
+      "Starlight Anya"
+    ],
+    "gender": "Female",
+    "favourites": 13085,
+    "media": [
+      {
+        "romaji": "SPY×FAMILY",
+        "english": "SPY x FAMILY",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "SPY×FAMILY Part 2",
+        "english": "SPY x FAMILY Cour 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "SPY×FAMILY Season 2",
+        "english": "SPY x FAMILY Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      }
+    ],
+    "id": 138100
+  },
+  {
+    "rank": 28,
+    "name_en": "Rin Tohsaka",
+    "name_native": "遠坂凛",
+    "alternatives": [
+      "Rin Tousaka",
+      "Poppins of July",
+      "Red Devil",
+      "The Consultant",
+      "Red Evil",
+      "Kischur's Nightmare"
+    ],
+    "gender": "Female",
+    "favourites": 12882,
+    "media": [
+      {
+        "romaji": "Fate/Zero",
+        "english": "Fate/Zero",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2011
+      },
+      {
+        "romaji": "Fate/stay night: Unlimited Blade Works",
+        "english": "Fate/stay night: Unlimited Blade Works",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2014
+      },
+      {
+        "romaji": "Fate/Zero 2nd Season",
+        "english": "Fate/Zero Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2012
+      }
+    ],
+    "id": 498
+  },
+  {
+    "rank": 29,
+    "name_en": "Maki Zenin",
+    "name_native": "禪院真希",
+    "alternatives": [
+      "Miss Zenin"
+    ],
+    "gender": "Female",
+    "favourites": 12615,
+    "media": [
+      {
+        "romaji": "Jujutsu Kaisen",
+        "english": "JUJUTSU KAISEN",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Jujutsu Kaisen 2nd Season",
+        "english": "JUJUTSU KAISEN Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      },
+      {
+        "romaji": "Jujutsu Kaisen 0",
+        "english": "JUJUTSU KAISEN 0",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2021
+      }
+    ],
+    "id": 134167
+  },
+  {
+    "rank": 30,
+    "name_en": "Shouko Nishimiya",
+    "name_native": "西宮硝子",
+    "alternatives": [
+      "Shoko",
+      "Shou",
+      "Sho",
+      "Sho-chan"
+    ],
+    "gender": "Female",
+    "favourites": 12093,
+    "media": [
+      {
+        "romaji": "Koe no Katachi",
+        "english": "A Silent Voice",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2016
+      },
+      {
+        "romaji": "Koe no Katachi",
+        "english": "A Silent Voice",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2013
+      },
+      {
+        "romaji": "Koe no Katachi",
+        "english": null,
+        "type": "MANGA",
+        "format": "ONE_SHOT",
+        "year": 2011
+      }
+    ],
+    "id": 80243
+  },
+  {
+    "rank": 31,
+    "name_en": "Artoria Pendragon",
+    "name_native": "アルトリア・ペンドラゴン",
+    "alternatives": [
+      "Saber (セイバー)",
+      "Altria Pendragon",
+      "King Arthur",
+      "King of Knights",
+      "Blue Saber",
+      "Arturia Pendragon",
+      "Goddess Rhongomyniad",
+      "Lion King",
+      "Elise Watoson",
+      "Once and Future King",
+      "Proud Knight-King",
+      "Arthur Pendragon",
+      "Saber Alter",
+      "Black Saber"
+    ],
+    "gender": "Female",
+    "favourites": 11989,
+    "media": [
+      {
+        "romaji": "Fate/Zero",
+        "english": "Fate/Zero",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2011
+      },
+      {
+        "romaji": "Fate/stay night: Unlimited Blade Works",
+        "english": "Fate/stay night: Unlimited Blade Works",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2014
+      },
+      {
+        "romaji": "Fate/Zero 2nd Season",
+        "english": "Fate/Zero Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2012
+      }
+    ],
+    "id": 497
+  },
+  {
+    "rank": 32,
+    "name_en": "Kyouko Hori",
+    "name_native": "堀京子",
+    "alternatives": [
+      "Kyon-Kyon",
+      "Kyo-chan",
+      "Honey-san",
+      "Ice Queen",
+      "Hannya",
+      "Kyouko Miyamura"
+    ],
+    "gender": "Female",
+    "favourites": 11873,
+    "media": [
+      {
+        "romaji": "Horimiya",
+        "english": "Horimiya",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "Horimiya: piece",
+        "english": "Horimiya: The Missing Pieces",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      },
+      {
+        "romaji": "Horimiya",
+        "english": "Horimiya",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2011
+      }
+    ],
+    "id": 66171
+  },
+  {
+    "rank": 33,
+    "name_en": "Hitori Gotou",
+    "name_native": "後藤ひとり",
+    "alternatives": [
+      "Bocchi-chan",
+      "Hitori Gotoh",
+      "guitarhero"
+    ],
+    "gender": "Female",
+    "favourites": 11577,
+    "media": [
+      {
+        "romaji": "Bocchi the Rock!",
+        "english": "BOCCHI THE ROCK!",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "Bocchi the Rock! 2nd Season",
+        "english": null,
+        "type": "ANIME",
+        "format": "TV",
+        "year": null
+      },
+      {
+        "romaji": "Slow Loop",
+        "english": "Slow Loop",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      }
+    ],
+    "id": 257562
+  },
+  {
+    "rank": 34,
+    "name_en": "Miku Nakano",
+    "name_native": "中野三玖",
+    "alternatives": [
+      "みく"
+    ],
+    "gender": "Female",
+    "favourites": 11546,
+    "media": [
+      {
+        "romaji": "Go-toubun no Hanayome",
+        "english": "The Quintessential Quintuplets",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Go-toubun no Hanayome ∬",
+        "english": "The Quintessential Quintuplets 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "Go-toubun no Hanayome Movie",
+        "english": "The Quintessential Quintuplets Movie",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2022
+      }
+    ],
+    "id": 126373
+  },
+  {
+    "rank": 35,
+    "name_en": "Roxy Migurdia",
+    "name_native": "ロキシー・ミグルディア",
+    "alternatives": [
+      "Roxy Greyrat"
+    ],
+    "gender": "Female",
+    "favourites": 11393,
+    "media": [
+      {
+        "romaji": "Mushoku Tensei: Isekai Ittara Honki Dasu",
+        "english": "Mushoku Tensei: Jobless Reincarnation",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "Mushoku Tensei: Isekai Ittara Honki Dasu Part 2",
+        "english": "Mushoku Tensei: Jobless Reincarnation Cour 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2",
+        "english": "Mushoku Tensei: Jobless Reincarnation Season 2 Part 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2024
+      }
+    ],
+    "id": 88350
+  },
+  {
+    "rank": 36,
+    "name_en": "Kana Arima",
+    "name_native": "有馬かな",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 11309,
+    "media": [
+      {
+        "romaji": "[Oshi no Ko]",
+        "english": "Oshi No Ko",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      },
+      {
+        "romaji": "[Oshi no Ko] 2nd Season",
+        "english": "Oshi no Ko Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2024
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2015
+      }
+    ],
+    "id": 188783
+  },
+  {
+    "rank": 37,
+    "name_en": "Homura Akemi",
+    "name_native": "暁美ほむら",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 11264,
+    "media": [
+      {
+        "romaji": "Mahou Shoujo Madoka☆Magica",
+        "english": "Puella Magi Madoka Magica",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2011
+      },
+      {
+        "romaji": "Mahou Shoujo Madoka☆Magica: Hangyaku no Monogatari",
+        "english": "Puella Magi Madoka Magica the Movie -Rebellion-",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2013
+      },
+      {
+        "romaji": "Magia Record: Mahou Shoujo Madoka☆Magica Gaiden",
+        "english": "Magia Record: Puella Magi Madoka Magica Side Story",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      }
+    ],
+    "id": 38005
+  },
+  {
+    "rank": 38,
+    "name_en": "Ai Hayasaka",
+    "name_native": "早坂愛",
+    "alternatives": [
+      "Haysaca A. Smith",
+      "Haysaca A. Smithee",
+      "Herthaka",
+      "Smithee A.",
+      "Rat"
+    ],
+    "gender": "Female",
+    "favourites": 11112,
+    "media": [
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai?: Tensaitachi no Renai Zunousen",
+        "english": "Kaguya-sama: Love is War?",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Kaguya-sama wa Kokurasetai: Ultra Romantic",
+        "english": "Kaguya-sama: Love is War -Ultra Romantic-",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      }
+    ],
+    "id": 121104
+  },
+  {
+    "rank": 39,
+    "name_en": "Misato Katsuragi",
+    "name_native": "葛城ミサト",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 10921,
+    "media": [
+      {
+        "romaji": "Shin Seiki Evangelion",
+        "english": "Neon Genesis Evangelion",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 1995
+      },
+      {
+        "romaji": "Shin Seiki Evangelion Movie: Air / Magokoro wo, Kimi ni",
+        "english": "Neon Genesis Evangelion: The End of Evangelion",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 1997
+      },
+      {
+        "romaji": "Evangelion Shin Movie: Jo",
+        "english": "Evangelion: 1.0 You Are (Not) Alone",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2007
+      }
+    ],
+    "id": 1259
+  },
+  {
+    "rank": 40,
+    "name_en": "Rei Ayanami",
+    "name_native": "綾波レイ",
+    "alternatives": [
+      "First Child",
+      "Look-alike",
+      "Tentative Name: Rei Ayanami",
+      "アヤナミレイ(仮称)",
+      "Original Batch"
+    ],
+    "gender": "Female",
+    "favourites": 10906,
+    "media": [
+      {
+        "romaji": "Shin Seiki Evangelion",
+        "english": "Neon Genesis Evangelion",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 1995
+      },
+      {
+        "romaji": "Shin Seiki Evangelion Movie: Air / Magokoro wo, Kimi ni",
+        "english": "Neon Genesis Evangelion: The End of Evangelion",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 1997
+      },
+      {
+        "romaji": "Evangelion Shin Movie: Jo",
+        "english": "Evangelion: 1.0 You Are (Not) Alone",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2007
+      }
+    ],
+    "id": 86
+  },
+  {
+    "rank": 41,
+    "name_en": "Nino Nakano",
+    "name_native": "中野二乃",
+    "alternatives": [
+      "にの"
+    ],
+    "gender": "Female",
+    "favourites": 10595,
+    "media": [
+      {
+        "romaji": "Go-toubun no Hanayome",
+        "english": "The Quintessential Quintuplets",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Go-toubun no Hanayome ∬",
+        "english": "The Quintessential Quintuplets 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "Go-toubun no Hanayome Movie",
+        "english": "The Quintessential Quintuplets Movie",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2022
+      }
+    ],
+    "id": 126372
+  },
+  {
+    "rank": 42,
+    "name_en": "Asuna Yuuki",
+    "name_native": "結城明日奈",
+    "alternatives": [
+      "アスナ",
+      "Berserker Healer (バーサクヒーラー)",
+      "Lightning Flash (閃光)",
+      "Mama (ママ)",
+      "Erika (エリカ)",
+      "Titania (ティターニア)",
+      "Stacia (ステイシア)",
+      "Suteishia"
+    ],
+    "gender": "Female",
+    "favourites": 10497,
+    "media": [
+      {
+        "romaji": "Sword Art Online",
+        "english": "Sword Art Online",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2012
+      },
+      {
+        "romaji": "Sword Art Online II",
+        "english": "Sword Art Online II",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2014
+      },
+      {
+        "romaji": "Sword Art Online: Alicization",
+        "english": "Sword Art Online: Alicization",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2018
+      }
+    ],
+    "id": 36828
+  },
+  {
+    "rank": 43,
+    "name_en": "C.C.",
+    "name_native": "シー･ツー",
+    "alternatives": [
+      "Witch of Britannia",
+      "Gray Witch",
+      "Pizza Girl",
+      "C2"
+    ],
+    "gender": "Female",
+    "favourites": 10455,
+    "media": [
+      {
+        "romaji": "Code Geass: Hangyaku no Lelouch",
+        "english": "Code Geass: Lelouch of the Rebellion",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2006
+      },
+      {
+        "romaji": "Code Geass: Hangyaku no Lelouch R2",
+        "english": "Code Geass: Lelouch of the Rebellion R2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2008
+      },
+      {
+        "romaji": "Code Geass: Fukkatsu no Lelouch",
+        "english": "Code Geass: Lelouch of the Re;surrection",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2019
+      }
+    ],
+    "id": 1111
+  },
+  {
+    "rank": 44,
+    "name_en": "Kurena Kukumila",
+    "name_native": "クレナ・ククミラ",
+    "alternatives": [
+      "Gunslinger"
+    ],
+    "gender": "Female",
+    "favourites": 10027,
+    "media": [
+      {
+        "romaji": "86: Eighty Six",
+        "english": "86 EIGHTY-SIX",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "86: Eighty Six Part 2",
+        "english": "86 EIGHTY-SIX Part 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "86: Eighty Six",
+        "english": "86―EIGHTY-SIX",
+        "type": "MANGA",
+        "format": "NOVEL",
+        "year": 2017
+      }
+    ],
+    "id": 174873
+  },
+  {
+    "rank": 45,
+    "name_en": "Yukino Yukinoshita",
+    "name_native": "雪ノ下雪乃",
+    "alternatives": [
+      "Yukinon"
+    ],
+    "gender": "Female",
+    "favourites": 9998,
+    "media": [
+      {
+        "romaji": "Yahari Ore no Seishun Love Come wa Machigatteiru.",
+        "english": "My Teen Romantic Comedy SNAFU",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2013
+      },
+      {
+        "romaji": "Yahari Ore no Seishun Love Come wa Machigatteiru. Zoku",
+        "english": "My Teen Romantic Comedy SNAFU TOO!",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2015
+      },
+      {
+        "romaji": "Yahari Ore no Seishun Love Come wa Machigatteiru. Kan",
+        "english": "My Teen Romantic Comedy SNAFU Climax!",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      }
+    ],
+    "id": 67067
+  },
+  {
+    "rank": 46,
+    "name_en": "Nami",
+    "name_native": "ナミ",
+    "alternatives": [
+      "Cat Burglar",
+      "O-Nami",
+      "Namizo",
+      "Namiland"
+    ],
+    "gender": "Female",
+    "favourites": 9876,
+    "media": [
+      {
+        "romaji": "ONE PIECE",
+        "english": "ONE PIECE",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 1999
+      },
+      {
+        "romaji": "ONE PIECE",
+        "english": "One Piece",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 1997
+      },
+      {
+        "romaji": "ONE PIECE FILM: RED",
+        "english": "One Piece Film: Red",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2022
+      }
+    ],
+    "id": 723
+  },
+  {
+    "rank": 47,
+    "name_en": "Mami Nanami",
+    "name_native": "七海麻美",
+    "alternatives": [
+      "Maya",
+      "Kaori",
+      "Numa (沼)"
+    ],
+    "gender": "Female",
+    "favourites": 9776,
+    "media": [
+      {
+        "romaji": "Kanojo, Okarishimasu",
+        "english": "Rent-a-Girlfriend",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Kanojo, Okarishimasu 2nd Season",
+        "english": "Rent-a-Girlfriend Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "Kanojo, Okarishimasu 3rd Season",
+        "english": "Rent-a-Girlfriend Season 3",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2023
+      }
+    ],
+    "id": 154224
+  },
+  {
+    "rank": 48,
+    "name_en": "Gabi Braun",
+    "name_native": "ガビ・ブラウン",
+    "alternatives": [
+      "Mia (ミア)"
+    ],
+    "gender": "Female",
+    "favourites": 9731,
+    "media": [
+      {
+        "romaji": "Shingeki no Kyojin: The Final Season",
+        "english": "Attack on Titan Final Season",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Shingeki no Kyojin: The Final Season Part 2",
+        "english": "Attack on Titan Final Season Part 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "Shingeki no Kyojin: The Final Season - Kanketsu-hen Zenpen",
+        "english": "Attack on Titan Final Season THE FINAL CHAPTERS Special 1",
+        "type": "ANIME",
+        "format": "SPECIAL",
+        "year": 2023
+      }
+    ],
+    "id": 125659
+  },
+  {
+    "rank": 49,
+    "name_en": "Vladilena Milizé",
+    "name_native": "ヴラディレーナ・ミリーゼ",
+    "alternatives": [
+      "Lena",
+      "Handler One",
+      "鮮血の女王",
+      "Bloody Reina",
+      "Bloody Regina"
+    ],
+    "gender": "Female",
+    "favourites": 9653,
+    "media": [
+      {
+        "romaji": "86: Eighty Six",
+        "english": "86 EIGHTY-SIX",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "86: Eighty Six Part 2",
+        "english": "86 EIGHTY-SIX Part 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      },
+      {
+        "romaji": "86: Eighty Six",
+        "english": "86―EIGHTY-SIX",
+        "type": "MANGA",
+        "format": "NOVEL",
+        "year": 2017
+      }
+    ],
+    "id": 141061
+  },
+  {
+    "rank": 50,
+    "name_en": "Kaori Miyazono",
+    "name_native": "宮園かをり",
+    "alternatives": [
+      "Free-spirit"
+    ],
+    "gender": "Female",
+    "favourites": 9543,
+    "media": [
+      {
+        "romaji": "Shigatsu wa Kimi no Uso",
+        "english": "Your lie in April",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2014
+      },
+      {
+        "romaji": "Shigatsu wa Kimi no Uso: MOMENTS",
+        "english": "Your lie in April: Moments",
+        "type": "ANIME",
+        "format": "OVA",
+        "year": 2015
+      },
+      {
+        "romaji": "Shigatsu wa Kimi no Uso",
+        "english": "Your Lie in April",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2011
+      }
+    ],
+    "id": 69411
+  },
+  {
+    "rank": 51,
+    "name_en": "Shinobu Kochou",
+    "name_native": "胡蝶しのぶ",
+    "alternatives": [
+      "Insect Hashira",
+      "Insect Pillar"
+    ],
+    "gender": "Female",
+    "favourites": 9502,
+    "media": [
+      {
+        "romaji": "Kimetsu no Yaiba",
+        "english": "Demon Slayer: Kimetsu no Yaiba",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Kimetsu no Yaiba: Mugen Ressha-hen",
+        "english": "Demon Slayer -Kimetsu no Yaiba- The Movie: Mugen Train",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2020
+      },
+      {
+        "romaji": "Kimetsu no Yaiba: Yuukaku-hen",
+        "english": "Demon Slayer: Kimetsu no Yaiba Entertainment District Arc",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      }
+    ],
+    "id": 136070
+  },
+  {
+    "rank": 52,
+    "name_en": "Yumeko Jabami",
+    "name_native": "蛇喰夢子",
+    "alternatives": [],
+    "gender": "Female",
+    "favourites": 9499,
+    "media": [
+      {
+        "romaji": "Kakegurui",
+        "english": "Kakegurui",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2017
+      },
+      {
+        "romaji": "Kakegurui ××",
+        "english": "Kakegurui xx",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Kakegurui",
+        "english": "Kakegurui - Compulsive Gambler -",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2014
+      }
+    ],
+    "id": 121889
+  },
+  {
+    "rank": 53,
+    "name_en": "Tooru Honda",
+    "name_native": "本田透",
+    "alternatives": [
+      "Tohru Honda",
+      "Tooru Souma",
+      "Tohru Souma"
+    ],
+    "gender": "Female",
+    "favourites": 9257,
+    "media": [
+      {
+        "romaji": "Fruits Basket: 1st Season",
+        "english": "Fruits Basket (2019)",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2019
+      },
+      {
+        "romaji": "Fruits Basket: 2nd Season",
+        "english": "Fruits Basket Season 2",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2020
+      },
+      {
+        "romaji": "Fruits Basket: The Final",
+        "english": "Fruits Basket The Final Season",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2021
+      }
+    ],
+    "id": 207
+  },
+  {
+    "rank": 54,
+    "name_en": "Reze",
+    "name_native": "レゼ",
+    "alternatives": [
+      "Lady Reze",
+      "Bomb Devil",
+      "Bakudan no Akuma (爆弾の悪魔)",
+      "Bomb Girl"
+    ],
+    "gender": "Female",
+    "favourites": 9157,
+    "media": [
+      {
+        "romaji": "Chainsaw Man",
+        "english": "Chainsaw Man",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2022
+      },
+      {
+        "romaji": "Chainsaw Man",
+        "english": "Chainsaw Man",
+        "type": "MANGA",
+        "format": "MANGA",
+        "year": 2018
+      },
+      {
+        "romaji": "Chainsaw Man: Reze-hen",
+        "english": "Chainsaw Man – The Movie: Reze Arc",
+        "type": "ANIME",
+        "format": "MOVIE",
+        "year": 2025
+      }
+    ],
+    "id": 148740
+  },
+  {
+    "rank": 55,
+    "name_en": "Taiga Aisaka",
+    "name_native": "逢坂大河",
+    "alternatives": [
+      "Palmtop Tiger"
+    ],
+    "gender": "Female",
+    "favourites": 8935,
+    "media": [
+      {
+        "romaji": "Toradora!",
+        "english": "Toradora!",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2008
+      },
+      {
+        "romaji": "Ookami-san to Shichinin no Nakama-tachi",
+        "english": "Okami-san and Her Seven Companions",
+        "type": "ANIME",
+        "format": "TV",
+        "year": 2010
+      },
+      {
+        "romaji": "Toradora!: Bentou no Gokui",
+        "english": "Toradora!: Bento Battle",
+        "type": "ANIME",
+        "format": "OVA",
+        "year": 2011
+      }
+    ],
+    "id": 12064
+  }
+]
