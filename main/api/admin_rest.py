@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from contextlib import contextmanager
+from inspect import isawaitable
 import json
 import errno
 import os
@@ -26,6 +27,11 @@ from g3ku.config.model_manager import ModelManager, VALID_SCOPES, _UNSET
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
+from g3ku.runtime.frontdoor.checkpoint_inspection import (
+    build_frontdoor_replay_diagnostics,
+    get_frontdoor_checkpoint,
+    get_frontdoor_checkpoint_history,
+)
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
 from main.governance import (
     GovernanceStore,
@@ -61,6 +67,52 @@ def _service():
     if service is None:
         raise HTTPException(status_code=503, detail='main_task_service_unavailable')
     return service
+
+
+@router.get("/ceo/checkpoints/{session_id}")
+async def get_ceo_checkpoint(
+    session_id: str,
+    checkpoint_id: str | None = Query(None),
+):
+    agent = get_agent()
+    item = get_frontdoor_checkpoint(agent, session_id=session_id, checkpoint_id=checkpoint_id)
+    if isawaitable(item):
+        item = await item
+    if item is None:
+        raise HTTPException(status_code=404, detail="checkpoint_not_found")
+    return {"ok": True, "item": item}
+
+
+@router.get("/ceo/checkpoints/{session_id}/history")
+async def get_ceo_checkpoint_history(
+    session_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    before_checkpoint_id: str | None = Query(None),
+):
+    agent = get_agent()
+    items = get_frontdoor_checkpoint_history(
+        agent,
+        session_id=session_id,
+        limit=limit,
+        before_checkpoint_id=before_checkpoint_id,
+    )
+    if isawaitable(items):
+        items = await items
+    return {"ok": True, "items": items}
+
+
+@router.get("/ceo/checkpoints/{session_id}/replay-diagnostics")
+async def get_ceo_replay_diagnostics(
+    session_id: str,
+    checkpoint_id: str = Query(...),
+):
+    agent = get_agent()
+    snapshot = get_frontdoor_checkpoint(agent, session_id=session_id, checkpoint_id=checkpoint_id)
+    if isawaitable(snapshot):
+        snapshot = await snapshot
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="checkpoint_not_found")
+    return {"ok": True, "item": build_frontdoor_replay_diagnostics(snapshot)}
 
 
 def _resolve_workspace_relative_path(workspace: Path, raw_path: str | Path | None, *, fallback: str) -> Path:

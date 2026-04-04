@@ -4,13 +4,24 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from g3ku.runtime.api import ceo_sessions
 from g3ku.runtime.frontdoor.checkpoint_inspection import (
     build_frontdoor_replay_diagnostics,
     get_frontdoor_checkpoint,
     get_frontdoor_checkpoint_history,
     serialize_state_snapshot,
 )
+from main.api import admin_rest
+
+
+def _build_checkpoint_app() -> FastAPI:
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix="/api")
+    app.include_router(admin_rest.router, prefix="/api")
+    return app
 
 
 class _FakeCompiledGraph:
@@ -261,4 +272,82 @@ def test_build_frontdoor_replay_diagnostics_preserves_available_checkpoint_confi
                 "checkpoint_ns": "subgraph:planner",
             }
         },
+    }
+
+
+def test_ceo_session_checkpoint_history_endpoint_returns_serialized_history(monkeypatch, tmp_path) -> None:
+    app = _build_checkpoint_app()
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        ceo_sessions,
+        "_sessions",
+        lambda: (
+            SimpleNamespace(),
+            SimpleNamespace(
+                get_path=lambda _key: tmp_path / "web.shared.json",
+                get_or_create=lambda key: SimpleNamespace(key=key, metadata={}),
+            ),
+            SimpleNamespace(get=lambda _key: None),
+            SimpleNamespace(),
+        ),
+    )
+    monkeypatch.setattr(
+        ceo_sessions,
+        "_assert_known_session",
+        lambda _manager, session_id: SimpleNamespace(key=session_id, metadata={}),
+    )
+    monkeypatch.setattr(
+        ceo_sessions,
+        "get_frontdoor_checkpoint_history",
+        lambda loop, *, session_id, limit=20, before_checkpoint_id=None, metadata_filter=None: [
+            {
+                "thread_id": session_id,
+                "checkpoint_id": "cp-2",
+                "parent_checkpoint_id": "cp-1",
+                "metadata": {"step": 2, "source": "loop"},
+                "next": [],
+                "values": {"route_kind": "direct_reply"},
+                "tasks": [],
+                "has_interrupts": False,
+            }
+        ],
+    )
+
+    response = client.get("/api/ceo/sessions/web:ceo-demo/checkpoint-history?limit=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == "web:ceo-demo"
+    assert body["items"][0]["checkpoint_id"] == "cp-2"
+    assert body["items"][0]["metadata"]["step"] == 2
+
+
+def test_admin_replay_diagnostics_endpoint_returns_replay_ready_payload(monkeypatch) -> None:
+    app = _build_checkpoint_app()
+    client = TestClient(app)
+
+    monkeypatch.setattr(admin_rest, "get_agent", lambda: SimpleNamespace(multi_agent_runner=SimpleNamespace()))
+    monkeypatch.setattr(
+        admin_rest,
+        "get_frontdoor_checkpoint",
+        lambda loop, *, session_id, checkpoint_id=None, subgraphs=False: {
+            "thread_id": session_id,
+            "checkpoint_id": checkpoint_id,
+            "parent_checkpoint_id": "cp-1",
+            "metadata": {"step": 2, "source": "loop"},
+            "next": ["finalize_turn"],
+            "values": {"route_kind": "direct_reply"},
+            "tasks": [],
+            "has_interrupts": False,
+        },
+    )
+
+    response = client.get("/api/ceo/checkpoints/web:ceo-demo/replay-diagnostics?checkpoint_id=cp-2")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["item"]["checkpoint_id"] == "cp-2"
+    assert body["item"]["replay_config"] == {
+        "configurable": {"thread_id": "web:ceo-demo", "checkpoint_id": "cp-2"}
     }
