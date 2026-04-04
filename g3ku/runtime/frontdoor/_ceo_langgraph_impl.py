@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, convert_to_messages
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import Command, interrupt
 from pydantic import ConfigDict, Field, create_model
 from typing_extensions import TypedDict
 
@@ -27,11 +28,18 @@ from main.runtime.tool_call_repair import (
 
 from ._ceo_support import CeoFrontDoorSupport
 from .history_compaction import compact_frontdoor_history
-from .state_models import CeoRuntimeContext, initial_persistent_state
+from .state_models import (
+    CeoFrontdoorInterrupted,
+    CeoPendingInterrupt,
+    CeoRuntimeContext,
+    initial_persistent_state,
+)
 
 
 class CeoGraphState(TypedDict, total=False):
     user_input: Any
+    approval_request: dict[str, Any] | None
+    approval_status: str
     query_text: str
     messages: list[dict[str, Any]]
     tool_names: list[str]
@@ -192,6 +200,7 @@ def _build_langgraph_ceo_graph(runner):
     graph.add_node("prepare_turn", runner._graph_prepare_turn)
     graph.add_node("call_model", runner._graph_call_model)
     graph.add_node("normalize_model_output", runner._graph_normalize_model_output)
+    graph.add_node("review_tool_calls", runner._graph_review_tool_calls)
     graph.add_node("execute_tools", runner._graph_execute_tools)
     graph.add_node("finalize_turn", runner._graph_finalize_turn)
     graph.add_edge(START, "prepare_turn")
@@ -202,6 +211,15 @@ def _build_langgraph_ceo_graph(runner):
         runner._graph_next_step,
         {
             "call_model": "call_model",
+            "review_tool_calls": "review_tool_calls",
+            "execute_tools": "execute_tools",
+            "finalize": "finalize_turn",
+        },
+    )
+    graph.add_conditional_edges(
+        "review_tool_calls",
+        runner._graph_next_step,
+        {
             "execute_tools": "execute_tools",
             "finalize": "finalize_turn",
         },
@@ -295,6 +313,49 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             recent_message_count=recent_count,
             summary_trigger_message_count=trigger_count,
         )
+
+    def _reviewable_tool_names(self) -> set[str]:
+        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        raw_names = list(
+            getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task"]) or []
+        )
+        return {str(name).strip() for name in raw_names if str(name).strip()}
+
+    def _approval_request_for_tool_calls(
+        self,
+        tool_call_payloads: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        risky = [
+            dict(item)
+            for item in list(tool_call_payloads or [])
+            if str(item.get("name") or "").strip() in self._reviewable_tool_names()
+        ]
+        if not risky:
+            return None
+        return {
+            "kind": "frontdoor_tool_approval",
+            "question": "Approve the CEO frontdoor tool execution?",
+            "tool_calls": risky,
+        }
+
+    def _normalize_approval_resume_value(
+        self,
+        *,
+        decision: Any,
+        original_payloads: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if decision is True:
+            return {"approved": True, "tool_call_payloads": list(original_payloads)}
+        if decision is False or decision in (None, ""):
+            return {"approved": False, "tool_call_payloads": []}
+        if isinstance(decision, dict):
+            approved = bool(decision.get("approved", decision.get("action") == "approve"))
+            payloads = decision.get("tool_calls")
+            return {
+                "approved": approved,
+                "tool_call_payloads": list(payloads if isinstance(payloads, list) else original_payloads),
+            }
+        return {"approved": False, "tool_call_payloads": []}
 
     def _build_langchain_tools_for_state(
         self,
@@ -509,6 +570,8 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
             "user_input": user_input,
+            "approval_request": None,
+            "approval_status": "",
             "query_text": query_text,
             "messages": messages,
             "tool_names": list(tool_names),
@@ -629,15 +692,18 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         tool_call_payloads = self._tool_call_payloads_from_calls(response_tool_calls)
         if tool_call_payloads:
             analysis_text = "" if synthetic_tool_calls_used else self._content_text(response_view.content)
+            approval_request = self._approval_request_for_tool_calls(tool_call_payloads)
             return {
                 "analysis_text": analysis_text.strip(),
                 "tool_call_payloads": tool_call_payloads,
+                "approval_request": approval_request,
+                "approval_status": "",
                 "synthetic_tool_calls_used": synthetic_tool_calls_used,
                 "xml_repair_attempt_count": 0,
                 "xml_repair_excerpt": "",
                 "xml_repair_tool_names": [],
                 "xml_repair_last_issue": "",
-                "next_step": "execute_tools",
+                "next_step": "review_tool_calls",
             }
 
         if xml_pseudo_call is not None:
@@ -720,6 +786,32 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             "final_output": self._empty_response_explanation(used_tools=used_tools),
             "route_kind": self._route_kind_for_turn(used_tools=used_tools, default=current_route_kind),
             "next_step": "finalize",
+        }
+
+    def _graph_review_tool_calls(self, state: CeoGraphState) -> dict[str, Any]:
+        approval_request = dict(state.get("approval_request") or {})
+        if not approval_request:
+            return {"next_step": "execute_tools"}
+
+        decision = interrupt(approval_request)
+        normalized = self._normalize_approval_resume_value(
+            decision=decision,
+            original_payloads=list(state.get("tool_call_payloads") or []),
+        )
+        if not normalized["approved"]:
+            return {
+                "approval_request": None,
+                "approval_status": "rejected",
+                "tool_call_payloads": [],
+                "final_output": "Cancelled the approval-gated action. No tool was executed.",
+                "route_kind": "direct_reply",
+                "next_step": "finalize",
+            }
+        return {
+            "approval_request": None,
+            "approval_status": "approved",
+            "tool_call_payloads": list(normalized["tool_call_payloads"]),
+            "next_step": "execute_tools",
         }
 
     async def _graph_execute_tools(
@@ -881,18 +973,10 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             result["messages"] = self._compact_frontdoor_messages(messages)
         return result
 
-    @staticmethod
-    def _graph_next_step(state: CeoGraphState) -> str:
-        next_step = str(state.get("next_step") or "finalize").strip()
-        if next_step not in {"call_model", "execute_tools", "finalize"}:
-            return "finalize"
-        return next_step
-
-    async def run_turn(self, *, user_input, session, on_progress=None) -> str:
+    async def _invoke_graph_input(self, *, graph_input, session, on_progress=None) -> dict[str, Any]:
         await self._loop._ensure_checkpointer_ready()
-        setattr(session, "_last_route_kind", "direct_reply")
-        result = await self._get_compiled_graph().ainvoke(
-            initial_persistent_state(user_input=_persistent_user_input_payload(user_input)),
+        graph_output = await self._get_compiled_graph().ainvoke(
+            graph_input,
             config={"configurable": {"thread_id": session.state.session_key}},
             context=CeoRuntimeContext(
                 loop=self._loop,
@@ -900,6 +984,43 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
                 session_key=session.state.session_key,
                 on_progress=on_progress,
             ),
+            version="v2",
+        )
+        values = dict(getattr(graph_output, "value", graph_output) or {})
+        pending_interrupts = [
+            CeoPendingInterrupt(
+                interrupt_id=str(getattr(item, "id", "") or ""),
+                value=getattr(item, "value", None),
+            )
+            for item in list(getattr(graph_output, "interrupts", ()) or ())
+        ]
+        if pending_interrupts:
+            raise CeoFrontdoorInterrupted(interrupts=pending_interrupts, values=values)
+        return values
+
+    @staticmethod
+    def _graph_next_step(state: CeoGraphState) -> str:
+        next_step = str(state.get("next_step") or "finalize").strip()
+        if next_step not in {"call_model", "review_tool_calls", "execute_tools", "finalize"}:
+            return "finalize"
+        return next_step
+
+    async def run_turn(self, *, user_input, session, on_progress=None) -> str:
+        setattr(session, "_last_route_kind", "direct_reply")
+        result = await self._invoke_graph_input(
+            graph_input=initial_persistent_state(user_input=_persistent_user_input_payload(user_input)),
+            session=session,
+            on_progress=on_progress,
+        )
+        output = str(result.get("final_output") or "").strip()
+        setattr(session, "_last_route_kind", str(result.get("route_kind") or "direct_reply"))
+        return output
+
+    async def resume_turn(self, *, session, resume_value: Any, on_progress=None) -> str:
+        result = await self._invoke_graph_input(
+            graph_input=Command(resume=resume_value),
+            session=session,
+            on_progress=on_progress,
         )
         output = str(result.get("final_output") or "").strip()
         setattr(session, "_last_route_kind", str(result.get("route_kind") or "direct_reply"))

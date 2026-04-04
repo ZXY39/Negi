@@ -6,6 +6,7 @@ import types
 from types import SimpleNamespace
 
 import pytest
+from langgraph.types import Command
 
 if "litellm" not in sys.modules:
     litellm_stub = types.ModuleType("litellm")
@@ -26,7 +27,7 @@ from g3ku.runtime.frontdoor.history_compaction import (
     FRONTDOOR_HISTORY_SUMMARY_MARKER,
     compact_frontdoor_history,
 )
-from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
+from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoRuntimeContext
 from g3ku.session.manager import SessionManager
 
 
@@ -44,6 +45,40 @@ class _CompiledGraphRecorder:
             }
         )
         return {"final_output": "ok", "route_kind": "tool_result"}
+
+
+class _FakeGraphOutput:
+    def __init__(self, *, value: dict[str, object], interrupts=()) -> None:
+        self.value = dict(value or {})
+        self.interrupts = tuple(interrupts)
+
+
+class _InterruptingCompiledGraph:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def ainvoke(self, input, config=None, *, context=None, version="v1", **kwargs):
+        self.calls.append(
+            {
+                "input": input,
+                "config": config,
+                "context": context,
+                "version": version,
+                "kwargs": kwargs,
+            }
+        )
+        if isinstance(input, Command):
+            return _FakeGraphOutput(
+                value={"final_output": "approved reply", "route_kind": "direct_reply"},
+                interrupts=(),
+            )
+        return _FakeGraphOutput(
+            value={
+                "route_kind": "direct_reply",
+                "tool_call_payloads": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
+            },
+            interrupts=(SimpleNamespace(id="interrupt-1", value={"kind": "frontdoor_tool_approval"}),),
+        )
 
 
 @pytest.mark.asyncio
@@ -94,6 +129,50 @@ async def test_ceo_frontdoor_runner_passes_thread_id_and_runtime_context() -> No
     assert "on_progress" not in graph_input
 
 
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_run_turn_raises_structured_interrupt() -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    loop = SimpleNamespace(_ensure_checkpointer_ready=_noop_ready)
+    runner = CeoFrontDoorRunner(loop=loop)
+    runner._compiled_graph = _InterruptingCompiledGraph()
+    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))
+
+    with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
+        await runner.run_turn(
+            user_input=SimpleNamespace(content="create a task", metadata={}),
+            session=session,
+            on_progress=None,
+        )
+
+    assert exc_info.value.interrupts[0].interrupt_id == "interrupt-1"
+    assert exc_info.value.interrupts[0].value["kind"] == "frontdoor_tool_approval"
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_resume_turn_uses_command_resume_on_same_thread() -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    graph = _InterruptingCompiledGraph()
+    loop = SimpleNamespace(_ensure_checkpointer_ready=_noop_ready)
+    runner = CeoFrontDoorRunner(loop=loop)
+    runner._compiled_graph = graph
+    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))
+
+    output = await runner.resume_turn(
+        session=session,
+        resume_value={"approved": True},
+        on_progress=None,
+    )
+
+    assert output == "approved reply"
+    assert isinstance(graph.calls[0]["input"], Command)
+    assert graph.calls[0]["config"] == {"configurable": {"thread_id": "web:shared"}}
+    assert graph.calls[0]["version"] == "v2"
+
+
 def test_ceo_frontdoor_graph_compiles_with_checkpointer_and_store(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
     compiled_graph = object()
@@ -124,6 +203,7 @@ def test_ceo_frontdoor_graph_compiles_with_checkpointer_and_store(monkeypatch: p
         _graph_prepare_turn=object(),
         _graph_call_model=object(),
         _graph_normalize_model_output=object(),
+        _graph_review_tool_calls=object(),
         _graph_execute_tools=object(),
         _graph_finalize_turn=object(),
         _graph_next_step=object(),
@@ -329,6 +409,7 @@ def test_memory_assembly_config_exposes_frontdoor_compaction_defaults() -> None:
 
     assert config.frontdoor_recent_message_count == 8
     assert config.frontdoor_summary_trigger_message_count == 24
+    assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
 
 
 def test_frontdoor_history_compaction_inserts_summary_marker_and_keeps_recent_tail() -> None:
