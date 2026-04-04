@@ -243,6 +243,7 @@ async def get_artifact(
     else:
         excerpt = service.open_content(
             ref=ref,
+            view='raw',
             start_line=start_line,
             end_line=end_line,
             around_line=around_line,
@@ -256,7 +257,7 @@ async def get_artifact(
 async def describe_content(ref: str | None = Query(None), path: str | None = Query(None), view: str = Query('canonical')):
     service = _service()
     await service.startup()
-    return {'ok': True, **service.content_store.describe(ref=ref, path=path, view=view)}
+    return {'ok': True, **service.describe_content(ref=ref, path=path, view=view)}
 
 
 @router.get('/content/search')
@@ -271,7 +272,7 @@ async def search_content(
 ):
     service = _service()
     await service.startup()
-    return {'ok': True, **service.content_store.search(query=query, ref=ref, path=path, view=view, limit=limit, before=before, after=after)}
+    return {'ok': True, **service.search_content(query=query, ref=ref, path=path, view=view, limit=limit, before=before, after=after)}
 
 
 @router.get('/content/open')
@@ -288,7 +289,7 @@ async def open_content(
     await service.startup()
     return {
         'ok': True,
-        **service.content_store.open(
+        **service.open_content(
             ref=ref,
             path=path,
             view=view,

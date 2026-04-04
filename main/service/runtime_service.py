@@ -3937,8 +3937,8 @@ class MainRuntimeService:
     def get_artifact(self, artifact_id: str) -> TaskArtifactRecord | None:
         return self.store.get_artifact(artifact_id)
 
-    def describe_content(self, *, ref: str | None = None, path: str | None = None) -> dict[str, Any]:
-        return self.content_store.describe(ref=ref, path=path)
+    def describe_content(self, *, ref: str | None = None, path: str | None = None, view: str = 'canonical') -> dict[str, Any]:
+        return self.content_store.describe(ref=ref, path=path, view=view)
 
     def search_content(
         self,
@@ -3946,17 +3946,19 @@ class MainRuntimeService:
         query: str,
         ref: str | None = None,
         path: str | None = None,
+        view: str = 'canonical',
         limit: int = 10,
         before: int = 2,
         after: int = 2,
     ) -> dict[str, Any]:
-        return self.content_store.search(ref=ref, path=path, query=query, limit=limit, before=before, after=after)
+        return self.content_store.search(ref=ref, path=path, query=query, view=view, limit=limit, before=before, after=after)
 
     def open_content(
         self,
         *,
         ref: str | None = None,
         path: str | None = None,
+        view: str = 'canonical',
         start_line: int | None = None,
         end_line: int | None = None,
         around_line: int | None = None,
@@ -3965,6 +3967,7 @@ class MainRuntimeService:
         return self.content_store.open(
             ref=ref,
             path=path,
+            view=view,
             start_line=start_line,
             end_line=end_line,
             around_line=around_line,

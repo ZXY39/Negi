@@ -73,6 +73,10 @@ def _search_refine_payload(*, query: str, cap: int, ref: str, handle: ContentHan
     return {
         'ok': True,
         'ref': ref,
+        'requested_ref': handle.requested_ref,
+        'resolved_ref': handle.resolved_ref or handle.ref,
+        'wrapper_ref': handle.wrapper_ref,
+        'wrapper_depth': handle.wrapper_depth,
         'handle': handle.to_dict(),
         'query': query,
         'scope_type': scope_type,

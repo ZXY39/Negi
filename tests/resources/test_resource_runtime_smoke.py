@@ -11,6 +11,8 @@ from types import MethodType
 
 import pytest
 import yaml
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
 from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
@@ -18,6 +20,7 @@ from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.resources.tool_settings import FilesystemToolSettings
+from main.api import rest as api_rest
 from main.models import TaskArtifactRecord
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -1799,6 +1802,22 @@ def test_content_navigation_resolves_nested_wrappers_hop_by_hop(tmp_path: Path):
     store.close()
 
 
+def test_content_navigation_search_overflow_keeps_wrapper_metadata(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("\n".join(["needle"] * 12), runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
+    result = navigator.search(ref=wrapped.ref, query="needle", limit=3)
+    assert result["overflow"] is True
+    assert result["requires_refine"] is True
+    assert result["requested_ref"] == wrapped.ref
+    assert result["resolved_ref"] == inner.ref
+    assert result["wrapper_ref"] == wrapped.ref
+    assert result["wrapper_depth"] == 1
+    store.close()
+
+
 def test_content_navigation_detects_wrapper_ref_cycles(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
@@ -1848,6 +1867,70 @@ def test_content_summary_and_ref_keeps_wrapper_ref_for_content_envelopes(tmp_pat
     assert summary == wrapped.summary
     assert ref == wrapped.ref
     store.close()
+
+
+def test_content_rest_routes_use_runtime_service_methods_and_preserve_legacy_artifact_excerpt_behavior(monkeypatch):
+    class _StubService:
+        def __init__(self):
+            self.describe_calls = []
+            self.search_calls = []
+            self.open_calls = []
+            self.artifact = SimpleNamespace(
+                artifact_id="artifact:wrapper",
+                task_id="task:test",
+                path="",
+                model_dump=lambda mode="json": {
+                    "artifact_id": "artifact:wrapper",
+                    "task_id": "task:test",
+                    "path": "",
+                },
+            )
+
+        async def startup(self):
+            return None
+
+        def normalize_task_id(self, task_id: str) -> str:
+            return task_id
+
+        def get_artifact(self, artifact_id: str):
+            return self.artifact if artifact_id == self.artifact.artifact_id else None
+
+        def describe_content(self, *, ref=None, path=None, view="canonical"):
+            self.describe_calls.append({"ref": ref, "path": path, "view": view})
+            return {"ok": True, "summary": "desc", "ref": ref, "requested_ref": ref, "resolved_ref": ref, "wrapper_ref": "", "wrapper_depth": 0}
+
+        def search_content(self, *, query, ref=None, path=None, view="canonical", limit=10, before=2, after=2):
+            self.search_calls.append({"query": query, "ref": ref, "path": path, "view": view, "limit": limit, "before": before, "after": after})
+            return {"ok": True, "ref": ref, "requested_ref": ref, "resolved_ref": ref, "wrapper_ref": "", "wrapper_depth": 0, "query": query, "hits": [], "count": 0, "overflow": False, "requires_refine": False, "cap": limit, "overflow_lower_bound": None, "message": "", "suggestions": []}
+
+        def open_content(self, *, ref=None, path=None, view="canonical", start_line=None, end_line=None, around_line=None, window=None):
+            self.open_calls.append({"ref": ref, "path": path, "view": view, "start_line": start_line, "end_line": end_line, "around_line": around_line, "window": window})
+            excerpt = "wrapper body" if view == "raw" else "canonical body"
+            return {"ok": True, "ref": ref, "requested_ref": ref, "resolved_ref": ref if view == "raw" else "artifact:artifact:inner", "wrapper_ref": "" if view == "raw" else ref, "wrapper_depth": 0 if view == "raw" else 1, "start_line": 1, "end_line": 1, "excerpt": excerpt}
+
+    service = _StubService()
+    monkeypatch.setattr(api_rest, "_service", lambda: service)
+
+    app = FastAPI()
+    app.include_router(api_rest.router, prefix="/api")
+    client = TestClient(app)
+
+    artifact_response = client.get("/api/tasks/task:test/artifacts/artifact:wrapper")
+    assert artifact_response.status_code == 200
+    assert artifact_response.json()["content"] == "wrapper body"
+
+    describe_response = client.get("/api/content/describe", params={"ref": "artifact:artifact:wrapper"})
+    assert describe_response.status_code == 200
+    search_response = client.get("/api/content/search", params={"ref": "artifact:artifact:wrapper", "query": "needle"})
+    assert search_response.status_code == 200
+    open_response = client.get("/api/content/open", params={"ref": "artifact:artifact:wrapper"})
+    assert open_response.status_code == 200
+    assert open_response.json()["excerpt"] == "canonical body"
+
+    assert service.open_calls[0]["view"] == "raw"
+    assert service.describe_calls == [{"ref": "artifact:artifact:wrapper", "path": None, "view": "canonical"}]
+    assert service.search_calls == [{"query": "needle", "ref": "artifact:artifact:wrapper", "path": None, "view": "canonical", "limit": 10, "before": 2, "after": 2}]
+    assert service.open_calls[1]["view"] == "canonical"
 
 
 @pytest.mark.asyncio
