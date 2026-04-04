@@ -11,13 +11,16 @@ from types import MethodType
 
 import pytest
 import yaml
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
-from g3ku.content import ContentNavigationService, parse_content_envelope
+from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.resources.tool_settings import FilesystemToolSettings
+from main.api import rest as api_rest
 from main.models import TaskArtifactRecord
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -64,7 +67,9 @@ def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.1):
 
 def _python_launcher() -> str:
     if os.name == 'nt':
-        return 'py -3'
+        if shutil.which('py'):
+            return 'py -3'
+        return f'& "{Path(os.sys.executable)}"'
     return 'python3' if shutil.which('python3') else 'python'
 
 
@@ -1482,6 +1487,83 @@ async def test_content_tool_rejects_artifact_refs_outside_acceptance_allowlist(t
         store.close()
 
 
+@pytest.mark.asyncio
+async def test_content_tool_accepts_wrapped_content_when_allowlist_uses_wrapper_or_canonical_ref(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    service = _ArtifactService(artifact_store)
+    navigator = service.content_store
+    inner = navigator.maybe_externalize_text(
+        'alpha\nallowed\nomega\n',
+        runtime={'task_id': 'task:test', 'node_id': 'node:inner'},
+        display_name='inner',
+        source_kind='node_output',
+        force=True,
+    )
+    wrapped = navigator.maybe_externalize_text(
+        json.dumps(inner.to_dict(), ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:wrapper'},
+        display_name='wrapped',
+        source_kind='tool_result:content',
+        force=True,
+    )
+    assert inner is not None
+    assert wrapped is not None
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+
+        canonical_allowed = json.loads(
+            await tool.execute(
+                action='open',
+                ref=wrapped.ref,
+                start_line=1,
+                end_line=5,
+                __g3ku_runtime={
+                    'task_id': 'task:test',
+                    'node_id': 'node:acceptance',
+                    'node_kind': 'acceptance',
+                    'enforce_content_ref_allowlist': True,
+                    'allowed_content_refs': [inner.ref],
+                },
+            )
+        )
+        wrapper_allowed = json.loads(
+            await tool.execute(
+                action='open',
+                ref=inner.ref,
+                start_line=1,
+                end_line=5,
+                __g3ku_runtime={
+                    'task_id': 'task:test',
+                    'node_id': 'node:acceptance',
+                    'node_kind': 'acceptance',
+                    'enforce_content_ref_allowlist': True,
+                    'allowed_content_refs': [wrapped.ref],
+                },
+            )
+        )
+
+        assert canonical_allowed['ok'] is True
+        assert canonical_allowed['resolved_ref'] == inner.ref
+        assert 'allowed' in canonical_allowed['excerpt']
+        assert wrapper_allowed['ok'] is True
+        assert wrapper_allowed['resolved_ref'] == inner.ref
+        assert 'allowed' in wrapper_allowed['excerpt']
+    finally:
+        manager.close()
+        store.close()
+
+
 def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
@@ -1605,9 +1687,11 @@ def test_prepare_messages_for_model_uses_compact_content_refs(tmp_path: Path):
 
     assert prepared[0]['content']
     raw_payload = json.loads(prepared[1]['content'])
-    assert set(raw_payload.keys()) == {'type', 'summary', 'ref', 'next_actions'}
+    assert set(raw_payload.keys()) == {'type', 'summary', 'ref', 'resolved_ref', 'wrapper_ref', 'next_actions'}
     assert 'Head preview:' not in raw_payload['summary']
     assert raw_payload['ref'].startswith('artifact:')
+    assert raw_payload['resolved_ref'].startswith('artifact:')
+    assert raw_payload['wrapper_ref'] in {'', raw_payload['ref']}
     parsed = parse_content_envelope(prepared[1]['content'])
     assert parsed is not None
     assert parsed.handle is None
@@ -1783,17 +1867,151 @@ def test_content_navigation_open_raw_view_reads_wrapper_json(tmp_path: Path):
     store.close()
 
 
+def test_content_navigation_resolves_nested_wrappers_hop_by_hop(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("alpha\nneedle\nomega\n", runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    middle = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:middle"}, display_name="middle", source_kind="tool_result:content", force=True)
+    outer = navigator.maybe_externalize_text(json.dumps(middle.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:outer"}, display_name="outer", source_kind="tool_result:content", force=True)
+    result = navigator.search(ref=outer.ref, query="needle")
+    assert result["count"] == 1
+    assert result["requested_ref"] == outer.ref
+    assert result["resolved_ref"] == inner.ref
+    assert result["wrapper_ref"] == outer.ref
+    assert result["wrapper_depth"] == 2
+    store.close()
+
+
+def test_content_navigation_search_overflow_keeps_wrapper_metadata(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("\n".join(["needle"] * 12), runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
+    result = navigator.search(ref=wrapped.ref, query="needle", limit=3)
+    assert result["overflow"] is True
+    assert result["requires_refine"] is True
+    assert result["requested_ref"] == wrapped.ref
+    assert result["resolved_ref"] == inner.ref
+    assert result["wrapper_ref"] == wrapped.ref
+    assert result["wrapper_depth"] == 1
+    store.close()
+
+
 def test_content_navigation_detects_wrapper_ref_cycles(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
     navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
-    a = artifact_store.create_text_artifact(task_id="task:test", node_id="node:a", kind="tool_result:content", title="A", content="{}")
-    b = artifact_store.create_text_artifact(task_id="task:test", node_id="node:b", kind="tool_result:content", title="B", content="{}")
+    a = artifact_store.create_text_artifact(task_id="task:test", node_id="node:a", kind="tool_result:content", title="A", content="seed-a")
+    b = artifact_store.create_text_artifact(task_id="task:test", node_id="node:b", kind="tool_result:content", title="B", content="seed-b")
     Path(a.path).write_text(json.dumps({"type": "content_ref", "ref": f"artifact:{b.artifact_id}"}), encoding="utf-8")
     Path(b.path).write_text(json.dumps({"type": "content_ref", "ref": f"artifact:{a.artifact_id}"}), encoding="utf-8")
     with pytest.raises(ValueError, match="content ref cycle detected"):
         navigator.describe(ref=f"artifact:{a.artifact_id}")
     store.close()
+
+
+def test_content_navigation_detects_self_referential_wrapper_cycles(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    wrapper = artifact_store.create_text_artifact(task_id="task:test", node_id="node:self", kind="tool_result:content", title="Self", content="seed-self")
+    wrapper_ref = f"artifact:{wrapper.artifact_id}"
+    Path(wrapper.path).write_text(json.dumps({"type": "content_ref", "ref": wrapper_ref}), encoding="utf-8")
+    with pytest.raises(ValueError, match="content ref cycle detected"):
+        navigator.describe(ref=wrapper_ref)
+    store.close()
+
+
+def test_content_navigation_populates_path_ref_metadata(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    target = tmp_path / "notes.txt"
+    target.write_text("line one\nline two\n", encoding="utf-8")
+    result = navigator.describe(path=str(target))
+    assert result["requested_ref"] == "path:notes.txt"
+    assert result["resolved_ref"] == "path:notes.txt"
+    assert result["wrapper_ref"] == ""
+    assert result["wrapper_depth"] == 0
+    store.close()
+
+
+def test_content_summary_and_ref_uses_canonical_ref_for_content_envelopes(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("canonical body", runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
+    summary, ref = content_summary_and_ref(wrapped.to_dict())
+    assert summary == wrapped.summary
+    assert ref == inner.ref
+    store.close()
+
+
+def test_content_rest_routes_use_runtime_service_methods_and_preserve_legacy_artifact_excerpt_behavior(monkeypatch):
+    class _StubService:
+        def __init__(self):
+            self.describe_calls = []
+            self.search_calls = []
+            self.open_calls = []
+            self.artifact = SimpleNamespace(
+                artifact_id="artifact:wrapper",
+                task_id="task:test",
+                path="",
+                model_dump=lambda mode="json": {
+                    "artifact_id": "artifact:wrapper",
+                    "task_id": "task:test",
+                    "path": "",
+                },
+            )
+
+        async def startup(self):
+            return None
+
+        def normalize_task_id(self, task_id: str) -> str:
+            return task_id
+
+        def get_artifact(self, artifact_id: str):
+            return self.artifact if artifact_id == self.artifact.artifact_id else None
+
+        def describe_content(self, *, ref=None, path=None, view="canonical"):
+            self.describe_calls.append({"ref": ref, "path": path, "view": view})
+            return {"ok": True, "summary": "desc", "ref": ref, "requested_ref": ref, "resolved_ref": ref, "wrapper_ref": "", "wrapper_depth": 0}
+
+        def search_content(self, *, query, ref=None, path=None, view="canonical", limit=10, before=2, after=2):
+            self.search_calls.append({"query": query, "ref": ref, "path": path, "view": view, "limit": limit, "before": before, "after": after})
+            return {"ok": True, "ref": ref, "requested_ref": ref, "resolved_ref": ref, "wrapper_ref": "", "wrapper_depth": 0, "query": query, "hits": [], "count": 0, "overflow": False, "requires_refine": False, "cap": limit, "overflow_lower_bound": None, "message": "", "suggestions": []}
+
+        def open_content(self, *, ref=None, path=None, view="canonical", start_line=None, end_line=None, around_line=None, window=None):
+            self.open_calls.append({"ref": ref, "path": path, "view": view, "start_line": start_line, "end_line": end_line, "around_line": around_line, "window": window})
+            excerpt = "wrapper body" if view == "raw" else "canonical body"
+            return {"ok": True, "ref": ref, "requested_ref": ref, "resolved_ref": ref if view == "raw" else "artifact:artifact:inner", "wrapper_ref": "" if view == "raw" else ref, "wrapper_depth": 0 if view == "raw" else 1, "start_line": 1, "end_line": 1, "excerpt": excerpt}
+
+    service = _StubService()
+    monkeypatch.setattr(api_rest, "_service", lambda: service)
+
+    app = FastAPI()
+    app.include_router(api_rest.router, prefix="/api")
+    client = TestClient(app)
+
+    artifact_response = client.get("/api/tasks/task:test/artifacts/artifact:wrapper")
+    assert artifact_response.status_code == 200
+    assert artifact_response.json()["content"] == "wrapper body"
+
+    describe_response = client.get("/api/content/describe", params={"ref": "artifact:artifact:wrapper"})
+    assert describe_response.status_code == 200
+    search_response = client.get("/api/content/search", params={"ref": "artifact:artifact:wrapper", "query": "needle"})
+    assert search_response.status_code == 200
+    open_response = client.get("/api/content/open", params={"ref": "artifact:artifact:wrapper"})
+    assert open_response.status_code == 200
+    assert open_response.json()["excerpt"] == "canonical body"
+
+    assert service.open_calls[0]["view"] == "raw"
+    assert service.describe_calls == [{"ref": "artifact:artifact:wrapper", "path": None, "view": "canonical"}]
+    assert service.search_calls == [{"query": "needle", "ref": "artifact:artifact:wrapper", "path": None, "view": "canonical", "limit": 10, "before": 2, "after": 2}]
+    assert service.open_calls[1]["view"] == "canonical"
 
 
 @pytest.mark.asyncio

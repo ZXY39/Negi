@@ -18,6 +18,10 @@ class ContentHandle:
     char_count: int = 0
     head_preview: str = ""
     tail_preview: str = ""
+    requested_ref: str = ""
+    resolved_ref: str = ""
+    wrapper_ref: str = ""
+    wrapper_depth: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -33,6 +37,10 @@ class ContentHandle:
             "char_count": int(self.char_count or 0),
             "head_preview": self.head_preview,
             "tail_preview": self.tail_preview,
+            "requested_ref": self.requested_ref,
+            "resolved_ref": self.resolved_ref,
+            "wrapper_ref": self.wrapper_ref,
+            "wrapper_depth": int(self.wrapper_depth or 0),
         }
 
 
@@ -41,6 +49,8 @@ class ContentEnvelope:
     type: str = "content_ref"
     summary: str = ""
     ref: str = ""
+    resolved_ref: str = ""
+    wrapper_ref: str = ""
     handle: ContentHandle | None = None
     next_actions: list[str] = field(default_factory=lambda: ["content.search", "content.open"])
 
@@ -54,6 +64,8 @@ class ContentEnvelope:
             "type": self.type,
             "summary": self.summary if summary_override is None else str(summary_override or ""),
             "ref": self.ref,
+            "resolved_ref": self.resolved_ref,
+            "wrapper_ref": self.wrapper_ref,
             "next_actions": list(self.next_actions or []),
         }
         if include_handle:

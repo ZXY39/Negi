@@ -459,18 +459,19 @@ class ApiClient {
         return this.get(`/api/tasks/${taskId}/artifacts/${artifactId}`);
     }
 
-    static async describeContent({ ref = "", path = "" } = {}) {
-        return this.get("/api/content/describe", { ref, path });
+    static async describeContent({ ref = "", path = "", view = "canonical" } = {}) {
+        return this.get("/api/content/describe", { ref, path, view });
     }
 
-    static async searchContent({ query, ref = "", path = "", limit = 10, before = 2, after = 2 } = {}) {
-        return this.get("/api/content/search", { query, ref, path, limit, before, after });
+    static async searchContent({ query, ref = "", path = "", view = "canonical", limit = 10, before = 2, after = 2 } = {}) {
+        return this.get("/api/content/search", { query, ref, path, view, limit, before, after });
     }
 
-    static async openContent({ ref = "", path = "", startLine = null, endLine = null, aroundLine = null, window = null } = {}) {
+    static async openContent({ ref = "", path = "", view = "canonical", startLine = null, endLine = null, aroundLine = null, window = null } = {}) {
         return this.get("/api/content/open", {
             ref,
             path,
+            view,
             start_line: startLine,
             end_line: endLine,
             around_line: aroundLine,

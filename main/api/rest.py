@@ -83,13 +83,17 @@ async def get_task_tree_snapshot(task_id: str):
 
 
 @router.get('/tasks/{task_id}/nodes/{node_id}')
-async def get_task_node_detail(task_id: str, node_id: str):
+async def get_task_node_detail(
+    task_id: str,
+    node_id: str,
+    detail_level: str = Query('summary'),
+):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_node_detail_payload(task_id, node_id)
-    if payload is None:
+    payload = service.node_detail(task_id, node_id, detail_level=detail_level)
+    if not isinstance(payload, dict):
         raise HTTPException(status_code=404, detail='node_not_found')
     return payload
 
@@ -243,6 +247,7 @@ async def get_artifact(
     else:
         excerpt = service.open_content(
             ref=ref,
+            view='raw',
             start_line=start_line,
             end_line=end_line,
             around_line=around_line,
@@ -253,10 +258,10 @@ async def get_artifact(
 
 
 @router.get('/content/describe')
-async def describe_content(ref: str | None = Query(None), path: str | None = Query(None)):
+async def describe_content(ref: str | None = Query(None), path: str | None = Query(None), view: str = Query('canonical')):
     service = _service()
     await service.startup()
-    return {'ok': True, **service.describe_content(ref=ref, path=path)}
+    return {'ok': True, **service.describe_content(ref=ref, path=path, view=view)}
 
 
 @router.get('/content/search')
@@ -264,19 +269,21 @@ async def search_content(
     query: str = Query(...),
     ref: str | None = Query(None),
     path: str | None = Query(None),
+    view: str = Query('canonical'),
     limit: int = Query(10),
     before: int = Query(2),
     after: int = Query(2),
 ):
     service = _service()
     await service.startup()
-    return {'ok': True, **service.search_content(query=query, ref=ref, path=path, limit=limit, before=before, after=after)}
+    return {'ok': True, **service.search_content(query=query, ref=ref, path=path, view=view, limit=limit, before=before, after=after)}
 
 
 @router.get('/content/open')
 async def open_content(
     ref: str | None = Query(None),
     path: str | None = Query(None),
+    view: str = Query('canonical'),
     start_line: int | None = Query(None),
     end_line: int | None = Query(None),
     around_line: int | None = Query(None),
@@ -289,6 +296,7 @@ async def open_content(
         **service.open_content(
             ref=ref,
             path=path,
+            view=view,
             start_line=start_line,
             end_line=end_line,
             around_line=around_line,

@@ -15,6 +15,9 @@
 - 如果需要 skill 正文，只能对 `visible_skills` 中已经出现的 `skill_id` 调用 `load_skill_context(skill_id="...")`。
 - 除非上游提示词或用户需求明确要求你搜索或核对其他 skill，否则一律不允许自行搜索、猜测或扩展 skill 范围。
 - 当工具能帮助你完成节点目标时，优先使用工具。
+- 汇总子节点时，优先使用 `final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview`；不要为了“看起来更完整”而反复请求 full `task_node_detail`。
+- `task_node_detail` 默认返回 lightweight summary；只有 summary 信息不足以支撑当前判断、且你确实需要补充关键证据时，才请求 `detail_level="full"`。
+- 对 `artifact:` 引用，默认使用 canonical `content.search` / `content.open` 做局部核对；只有在明确需要调试包装内容、确认 wrapper 行为或排查 canonical 视图无法解释的问题时，才使用 raw view。
 - 你必须按阶段推进当前执行节点。
 - 推进采用第一性原理，避免无边界反复检索。
 - `execution_policy` 适用于信息收集、内容编写、工具执行、代码处理等各种任务，而不只是一类特定任务。

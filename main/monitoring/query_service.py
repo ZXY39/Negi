@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -217,7 +218,7 @@ class TaskQueryService:
         self._record_debug('query_service.get_task_snapshot', started_at=started_at, started_mono=started_mono)
         return payload
 
-    def get_node_detail(self, task_id: str, node_id: str) -> TaskNodeDetail | None:
+    def get_node_detail(self, task_id: str, node_id: str, *, detail_level: str = 'summary') -> TaskNodeDetail | None:
         task = self._store.get_task(task_id)
         detail_record = self._store.get_task_node_detail(node_id)
         node_record = self._store.get_task_node(node_id)
@@ -228,8 +229,28 @@ class TaskQueryService:
             node_record = None
         if runtime_node is not None and str(runtime_node.task_id or '').strip() != task.task_id:
             runtime_node = None
+        normalized_detail_level = str(detail_level or 'summary').strip().lower()
+        if normalized_detail_level not in {'summary', 'full'}:
+            normalized_detail_level = 'summary'
         payload = dict(detail_record.payload or {})
         node_payload = dict(getattr(node_record, 'payload', None) or {}) if node_record is not None else {}
+        execution_trace_summary = (
+            dict(payload.get('execution_trace_summary') or {})
+            if isinstance(payload.get('execution_trace_summary'), dict)
+            else {}
+        )
+        execution_trace_ref = str(payload.get('execution_trace_ref') or detail_record.execution_trace_ref or '').strip()
+        execution_trace = {}
+        if normalized_detail_level == 'full':
+            execution_trace = self._resolve_execution_trace(
+                detail_record=detail_record,
+                runtime_node=runtime_node,
+                payload=payload,
+            )
+            if not execution_trace_summary:
+                execution_trace_summary = self._execution_trace_summary(execution_trace)
+        elif not execution_trace_summary and runtime_node is not None:
+            execution_trace_summary = self._execution_trace_summary(self._execution_trace(runtime_node))
         detail = TaskNodeDetail(
             node_id=str(payload.get('node_id') or detail_record.node_id),
             task_id=str(payload.get('task_id') or detail_record.task_id),
@@ -238,14 +259,20 @@ class TaskQueryService:
             node_kind=str(payload.get('node_kind') or node_payload.get('node_kind') or 'execution'),
             status=str(payload.get('status') or node_payload.get('status') or 'in_progress'),
             goal=str(payload.get('goal') or ''),
+            detail_level=normalized_detail_level,
             prompt=str(payload.get('prompt_summary') or detail_record.prompt_summary or ''),
+            prompt_summary=str(payload.get('prompt_summary') or detail_record.prompt_summary or ''),
             input=str(payload.get('input_text') or detail_record.input_text or ''),
+            input_preview=str(payload.get('input_text') or detail_record.input_text or ''),
             input_ref=str(payload.get('input_ref') or detail_record.input_ref or ''),
             output=str(payload.get('output_text') or detail_record.output_text or ''),
+            output_preview=str(payload.get('output_text') or detail_record.output_text or ''),
             output_ref=str(payload.get('output_ref') or detail_record.output_ref or ''),
             check_result=str(payload.get('check_result') or detail_record.check_result or ''),
+            check_result_preview=str(payload.get('check_result') or detail_record.check_result or ''),
             check_result_ref=str(payload.get('check_result_ref') or detail_record.check_result_ref or ''),
             final_output=str(payload.get('final_output') or detail_record.final_output or ''),
+            final_output_preview=str(payload.get('final_output') or detail_record.final_output or ''),
             final_output_ref=str(payload.get('final_output_ref') or detail_record.final_output_ref or ''),
             failure_reason=str(payload.get('failure_reason') or detail_record.failure_reason or ''),
             updated_at=str(
@@ -256,7 +283,9 @@ class TaskQueryService:
                 or ''
             ),
             children_fingerprint=str(payload.get('children_fingerprint') or node_payload.get('children_fingerprint') or ''),
-            execution_trace=self._execution_trace(runtime_node) if runtime_node is not None else dict(payload.get('execution_trace') or {}),
+            execution_trace=execution_trace,
+            execution_trace_summary=execution_trace_summary,
+            execution_trace_ref=execution_trace_ref,
             tool_file_changes=normalize_tool_file_changes(payload.get('tool_file_changes')),
             token_usage=TokenUsageSummary.model_validate(payload.get('token_usage') or {}),
             token_usage_by_model=[
@@ -265,14 +294,24 @@ class TaskQueryService:
                 if isinstance(item, dict)
             ],
         )
-        final_output_full = self._resolve_detail_text(detail.final_output, detail.final_output_ref)
-        if final_output_full:
-            detail.final_output = final_output_full
-            detail.execution_trace['final_output'] = final_output_full
-        acceptance_result_full = self._resolve_detail_text(detail.check_result, detail.check_result_ref)
-        if acceptance_result_full:
-            detail.check_result = acceptance_result_full
-            detail.execution_trace['acceptance_result'] = acceptance_result_full
+        if normalized_detail_level == 'summary':
+            detail.input_preview = self._preview_text(detail.input)
+            detail.output_preview = self._preview_text(detail.output)
+            detail.check_result_preview = self._preview_text(detail.check_result)
+            detail.final_output_preview = self._preview_text(detail.final_output)
+            detail.input = self._summary_inline_text(detail.input, detail.input_ref)
+            detail.output = self._summary_inline_text(detail.output, detail.output_ref)
+            detail.check_result = self._summary_inline_text(detail.check_result, detail.check_result_ref)
+            detail.final_output = self._summary_inline_text(detail.final_output, detail.final_output_ref)
+        if normalized_detail_level == 'full':
+            final_output_full = self._resolve_detail_text(detail.final_output, detail.final_output_ref)
+            if final_output_full:
+                detail.final_output = final_output_full
+                detail.execution_trace['final_output'] = final_output_full
+            acceptance_result_full = self._resolve_detail_text(detail.check_result, detail.check_result_ref)
+            if acceptance_result_full:
+                detail.check_result = acceptance_result_full
+                detail.execution_trace['acceptance_result'] = acceptance_result_full
         return detail
 
     def get_tree_snapshot(self, task_id: str) -> TaskTreeSnapshot | None:
@@ -341,6 +380,93 @@ class TaskQueryService:
                 if resolved:
                     return resolved
         return str(text or '')
+
+    @staticmethod
+    def _preview_text(value: str, *, max_chars: int = 400) -> str:
+        text = str(value or '').strip()
+        if len(text) <= max_chars:
+            return text
+        return f'{text[: max_chars - 3].rstrip()}...'
+
+    @classmethod
+    def _summary_inline_text(cls, value: str, ref: str, *, max_chars: int = 160) -> str:
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        if not str(ref or '').strip():
+            return text
+        if len(text) <= max_chars:
+            return text
+        return ''
+
+    def _resolve_execution_trace(
+        self,
+        *,
+        detail_record: Any,
+        runtime_node: NodeRecord | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        execution_trace_ref = str(payload.get('execution_trace_ref') or getattr(detail_record, 'execution_trace_ref', '') or '').strip()
+        if execution_trace_ref:
+            resolver = getattr(self._log_service, 'resolve_content_ref', None)
+            if callable(resolver):
+                resolved = str(resolver(execution_trace_ref) or '')
+                if resolved:
+                    try:
+                        parsed = self._parse_execution_trace_text(resolved)
+                    except Exception:
+                        parsed = {}
+                    if parsed:
+                        return parsed
+        if runtime_node is not None:
+            return self._execution_trace(runtime_node)
+        return dict(payload.get('execution_trace') or {}) if isinstance(payload.get('execution_trace'), dict) else {}
+
+    @staticmethod
+    def _parse_execution_trace_text(value: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(str(value or ''))
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _execution_trace_summary(execution_trace: dict[str, Any] | None) -> dict[str, Any]:
+        trace = execution_trace if isinstance(execution_trace, dict) else {}
+        stages_payload: list[dict[str, Any]] = []
+        for stage in list(trace.get('stages') or []):
+            if not isinstance(stage, dict):
+                continue
+            tool_calls: list[dict[str, str]] = []
+            for round_item in list(stage.get('rounds') or []):
+                if not isinstance(round_item, dict):
+                    continue
+                for step in list(round_item.get('tools') or []):
+                    compact_step = TaskQueryService._compact_execution_trace_tool_call(step)
+                    if compact_step is not None:
+                        tool_calls.append(compact_step)
+            stages_payload.append({'stage_goal': str(stage.get('stage_goal') or ''), 'tool_calls': tool_calls})
+        if stages_payload:
+            return {'stages': stages_payload}
+        fallback_tool_calls: list[dict[str, str]] = []
+        for step in list(trace.get('tool_steps') or []):
+            compact_step = TaskQueryService._compact_execution_trace_tool_call(step)
+            if compact_step is not None:
+                fallback_tool_calls.append(compact_step)
+        if fallback_tool_calls:
+            return {'stages': [{'stage_goal': '', 'tool_calls': fallback_tool_calls}]}
+        return {'stages': []}
+
+    @staticmethod
+    def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:
+        if not isinstance(step, dict):
+            return None
+        return {
+            'tool_name': str(step.get('tool_name') or '').strip() or 'tool',
+            'arguments_text': str(step.get('arguments_text') or ''),
+            'output_text': str(step.get('output_text') or ''),
+            'output_ref': str(step.get('output_ref') or ''),
+        }
 
     @staticmethod
     def _projection_default_round_id(record: Any, rounds: list[Any]) -> str:
@@ -908,7 +1034,7 @@ class TaskQueryService:
             if not node_id:
                 continue
             payload = dict(getattr(detail, 'payload', {}) or {})
-            execution_trace = payload.get('execution_trace') if isinstance(payload.get('execution_trace'), dict) else {}
+            execution_trace = payload.get('execution_trace_summary') if isinstance(payload.get('execution_trace_summary'), dict) else {}
             stage_goal = self._latest_stage_goal_from_execution_trace(execution_trace)
             if stage_goal:
                 goals[node_id] = stage_goal

@@ -504,19 +504,41 @@ async def test_react_loop_externalizes_tool_messages_with_canonical_ref(tmp_path
             source_kind="node_output",
             force=True,
         )
+        wrapped = log_service._content_store.maybe_externalize_text(
+            json.dumps(inner.to_dict(), ensure_ascii=False),
+            runtime={"task_id": "task-1", "node_id": "node-1"},
+            display_name="wrapped",
+            source_kind="tool_result:content",
+            force=True,
+        )
 
         assert inner is not None
+        assert wrapped is not None
+
+        tool_payload = {
+            "ok": True,
+            "ref": wrapped.ref,
+            "requested_ref": wrapped.ref,
+            "resolved_ref": inner.ref,
+            "wrapper_ref": wrapped.ref,
+            "wrapper_depth": 1,
+            "start_line": 1,
+            "end_line": 280,
+            "excerpt": "\n".join(f"line {index:03d} needle context" for index in range(280)),
+        }
 
         rendered = loop._render_tool_message_content(
-            json.dumps(inner.to_dict(), ensure_ascii=False),
+            json.dumps(tool_payload, ensure_ascii=False),
             runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
             tool_name="content",
         )
 
-        payload = json.loads(rendered)
+        payload = parse_content_envelope(rendered)
 
-        assert payload["ref"] == inner.ref
-        assert payload["resolved_ref"] == inner.ref
+        assert payload is not None
+        assert payload.ref.startswith("artifact:")
+        assert payload.ref != inner.ref
+        assert payload.resolved_ref == inner.ref
     finally:
         store.close()
 

@@ -33,6 +33,7 @@ from main.runtime.stage_budget import (
     tool_call_counts_against_stage_budget,
 )
 from main.monitoring.file_store import TaskFileStore
+from main.monitoring.execution_trace import build_execution_trace
 from main.monitoring.models import (
     TaskProjectionNodeDetailRecord,
     TaskProjectionNodeRecord,
@@ -2050,6 +2051,9 @@ class TaskLogService:
     def _task_projection_node_detail_record(self, node: NodeRecord) -> TaskProjectionNodeDetailRecord:
         prompt_summary = _single_line_text(node.prompt or node.goal or '', max_chars=400)
         tool_file_changes = normalize_tool_file_changes((node.metadata or {}).get('tool_file_changes'))
+        execution_trace = self._projection_execution_trace(node)
+        execution_trace_summary = self._execution_trace_summary(execution_trace)
+        execution_trace_ref = self._externalize_execution_trace(node, execution_trace)
         return TaskProjectionNodeDetailRecord(
             node_id=node.node_id,
             task_id=node.task_id,
@@ -2064,7 +2068,7 @@ class TaskLogService:
             final_output_ref=str(node.final_output_ref or ''),
             failure_reason=str(node.failure_reason or ''),
             prompt_summary=prompt_summary,
-            execution_trace_ref='',
+            execution_trace_ref=execution_trace_ref,
             payload={
                 'node_id': node.node_id,
                 'task_id': node.task_id,
@@ -2084,11 +2088,82 @@ class TaskLogService:
                 'final_output_ref': str(node.final_output_ref or ''),
                 'failure_reason': str(node.failure_reason or ''),
                 'updated_at': str(node.updated_at or ''),
+                'execution_trace_summary': execution_trace_summary,
+                'execution_trace_ref': execution_trace_ref,
                 'tool_file_changes': [item.model_dump(mode='json') for item in list(tool_file_changes or [])],
                 'token_usage': node.token_usage.model_dump(mode='json'),
                 'token_usage_by_model': [item.model_dump(mode='json') for item in list(node.token_usage_by_model or [])],
             },
         )
+
+    def _projection_execution_trace(self, node: NodeRecord) -> dict[str, Any]:
+        frame = self.read_runtime_frame(node.task_id, node.node_id)
+        live_tool_calls = [dict(item) for item in list((frame or {}).get('tool_calls') or []) if isinstance(item, dict)]
+        tool_results = list(self._store.list_task_node_tool_results(node.task_id, node.node_id) or [])
+        return build_execution_trace(node, tool_results=tool_results, live_tool_calls=live_tool_calls)
+
+    def _externalize_execution_trace(self, node: NodeRecord, execution_trace: dict[str, Any]) -> str:
+        store = self._content_store
+        if store is None:
+            return ''
+        runtime = {'task_id': node.task_id, 'node_id': node.node_id}
+        try:
+            envelope = store.maybe_externalize_text(
+                execution_trace,
+                runtime=runtime,
+                display_name=f'execution-trace:{node.node_id}',
+                source_kind='task_execution_trace',
+                mime_type='application/json',
+                force=True,
+            )
+        except Exception:
+            return ''
+        if envelope is None:
+            return ''
+        return str(envelope.ref or '')
+
+    @staticmethod
+    def _execution_trace_summary(execution_trace: dict[str, Any] | None) -> dict[str, Any]:
+        trace = execution_trace if isinstance(execution_trace, dict) else {}
+        stages_payload: list[dict[str, Any]] = []
+        for stage in list(trace.get('stages') or []):
+            if not isinstance(stage, dict):
+                continue
+            tool_calls: list[dict[str, str]] = []
+            for round_item in list(stage.get('rounds') or []):
+                if not isinstance(round_item, dict):
+                    continue
+                for step in list(round_item.get('tools') or []):
+                    compact_step = TaskLogService._compact_execution_trace_tool_call(step)
+                    if compact_step is not None:
+                        tool_calls.append(compact_step)
+            stages_payload.append(
+                {
+                    'stage_goal': str(stage.get('stage_goal') or ''),
+                    'tool_calls': tool_calls,
+                }
+            )
+        if stages_payload:
+            return {'stages': stages_payload}
+        fallback_tool_calls: list[dict[str, str]] = []
+        for step in list(trace.get('tool_steps') or []):
+            compact_step = TaskLogService._compact_execution_trace_tool_call(step)
+            if compact_step is not None:
+                fallback_tool_calls.append(compact_step)
+        if fallback_tool_calls:
+            return {'stages': [{'stage_goal': '', 'tool_calls': fallback_tool_calls}]}
+        return {'stages': []}
+
+    @staticmethod
+    def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:
+        if not isinstance(step, dict):
+            return None
+        return {
+            'tool_name': str(step.get('tool_name') or '').strip() or 'tool',
+            'arguments_text': str(step.get('arguments_text') or ''),
+            'output_text': str(step.get('output_text') or ''),
+            'output_ref': str(step.get('output_ref') or ''),
+        }
 
     def _task_projection_round_records(self, node: NodeRecord) -> list[TaskProjectionRoundRecord]:
         payload = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}

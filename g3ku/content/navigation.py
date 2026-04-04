@@ -18,6 +18,7 @@ MAX_SEARCH_LIMIT = 50
 _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
 _PREVIEW_CHAR_LIMIT = 220
+_MAX_WRAPPER_DEPTH = 8
 _ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
     {
         "tool_result:memory_search",
@@ -72,6 +73,10 @@ def _search_refine_payload(*, query: str, cap: int, ref: str, handle: ContentHan
     return {
         'ok': True,
         'ref': ref,
+        'requested_ref': handle.requested_ref,
+        'resolved_ref': handle.resolved_ref or handle.ref,
+        'wrapper_ref': handle.wrapper_ref,
+        'wrapper_depth': handle.wrapper_depth,
         'handle': handle.to_dict(),
         'query': query,
         'scope_type': scope_type,
@@ -107,10 +112,11 @@ def _runtime_node_id(runtime: dict[str, Any] | None) -> str | None:
 
 def _content_summary(handle: ContentHandle, *, include_preview: bool = True) -> str:
     label = handle.display_name or handle.source_kind or "content"
+    content_ref = handle.resolved_ref or handle.ref
     summary = (
         f"Externalized {label} "
         f"({int(handle.line_count or 0)} lines, {int(handle.char_count or 0)} chars). "
-        f"Use content.search/open with ref={handle.ref}. Do not pass this ref as filesystem path."
+        f"Use content.search/open with ref={content_ref}. Do not pass this ref as filesystem path."
     )
     if handle.origin_ref and handle.origin_ref != handle.ref:
         summary = f"{summary}\nOrigin ref: {handle.origin_ref}"
@@ -183,6 +189,37 @@ def _parsed_json_payload(value: Any) -> dict[str, Any] | None:
     except Exception:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _structured_resolved_ref_and_depth(value: Any) -> tuple[str, int]:
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return "", 0
+    resolved_ref = str(payload.get("resolved_ref") or "").strip()
+    if not resolved_ref:
+        return "", 0
+    try:
+        wrapper_depth = max(0, int(payload.get("wrapper_depth") or 0))
+    except (TypeError, ValueError):
+        wrapper_depth = 0
+    if wrapper_depth:
+        return resolved_ref, wrapper_depth
+    wrapper_ref = str(payload.get("wrapper_ref") or "").strip()
+    requested_ref = str(payload.get("requested_ref") or payload.get("ref") or "").strip()
+    if wrapper_ref or (requested_ref and requested_ref != resolved_ref):
+        return resolved_ref, 1
+    return resolved_ref, 0
+
+
+def _structured_ref_payload(value: Any) -> tuple[str, str]:
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return "", ""
+    canonical_ref = str(payload.get("resolved_ref") or "").strip()
+    wrapper_ref = str(payload.get("wrapper_ref") or payload.get("requested_ref") or payload.get("ref") or "").strip()
+    if canonical_ref and wrapper_ref == canonical_ref:
+        wrapper_ref = ""
+    return canonical_ref, wrapper_ref
 
 
 def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str) -> bool:
@@ -304,11 +341,17 @@ def parse_content_envelope(value: Any) -> ContentEnvelope | None:
             char_count=int(raw_handle.get("char_count") or 0),
             head_preview=str(raw_handle.get("head_preview") or "").strip(),
             tail_preview=str(raw_handle.get("tail_preview") or "").strip(),
+            requested_ref=str(raw_handle.get("requested_ref") or "").strip(),
+            resolved_ref=str(raw_handle.get("resolved_ref") or "").strip(),
+            wrapper_ref=str(raw_handle.get("wrapper_ref") or "").strip(),
+            wrapper_depth=int(raw_handle.get("wrapper_depth") or 0),
         )
     return ContentEnvelope(
         type="content_ref",
         summary=str(payload.get("summary") or "").strip(),
         ref=str(payload.get("ref") or getattr(handle, "ref", "") or "").strip(),
+        resolved_ref=str(payload.get("resolved_ref") or getattr(handle, "resolved_ref", "") or "").strip(),
+        wrapper_ref=str(payload.get("wrapper_ref") or getattr(handle, "wrapper_ref", "") or "").strip(),
         handle=handle,
         next_actions=[str(item) for item in list(payload.get("next_actions") or []) if str(item or "").strip()],
     )
@@ -317,7 +360,11 @@ def parse_content_envelope(value: Any) -> ContentEnvelope | None:
 def content_summary_and_ref(value: Any) -> tuple[str, str]:
     envelope = parse_content_envelope(value)
     if envelope is not None:
-        return envelope.summary, str(envelope.ref or "")
+        canonical_ref = str(envelope.resolved_ref or getattr(envelope.handle, "resolved_ref", "") or envelope.ref or "")
+        return envelope.summary, canonical_ref
+    structured_ref, _wrapper_ref = _structured_ref_payload(value)
+    if structured_ref:
+        return _stringify(value), structured_ref
     if isinstance(value, (dict, list)):
         return _stringify(value), ""
     return str(value or ""), ""
@@ -352,7 +399,7 @@ class ContentNavigationService:
         force: bool = False,
     ) -> ContentEnvelope | None:
         envelope = parse_content_envelope(value)
-        if envelope is not None:
+        if envelope is not None and not force:
             return envelope
         text = _stringify(value)
         if not text:
@@ -371,8 +418,22 @@ class ContentNavigationService:
             mime_type=mime_type,
             origin_ref=origin_ref,
         )
+        resolved_ref, nested_depth = self._resolved_ref_and_depth_from_value(value)
+        handle = self._apply_handle_refs(
+            handle,
+            requested_ref=handle.ref,
+            resolved_ref=resolved_ref,
+            wrapper_ref=handle.ref if resolved_ref and resolved_ref != handle.ref else "",
+            wrapper_depth=(1 + nested_depth) if resolved_ref and resolved_ref != handle.ref else 0,
+        )
         summary = _content_summary(handle)
-        return ContentEnvelope(summary=summary, ref=handle.ref, handle=handle)
+        return ContentEnvelope(
+            summary=summary,
+            ref=handle.ref,
+            resolved_ref=handle.resolved_ref,
+            wrapper_ref=handle.wrapper_ref,
+            handle=handle,
+        )
 
     def externalize_for_message(
         self,
@@ -458,11 +519,15 @@ class ContentNavigationService:
             prepared.append(updated)
         return prepared
 
-    def describe(self, *, ref: str | None = None, path: str | None = None) -> dict[str, Any]:
-        text, handle = self._resolve(ref=ref, path=path)
+    def describe(self, *, ref: str | None = None, path: str | None = None, view: str = "canonical") -> dict[str, Any]:
+        text, handle = self._resolve(ref=ref, path=path, view=view)
         return {
             "ok": True,
             "ref": handle.ref,
+            "requested_ref": handle.requested_ref,
+            "resolved_ref": handle.resolved_ref or handle.ref,
+            "wrapper_ref": handle.wrapper_ref,
+            "wrapper_depth": handle.wrapper_depth,
             "handle": handle.to_dict(),
             "summary": _content_summary(handle),
             "size_bytes": handle.size_bytes,
@@ -470,21 +535,22 @@ class ContentNavigationService:
             "char_count": handle.char_count,
         }
 
-    def head(self, *, ref: str | None = None, path: str | None = None, lines: int = DEFAULT_OPEN_LINES) -> dict[str, Any]:
-        return self._excerpt(ref=ref, path=path, start_line=1, end_line=max(1, min(int(lines or DEFAULT_OPEN_LINES), MAX_OPEN_LINES)))
+    def head(self, *, ref: str | None = None, path: str | None = None, lines: int = DEFAULT_OPEN_LINES, view: str = "canonical") -> dict[str, Any]:
+        return self._excerpt(ref=ref, path=path, start_line=1, end_line=max(1, min(int(lines or DEFAULT_OPEN_LINES), MAX_OPEN_LINES)), view=view)
 
-    def tail(self, *, ref: str | None = None, path: str | None = None, lines: int = DEFAULT_OPEN_LINES) -> dict[str, Any]:
-        text, handle = self._resolve(ref=ref, path=path)
+    def tail(self, *, ref: str | None = None, path: str | None = None, lines: int = DEFAULT_OPEN_LINES, view: str = "canonical") -> dict[str, Any]:
+        text, handle = self._resolve(ref=ref, path=path, view=view)
         all_lines = text.splitlines()
         size = max(1, min(int(lines or DEFAULT_OPEN_LINES), MAX_OPEN_LINES))
         start_line = max(1, len(all_lines) - size + 1)
-        return self._excerpt(ref=ref, path=path, start_line=start_line, end_line=len(all_lines))
+        return self._excerpt(ref=ref, path=path, start_line=start_line, end_line=len(all_lines), view=view)
 
     def open(
         self,
         *,
         ref: str | None = None,
         path: str | None = None,
+        view: str = "canonical",
         start_line: int | None = None,
         end_line: int | None = None,
         around_line: int | None = None,
@@ -499,7 +565,7 @@ class ContentNavigationService:
         finish = max(start, int(end_line or (start + DEFAULT_OPEN_LINES - 1)))
         if (finish - start + 1) > MAX_OPEN_LINES:
             finish = start + MAX_OPEN_LINES - 1
-        return self._excerpt(ref=ref, path=path, start_line=start, end_line=finish)
+        return self._excerpt(ref=ref, path=path, start_line=start, end_line=finish, view=view)
 
     def search(
         self,
@@ -507,11 +573,12 @@ class ContentNavigationService:
         query: str,
         ref: str | None = None,
         path: str | None = None,
+        view: str = "canonical",
         limit: int = DEFAULT_SEARCH_LIMIT,
         before: int = 2,
         after: int = 2,
     ) -> dict[str, Any]:
-        text, handle = self._resolve(ref=ref, path=path)
+        text, handle = self._resolve(ref=ref, path=path, view=view)
         needle = str(query or "").strip()
         if not needle:
             return {"ok": False, "error": "query is required"}
@@ -542,6 +609,10 @@ class ContentNavigationService:
         return {
             "ok": True,
             "ref": handle.ref,
+            "requested_ref": handle.requested_ref,
+            "resolved_ref": handle.resolved_ref or handle.ref,
+            "wrapper_ref": handle.wrapper_ref,
+            "wrapper_depth": handle.wrapper_depth,
             "handle": handle.to_dict(),
             "query": needle,
             "hits": results,
@@ -554,8 +625,8 @@ class ContentNavigationService:
             "suggestions": [],
         }
 
-    def _excerpt(self, *, ref: str | None = None, path: str | None = None, start_line: int, end_line: int) -> dict[str, Any]:
-        text, handle = self._resolve(ref=ref, path=path)
+    def _excerpt(self, *, ref: str | None = None, path: str | None = None, start_line: int, end_line: int, view: str = "canonical") -> dict[str, Any]:
+        text, handle = self._resolve(ref=ref, path=path, view=view)
         lines = text.splitlines()
         start = max(1, int(start_line or 1))
         finish = max(start, int(end_line or start))
@@ -563,13 +634,28 @@ class ContentNavigationService:
         return {
             "ok": True,
             "ref": handle.ref,
+            "requested_ref": handle.requested_ref,
+            "resolved_ref": handle.resolved_ref or handle.ref,
+            "wrapper_ref": handle.wrapper_ref,
+            "wrapper_depth": handle.wrapper_depth,
             "handle": handle.to_dict(),
             "start_line": start,
             "end_line": min(finish, len(lines)),
             "excerpt": excerpt,
         }
 
-    def _resolve(self, *, ref: str | None = None, path: str | None = None) -> tuple[str, ContentHandle]:
+    def _resolve(
+        self,
+        *,
+        ref: str | None = None,
+        path: str | None = None,
+        view: str = "canonical",
+        _requested_ref: str = "",
+        _wrapper_ref: str = "",
+        _wrapper_depth: int = 0,
+        _visited_refs: tuple[str, ...] = (),
+    ) -> tuple[str, ContentHandle]:
+        resolved_view = self._normalize_view(view)
         if path:
             file_path = self._resolve_workspace_path(path)
             if not file_path.exists():
@@ -581,7 +667,7 @@ class ContentNavigationService:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
             except ValueError:
                 ref_path = str(file_path)
-            return text, self._build_handle(
+            handle = self._build_handle(
                 ref=f"path:{ref_path}",
                 artifact_id="",
                 uri=str(file_path),
@@ -591,19 +677,38 @@ class ContentNavigationService:
                 origin_ref="",
                 text=text,
             )
+            handle = self._apply_handle_refs(
+                handle,
+                requested_ref=_requested_ref or handle.ref,
+                resolved_ref=handle.ref,
+                wrapper_ref=_wrapper_ref,
+                wrapper_depth=_wrapper_depth,
+            )
+            return text, handle
 
         normalized_ref = self._normalize_ref(ref)
         if normalized_ref.startswith("path:"):
-            return self._resolve(path=normalized_ref[5:])
+            return self._resolve(
+                path=normalized_ref[5:],
+                view=resolved_view,
+                _requested_ref=_requested_ref or normalized_ref,
+                _wrapper_ref=_wrapper_ref,
+                _wrapper_depth=_wrapper_depth,
+                _visited_refs=_visited_refs,
+            )
         if not normalized_ref.startswith("artifact:"):
             raise ValueError(f"unsupported content ref: {normalized_ref or '<empty>'}")
+        if normalized_ref in _visited_refs:
+            raise ValueError("content ref cycle detected")
+        if _wrapper_depth > _MAX_WRAPPER_DEPTH:
+            raise ValueError(f"content ref wrapper depth exceeded: {_MAX_WRAPPER_DEPTH}")
         artifact_id = normalized_ref.split(":", 1)[1]
         artifact = self._lookup_artifact(artifact_id)
         if artifact is None or not getattr(artifact, "path", None):
             raise FileNotFoundError(f"artifact not found: {artifact_id}")
         artifact_path = Path(str(artifact.path))
         text = artifact_path.read_text(encoding="utf-8") if artifact_path.exists() else ""
-        return text, self._build_handle(
+        handle = self._build_handle(
             ref=normalized_ref,
             artifact_id=artifact_id,
             uri=str(artifact_path),
@@ -613,12 +718,81 @@ class ContentNavigationService:
             origin_ref="",
             text=text,
         )
+        requested_ref = _requested_ref or normalized_ref
+        if resolved_view == "canonical":
+            next_ref = self._next_wrapper_ref_from_value(text)
+            if next_ref:
+                if next_ref == normalized_ref:
+                    raise ValueError("content ref cycle detected")
+                return self._resolve(
+                    ref=next_ref,
+                    view=resolved_view,
+                    _requested_ref=requested_ref,
+                    _wrapper_ref=_wrapper_ref or normalized_ref,
+                    _wrapper_depth=_wrapper_depth + 1,
+                    _visited_refs=(*_visited_refs, normalized_ref),
+                )
+        handle = self._apply_handle_refs(
+            handle,
+            requested_ref=requested_ref,
+            resolved_ref=normalized_ref,
+            wrapper_ref=_wrapper_ref,
+            wrapper_depth=_wrapper_depth,
+        )
+        return text, handle
 
     def _normalize_ref(self, ref: str | None) -> str:
         envelope = parse_content_envelope(ref)
         if envelope is not None:
             return str(envelope.ref or "")
         return str(ref or "").strip()
+
+    @staticmethod
+    def _normalize_view(view: str | None) -> str:
+        normalized = str(view or "canonical").strip().lower()
+        return normalized if normalized in {"canonical", "raw"} else "canonical"
+
+    @staticmethod
+    def _canonical_ref_from_value(value: Any) -> str:
+        envelope = parse_content_envelope(value)
+        if envelope is None:
+            return ""
+        return str(envelope.resolved_ref or getattr(envelope.handle, "resolved_ref", "") or envelope.ref or "").strip()
+
+    @staticmethod
+    def _next_wrapper_ref_from_value(value: Any) -> str:
+        envelope = parse_content_envelope(value)
+        if envelope is None:
+            return ""
+        return str(envelope.ref or getattr(envelope.handle, "ref", "") or "").strip()
+
+    @classmethod
+    def _resolved_ref_and_depth_from_value(cls, value: Any) -> tuple[str, int]:
+        envelope = parse_content_envelope(value)
+        if envelope is None:
+            return _structured_resolved_ref_and_depth(value)
+        resolved_ref = cls._canonical_ref_from_value(envelope)
+        handle = envelope.handle
+        if handle is not None:
+            return resolved_ref, max(0, int(handle.wrapper_depth or 0))
+        immediate_ref = str(envelope.ref or "").strip()
+        nested_depth = 1 if resolved_ref and immediate_ref and resolved_ref != immediate_ref else 0
+        return resolved_ref, nested_depth
+
+    @staticmethod
+    def _apply_handle_refs(
+        handle: ContentHandle,
+        *,
+        requested_ref: str,
+        resolved_ref: str,
+        wrapper_ref: str,
+        wrapper_depth: int,
+    ) -> ContentHandle:
+        handle.requested_ref = str(requested_ref or handle.ref or "").strip()
+        handle.resolved_ref = str(resolved_ref or handle.ref or "").strip()
+        handle.wrapper_ref = str(wrapper_ref or "").strip()
+        handle.wrapper_depth = max(0, int(wrapper_depth or 0))
+        return handle
 
     def _lookup_artifact(self, artifact_id: str) -> Any | None:
         lookup = self._artifact_lookup

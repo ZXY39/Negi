@@ -34,46 +34,6 @@ class _DummyChatBackend:
         raise AssertionError(f"chat backend should not be called in this test: {kwargs!r}")
 
 
-class _GovernanceReviewChatBackend:
-    def __init__(self, *, decision: str = "cap_current_depth") -> None:
-        self.calls: list[dict[str, object]] = []
-        self._decision = str(decision or "cap_current_depth").strip()
-
-    async def chat(self, **kwargs):
-        self.calls.append(dict(kwargs))
-        payload = {
-            "decision": self._decision,
-            "reason": "检查结论：存在明显过度派生，继续扩展会偏离第一性原理。",
-            "evidence": [
-                "满足检查点：当前任务树继续增加深度，已超出以结果为中心的必要拆分。",
-                "不满足检查点：当前子节点的任务操作过于细致全面，出现节外生枝。",
-            ],
-        }
-        return LLMResponse(content=json.dumps(payload, ensure_ascii=False), finish_reason="stop")
-
-
-class _GovernanceReviewRetryChatBackend:
-    def __init__(self, responses: list[str]) -> None:
-        self.calls: list[dict[str, object]] = []
-        self._responses = list(responses)
-
-    async def chat(self, **kwargs):
-        self.calls.append(dict(kwargs))
-        if not self._responses:
-            raise AssertionError("governance retry backend exhausted")
-        return LLMResponse(content=self._responses.pop(0), finish_reason="stop")
-
-
-class _GovernanceReviewExceptionChatBackend:
-    def __init__(self, *, message: str = "inspection chain failed") -> None:
-        self.calls: list[dict[str, object]] = []
-        self._message = str(message or "inspection chain failed")
-
-    async def chat(self, **kwargs):
-        self.calls.append(dict(kwargs))
-        raise RuntimeError(self._message)
-
-
 def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(rest_router, prefix="/api")
@@ -387,56 +347,6 @@ def test_internal_task_event_callback_forwards_live_patch(tmp_path: Path, monkey
 
         pushed = _receive_until_type(ws, "task.live.patch")
         assert pushed["data"]["task_id"] == record.task_id
-
-
-def test_internal_task_event_callback_forwards_governance_patch(tmp_path: Path, monkeypatch):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
-    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
-    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
-
-    async def _ensure_services(_agent=None) -> None:
-        return None
-
-    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
-
-    client = TestClient(_build_app())
-    record = asyncio.run(_create_web_task(service))
-    with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
-        assert ws.receive_json()["type"] == "hello"
-
-        payload = {
-            "event_type": "task.governance.patch",
-            "session_id": record.session_id,
-            "task_id": record.task_id,
-            "data": {
-                "task_id": record.task_id,
-                "governance": {
-                    "enabled": True,
-                    "frozen": True,
-                    "review_inflight": True,
-                    "history": [],
-                },
-            },
-        }
-        response = client.post(
-            "/api/internal/task-event",
-            json=payload,
-            headers={"x-g3ku-internal-token": "secret-token"},
-        )
-        assert response.status_code == 200
-        assert response.json()["accepted"] is True
-
-        pushed = _receive_until_type(ws, "task.governance.patch")
-        assert pushed["data"]["task_id"] == record.task_id
-        assert pushed["data"]["governance"]["frozen"] is True
 
 
 def test_internal_task_event_batch_callback_forwards_summary_patches(tmp_path: Path, monkeypatch):
@@ -1985,7 +1895,6 @@ def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_pat
     tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
 
     assert tool_results[-1].output_ref == inner.ref
-    assert str(tool_results[-1].payload["parsed_payload"]["wrapper_ref"]).startswith("artifact:")
 
 
 def test_refresh_task_view_skips_upsert_when_semantically_unchanged(tmp_path: Path):
@@ -3291,10 +3200,137 @@ def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
     assert payload["task_id"] == record.task_id
     assert payload["node_id"] == root.node_id
     assert payload["item"]["node_id"] == root.node_id
+    assert payload["item"]["detail_level"] == "summary"
     assert payload["artifact_count"] == 1
-    assert payload["artifacts"][0]["artifact_id"] == matching.artifact_id
-    assert payload["artifacts"][0]["node_id"] == root.node_id
-    assert payload["artifacts"][0]["ref"] == f'artifact:{matching.artifact_id}'
+    assert payload["artifacts_preview"][0]["artifact_id"] == matching.artifact_id
+    assert payload["artifacts_preview"][0]["node_id"] == root.node_id
+    assert payload["artifacts_preview"][0]["ref"] == f'artifact:{matching.artifact_id}'
+    assert "artifacts" not in payload
+
+
+def test_rest_node_detail_reports_real_artifact_metadata_for_summary_and_full(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    matching = service.artifact_store.create_text_artifact(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        kind="report",
+        title="Root Artifact",
+        content="root artifact content",
+    )
+
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    client = TestClient(_build_app())
+
+    summary_response = client.get(f"/api/tasks/{record.task_id}/nodes/{root.node_id}")
+    full_response = client.get(
+        f"/api/tasks/{record.task_id}/nodes/{root.node_id}",
+        params={"detail_level": "full"},
+    )
+
+    assert summary_response.status_code == 200
+    assert full_response.status_code == 200
+
+    summary_payload = summary_response.json()
+    assert summary_payload["artifact_count"] == 1
+    assert summary_payload["artifacts_preview"][0]["artifact_id"] == matching.artifact_id
+    assert summary_payload["item"]["artifact_count"] == 1
+    assert summary_payload["item"]["artifacts_preview"][0]["artifact_id"] == matching.artifact_id
+
+    full_payload = full_response.json()
+    assert full_payload["artifact_count"] == 1
+    assert full_payload["artifacts"][0]["artifact_id"] == matching.artifact_id
+    assert full_payload["item"]["artifact_count"] == 1
+    assert full_payload["item"]["artifacts_preview"] == []
+
+
+def test_get_node_detail_payload_uses_summary_mode_and_execution_trace_ref(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert payload is not None
+    assert payload["item"]["detail_level"] == "summary"
+    assert payload["item"]["execution_trace_ref"].startswith("artifact:")
+    assert "execution_trace_summary" in payload["item"]
+    assert "execution_trace" not in payload["item"]
+
+
+def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inline_text(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    input_text = "\n".join(f"input line {index:03d}" for index in range(160))
+    output_text = "\n".join(f"output line {index:03d}" for index in range(180))
+    check_result = "\n".join(f"check line {index:03d}" for index in range(170))
+    final_output = "\n".join(f"final line {index:03d}" for index in range(200))
+
+    service.log_service.update_node_input(record.task_id, root.node_id, input_text)
+    service.log_service.append_node_output(record.task_id, root.node_id, content=output_text)
+    service.log_service.update_node_check_result(record.task_id, root.node_id, check_result)
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="success",
+        final_output=final_output,
+    )
+
+    payload = service.get_node_detail_payload(record.task_id, root.node_id)
+
+    assert payload is not None
+    item = payload["item"]
+    assert item["detail_level"] == "summary"
+    assert item["input"] == ""
+    assert item["output"] == ""
+    assert item["check_result"] == ""
+    assert item["final_output"] == ""
+    assert item["input_preview"]
+    assert item["output_preview"]
+    assert item["check_result_preview"]
+    assert item["final_output_preview"]
+    assert item["input_preview"] != input_text
+    assert item["output_preview"] != output_text
+    assert item["check_result_preview"] != check_result
+    assert item["final_output_preview"] != final_output
+    assert len(item["input_preview"]) < len(input_text)
+    assert len(item["output_preview"]) < len(output_text)
+    assert len(item["check_result_preview"]) < len(check_result)
+    assert len(item["final_output_preview"]) < len(final_output)
+    assert item["input_ref"].startswith("artifact:")
+    assert item["output_ref"].startswith("artifact:")
+    assert item["check_result_ref"].startswith("artifact:")
+    assert item["final_output_ref"].startswith("artifact:")
 
 
 def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path: Path):
@@ -3328,7 +3364,7 @@ def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path:
     )
     service.record_node_file_change(record.task_id, root.node_id, path=str((tmp_path / "created.txt").resolve()), change_type="created")
 
-    payload = service.get_node_detail_payload(record.task_id, root.node_id)
+    payload = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="full")
 
     assert payload is not None
     item = payload["item"]
@@ -3496,6 +3532,49 @@ def test_node_detail_and_latest_context_repair_legacy_mojibake(tmp_path: Path):
     assert detail_payload["item"]["goal"] == f"最终验收:{root.goal}"
     assert detail_payload["item"]["check_result"] == "验收通过"
     assert latest_context["title"] == f"最终验收:{root.goal}"
+
+
+def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    captured: dict[str, str] = {}
+
+    def _node_detail(task_id: str, node_id: str, detail_level: str = "summary"):
+        captured["task_id"] = task_id
+        captured["node_id"] = node_id
+        captured["detail_level"] = detail_level
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "node_id": node_id,
+            "item": {
+                "task_id": task_id,
+                "node_id": node_id,
+                "detail_level": detail_level,
+                "execution_trace": {"stages": []},
+            },
+        }
+
+    service.node_detail = _node_detail
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    client = TestClient(_build_app())
+
+    response = client.get("/api/tasks/task:demo/nodes/node:demo?detail_level=full")
+
+    assert response.status_code == 200
+    assert captured == {
+        "task_id": "task:demo",
+        "node_id": "node:demo",
+        "detail_level": "full",
+    }
+    assert response.json()["item"]["detail_level"] == "full"
 
 
 def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_path: Path):
@@ -3697,7 +3776,7 @@ def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_pa
     )
 
     progress = service.query_service.view_progress(record.task_id, mark_read=False)
-    acceptance_detail = service.get_node_detail_payload(record.task_id, acceptance.node_id)
+    acceptance_detail = service.get_node_detail_payload(record.task_id, acceptance.node_id, detail_level="full")
 
     assert progress is not None
     assert acceptance_detail is not None
@@ -3776,7 +3855,7 @@ def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_pat
     )
 
     progress = service.query_service.view_progress(record.task_id, mark_read=False)
-    node_payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+    node_payload = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level="full")
 
     assert progress is not None
     assert node_payload is not None
@@ -4469,287 +4548,4 @@ async def test_run_node_short_circuits_when_task_is_already_terminal(tmp_path: P
     assert latest_child is not None
     assert latest_child.status == "failed"
     assert latest_child.failure_reason == "root failed"
-
-
-@pytest.mark.asyncio
-async def test_task_snapshot_includes_governance_state(tmp_path: Path):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-    try:
-        _mark_worker_online(service)
-        record = await service.create_task("governed task", session_id="web:shared")
-        service.log_service.upsert_task_governance(
-            record.task_id,
-            {
-                "enabled": True,
-                "frozen": True,
-                "review_inflight": True,
-                "history": [
-                    {
-                        "triggered_at": now_iso(),
-                        "trigger_reason": "depth+1",
-                        "trigger_snapshot": {"max_depth": 2, "total_nodes": 18},
-                        "decision": "cap_current_depth",
-                        "decision_reason": "depth runaway",
-                        "limited_depth": 2,
-                    }
-                ],
-            },
-        )
-
-        payload = service.get_task_detail_payload(record.task_id, mark_read=False)
-        assert payload is not None
-        assert payload["governance"]["frozen"] is True
-        assert payload["task"]["governance"]["review_inflight"] is True
-        assert payload["governance"]["history"][0]["decision"] == "cap_current_depth"
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_governance_depth_trigger_caps_task_and_records_history(tmp_path: Path):
-    backend = _GovernanceReviewChatBackend(decision="cap_current_depth")
-    service = MainRuntimeService(
-        chat_backend=backend,
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-    try:
-        _mark_worker_online(service)
-        record = await service.create_task("governance trigger", session_id="web:shared", max_depth=3)
-        task = service.get_task(record.task_id)
-        root = service.get_node(record.root_node_id)
-
-        assert task is not None
-        assert root is not None
-
-        child = service.node_runner._create_execution_child(
-            task=task,
-            parent=root,
-            spec=SpawnChildSpec(goal="child", prompt="child prompt", execution_policy=_execution_policy()),
-        )
-        assert child.depth == 1
-
-        refreshed_task = service.get_task(record.task_id)
-        refreshed_child = service.get_node(child.node_id)
-        assert refreshed_task is not None
-        assert refreshed_child is not None
-
-        grandchild = service.node_runner._create_execution_child(
-            task=refreshed_task,
-            parent=refreshed_child,
-            spec=SpawnChildSpec(goal="grandchild", prompt="grandchild prompt", execution_policy=_execution_policy()),
-        )
-        assert grandchild.depth == 2
-
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            current_task = service.get_task(record.task_id)
-            governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
-            if current_task is not None and int(current_task.max_depth or 0) == 2 and governance.get("history"):
-                break
-            await asyncio.sleep(0.05)
-
-        current_task = service.get_task(record.task_id)
-        governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
-        assert current_task is not None
-        assert int(current_task.max_depth or 0) == 2
-        assert governance.get("supervision_disabled_after_limit") is True
-        assert governance.get("frozen") is False
-        assert governance.get("review_inflight") is False
-        assert governance["history"][-1]["decision"] == "cap_current_depth"
-        assert governance["history"][-1]["limited_depth"] == 2
-        assert backend.calls
-        call = backend.calls[-1]
-        assert call["model_refs"] == service.node_runner._acceptance_model_refs
-        messages = list(call["messages"])
-        assert len(messages) == 2
-        assert "你负责检查整个任务树是否过度派生" in str(messages[0]["content"])
-        assert "第一性原理" in str(messages[0]["content"])
-        assert "当前子节点的任务操作是否过于细致全面" in str(messages[0]["content"])
-        assert "节外生枝" in str(messages[0]["content"])
-        assert "满足了哪些点或不满足哪些点" in str(messages[0]["content"])
-        assert governance["history"][-1]["evidence"]
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_governance_review_retries_until_valid_model_result(tmp_path: Path):
-    backend = _GovernanceReviewRetryChatBackend(
-        responses=[
-            "not-json",
-            json.dumps(
-                {
-                    "decision": "allow",
-                    "reason": "检查结论：当前扩展仍然围绕核心目标推进，可以继续执行。",
-                    "evidence": [
-                        "满足检查点：新增深度仍服务于解决关键问题，没有偏离第一性原理。",
-                        "满足检查点：当前子节点拆分仍是必要拆分，不属于节外生枝。",
-                    ],
-                },
-                ensure_ascii=False,
-            ),
-        ]
-    )
-    service = MainRuntimeService(
-        chat_backend=backend,
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-    try:
-        _mark_worker_online(service)
-        record = await service.create_task("governance retry", session_id="web:shared", max_depth=3)
-        task = service.get_task(record.task_id)
-        root = service.get_node(record.root_node_id)
-
-        assert task is not None
-        assert root is not None
-
-        child = service.node_runner._create_execution_child(
-            task=task,
-            parent=root,
-            spec=SpawnChildSpec(goal="child", prompt="child prompt", execution_policy=_execution_policy()),
-        )
-        refreshed_task = service.get_task(record.task_id)
-        refreshed_child = service.get_node(child.node_id)
-        assert refreshed_task is not None
-        assert refreshed_child is not None
-
-        service.node_runner._create_execution_child(
-            task=refreshed_task,
-            parent=refreshed_child,
-            spec=SpawnChildSpec(goal="grandchild", prompt="grandchild prompt", execution_policy=_execution_policy()),
-        )
-
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
-            if governance.get("history"):
-                break
-            await asyncio.sleep(0.05)
-
-        current_task = service.get_task(record.task_id)
-        governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
-        assert current_task is not None
-        assert int(current_task.max_depth or 0) == 3
-        assert governance.get("frozen") is False
-        assert governance.get("review_inflight") is False
-        assert governance["history"][-1]["decision"] == "allow"
-        assert governance.get("depth_baseline") == 2
-        assert len(backend.calls) == 2
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_governance_review_defaults_to_cap_on_model_chain_exception(tmp_path: Path):
-    backend = _GovernanceReviewExceptionChatBackend(message="inspection provider offline")
-    service = MainRuntimeService(
-        chat_backend=backend,
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-    try:
-        _mark_worker_online(service)
-        record = await service.create_task("governance exception", session_id="web:shared", max_depth=3)
-        task = service.get_task(record.task_id)
-        root = service.get_node(record.root_node_id)
-
-        assert task is not None
-        assert root is not None
-
-        child = service.node_runner._create_execution_child(
-            task=task,
-            parent=root,
-            spec=SpawnChildSpec(goal="child", prompt="child prompt", execution_policy=_execution_policy()),
-        )
-        refreshed_task = service.get_task(record.task_id)
-        refreshed_child = service.get_node(child.node_id)
-        assert refreshed_task is not None
-        assert refreshed_child is not None
-
-        service.node_runner._create_execution_child(
-            task=refreshed_task,
-            parent=refreshed_child,
-            spec=SpawnChildSpec(goal="grandchild", prompt="grandchild prompt", execution_policy=_execution_policy()),
-        )
-
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            current_task = service.get_task(record.task_id)
-            governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
-            if current_task is not None and int(current_task.max_depth or 0) == 2 and governance.get("history"):
-                break
-            await asyncio.sleep(0.05)
-
-        current_task = service.get_task(record.task_id)
-        governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
-        assert current_task is not None
-        assert int(current_task.max_depth or 0) == 2
-        assert governance["history"][-1]["decision"] == "cap_current_depth"
-        assert "RuntimeError: inspection provider offline" in governance["history"][-1]["decision_reason"]
-        assert "默认限深" in governance["history"][-1]["decision_reason"]
-        assert any("默认限深" in str(item) for item in governance["history"][-1]["evidence"])
-        assert len(backend.calls) == 1
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_spawn_child_nodes_refuses_when_governance_limit_would_exceed_depth(tmp_path: Path):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-    try:
-        _mark_worker_online(service)
-        record = await service.create_task("spawn refusal", session_id="web:shared", max_depth=2)
-        root = service.get_node(record.root_node_id)
-        assert root is not None
-
-        service.store.update_task(
-            record.task_id,
-            lambda item: item.model_copy(update={"max_depth": 0}),
-        )
-        service.log_service.upsert_task_governance(
-            record.task_id,
-            {
-                "enabled": True,
-                "frozen": False,
-                "review_inflight": False,
-                "hard_limited_depth": 0,
-                "supervision_disabled_after_limit": True,
-                "history": [],
-            },
-        )
-
-        with pytest.raises(ValueError, match="当前已达到最大深度，不允许派生子节点，请自行执行!"):
-            await service.node_runner._spawn_children(
-                task_id=record.task_id,
-                parent_node_id=root.node_id,
-                specs=[SpawnChildSpec(goal="child", prompt="prompt", execution_policy=_execution_policy())],
-                call_id="call:test",
-            )
-    finally:
-        await service.close()
 

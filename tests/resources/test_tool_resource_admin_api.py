@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from datetime import datetime
+import inspect
 from pathlib import Path
 import json
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ from main.api import admin_rest
 from main.governance.resource_filter import list_effective_tool_names
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
 from main.models import TaskRecord
-from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService
+from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService, TaskNodeDetailTool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -654,14 +655,14 @@ def test_main_runtime_service_node_detail_includes_matching_artifacts():
     service = object.__new__(MainRuntimeService)
     service.store = _Store()
     service.get_task = lambda task_id: _Task() if task_id == 'task:demo' else None
-    service.get_node_detail_payload = lambda task_id, node_id: {
+    service.get_node_detail_payload = lambda task_id, node_id, detail_level='summary': {
         'ok': True,
         'task_id': task_id,
         'node_id': node_id,
-        'item': {'task_id': task_id, 'node_id': node_id, 'status': 'failed'},
+        'item': {'task_id': task_id, 'node_id': node_id, 'status': 'failed', 'detail_level': detail_level},
     }
 
-    result = service.node_detail('demo', 'node:demo')
+    result = service.node_detail('demo', 'node:demo', detail_level='full')
 
     assert isinstance(result, dict)
     assert captured['artifacts_task_id'] == 'task:demo'
@@ -683,7 +684,7 @@ def test_main_runtime_service_node_detail_compacts_execution_trace_for_tool_outp
     service = object.__new__(MainRuntimeService)
     service.store = _Store()
     service.get_task = lambda task_id: _Task() if task_id == 'task:demo' else None
-    service.get_node_detail_payload = lambda task_id, node_id: {
+    service.get_node_detail_payload = lambda task_id, node_id, detail_level='summary': {
         'ok': True,
         'task_id': task_id,
         'node_id': node_id,
@@ -691,6 +692,7 @@ def test_main_runtime_service_node_detail_compacts_execution_trace_for_tool_outp
             'task_id': task_id,
             'node_id': node_id,
             'status': 'failed',
+            'detail_level': detail_level,
             'execution_trace': {
                 'initial_prompt': 'full prompt',
                 'tool_steps': [
@@ -737,30 +739,91 @@ def test_main_runtime_service_node_detail_compacts_execution_trace_for_tool_outp
         },
     }
 
-    result = service.node_detail('demo', 'node:demo')
+    result = service.node_detail('demo', 'node:demo', detail_level='full')
 
     assert isinstance(result, dict)
-    assert result['item']['execution_trace'] == {
-        'stages': [
-            {
-                'stage_goal': 'inspect repository',
-                'tool_calls': [
-                    {
-                        'tool_name': 'filesystem',
-                        'arguments_text': '{"path": "repo"}',
-                        'output_text': 'repo summary',
-                        'output_ref': 'artifact:tool-step',
+    assert result['item']['execution_trace']['stages'][0]['stage_goal'] == 'inspect repository'
+    assert result['item']['execution_trace']['stages'][0]['rounds'][0]['tools'][0]['tool_name'] == 'filesystem'
+
+
+def test_main_runtime_service_node_detail_defaults_to_summary_payload():
+    class _Store:
+        def list_artifacts(self, task_id: str):
+            return [
+                SimpleNamespace(
+                    artifact_id='artifact:1',
+                    task_id=task_id,
+                    node_id='node:demo',
+                    kind='report',
+                    title='Artifact One',
+                    path='D:/artifact-one.md',
+                    mime_type='text/markdown',
+                    preview_text='one',
+                    created_at='2026-03-25T00:00:00',
+                    model_dump=lambda mode='json': {
+                        'artifact_id': 'artifact:1',
+                        'task_id': task_id,
+                        'node_id': 'node:demo',
+                        'kind': 'report',
+                        'title': 'Artifact One',
+                        'path': 'D:/artifact-one.md',
+                        'mime_type': 'text/markdown',
+                        'preview_text': 'one',
+                        'created_at': '2026-03-25T00:00:00',
                     },
-                    {
-                        'tool_name': 'content',
-                        'arguments_text': '{"ref": "artifact:tool-step"}',
-                        'output_text': 'file contents',
-                        'output_ref': 'artifact:content-step',
-                    },
-                ],
-            }
-        ]
+                )
+            ]
+
+    class _Task:
+        task_id = 'task:demo'
+
+    service = object.__new__(MainRuntimeService)
+    service.store = _Store()
+    service.get_task = lambda task_id: _Task() if task_id == 'task:demo' else None
+    service.get_node_detail_payload = lambda task_id, node_id, detail_level='summary': {
+        'ok': True,
+        'task_id': task_id,
+        'node_id': node_id,
+        'item': {
+            'task_id': task_id,
+            'node_id': node_id,
+            'detail_level': detail_level,
+            'output_preview': 'preview output',
+            'output_ref': 'artifact:artifact:out',
+            'execution_trace_summary': {'stages': []},
+            'execution_trace_ref': 'artifact:artifact:trace',
+        },
     }
+
+    result = service.node_detail('demo', 'node:demo')
+
+    assert result['item']['detail_level'] == 'summary'
+    assert 'artifacts_preview' in result
+    assert 'artifacts' not in result
+
+
+def test_task_node_detail_tool_parameters_match_resource_contract():
+    tool = TaskNodeDetailTool(SimpleNamespace())
+
+    assert tool.parameters == {
+        'type': 'object',
+        'properties': {
+            '任务id': {'type': 'string', 'description': '目标任务 id。'},
+            '节点id': {'type': 'string', 'description': '目标节点 id。'},
+            'detail_level': {
+                'type': 'string',
+                'enum': ['summary', 'full'],
+                'description': 'summary 返回轻量节点详情与 refs/工件预览；full 返回完整执行轨迹和完整工件列表。',
+            },
+        },
+        'required': ['任务id', '节点id'],
+    }
+
+
+def test_runtime_service_has_single_live_task_node_detail_tool_definition():
+    source = inspect.getsource(__import__("main.service.runtime_service", fromlist=["TaskNodeDetailTool"]))
+
+    assert source.count("return 'task_node_detail'") == 1
 
 
 @pytest.mark.asyncio

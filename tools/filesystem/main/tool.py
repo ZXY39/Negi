@@ -279,6 +279,7 @@ class FilesystemTool:
 
     def _enforce_workspace_path_policy(self, *, file_path: Path, action: str) -> None:
         resolved = file_path.expanduser().resolve()
+        workspace_root = self._workspace_root()
         temp_root = self._temp_root()
         externaltools_root = self._externaltools_root()
         tools_root = self._tools_root()
@@ -289,7 +290,9 @@ class FilesystemTool:
                     f'Path {resolved} is blocked for filesystem.{action}: use {temp_root} for temporary content instead of legacy tmp directories'
                 )
 
-        if self._is_system_temp_path(resolved) and not _is_relative_to(resolved, temp_root):
+        if self._is_system_temp_path(resolved) and not (
+            _is_relative_to(resolved, workspace_root) or _is_relative_to(resolved, temp_root)
+        ):
             raise PermissionError(
                 f'Path {resolved} is blocked for filesystem.{action}: use {temp_root} for temporary content instead of the system temp directory'
             )

@@ -19,22 +19,36 @@ class ContentTool:
             return str(envelope.ref or '').strip()
         return str(ref or '').strip()
 
-    @classmethod
-    def _guard_ref_access(cls, *, runtime: dict[str, Any] | None, ref: str | None) -> str | None:
+    def _canonical_artifact_ref(self, ref: str | None) -> str:
+        normalized = self._normalize_ref(ref)
+        if not normalized.startswith('artifact:'):
+            return normalized
+        try:
+            payload = self._content_store.describe(ref=normalized, view='canonical')
+        except Exception:
+            return normalized
+        resolved_ref = self._normalize_ref(payload.get('resolved_ref'))
+        return resolved_ref if resolved_ref.startswith('artifact:') else normalized
+
+    def _guard_ref_access(self, *, runtime: dict[str, Any] | None, ref: str | None) -> str | None:
         payload = runtime if isinstance(runtime, dict) else {}
         if not bool(payload.get('enforce_content_ref_allowlist')):
             return None
-        requested_ref = cls._normalize_ref(ref)
+        requested_ref = self._normalize_ref(ref)
         if not requested_ref.startswith('artifact:'):
             return None
         allowed_refs = sorted(
             {
-                cls._normalize_ref(item)
+                self._normalize_ref(item)
                 for item in list(payload.get('allowed_content_refs') or [])
-                if cls._normalize_ref(item).startswith('artifact:')
+                if self._normalize_ref(item).startswith('artifact:')
             }
         )
         if requested_ref in allowed_refs:
+            return None
+        requested_canonical = self._canonical_artifact_ref(requested_ref)
+        allowed_canonical_refs = {self._canonical_artifact_ref(item) for item in allowed_refs}
+        if requested_canonical in allowed_canonical_refs:
             return None
         return json.dumps(
             {
@@ -52,6 +66,7 @@ class ContentTool:
         ref: str | None = None,
         path: str | None = None,
         query: str | None = None,
+        view: str | None = None,
         limit: int | None = None,
         before: int | None = None,
         after: int | None = None,
@@ -73,13 +88,14 @@ class ContentTool:
             return blocked
         try:
             if operation == "describe":
-                return json.dumps(self._content_store.describe(ref=ref, path=path), ensure_ascii=False)
+                return json.dumps(self._content_store.describe(ref=ref, path=path, view=str(view or "canonical")), ensure_ascii=False)
             if operation == "search":
                 return json.dumps(
                     self._content_store.search(
                         ref=ref,
                         path=path,
                         query=str(query or ""),
+                        view=str(view or "canonical"),
                         limit=int(limit or 10),
                         before=int(before or 2),
                         after=int(after or 2),
@@ -91,6 +107,7 @@ class ContentTool:
                     self._content_store.open(
                         ref=ref,
                         path=path,
+                        view=str(view or "canonical"),
                         start_line=int(start_line) if start_line is not None else None,
                         end_line=int(end_line) if end_line is not None else None,
                         around_line=int(around_line) if around_line is not None else None,
@@ -99,9 +116,9 @@ class ContentTool:
                     ensure_ascii=False,
                 )
             if operation == "head":
-                return json.dumps(self._content_store.head(ref=ref, path=path, lines=int(lines or 80)), ensure_ascii=False)
+                return json.dumps(self._content_store.head(ref=ref, path=path, view=str(view or "canonical"), lines=int(lines or 80)), ensure_ascii=False)
             if operation == "tail":
-                return json.dumps(self._content_store.tail(ref=ref, path=path, lines=int(lines or 80)), ensure_ascii=False)
+                return json.dumps(self._content_store.tail(ref=ref, path=path, view=str(view or "canonical"), lines=int(lines or 80)), ensure_ascii=False)
             return json.dumps({"ok": False, "error": f"Unsupported content action: {operation}"}, ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)

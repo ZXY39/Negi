@@ -139,19 +139,29 @@ class TaskNodeDetail(Model):
     node_kind: str = 'execution'
     status: NodeStatus = 'in_progress'
     goal: str = ''
+    detail_level: str = 'summary'
     prompt: str = ''
+    prompt_summary: str = ''
     input: str = ''
+    input_preview: str = ''
     input_ref: str = ''
     output: str = ''
+    output_preview: str = ''
     output_ref: str = ''
     check_result: str = ''
+    check_result_preview: str = ''
     check_result_ref: str = ''
     final_output: str = ''
+    final_output_preview: str = ''
     final_output_ref: str = ''
     failure_reason: str = ''
     updated_at: str = ''
     children_fingerprint: str = ''
     execution_trace: dict[str, Any] = Field(default_factory=dict)
+    execution_trace_summary: dict[str, Any] = Field(default_factory=dict)
+    execution_trace_ref: str = ''
+    artifacts_preview: list[dict[str, Any]] = Field(default_factory=list)
+    artifact_count: int = 0
     tool_file_changes: list[NodeToolFileChange] = Field(default_factory=list)
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
