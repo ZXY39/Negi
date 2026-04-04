@@ -350,10 +350,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             return {"approved": False, "tool_call_payloads": []}
         if isinstance(decision, dict):
             approved = bool(decision.get("approved", decision.get("action") == "approve"))
-            payloads = decision.get("tool_calls")
             return {
                 "approved": approved,
-                "tool_call_payloads": list(payloads if isinstance(payloads, list) else original_payloads),
+                "tool_call_payloads": list(original_payloads) if approved else [],
             }
         return {"approved": False, "tool_call_payloads": []}
 
