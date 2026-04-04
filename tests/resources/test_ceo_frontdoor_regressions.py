@@ -738,3 +738,81 @@ async def test_graph_execute_tools_preserves_model_summary_state(monkeypatch, tm
         "narrative": "CEO frontdoor durable context.",
     }
     assert result["summary_model_key"] == "summary-model"
+
+
+@pytest.mark.asyncio
+async def test_graph_execute_tools_fallback_clears_stale_model_summary_payload(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=True,
+                frontdoor_summarizer_model_key="summary-model",
+                frontdoor_summarizer_trigger_message_count=4,
+                frontdoor_summarizer_keep_message_count=3,
+            )
+        ),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _boom(prompt: dict[str, object]) -> dict[str, object]:
+        _ = prompt
+        raise RuntimeError("summary model unavailable")
+
+    monkeypatch.setattr(runner, "_invoke_summary_model", _boom)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    result = await runner._graph_execute_tools(
+        {
+            "messages": [{"role": "user", "content": f"message {idx}"} for idx in range(6)],
+            "tool_call_payloads": [{"id": "call-1", "name": "missing_tool", "arguments": {"value": "alpha"}}],
+            "response_payload": {"content": "tool preface"},
+            "synthetic_tool_calls_used": False,
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": None,
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "summary_payload": {
+                "stable_preferences": ["reply in Chinese"],
+                "stable_facts": ["old fact"],
+                "open_loops": ["stale loop"],
+                "recent_actions": ["stale action"],
+                "narrative": "Old model summary.",
+            },
+            "summary_model_key": "summary-model",
+            "tool_names": [],
+            "user_input": {"content": "follow up", "metadata": {}},
+        },
+        runtime=runtime,
+    )
+
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
+    assert result["summary_payload"] == {"fallback": "heuristic"}
+    assert result["summary_model_key"] == ""

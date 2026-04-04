@@ -68,9 +68,7 @@ async def test_summarize_frontdoor_history_falls_back_to_heuristic_compaction() 
         model_invoke=_boom,
     )
 
-    assert result.summary_payload["fallback"] == "heuristic"
-    assert result.summary_payload["stable_preferences"] == ["reply in Chinese"]
-    assert result.summary_payload["stable_facts"] == ["project root is D:/NewProjects/G3KU"]
+    assert result.summary_payload == {"fallback": "heuristic"}
     assert "frontdoor-history-summary" in str(result.summary_text)
     assert [item["content"] for item in result.messages[-4:]] == [f"message {idx}" for idx in range(6, 10)]
     assert result.summary_model_key == ""
@@ -251,12 +249,40 @@ async def test_summarize_frontdoor_history_malformed_model_output_falls_back_heu
         model_invoke=_bad_model,
     )
 
-    assert result.summary_payload["fallback"] == "heuristic"
-    assert result.summary_payload["stable_preferences"] == ["reply in Chinese"]
-    assert result.summary_payload["stable_facts"] == ["project root is D:/NewProjects/G3KU"]
+    assert result.summary_payload == {"fallback": "heuristic"}
     assert [item["content"] for item in result.messages[-4:]] == [f"message {idx}" for idx in range(6, 10)]
     assert result.summary_model_key == ""
     assert result.summary_version == int(heuristic_state["summary_version"])
+
+
+@pytest.mark.asyncio
+async def test_summarize_frontdoor_history_fallback_clears_stale_structured_payload() -> None:
+    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(10)]
+    previous_summary_payload = {
+        "stable_preferences": ["reply in Chinese"],
+        "stable_facts": ["project root is D:/NewProjects/G3KU"],
+        "open_loops": ["finish migration"],
+        "recent_actions": ["reviewed ceo frontdoor"],
+        "narrative": "Old model summary.",
+    }
+
+    async def _boom(prompt: dict[str, object]) -> dict[str, object]:
+        _ = prompt
+        raise RuntimeError("summary model unavailable")
+
+    result = await summarize_frontdoor_history(
+        messages=messages,
+        previous_summary_text="## CEO Durable Summary [frontdoor-history-summary]",
+        previous_summary_payload=previous_summary_payload,
+        keep_message_count=4,
+        trigger_message_count=6,
+        model_key="summary-model",
+        model_invoke=_boom,
+    )
+
+    assert result.summary_payload == {"fallback": "heuristic"}
+    assert result.summary_model_key == ""
+    assert "frontdoor-history-summary" in str(result.summary_text)
 
 
 @pytest.mark.asyncio

@@ -77,12 +77,10 @@ def _heuristic_fallback_result(
         summary_trigger_message_count=max(1, int(trigger_message_count)),
     )
     state = frontdoor_summary_state(compacted)
-    summary_payload = dict(previous_summary_payload or {})
-    summary_payload["fallback"] = "heuristic"
     return CeoSummaryResult(
         messages=compacted,
         summary_text=str(state.get("summary_text") or ""),
-        summary_payload=summary_payload,
+        summary_payload={"fallback": "heuristic"},
         summary_version=int(state.get("summary_version") or 1),
         summary_model_key="",
     )
