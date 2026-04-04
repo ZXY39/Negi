@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -89,11 +89,7 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
         super().__init__()
         self._runner = runner
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
+    def _prepare_request_and_update(self, request: ModelRequest) -> tuple[ModelRequest, dict[str, Any]]:
         prompt_context = self._runner.build_prompt_context(
             state=request.state,
             runtime=request.runtime,
@@ -134,11 +130,13 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
             overlay_text=overlay_text,
             overlay_section_count=len([section for section in overlay_text.split("\n\n") if section.strip()]),
         )
-        response = handler(request.override(system_message=system_message))
-        update = {
+        return request.override(system_message=system_message), {
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
         }
+
+    @staticmethod
+    def _wrap_response(response: ModelResponse | ExtendedModelResponse, update: dict[str, Any]) -> ExtendedModelResponse:
         if isinstance(response, ExtendedModelResponse):
             existing_update = dict(getattr(getattr(response, "command", None), "update", {}) or {})
             return ExtendedModelResponse(
@@ -149,6 +147,24 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
             model_response=response,
             command=Command(update=update),
         )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        updated_request, update = self._prepare_request_and_update(request)
+        response = handler(updated_request)
+        return self._wrap_response(response, update)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        updated_request, update = self._prepare_request_and_update(request)
+        response = await handler(updated_request)
+        return self._wrap_response(response, update)
 
 
 class CeoToolExposureMiddleware(AgentMiddleware):
@@ -163,3 +179,11 @@ class CeoToolExposureMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         tools = self._runner.visible_langchain_tools(state=request.state, runtime=request.runtime)
         return handler(request.override(tools=tools))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        tools = self._runner.visible_langchain_tools(state=request.state, runtime=request.runtime)
+        return await handler(request.override(tools=tools))

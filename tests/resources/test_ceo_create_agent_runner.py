@@ -246,7 +246,8 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
     assert [item.interrupt_id for item in exc_info.value.interrupts] == ["interrupt-2"]
 
 
-def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_real_request_shape(
+@pytest.mark.asyncio
+async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_real_request_shape(
     monkeypatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -277,7 +278,7 @@ def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_re
     runner.visible_langchain_tools = lambda **kwargs: [exposed_tool_schema]
     seen_request: dict[str, object] = {}
 
-    def _terminal_handler(request):
+    async def _terminal_handler(request):
         seen_request["system_message"] = request.system_message
         seen_request["tools"] = list(request.tools or [])
         return ModelResponse(result=[AIMessage(content="ok")])
@@ -286,12 +287,12 @@ def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_re
     for middleware in reversed(runner._middleware()):
         previous_handler = handler
 
-        def _wrap(request, handler=previous_handler, middleware=middleware):
-            return middleware.wrap_model_call(request, handler)
+        async def _wrap(request, handler=previous_handler, middleware=middleware):
+            return await middleware.awrap_model_call(request, handler)
 
         handler = _wrap
 
-    response = handler(
+    response = await handler(
         ModelRequest(
             model=SimpleNamespace(),
             system_message=SystemMessage(content="You are the CEO frontdoor agent."),
@@ -357,6 +358,51 @@ def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_re
 
 
 @pytest.mark.asyncio
+async def test_create_agent_runner_preserves_full_tool_call_payloads_when_approval_request_is_subset() -> None:
+    class _InterruptingAgent:
+        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
+            _ = payload, config, context, version
+            return _FakeGraphOutput(
+                value={
+                    "approval_request": {
+                        "kind": "frontdoor_tool_approval",
+                        "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
+                    },
+                },
+                interrupts=(
+                    SimpleNamespace(
+                        id="interrupt-1",
+                        value={
+                            "kind": "frontdoor_tool_approval",
+                            "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
+                            "tool_call_payloads": [
+                                {"name": "create_async_task", "arguments": {"task": "demo"}},
+                                {"name": "memory_write", "arguments": {"content": "persist this"}},
+                            ],
+                        },
+                    ),
+                ),
+            )
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
+    )
+    runner._agent = _InterruptingAgent()
+
+    with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
+        await runner.run_turn(
+            user_input=SimpleNamespace(content="create a task", metadata={}),
+            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+            on_progress=None,
+        )
+
+    assert exc_info.value.values["tool_call_payloads"] == [
+        {"name": "create_async_task", "arguments": {"task": "demo"}},
+        {"name": "memory_write", "arguments": {"content": "persist this"}},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_create_agent_runner_keeps_pending_interrupt_contract_coherent() -> None:
     class _InterruptingAgent:
         async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
@@ -406,6 +452,54 @@ async def test_create_agent_runner_keeps_pending_interrupt_contract_coherent() -
             "stable_prompt_signature": "sig-1",
             "tool_signature_count": 1,
         },
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_preserves_full_tool_call_payload_batch_from_interrupt_state() -> None:
+    subset_payloads = [{"id": "call-1", "name": "message", "arguments": {"content": "safe subset"}}]
+    full_payloads = subset_payloads + [
+        {"id": "call-2", "name": "create_async_task", "arguments": {"task": "risky full batch"}}
+    ]
+
+    class _InterruptingAgent:
+        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
+            _ = payload, config, context, version
+            return _FakeGraphOutput(
+                value={"prompt_cache_key": "cache-key"},
+                interrupts=(
+                    SimpleNamespace(
+                        id="interrupt-1",
+                        value={
+                            "approval_request": {
+                                "kind": "frontdoor_tool_approval",
+                                "tool_calls": subset_payloads,
+                            },
+                            "tool_call_payloads": full_payloads,
+                        },
+                    ),
+                ),
+            )
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
+    )
+    runner._agent = _InterruptingAgent()
+
+    with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
+        await runner.run_turn(
+            user_input=SimpleNamespace(content="create a task", metadata={}),
+            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+            on_progress=None,
+        )
+
+    assert exc_info.value.values == {
+        "approval_request": {
+            "kind": "frontdoor_tool_approval",
+            "tool_calls": subset_payloads,
+        },
+        "tool_call_payloads": full_payloads,
+        "prompt_cache_key": "cache-key",
     }
 
 

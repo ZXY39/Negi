@@ -97,14 +97,28 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
             values = {}
         if interrupts:
             first_interrupt_value = interrupts[0].value if interrupts else None
+            interrupt_state = first_interrupt_value if isinstance(first_interrupt_value, dict) else {}
+            interrupt_approval_request = interrupt_state.get("approval_request")
             if not isinstance(values.get("approval_request"), dict) and isinstance(first_interrupt_value, dict):
-                values["approval_request"] = dict(first_interrupt_value)
+                if isinstance(interrupt_approval_request, dict):
+                    values["approval_request"] = dict(interrupt_approval_request)
+                else:
+                    values["approval_request"] = dict(first_interrupt_value)
             if not list(values.get("tool_call_payloads") or []):
-                approval_request = values.get("approval_request")
-                if isinstance(approval_request, dict):
-                    tool_call_payloads = list(approval_request.get("tool_calls") or [])
-                    if tool_call_payloads:
-                        values["tool_call_payloads"] = tool_call_payloads
+                interrupt_payloads = list(interrupt_state.get("tool_call_payloads") or [])
+                if interrupt_payloads:
+                    values["tool_call_payloads"] = interrupt_payloads
+                if not list(values.get("tool_call_payloads") or []):
+                    if isinstance(interrupt_approval_request, dict):
+                        interrupt_tool_calls = list(interrupt_approval_request.get("tool_calls") or [])
+                        if interrupt_tool_calls:
+                            values["tool_call_payloads"] = interrupt_tool_calls
+                if not list(values.get("tool_call_payloads") or []):
+                    approval_request = values.get("approval_request")
+                    if isinstance(approval_request, dict):
+                        tool_call_payloads = list(approval_request.get("tool_calls") or [])
+                        if tool_call_payloads:
+                            values["tool_call_payloads"] = tool_call_payloads
             raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
         return values
 
