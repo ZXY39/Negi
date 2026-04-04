@@ -240,6 +240,17 @@ class TaskQueryService:
             else {}
         )
         execution_trace_ref = str(payload.get('execution_trace_ref') or detail_record.execution_trace_ref or '').strip()
+        if not execution_trace_ref and runtime_node is not None:
+            refreshed = self._log_service.sync_node_read_model(task.task_id, node_id, externalize_execution_trace=True)
+            if refreshed is not None:
+                detail_record = refreshed
+                payload = dict(detail_record.payload or {})
+                execution_trace_summary = (
+                    dict(payload.get('execution_trace_summary') or {})
+                    if isinstance(payload.get('execution_trace_summary'), dict)
+                    else {}
+                )
+                execution_trace_ref = str(payload.get('execution_trace_ref') or detail_record.execution_trace_ref or '').strip()
         execution_trace = {}
         if normalized_detail_level == 'full':
             execution_trace = self._resolve_execution_trace(

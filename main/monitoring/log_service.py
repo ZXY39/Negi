@@ -1923,23 +1923,67 @@ class TaskLogService:
             except Exception:
                 continue
 
-    def sync_task_read_models(self, task_id: str) -> TaskRecord | None:
+    def sync_task_read_models(self, task_id: str, *, externalize_execution_trace: bool = True) -> TaskRecord | None:
         with self._task_lock(task_id):
             task = self._store.get_task(task_id)
             if task is None:
                 return None
+            preserved_execution_trace_refs: dict[str, str] = {}
+            if not externalize_execution_trace:
+                preserved_execution_trace_refs = {
+                    str(record.node_id or '').strip(): str(record.execution_trace_ref or '').strip()
+                    for record in list(self._store.list_task_node_details(task_id) or [])
+                    if str(record.node_id or '').strip()
+                }
             for node in list(self._store.list_nodes(task_id) or []):
-                self._sync_node_read_models_locked(node)
+                self._sync_node_read_models_locked(
+                    node,
+                    externalize_execution_trace=externalize_execution_trace,
+                    preserved_execution_trace_ref=preserved_execution_trace_refs.get(str(node.node_id or '').strip(), ''),
+                )
                 self._sync_task_node_rounds_locked(node)
             self.refresh_task_view(task_id, mark_unread=False)
             if self._store.get_task_runtime_meta(task.task_id) is None:
                 self.update_task_runtime_meta(task.task_id, last_stall_notice_bucket_minutes=0)
             return self._store.get_task(task_id)
 
-    def _sync_node_read_models_locked(self, node: NodeRecord) -> None:
+    def sync_node_read_model(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        externalize_execution_trace: bool = True,
+    ) -> TaskProjectionNodeDetailRecord | None:
+        with self._task_lock(task_id):
+            node = self._store.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
+                return None
+            preserved_execution_trace_ref = ''
+            if not externalize_execution_trace:
+                current = self._store.get_task_node_detail(node_id)
+                preserved_execution_trace_ref = str(getattr(current, 'execution_trace_ref', '') or '').strip()
+            self._sync_node_read_models_locked(
+                node,
+                externalize_execution_trace=externalize_execution_trace,
+                preserved_execution_trace_ref=preserved_execution_trace_ref,
+            )
+            self._sync_task_node_rounds_locked(node)
+            return self._store.get_task_node_detail(node_id)
+
+    def _sync_node_read_models_locked(
+        self,
+        node: NodeRecord,
+        *,
+        externalize_execution_trace: bool = True,
+        preserved_execution_trace_ref: str = '',
+    ) -> None:
         self._projector.sync_node(
             self._task_projection_node_record(node),
-            self._task_projection_node_detail_record(node),
+            self._task_projection_node_detail_record(
+                node,
+                externalize_execution_trace=externalize_execution_trace,
+                preserved_execution_trace_ref=preserved_execution_trace_ref,
+            ),
         )
 
     def _sync_task_node_rounds_locked(self, node: NodeRecord) -> None:
@@ -2048,12 +2092,20 @@ class TaskLogService:
             },
         )
 
-    def _task_projection_node_detail_record(self, node: NodeRecord) -> TaskProjectionNodeDetailRecord:
+    def _task_projection_node_detail_record(
+        self,
+        node: NodeRecord,
+        *,
+        externalize_execution_trace: bool = True,
+        preserved_execution_trace_ref: str = '',
+    ) -> TaskProjectionNodeDetailRecord:
         prompt_summary = _single_line_text(node.prompt or node.goal or '', max_chars=400)
         tool_file_changes = normalize_tool_file_changes((node.metadata or {}).get('tool_file_changes'))
         execution_trace = self._projection_execution_trace(node)
         execution_trace_summary = self._execution_trace_summary(execution_trace)
-        execution_trace_ref = self._externalize_execution_trace(node, execution_trace)
+        execution_trace_ref = str(preserved_execution_trace_ref or '').strip()
+        if externalize_execution_trace:
+            execution_trace_ref = self._externalize_execution_trace(node, execution_trace)
         return TaskProjectionNodeDetailRecord(
             node_id=node.node_id,
             task_id=node.task_id,

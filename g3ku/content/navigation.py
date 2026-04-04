@@ -819,7 +819,7 @@ class ContentNavigationService:
         artifact = None
         if self._artifact_store is not None:
             create_singleton = getattr(self._artifact_store, "create_or_replace_singleton_text_artifact", None)
-            if source_kind == "task_runtime_messages" and callable(create_singleton):
+            if source_kind in {"task_runtime_messages", "task_execution_trace"} and callable(create_singleton):
                 artifact = create_singleton(
                     task_id=_runtime_task_id(runtime),
                     node_id=_runtime_node_id(runtime),

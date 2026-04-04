@@ -1652,6 +1652,44 @@ def test_content_navigation_uses_singleton_runtime_frame_message_artifact(tmp_pa
     store.close()
 
 
+def test_content_navigation_uses_singleton_execution_trace_artifact(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+
+    first = navigator.maybe_externalize_text(
+        json.dumps({'stage': 'first'}, ensure_ascii=False, indent=2),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='execution-trace:node:test',
+        source_kind='task_execution_trace',
+        force=True,
+    )
+    second = navigator.maybe_externalize_text(
+        json.dumps({'stage': 'second'}, ensure_ascii=False, indent=2),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='execution-trace:node:test',
+        source_kind='task_execution_trace',
+        force=True,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.ref == second.ref
+    artifacts = [
+        item
+        for item in store.list_artifacts('task:test')
+        if item.kind == 'task_execution_trace' and item.node_id == 'node:test'
+    ]
+    assert len(artifacts) == 1
+    assert 'second' in Path(artifacts[0].path).read_text(encoding='utf-8')
+
+    store.close()
+
+
 def test_prepare_messages_for_model_uses_compact_content_refs(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)

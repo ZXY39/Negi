@@ -457,7 +457,7 @@ class MainRuntimeService:
                 pass
         if self.execution_mode in {'embedded', 'worker'}:
             for task in self.store.list_tasks():
-                self.log_service.sync_task_read_models(task.task_id)
+                self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
                 if task.status != 'in_progress':
                     continue
                 if bool(task.is_paused) or bool(task.pause_requested):

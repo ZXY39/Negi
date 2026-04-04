@@ -3276,6 +3276,90 @@ def test_get_node_detail_payload_uses_summary_mode_and_execution_trace_ref(tmp_p
     assert "execution_trace" not in payload["item"]
 
 
+@pytest.mark.asyncio
+async def test_worker_startup_reuses_existing_execution_trace_refs_without_reexternalizing(tmp_path: Path, monkeypatch):
+    seed_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-seed",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    worker_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-worker",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+
+    try:
+        record = await _create_web_task(seed_service)
+        detail_before = seed_service.store.get_task_node_detail(record.root_node_id)
+        assert detail_before is not None
+        assert detail_before.execution_trace_ref.startswith("artifact:")
+
+        async def _noop_enqueue(_task_id: str) -> None:
+            return None
+
+        def _forbid_externalize(*args, **kwargs):
+            raise AssertionError("startup should not re-externalize execution traces")
+
+        worker_service.global_scheduler.enqueue_task = _noop_enqueue
+        worker_service._start_worker_loops = lambda: None
+        worker_service.task_stall_notifier.bootstrap_running_tasks = lambda: None
+        monkeypatch.setattr(worker_service.content_store, "maybe_externalize_text", _forbid_externalize)
+
+        await worker_service.startup()
+
+        detail_after = worker_service.store.get_task_node_detail(record.root_node_id)
+        assert detail_after is not None
+        assert detail_after.execution_trace_ref == detail_before.execution_trace_ref
+    finally:
+        await worker_service.close()
+        await seed_service.close()
+
+
+def test_get_node_detail_payload_rebuilds_missing_execution_trace_ref_on_demand(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    detail_before = service.store.get_task_node_detail(record.root_node_id)
+
+    assert detail_before is not None
+    assert detail_before.execution_trace_ref.startswith("artifact:")
+
+    blank_payload = {
+        **dict(detail_before.payload or {}),
+        "execution_trace_ref": "",
+    }
+    service.store.upsert_task_node_detail(
+        detail_before.model_copy(
+            update={
+                "execution_trace_ref": "",
+                "payload": blank_payload,
+            }
+        )
+    )
+
+    payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert payload is not None
+    assert payload["item"]["execution_trace_ref"].startswith("artifact:")
+    detail_after = service.store.get_task_node_detail(record.root_node_id)
+    assert detail_after is not None
+    assert detail_after.execution_trace_ref.startswith("artifact:")
+
+
 def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inline_text(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
