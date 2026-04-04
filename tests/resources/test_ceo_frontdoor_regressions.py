@@ -508,7 +508,7 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
     async def _fake_sleep(delay: float) -> None:
         sleep_calls.append(float(delay))
 
-    monkeypatch.setattr('g3ku.runtime.frontdoor.ceo_runner.asyncio.sleep', _fake_sleep)
+    monkeypatch.setattr("g3ku.runtime.frontdoor._ceo_langgraph_impl.asyncio.sleep", _fake_sleep)
 
     backend = _BackendRecorder(
         [

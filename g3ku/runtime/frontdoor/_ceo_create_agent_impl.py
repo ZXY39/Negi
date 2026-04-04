@@ -96,6 +96,15 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
         if not isinstance(values, dict):
             values = {}
         if interrupts:
+            first_interrupt_value = interrupts[0].value if interrupts else None
+            if not isinstance(values.get("approval_request"), dict) and isinstance(first_interrupt_value, dict):
+                values["approval_request"] = dict(first_interrupt_value)
+            if not list(values.get("tool_call_payloads") or []):
+                approval_request = values.get("approval_request")
+                if isinstance(approval_request, dict):
+                    tool_call_payloads = list(approval_request.get("tool_calls") or [])
+                    if tool_call_payloads:
+                        values["tool_call_payloads"] = tool_call_payloads
             raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
         return values
 
