@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from g3ku.config.schema import ManagedModelConfig
-from g3ku.llm_config.models import ProviderConfigDraft
+from g3ku.llm_config.facade import LLMConfigFacade
+from g3ku.llm_config.models import ModelBindingDraft, ProviderConfigDraft
 from g3ku.llm_config.normalization import normalize_draft
 from g3ku.llm_config.template_registry import TemplateRegistry
+import pytest
 
 
 def test_managed_model_config_accepts_multiple_api_keys() -> None:
@@ -57,3 +59,40 @@ def test_api_key_field_help_mentions_multiple_keys() -> None:
 
     assert "comma-separated" in str(api_key_field.help or "")
     assert "retry_count" in str(api_key_field.help or "")
+
+
+def test_managed_model_config_accepts_per_key_concurrency_limit_arrays() -> None:
+    config = ManagedModelConfig(
+        key="primary",
+        provider_model="openai:gpt-4.1",
+        api_key="key-1,key-2",
+        single_api_key_max_concurrency=[3, 5],
+    )
+
+    assert config.single_api_key_max_concurrency == [3, 5]
+
+
+def test_model_binding_draft_accepts_per_key_concurrency_limit_arrays() -> None:
+    draft = ModelBindingDraft(
+        key="primary",
+        config_id="cfg-1",
+        single_api_key_max_concurrency=[3, 5, 7],
+    )
+
+    assert draft.single_api_key_max_concurrency == [3, 5, 7]
+
+
+def test_binding_api_key_limits_reject_mismatched_array_length() -> None:
+    with pytest.raises(ValueError, match="expects 3 entries"):
+        LLMConfigFacade._validate_binding_api_key_limits(
+            api_key="key-1,key-2,key-3",
+            value=[3, 5],
+        )
+
+
+def test_binding_api_key_limits_reject_all_zero_arrays() -> None:
+    with pytest.raises(ValueError, match="leave at least one API key enabled"):
+        LLMConfigFacade._validate_binding_api_key_limits(
+            api_key="key-1,key-2",
+            value=[0, 0],
+        )

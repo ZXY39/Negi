@@ -7,6 +7,7 @@ from g3ku.config.loader import load_config, save_config
 from g3ku.config.schema import Config
 from g3ku.llm_config.enums import AuthMode, Capability
 from g3ku.llm_config.facade import LLMConfigFacade
+from g3ku.utils.api_keys import SingleAPIKeyMaxConcurrency, normalize_single_api_key_max_concurrency
 
 VALID_SCOPES = ("ceo", "execution", "inspection")
 _UNSET = object()
@@ -100,6 +101,9 @@ class ModelManager:
     def probe_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.facade.probe_draft(payload)
 
+    async def probe_max_concurrency_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.facade.probe_max_concurrency_draft(payload)
+
     def list_models(self) -> list[dict[str, Any]]:
         items = self.facade.list_bindings(self.config)
         for item in items:
@@ -121,7 +125,7 @@ class ModelManager:
         reasoning_effort: str | None = None,
         retry_on: list[str] | None = None,
         retry_count: int | None = None,
-        single_api_key_max_concurrency: int | None = None,
+        single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None,
         description: str = "",
     ) -> dict[str, Any]:
         clean_key = str(key or "").strip()
@@ -147,7 +151,7 @@ class ModelManager:
                 "description": str(description or "").strip(),
                 "retry_on": list(retry_on or ["network", "429", "5xx"]),
                 "retry_count": 0 if retry_count is None else int(retry_count),
-                "single_api_key_max_concurrency": None if single_api_key_max_concurrency is None else int(single_api_key_max_concurrency),
+                "single_api_key_max_concurrency": normalize_single_api_key_max_concurrency(single_api_key_max_concurrency),
             },
         )
         for scope in scopes or []:
@@ -169,7 +173,7 @@ class ModelManager:
         reasoning_effort: str | None | object = _UNSET,
         retry_on: list[str] | None | object = _UNSET,
         retry_count: int | None | object = _UNSET,
-        single_api_key_max_concurrency: int | None | object = _UNSET,
+        single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency | object = _UNSET,
         description: str | None | object = _UNSET,
     ) -> dict[str, Any]:
         item = self._require_model(key)
@@ -201,9 +205,7 @@ class ModelManager:
         if retry_count is not _UNSET:
             item.retry_count = int(retry_count)
         if single_api_key_max_concurrency is not _UNSET:
-            item.single_api_key_max_concurrency = (
-                None if single_api_key_max_concurrency in (None, "") else max(1, int(single_api_key_max_concurrency))
-            )
+            item.single_api_key_max_concurrency = normalize_single_api_key_max_concurrency(single_api_key_max_concurrency)
         if description is not _UNSET:
             item.description = str(description).strip()
         self._revalidate()

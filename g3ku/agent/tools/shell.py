@@ -80,8 +80,8 @@ class ExecTool(Tool):
     
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
-        cwd = self._resolve_cwd(working_dir)
-        policy_error = self._enforce_command_path_policy(command, cwd)
+        cwd = self._resolve_cwd(working_dir, runtime=runtime)
+        policy_error = self._enforce_command_path_policy(command, cwd, runtime=runtime)
         if policy_error:
             return self._build_payload(
                 status="error",
@@ -180,9 +180,9 @@ class ExecTool(Tool):
         finally:
             self._notify_resource_change(resource_state, runtime=runtime, trigger="tool:exec")
 
-    def _enforce_command_path_policy(self, command: str, cwd: str) -> str | None:
+    def _enforce_command_path_policy(self, command: str, cwd: str, *, runtime: dict[str, Any] | None = None) -> str | None:
         workspace_root = self._workspace_root()
-        temp_root = self._temp_root()
+        temp_root = self._canonical_temp_root(runtime)
         externaltools_root = self._externaltools_root()
         tools_root = self._tools_root()
         cwd_path = Path(cwd).expanduser().resolve()
@@ -246,7 +246,7 @@ class ExecTool(Tool):
                 f"Error: tools/ is registration-only. Download, extract, and install real third-party tool payloads under {externaltools_root} instead."
             )
 
-        if self._has_managed_target(command):
+        if self._has_managed_target(command, temp_root=temp_root):
             return None
 
         if self._is_within_workspace(cwd_path, temp_root) or self._is_within_workspace(cwd_path, externaltools_root):
@@ -297,11 +297,16 @@ class ExecTool(Tool):
 
     def _build_subprocess_env(self, *, runtime: dict[str, Any], cwd: str) -> dict[str, str]:
         env = os.environ.copy()
-        temp_dir = str(self._temp_root())
+        temp_dir = str(self._canonical_temp_root(runtime))
         externaltools_dir = str(self._externaltools_root())
         Path(temp_dir).mkdir(parents=True, exist_ok=True)
         Path(externaltools_dir).mkdir(parents=True, exist_ok=True)
-        runtime_temp_dir = str(runtime.get("temp_dir") or env.get("G3KU_TMP_DIR") or "").strip()
+        runtime_temp_dir = str(
+            self._runtime_task_temp_root(runtime)
+            or runtime.get("temp_dir")
+            or env.get("G3KU_TMP_DIR")
+            or ""
+        ).strip()
         if runtime_temp_dir:
             env["G3KU_RUNTIME_TEMP_DIR"] = runtime_temp_dir
         env["G3KU_TMP_DIR"] = temp_dir
@@ -324,8 +329,12 @@ class ExecTool(Tool):
             path_append=self.path_append,
         )
 
-    def _resolve_cwd(self, working_dir: str | None) -> str:
+    def _resolve_cwd(self, working_dir: str | None, *, runtime: dict[str, Any] | None = None) -> str:
         if not working_dir:
+            task_temp_root = self._runtime_task_temp_root(runtime)
+            if task_temp_root is not None:
+                task_temp_root.mkdir(parents=True, exist_ok=True)
+                return str(task_temp_root)
             return self.working_dir or os.getcwd()
         return str(Path(working_dir).expanduser())
 
@@ -358,6 +367,22 @@ class ExecTool(Tool):
         if configured:
             return Path(configured).expanduser().resolve()
         return self._workspace_root() / "temp"
+
+    def _runtime_task_temp_root(self, runtime: dict[str, Any] | None = None) -> Path | None:
+        payload = runtime if isinstance(runtime, dict) else {}
+        raw = str(payload.get("task_temp_dir") or "").strip()
+        if not raw:
+            return None
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except Exception:
+            return None
+        if not self._is_within_workspace(resolved, self._workspace_root()):
+            return None
+        return resolved
+
+    def _canonical_temp_root(self, runtime: dict[str, Any] | None = None) -> Path:
+        return self._runtime_task_temp_root(runtime) or self._temp_root()
 
     def _externaltools_root(self) -> Path:
         configured = str(self.externaltools_root or "").strip()
@@ -447,11 +472,12 @@ class ExecTool(Tool):
         )
 
     @staticmethod
-    def _mentions_managed_target_token(normalized_command: str) -> bool:
-        return bool(
-            re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?temp(?:\\|$)", normalized_command)
-            or re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?externaltools(?:\\|$)", normalized_command)
-        )
+    def _mentions_relative_temp_token(normalized_command: str) -> bool:
+        return bool(re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?temp(?:\\|$)", normalized_command))
+
+    @staticmethod
+    def _mentions_relative_externaltools_token(normalized_command: str) -> bool:
+        return bool(re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?externaltools(?:\\|$)", normalized_command))
 
     def _command_references_any_root(self, command: str, roots: list[Path]) -> bool:
         for raw in self._extract_absolute_paths(command):
@@ -477,11 +503,13 @@ class ExecTool(Tool):
                 return True
         return False
 
-    def _has_managed_target(self, command: str) -> bool:
+    def _has_managed_target(self, command: str, *, temp_root: Path) -> bool:
         normalized = self._normalize_command(command)
-        if self._mentions_managed_target_token(normalized):
+        if self._mentions_relative_externaltools_token(normalized):
             return True
-        return self._command_references_any_root(command, [self._temp_root(), self._externaltools_root()])
+        if temp_root == self._temp_root() and self._mentions_relative_temp_token(normalized):
+            return True
+        return self._command_references_any_root(command, [temp_root, self._externaltools_root()])
 
     @staticmethod
     def _extract_absolute_paths(command: str) -> list[str]:

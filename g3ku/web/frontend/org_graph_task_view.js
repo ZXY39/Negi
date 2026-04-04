@@ -1055,7 +1055,11 @@ function stageTraceStatus(stage) {
 
 function roundTraceStatus(round) {
     const tools = Array.isArray(round?.tools) ? round.tools : [];
-    return buildLiveSectionStatus(tools);
+    if (!tools.length) return "info";
+    if (tools.some((item) => String(item?.status || "") === "running" || String(item?.status || "") === "queued")) {
+        return "running";
+    }
+    return "success";
 }
 
 function nodeFinalTraceStatus(node) {
@@ -1064,7 +1068,7 @@ function nodeFinalTraceStatus(node) {
     return "success";
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", open = false, bodyHtml = "", showRuntime = true }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true }) {
     return `
         <details class="interaction-step task-trace-step ${esc(status)}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
@@ -1073,7 +1077,7 @@ function renderTraceStep({ traceKey = "", title, status = "info", open = false, 
                 </span>
                 <span class="interaction-step-side">
                     ${showRuntime ? '<span class="task-trace-runtime" hidden></span>' : ''}
-                    <span class="interaction-step-status">${esc(traceStatusLabel(status))}</span>
+                    <span class="interaction-step-status">${esc(String(statusLabel || "").trim() || traceStatusLabel(status))}</span>
                 </span>
             </summary>
             <div class="task-trace-body">${bodyHtml}</div>
@@ -1145,6 +1149,7 @@ function renderExecutionStageRounds(stage) {
             traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}`,
             title: `${title}${round.created_at ? ` · ${formatCompactTime(round.created_at)}` : ""}`,
             status: roundTraceStatus(round),
+            statusLabel: displayTaskStageStatus(roundTraceStatus(round)),
             open: false,
             bodyHtml: toolDetails,
         });
@@ -1187,6 +1192,7 @@ function buildExecutionTraceSteps(trace, node) {
                 traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
                 title: formatExecutionStageTitle(stage),
                 status: stageTraceStatus(stage),
+                statusLabel: displayTaskStageStatus(stage.status),
                 open: index === trace.stages.length - 1,
                 bodyHtml: [
                     renderTraceMessage(`本阶段最大轮数为${stage.stage_total_steps || 0}`, "本阶段最大轮数为0"),
@@ -1338,7 +1344,7 @@ function traceStatusLabel(status) {
     return ({
         info: "信息",
         running: "进行中",
-        success: "完成",
+        success: "成功",
         error: "失败",
     }[String(status || "")] || "信息");
 }

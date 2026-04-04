@@ -61,17 +61,19 @@ class ModelKeyConcurrencyController:
     def model_state(self, model_ref: str) -> dict[str, Any]:
         with self._lock:
             limits = self._normalized_limits(model_ref)
-            key_count = int(limits["key_count"])
-            per_key_limit = limits["per_key_limit"]
-            running = {index: int(self._running_counts.get((model_ref, index), 0)) for index in range(key_count)}
+            key_indexes = list(limits["key_indexes"])
+            per_key_limits = dict(limits["per_key_limits"])
+            key_count = len(key_indexes)
+            running = {index: int(self._running_counts.get((model_ref, index), 0)) for index in key_indexes}
             waiting = {
                 index: int(len(self._waiters.get((model_ref, index), ()) or ()))
-                for index in range(key_count)
+                for index in key_indexes
             }
             return {
                 "model_ref": str(model_ref or "").strip(),
                 "key_count": key_count,
-                "per_key_limit": per_key_limit,
+                "per_key_limit": None if len(set(per_key_limits.values())) != 1 else next(iter(per_key_limits.values()), None),
+                "per_key_limits": per_key_limits,
                 "running": running,
                 "waiting": waiting,
             }
@@ -82,8 +84,8 @@ class ModelKeyConcurrencyController:
             return None
         with self._lock:
             limits = self._normalized_limits(normalized_model_ref)
-            for key_index in range(int(limits["key_count"])):
-                if not self._slot_has_capacity_locked(normalized_model_ref, key_index, per_key_limit=limits["per_key_limit"]):
+            for key_index in list(limits["key_indexes"]):
+                if not self._slot_has_capacity_locked(normalized_model_ref, key_index, per_key_limits=limits["per_key_limits"]):
                     continue
                 self._running_counts[(normalized_model_ref, key_index)] = int(
                     self._running_counts.get((normalized_model_ref, key_index), 0)
@@ -99,8 +101,13 @@ class ModelKeyConcurrencyController:
         future: asyncio.Future[ModelKeyPermitLease]
         with self._lock:
             limits = self._normalized_limits(normalized_model_ref)
-            bounded_key_index = min(normalized_key_index, int(limits["key_count"]) - 1)
-            if self._slot_has_capacity_locked(normalized_model_ref, bounded_key_index, per_key_limit=limits["per_key_limit"]):
+            key_indexes = list(limits["key_indexes"])
+            if not key_indexes:
+                raise ValueError(f"Model {normalized_model_ref} has no schedulable API key slots")
+            if normalized_key_index not in key_indexes:
+                raise ValueError(f"API key index {normalized_key_index} is disabled for model {normalized_model_ref}")
+            bounded_key_index = normalized_key_index
+            if self._slot_has_capacity_locked(normalized_model_ref, bounded_key_index, per_key_limits=limits["per_key_limits"]):
                 self._running_counts[(normalized_model_ref, bounded_key_index)] = int(
                     self._running_counts.get((normalized_model_ref, bounded_key_index), 0)
                 ) + 1
@@ -165,23 +172,52 @@ class ModelKeyConcurrencyController:
                 payload = {}
         raw_key_count = payload.get("key_count")
         raw_limit = payload.get("per_key_limit")
+        raw_key_indexes = payload.get("key_indexes")
+        raw_per_key_limits = payload.get("per_key_limits")
+        key_indexes: list[int] = []
+        if isinstance(raw_key_indexes, list):
+            for item in raw_key_indexes:
+                try:
+                    key_indexes.append(max(0, int(item)))
+                except Exception:
+                    continue
         try:
             key_count = max(1, int(raw_key_count or 0))
         except Exception:
             key_count = 1
-        if raw_limit in (None, ""):
-            per_key_limit = None
+        if not key_indexes:
+            key_indexes = list(range(key_count))
+        per_key_limits: dict[int, int | None] = {}
+        if isinstance(raw_per_key_limits, dict):
+            for key_index in key_indexes:
+                raw_item = raw_per_key_limits.get(key_index)
+                if raw_item is None:
+                    raw_item = raw_per_key_limits.get(str(key_index))
+                if raw_item in (None, ""):
+                    per_key_limits[key_index] = None
+                    continue
+                try:
+                    per_key_limits[key_index] = max(1, int(raw_item))
+                except Exception:
+                    per_key_limits[key_index] = None
         else:
-            try:
-                per_key_limit = max(1, int(raw_limit))
-            except Exception:
+            if raw_limit in (None, ""):
                 per_key_limit = None
+            else:
+                try:
+                    per_key_limit = max(1, int(raw_limit))
+                except Exception:
+                    per_key_limit = None
+            per_key_limits = {key_index: per_key_limit for key_index in key_indexes}
         return {
-            "key_count": key_count,
-            "per_key_limit": per_key_limit,
+            "key_indexes": key_indexes,
+            "key_count": len(key_indexes),
+            "per_key_limit": None if len(set(per_key_limits.values())) != 1 else next(iter(per_key_limits.values()), None),
+            "per_key_limits": per_key_limits,
         }
 
-    def _slot_has_capacity_locked(self, model_ref: str, key_index: int, *, per_key_limit: int | None) -> bool:
+    def _slot_has_capacity_locked(self, model_ref: str, key_index: int, *, per_key_limits: dict[int, int | None]) -> bool:
+        per_key_limit = per_key_limits.get(key_index)
         if per_key_limit is None:
             return True
         return int(self._running_counts.get((model_ref, key_index), 0)) < int(per_key_limit)
@@ -207,8 +243,10 @@ class ModelKeyConcurrencyController:
         if not waiters:
             return ready
         limits = self._normalized_limits(key[0])
-        bounded_key_index = min(key[1], int(limits["key_count"]) - 1)
-        while waiters and self._slot_has_capacity_locked(key[0], bounded_key_index, per_key_limit=limits["per_key_limit"]):
+        if key[1] not in set(limits["key_indexes"]):
+            return ready
+        bounded_key_index = key[1]
+        while waiters and self._slot_has_capacity_locked(key[0], bounded_key_index, per_key_limits=limits["per_key_limits"]):
             request = waiters.popleft()
             if request.future.cancelled():
                 continue

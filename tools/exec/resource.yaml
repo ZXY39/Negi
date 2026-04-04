@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: exec
-description: Execute shell commands with structured summaries plus content refs. Commands run in the host shell and only use an explicit working_dir when provided.
+description: Execute shell commands with structured summaries plus content refs. Commands run in the host shell and default to the task-scoped temp directory when the runtime provides `task_temp_dir`, unless an explicit working_dir is provided.
 source:
   type: ''
   url: ''
@@ -31,10 +31,10 @@ parameters:
   properties:
     command:
       type: string
-      description: Shell command to execute.
+      description: Shell command to execute. When the node runtime provides `runtime_environment.task_temp_dir`, downloads, scratch files, one-off scripts, caches, and other temporary outputs should default to that task-scoped temp directory unless the task explicitly requires another absolute path.
     working_dir:
       type: string
-      description: Optional working directory override. Provide an absolute path when you need a specific directory. If omitted, exec uses the process default cwd. When restrict_to_workspace is enabled, working_dir must stay inside the workspace.
+      description: Optional working directory override. Provide an absolute path when you need a specific directory. If omitted, exec defaults to `runtime_environment.task_temp_dir` when that runtime field is available; otherwise it falls back to the process default cwd. When restrict_to_workspace is enabled, working_dir must stay inside the workspace.
   required:
     - command
 exposure:

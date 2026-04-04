@@ -273,10 +273,17 @@ class ConfigChatBackend:
                                 break
                             raise exhausted from exc
                         raise
+                    configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
+                    if configured_api_key_indexes is None:
+                        api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
+                    else:
+                        api_key_indexes = [int(item) for item in configured_api_key_indexes]
+                    if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
+                        raise RuntimeError(f"All configured API keys are disabled for model {ref}")
                     retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
                     move_to_next_model = False
                     stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, base_target.model_id))
-                    for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count):
+                    for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count, key_indexes=api_key_indexes):
                         target = base_target
                         request_messages = list(messages or [])
                         request_message_count, request_message_chars = _message_stats(request_messages)

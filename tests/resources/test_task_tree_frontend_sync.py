@@ -766,6 +766,115 @@ def test_summary_execution_trace_defaults_running_when_stage_or_tool_lacks_compl
     assert result["toolStatus"] == "running"
 
 
+def test_render_trace_step_status_label_override_preserves_success_color() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const html = renderTraceStep({
+          title: "round",
+          status: "success",
+          statusLabel: "完成",
+          bodyHtml: "",
+          open: false,
+        });
+        const firstClass = (html.match(/task-trace-step\\s+([^\"\\s]+)/) || [null, ""])[1];
+        const firstLabel = (html.match(/interaction-step-status\">([^<]+)</) || [null, ""])[1];
+
+        console.log(JSON.stringify({
+          successLabel: traceStatusLabel("success"),
+          firstClass,
+          firstLabel,
+        }));
+        """
+    )
+
+    assert result["successLabel"] == "成功"
+    assert result["firstClass"] == "success"
+    assert result["firstLabel"] == "完成"
+
+
+def test_render_execution_stage_rounds_show_completed_round_and_tool_result_labels() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const html = renderExecutionStageRounds({
+          stage_id: "stage:test",
+          mode: "自主执行",
+          rounds: [
+            {
+              round_id: "round:1",
+              round_index: 1,
+              tools: [
+                {
+                  tool_name: "filesystem",
+                  status: "success",
+                  arguments_text: "{\\"path\\": \\".\\"}",
+                  output_text: "repo listing",
+                },
+                {
+                  tool_name: "web_fetch",
+                  status: "error",
+                  arguments_text: "{\\"url\\": \\"https://example.com\\"}",
+                  output_text: "fetch failed",
+                },
+              ],
+            },
+          ],
+        });
+        const labels = [...html.matchAll(/interaction-step-status\">([^<]+)</g)].map((match) => match[1]);
+        const classes = [...html.matchAll(/task-trace-step\\s+([^\"\\s]+)/g)].map((match) => match[1]);
+
+        console.log(JSON.stringify({
+          labels,
+          classes,
+        }));
+        """
+    )
+
+    assert result["labels"][:3] == ["完成", "成功", "失败"]
+    assert result["classes"][:3] == ["success", "success", "error"]
+
+
 def test_task_governance_view_model_marks_breathing_and_formats_history() -> None:
     result = _run_node_script(
         """

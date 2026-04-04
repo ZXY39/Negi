@@ -53,6 +53,7 @@ class NodeRunner:
         execution_max_concurrency: int | None = None,
         acceptance_max_concurrency: int | None = None,
         context_enricher=None,
+        workspace_root_getter=None,
     ) -> None:
         self._store = store
         self._log_service = log_service
@@ -74,6 +75,7 @@ class NodeRunner:
         self._parallel_child_pipelines_enabled = True
         self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
+        self._workspace_root_getter = workspace_root_getter
         self.nested_node_executor = None
         self.cancel_node_subtree_executor = None
         self.governance_child_created_observer = None
@@ -363,7 +365,7 @@ class NodeRunner:
             'prompt': str(node.prompt or ''),
             'core_requirement': core_requirement,
             'execution_policy': execution_policy.model_dump(mode='json'),
-            'runtime_environment': self._runtime_environment_payload(),
+            'runtime_environment': self._runtime_environment_payload(task=task),
         }
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             payload['execution_stage'] = self._execution_stage_payload(task=task, node=node)
@@ -428,6 +430,7 @@ class NodeRunner:
             workspace_root=self._workspace_root(),
             process_cwd=self._process_cwd(),
         )
+        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None)))
         return {
             'session_key': task.session_id,
             'task_id': task.task_id,
@@ -444,6 +447,8 @@ class NodeRunner:
             'project_path_entries': list(project_environment.get('project_path_entries') or []),
             'project_virtual_env': str(project_environment.get('project_virtual_env') or ''),
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
+            'task_temp_dir': task_temp_dir,
+            'temp_dir': task_temp_dir,
             'tool_snapshot_supplier': (
                 (lambda current_task_id=task.task_id: self._tool_snapshot_supplier(current_task_id))
                 if callable(getattr(self, '_tool_snapshot_supplier', None))
@@ -451,8 +456,12 @@ class NodeRunner:
             ),
         }
 
-    @staticmethod
-    def _workspace_root() -> Path:
+    def _workspace_root(self) -> Path:
+        getter = self._workspace_root_getter
+        if callable(getter):
+            value = getter()
+            if value is not None:
+                return Path(value).expanduser().resolve()
         return Path.cwd().expanduser().resolve()
 
     @staticmethod
@@ -481,12 +490,34 @@ class NodeRunner:
             return Path(shell).name
         return 'sh'
 
-    def _runtime_environment_payload(self) -> dict[str, Any]:
+    def _task_temp_dir(self, task_id: str | None) -> Path:
+        fallback = (self._workspace_root() / 'temp').resolve()
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return fallback
+        getter = getattr(self._log_service, 'read_task_runtime_meta', None)
+        if not callable(getter):
+            return fallback
+        try:
+            runtime_meta = dict(getter(normalized_task_id) or {})
+        except Exception:
+            return fallback
+        raw = str(runtime_meta.get('task_temp_dir') or '').strip()
+        if not raw:
+            return fallback
+        try:
+            candidate = Path(raw).expanduser().resolve(strict=False)
+        except Exception:
+            return fallback
+        return candidate if candidate.is_absolute() else fallback
+
+    def _runtime_environment_payload(self, *, task=None) -> dict[str, Any]:
         project_environment = current_project_environment(
             shell_family=self._shell_family(),
             workspace_root=self._workspace_root(),
             process_cwd=self._process_cwd(),
         )
+        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None)))
         return {
             'os_family': self._os_family(),
             'shell_family': str(project_environment.get('shell_family') or self._shell_family()),
@@ -497,18 +528,24 @@ class NodeRunner:
             'project_scripts_dir': str(project_environment.get('project_scripts_dir') or ''),
             'project_virtual_env': str(project_environment.get('project_virtual_env') or ''),
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
+            'task_temp_dir': task_temp_dir,
             'path_policy': {
                 'relative_paths_bind_to_workspace': False,
                 'filesystem_requires_absolute_path': True,
                 'content_requires_absolute_path': True,
-                'exec_default_working_dir': 'process_cwd',
+                'exec_default_working_dir': 'task_temp_dir',
                 'exec_requires_explicit_working_dir_for_target_dir': True,
             },
             'tool_guidance': {
-                'filesystem': '使用绝对路径。需要递归搜索目录时，优先使用 filesystem.search。',
+                'filesystem': (
+                    '使用绝对路径。默认把新建脚本、抓取结果、缓存、调试输出和其他中间文件写到 '
+                    'runtime_environment.task_temp_dir；只有为了满足任务要求且只能写到其他目录时才允许例外。'
+                    '需要递归搜索目录时，优先使用 filesystem.search。'
+                ),
                 'content': '单个内容体优先用 ref 导航或绝对文件路径；不要把它当成目录搜索工具。',
                 'exec': (
                     'Windows 上的 exec 运行在 PowerShell 中，其他系统运行在宿主 shell 中。'
+                    '未传 working_dir 时，默认在 runtime_environment.task_temp_dir 执行，并优先把所有中间文件写到该目录。'
                     '它会继承当前 G3KU 进程使用的同一套 Python 环境，并把该解释器注入 PATH。'
                     '不要假设 bash heredoc、rg 或 `true` 这类 Unix shell 内建一定可用。'
                     '需要特定目录时，显式传入 working_dir。'

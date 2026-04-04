@@ -8,7 +8,7 @@ from loguru import logger
 
 from g3ku.config.schema import Config
 from g3ku.providers.base import LLMProvider, LLMResponse
-from g3ku.utils.api_keys import iter_api_key_retry_slots
+from g3ku.utils.api_keys import APIKeyConfigurationError, iter_api_key_retry_slots
 
 PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting the configured fallback chain."
 RETRYABLE_MODEL_CHAIN_MAX_ROUNDS = 10
@@ -128,6 +128,8 @@ def should_rotate_api_key_error(error: Exception | str, retry_on: list[str] | No
 
 
 def should_fallback_model_error(error: Exception | str) -> bool:
+    if isinstance(error, APIKeyConfigurationError):
+        return False
     return not is_internal_runtime_model_error(error)
 
 
@@ -243,6 +245,13 @@ class FallbackProvider(LLMProvider):
                             break
                         raise exhausted from exc
                     raise
+                configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
+                if configured_api_key_indexes is None:
+                    api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
+                else:
+                    api_key_indexes = [int(item) for item in configured_api_key_indexes]
+                if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
+                    raise APIKeyConfigurationError(f"All configured API keys are disabled for model {model_key}")
 
                 target_parameters = dict(getattr(base_target, "model_parameters", {}) or {})
                 if target_parameters.get("max_tokens") is None and getattr(base_target, "max_tokens_limit", None) is not None:
@@ -273,7 +282,7 @@ class FallbackProvider(LLMProvider):
                 retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
                 move_to_next_model = False
 
-                for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count):
+                for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count, key_indexes=api_key_indexes):
                     target = base_target
                     try:
                         target = base_target if slot.attempt_number == 1 else build_provider_from_model_key(
@@ -307,7 +316,7 @@ class FallbackProvider(LLMProvider):
                                 model_key,
                                 slot.round_index + 1,
                                 slot.round_count,
-                                slot.key_index + 1,
+                                slot.key_position + 1,
                                 slot.key_count,
                                 exc,
                             )
@@ -318,7 +327,7 @@ class FallbackProvider(LLMProvider):
                                 model_key,
                                 slot.round_index + 1,
                                 slot.round_count,
-                                slot.key_index + 1,
+                                slot.key_position + 1,
                                 slot.key_count,
                                 exc,
                             )
@@ -357,7 +366,7 @@ class FallbackProvider(LLMProvider):
                                 model_key,
                                 slot.round_index + 1,
                                 slot.round_count,
-                                slot.key_index + 1,
+                                slot.key_position + 1,
                                 slot.key_count,
                                 response.content or response.finish_reason,
                             )
@@ -368,7 +377,7 @@ class FallbackProvider(LLMProvider):
                                 model_key,
                                 slot.round_index + 1,
                                 slot.round_count,
-                                slot.key_index + 1,
+                                slot.key_position + 1,
                                 slot.key_count,
                                 response.content or response.finish_reason,
                             )

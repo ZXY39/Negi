@@ -89,7 +89,7 @@ class _RetryableChainThenSuccessProvider:
         raise RuntimeError("HTTP 502: upstream request failed")
 
 
-def _target(*, provider, retry_count: int, api_key_count: int) -> ProviderTarget:
+def _target(*, provider, retry_count: int, api_key_count: int, api_key_indexes: list[int] | None = None) -> ProviderTarget:
     return ProviderTarget(
         provider_ref="primary",
         provider_id="custom",
@@ -98,6 +98,7 @@ def _target(*, provider, retry_count: int, api_key_count: int) -> ProviderTarget
         retry_on=["network", "429", "5xx"],
         retry_count=retry_count,
         api_key_count=api_key_count,
+        api_key_indexes=list(range(api_key_count)) if api_key_indexes is None else api_key_indexes,
     )
 
 
@@ -178,6 +179,51 @@ async def test_config_chat_backend_does_not_rotate_on_bad_request(monkeypatch) -
         )
 
     assert calls == [0]
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_skips_disabled_api_keys_in_rotation(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, model_key
+        key_index = int(api_key_index or 0)
+        provider = _AuthThenSuccessProvider(key_index, calls, succeed=key_index == 1)
+        return _target(provider=provider, retry_count=0, api_key_count=3, api_key_indexes=[0, 1])
+
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary"],
+    )
+
+    assert response.content == "ok"
+    assert calls == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_rejects_when_all_api_keys_disabled(monkeypatch) -> None:
+    class _UnexpectedProvider:
+        async def chat(self, **kwargs):
+            raise AssertionError(f"provider should not be called when all api keys are disabled: {kwargs!r}")
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, model_key, api_key_index
+        return _target(provider=_UnexpectedProvider(), retry_count=0, api_key_count=3, api_key_indexes=[])
+
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+
+    with pytest.raises(RuntimeError, match="All configured API keys are disabled"):
+        await backend.chat(
+            messages=[{"role": "user", "content": "demo"}],
+            tools=None,
+            model_refs=["primary"],
+        )
 
 
 @pytest.mark.asyncio

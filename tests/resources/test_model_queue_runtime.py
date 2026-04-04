@@ -40,6 +40,21 @@ def test_model_key_concurrency_controller_scopes_limits_by_model_ref() -> None:
     assert a3.key_index == 0
 
 
+def test_model_key_concurrency_controller_uses_per_key_limits_and_skips_disabled_keys() -> None:
+    controller = ModelKeyConcurrencyController(
+        resolve_model_limits=lambda model_ref: (
+            {"key_indexes": [0, 1], "per_key_limits": {0: 3, 1: 5, 2: 0}}
+            if model_ref == "model:a"
+            else None
+        )
+    )
+
+    leases = [controller.try_acquire_first_available(model_ref="model:a") for _ in range(9)]
+
+    assert [lease.key_index for lease in leases if lease is not None] == [0, 0, 0, 1, 1, 1, 1, 1]
+    assert leases[-1] is None
+
+
 @pytest.mark.asyncio
 async def test_node_turn_controller_enforces_strict_fifo_head_blocking() -> None:
     model_controller = ModelKeyConcurrencyController(

@@ -19,6 +19,12 @@ from g3ku.llm_config.repositories import EncryptedConfigRepository
 from g3ku.llm_config.secret_store import EncryptedFileSecretStore
 from g3ku.llm_config.service import ConfigService, TemplateService
 from g3ku.security.bootstrap import get_bootstrap_security_service
+from g3ku.utils.api_keys import (
+    SingleAPIKeyMaxConcurrency,
+    normalize_single_api_key_max_concurrency,
+    parse_api_keys,
+    resolve_api_key_concurrency_layout,
+)
 
 
 MASKED_SECRET_VALUE = "********"
@@ -102,6 +108,10 @@ class LLMConfigFacade:
         draft = ProviderConfigDraft.model_validate(payload)
         return self.config_service.probe_draft(draft).model_dump(mode="json")
 
+    async def probe_max_concurrency_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
+        draft = ProviderConfigDraft.model_validate(payload)
+        return (await self.config_service.probe_max_concurrency_draft(draft)).model_dump(mode="json")
+
     def list_config_records(self) -> list[dict[str, Any]]:
         return [item.model_dump(mode="json") for item in self.repository.list_summaries()]
 
@@ -182,6 +192,11 @@ class LLMConfigFacade:
             draft = ProviderConfigDraft.model_validate(draft_payload)
             item = self.create_config_record(draft.model_dump(mode="python"))
             config_id = str(item.get("config_id") or "").strip()
+        record = self._hydrate_record_secrets(self.repository.get(config_id))
+        binding.single_api_key_max_concurrency = self._validate_binding_api_key_limits(
+            api_key=str(record.auth.get("api_key", "") or ""),
+            value=binding.single_api_key_max_concurrency,
+        )
 
         config.models.catalog.append(
             ManagedModelConfig(
@@ -217,13 +232,17 @@ class LLMConfigFacade:
             raw_limit = draft_payload.get("single_api_key_max_concurrency")
             if raw_limit is None and "singleApiKeyMaxConcurrency" in draft_payload:
                 raw_limit = draft_payload.get("singleApiKeyMaxConcurrency")
-            binding.single_api_key_max_concurrency = None if raw_limit in (None, "") else max(1, int(raw_limit))
+            binding.single_api_key_max_concurrency = normalize_single_api_key_max_concurrency(raw_limit)
+        current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
+        merged = self._merge_draft(current, draft_payload, replace_parameters=False)
+        binding.single_api_key_max_concurrency = self._validate_binding_api_key_limits(
+            api_key=str(merged.api_key or ""),
+            value=getattr(binding, "single_api_key_max_concurrency", None),
+        )
 
         if not any(key in draft_payload for key in config_fields):
             return self.get_binding(config, model_key)
 
-        current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
-        merged = self._merge_draft(current, draft_payload, replace_parameters=False)
         validation = self.config_service.validate_draft(merged)
         if not validation.valid or validation.normalized_preview is None:
             raise ValueError("Draft validation failed")
@@ -462,6 +481,23 @@ class LLMConfigFacade:
             raise ValueError(f"Config {normalized} is not configured for {capability} capability")
         return normalized
 
+    @staticmethod
+    def _validate_binding_api_key_limits(
+        *,
+        api_key: str,
+        value: SingleAPIKeyMaxConcurrency,
+    ) -> SingleAPIKeyMaxConcurrency:
+        if value is None:
+            return None
+        has_keys = bool(parse_api_keys(api_key))
+        layout = resolve_api_key_concurrency_layout(
+            api_key,
+            value,
+            include_empty_slot=not has_keys,
+            reject_all_zero=has_keys,
+        )
+        return layout.configured_value
+
     def _runtime_target(
         self,
         *,
@@ -469,7 +505,7 @@ class LLMConfigFacade:
         record: NormalizedProviderConfig,
         retry_on: list[str],
         retry_count: int,
-        single_api_key_max_concurrency: int | None,
+        single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency,
     ) -> RuntimeTarget:
         model_parameters = _runtime_model_parameters(record.parameters)
         return RuntimeTarget(

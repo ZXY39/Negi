@@ -622,6 +622,11 @@ class ApiClient {
         return data.result || null;
     }
 
+    static async probeLlmDraftMaxConcurrency(payload) {
+        const data = await this.post("/api/llm/drafts/probe-max-concurrency", payload || {});
+        return data.result || null;
+    }
+
     static async listLlmConfigs() {
         const data = await this.get("/api/llm/configs");
         return data.items || [];

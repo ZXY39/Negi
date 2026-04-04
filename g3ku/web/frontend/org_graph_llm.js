@@ -87,6 +87,83 @@
     return ({ chat: "Chat", embedding: "Embedding", rerank: "Rerank" })[String(value || "")] || String(value || "-");
   }
 
+  function parseApiKeysFromValue(value) {
+    return String(value || "")
+      .split(/[\n,]/)
+      .map((item) => trim(item))
+      .filter(Boolean);
+  }
+
+  function apiKeyCountFromValue(value) {
+    return parseApiKeysFromValue(value).length;
+  }
+
+  function formatSingleApiKeyMaxConcurrencyValue(value) {
+    if (Array.isArray(value)) return value.join(",");
+    if (value === null || value === undefined || value === "") return "";
+    return String(value);
+  }
+
+  function expandSingleApiKeyMaxConcurrencyForEditor(value, apiKeyValue) {
+    if (Array.isArray(value)) return value.join(",");
+    if (value === null || value === undefined || value === "") return "";
+    const parsed = Number.parseInt(String(value), 10);
+    if (!Number.isInteger(parsed) || parsed < 1) return trim(value);
+    const apiKeyCount = apiKeyCountFromValue(apiKeyValue);
+    if (apiKeyCount > 1) return Array(apiKeyCount).fill(parsed).join(",");
+    return String(parsed);
+  }
+
+  function parseSingleApiKeyMaxConcurrencyInput(raw) {
+    const text = trim(raw);
+    if (!text) return null;
+    if (/[\n,]/.test(text)) {
+      const parts = text.split(/[\n,]/).map((item) => trim(item)).filter(Boolean);
+      if (!parts.length) return null;
+      return parts.map((item) => {
+        const parsed = Number.parseInt(item, 10);
+        if (!Number.isInteger(parsed) || parsed < 0) {
+          throw new Error("单 API key 最大并发数列表必须是大于等于 0 的整数");
+        }
+        return parsed;
+      });
+    }
+    const parsed = Number.parseInt(text, 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new Error("single_api_key_max_concurrency must be >= 1");
+    }
+    return parsed;
+  }
+
+  function validateSingleApiKeyMaxConcurrencyInput(raw, apiKeyValue) {
+    const parsed = parseSingleApiKeyMaxConcurrencyInput(raw);
+    if (!Array.isArray(parsed)) return parsed;
+    const apiKeyCount = apiKeyCountFromValue(apiKeyValue);
+    if (parsed.length !== apiKeyCount) {
+      throw new Error(`单 API key 最大并发数数量必须与 API key 数量一致，当前共有 ${apiKeyCount} 个 key`);
+    }
+    if (apiKeyCount > 0 && parsed.every((item) => item === 0)) {
+      throw new Error("单 API key 最大并发数至少保留一个大于 0 的值");
+    }
+    return parsed;
+  }
+
+  function bindingNotesTitle() {
+    return [
+      "最大并发数填写 0 时，对应的 API Key 不会投入使用。",
+      "多个 API Key 时，“重试次数”表示完整轮过所有 key 的次数，不是单次请求重试次数。",
+      "“api_key” 支持用逗号或换行填写多个 key，例如 key1,key2，注意可能会导致缓存命中率下降。多个 key 会按并发数上限轮换；设置多个 key 时，“重试次数”以完整轮过所有 key 为一次。",
+    ].join("\n");
+  }
+
+  function singleApiKeyMaxConcurrencyEquals(left, right) {
+    return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+  }
+
+  function renderBindingNoteAction() {
+    return `<button type="button" class="icon-btn llm-note-btn" title="${escv(bindingNotesTitle())}" aria-label="配置备注"><i data-lucide="info"></i></button>`;
+  }
+
   function setPath(target, path, value) {
     const parts = String(path || "").split(".").filter(Boolean);
     if (!parts.length) return;
@@ -524,7 +601,8 @@
     const binding = llmState().bindingMap[trim(modelKey)] || null;
     if (!binding) return;
     const record = await ApiClient.getLlmConfig(binding.config_id || binding.llm_config_id, { includeSecrets: true });
-    const jsonText = JSON.stringify(draftFromConfig(record), null, 2);
+    const draft = draftFromConfig(record);
+    const jsonText = JSON.stringify(draft, null, 2);
     llmState().editor = {
       ...emptyEditorState(),
       open: true,
@@ -537,7 +615,10 @@
       initialJsonText: jsonText,
       retryOn: Array.isArray(binding.retry_on) ? binding.retry_on.map((item) => trim(item)).filter(Boolean) : [...DEFAULT_RETRY_ON],
       retryCount: Number.isInteger(Number(binding.retry_count)) ? Math.max(0, Number(binding.retry_count)) : 0,
-      singleApiKeyMaxConcurrency: binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? "",
+      singleApiKeyMaxConcurrency: expandSingleApiKeyMaxConcurrencyForEditor(
+        binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? "",
+        draft.api_key || ""
+      ),
       description: trim(binding.description),
     };
     renderAll();
@@ -658,9 +739,7 @@
       editor.retryCount = Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
     }
     if (singleApiKeyMaxConcurrencyInput) {
-      const raw = String(singleApiKeyMaxConcurrencyInput.value || "").trim();
-      const parsed = Number.parseInt(raw, 10);
-      editor.singleApiKeyMaxConcurrency = Number.isInteger(parsed) && parsed >= 1 ? parsed : "";
+      editor.singleApiKeyMaxConcurrency = trim(singleApiKeyMaxConcurrencyInput.value || "");
     }
     if (descriptionInput) editor.description = trim(descriptionInput.value || "");
     return editor;
@@ -671,10 +750,11 @@
     const modelKey = trim(editor?.modelKey);
     const retryOn = Array.isArray(editor?.retryOn) ? editor.retryOn.map((item) => trim(item)).filter(Boolean) : [];
     const retryCount = Number.parseInt(String(editor?.retryCount ?? 0), 10);
-    const rawSingleApiKeyMaxConcurrency = String(editor?.singleApiKeyMaxConcurrency ?? "").trim();
-    const singleApiKeyMaxConcurrency = rawSingleApiKeyMaxConcurrency
-      ? Number.parseInt(rawSingleApiKeyMaxConcurrency, 10)
-      : null;
+    const draft = parseDraftJson(editor?.jsonText || "", editor?.providerId || "");
+    const singleApiKeyMaxConcurrency = validateSingleApiKeyMaxConcurrencyInput(
+      String(editor?.singleApiKeyMaxConcurrency ?? ""),
+      draft.api_key || ""
+    );
     const description = trim(editor?.description);
     if (requireModelKey && !modelKey) throw new Error("模型 Key 不能为空");
     if (!Number.isInteger(retryCount) || retryCount < 0) {
@@ -718,6 +798,60 @@
 
   function renderApiKeyJsonHint() {
     return '<p class="llm-muted">"api_key" 支持用逗号或换行填写多把 key，例如 key1,key2。多个 key 会按顺序轮换；设置多个 key 时，"retry_count" 以完整轮过所有 key 为一次。</p>';
+  }
+
+  function bindingDraftPayload({ requireModelKey = false } = {}) {
+    const editor = syncBindingInputs();
+    const modelKey = trim(editor?.modelKey);
+    const retryOn = Array.isArray(editor?.retryOn) ? editor.retryOn.map((item) => trim(item)).filter(Boolean) : [];
+    const retryCount = Number.parseInt(String(editor?.retryCount ?? 0), 10);
+    const draft = parseDraftJson(editor?.jsonText || "", editor?.providerId || "");
+    const singleApiKeyMaxConcurrency = validateSingleApiKeyMaxConcurrencyInput(
+      String(editor?.singleApiKeyMaxConcurrency ?? ""),
+      draft.api_key || ""
+    );
+    const description = trim(editor?.description);
+    if (requireModelKey && !modelKey) throw new Error("妯″瀷 Key 涓嶈兘涓虹┖");
+    if (!Number.isInteger(retryCount) || retryCount < 0) {
+      throw new Error("重试次数必须是不小于 0 的整数");
+    }
+    return {
+      modelKey,
+      retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
+      retryCount,
+      singleApiKeyMaxConcurrency,
+      description,
+    };
+  }
+
+  function renderBindingPolicyFields() {
+    const editor = llmState().editor || emptyEditorState();
+    return `
+      <div class="llm-form-grid">
+        <label class="resource-field">
+          <span class="resource-field-label">Retry On</span>
+          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
+        </label>
+        <label class="resource-field">
+          <span class="resource-field-label">重试次数</span>
+          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
+        </label>
+        <label class="resource-field">
+          <span class="resource-field-label">单 API key 最大并发数</span>
+          <div class="llm-inline-field-actions">
+            <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
+            <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
+          </div>
+        </label>
+      </div>
+      <label class="resource-field">
+        <span class="resource-field-label">说明</span>
+        <textarea id="llm-binding-description" class="resource-editor model-textarea" rows="4" placeholder="用于备注当前模型的用途、成本或降级策略。">${escv(editor.description || "")}</textarea>
+      </label>`;
+  }
+
+  function renderApiKeyJsonHint() {
+    return "";
   }
 
   function renderEditor() {
@@ -811,6 +945,113 @@
                 <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
               </label>
               ${renderApiKeyJsonHint()}
+              ${renderStatus()}
+              <div class="llm-inline-actions">
+                <button type="button" class="toolbar-btn ghost" data-llm-action="test-detail">测试连接</button>
+                <button type="button" class="toolbar-btn success" data-llm-action="save-detail">保存修改</button>
+                <button type="button" class="toolbar-btn danger" data-llm-action="delete-detail">删除模型</button>
+              </div>
+            </div>
+          </div>
+        </article>`;
+    }
+
+    setDrawerOpen(U.llmEditorBackdrop, U.llmEditorPanel, true);
+    if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
+    icons();
+  }
+
+  function renderEditor() {
+    refs();
+    const state = llmState();
+    if (!U.llmEditorShell || !U.llmEditorPanel || !U.llmEditorBackdrop) return;
+    if (!state.editor.open) {
+      U.llmEditorShell.innerHTML = "";
+      setDrawerOpen(U.llmEditorBackdrop, U.llmEditorPanel, false);
+      return;
+    }
+
+    if (state.editor.mode === "create") {
+      U.llmEditorShell.innerHTML = `
+        <article class="model-detail-card model-config-shell">
+          <div class="detail-modal-header model-config-header">
+            <div class="detail-modal-title">
+              <h2>新建模型</h2>
+              <p class="subtitle">先选择供应商，再基于预设 JSON 模板修改参数并测试连接。</p>
+            </div>
+            <div class="detail-modal-actions">
+              ${renderBindingNoteAction()}
+              <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
+            </div>
+          </div>
+          <div class="detail-modal-body model-config-body">
+            <div class="llm-section">
+              <div class="llm-form-grid">
+                <label class="resource-field">
+                  <span class="resource-field-label">模型 Key *</span>
+                  <input id="llm-model-key-input" class="resource-search" type="text" value="${escv(state.editor.modelKey)}" placeholder="例如：ceo_primary">
+                </label>
+                <label class="resource-field">
+                  <span class="resource-field-label">供应商</span>
+                  <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
+                </label>
+              </div>
+              ${renderBindingPolicyFields()}
+              <label class="resource-field">
+                <span class="resource-field-label">JSON 配置</span>
+                <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
+              </label>
+              ${renderStatus()}
+              <div class="llm-inline-actions">
+                <button type="button" class="toolbar-btn ghost" data-llm-action="test-create">测试连接</button>
+                <button type="button" class="toolbar-btn success" data-llm-action="save-create">添加模型</button>
+              </div>
+            </div>
+          </div>
+        </article>`;
+    } else if (state.editor.mode === "memory") {
+      const memory = state.editor.memory;
+      const saveDisabled = !canSaveMemoryEditor() || state.saving;
+      U.llmEditorShell.innerHTML = `
+        <article class="model-detail-card model-config-shell llm-memory-shell">
+          <div class="detail-modal-header model-config-header">
+            <div class="detail-modal-title">
+              <h2>记忆模型设置</h2>
+              <p class="subtitle">编辑 Memory Runtime 当前使用的 Embedding 与 Rerank JSON，保存时会自动测试连通性并刷新运行时。</p>
+            </div>
+            <div class="detail-modal-actions">
+              <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
+              <button type="button" class="toolbar-btn success" data-llm-action="save-memory"${saveDisabled ? " disabled" : ""}>保存并测试</button>
+            </div>
+          </div>
+          <div class="detail-modal-body model-config-body">
+            ${memory?.error ? `<div class="llm-memory-banner">${escv(memory.error)}</div>` : ""}
+            ${memory?.loading
+              ? '<div class="empty-state compact">正在加载记忆模型配置...</div>'
+              : `<div class="llm-memory-grid">${renderMemorySection("embedding", memory.embedding)}${renderMemorySection("rerank", memory.rerank)}</div>`}
+          </div>
+        </article>`;
+    } else {
+      const binding = currentBinding();
+      U.llmEditorShell.innerHTML = `
+        <article class="model-detail-card model-config-shell">
+          <div class="detail-modal-header model-config-header">
+            <div class="detail-modal-title">
+              <h2>${escv(binding?.key || state.editor.bindingKey)}</h2>
+              <p class="subtitle">可同时编辑当前模型的 JSON 配置与降级重试策略。</p>
+            </div>
+            <div class="detail-modal-actions">
+              ${renderBindingNoteAction()}
+              <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
+            </div>
+          </div>
+          <div class="detail-modal-body model-config-body">
+            <div class="llm-section">
+              ${renderBindingPolicyFields()}
+              <label class="resource-field">
+                <span class="resource-field-label">JSON 配置</span>
+                <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
+              </label>
               ${renderStatus()}
               <div class="llm-inline-actions">
                 <button type="button" class="toolbar-btn ghost" data-llm-action="test-detail">测试连接</button>
@@ -1018,6 +1259,36 @@
     });
   }
 
+    async function handleTestMaxConcurrency() {
+    const state = llmState();
+    syncBindingInputs();
+    const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
+    const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
+    state.editor.jsonText = jsonText;
+    state.editor.providerId = providerId;
+    const draft = parseDraftJson(jsonText, providerId);
+    validateSingleApiKeyMaxConcurrencyInput(String(state.editor.singleApiKeyMaxConcurrency ?? ""), draft.api_key || "");
+    showToast({
+      title: "测试最大并发数中",
+      text: "先测试连接，再测试每个 API key 的最大并发数...",
+      kind: "info",
+      persistent: true,
+    });
+    const ok = await probeDraft(draft);
+    if (!ok) {
+      throw new Error(draftFailureMessage(state.editor, "连接测试未通过，请先修正当前 JSON 配置。"));
+    }
+    const result = await ApiClient.probeLlmDraftMaxConcurrency(draft);
+    const suggestedLimits = Array.isArray(result?.suggested_limits) ? result.suggested_limits : [];
+    state.editor.singleApiKeyMaxConcurrency = formatSingleApiKeyMaxConcurrencyValue(suggestedLimits);
+    renderAll();
+    showToast({
+      title: result?.success ? "最大并发数测试完成" : "最大并发数部分完成",
+      text: result?.message || "已根据测试结果回填每个 API key 的最大并发数。",
+      kind: result?.success ? "success" : "info",
+    });
+  }
+
     async function handleCreateSave() {
     const state = llmState();
     const bindingDraft = bindingDraftPayload({ requireModelKey: true });
@@ -1118,7 +1389,7 @@
     const bindingPatch = {};
     if (JSON.stringify(bindingDraft.retryOn) !== JSON.stringify(binding.retry_on || [])) bindingPatch.retry_on = bindingDraft.retryOn;
     if (bindingDraft.retryCount !== Number.parseInt(String(binding.retry_count ?? 0), 10)) bindingPatch.retry_count = bindingDraft.retryCount;
-    if ((bindingDraft.singleApiKeyMaxConcurrency ?? null) !== (binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? null)) {
+    if (!singleApiKeyMaxConcurrencyEquals(bindingDraft.singleApiKeyMaxConcurrency, binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? null)) {
       bindingPatch.single_api_key_max_concurrency = bindingDraft.singleApiKeyMaxConcurrency;
     }
     if (bindingDraft.description !== trim(binding.description)) bindingPatch.description = bindingDraft.description;
@@ -1452,6 +1723,41 @@
     llmState().eventsBound = true;
   }
 
+  async function bootstrap() {
+    if (llmState().eventsBound) return;
+    refs();
+    bindList();
+    U.llmMemorySettings?.addEventListener("click", () => void openMemoryModal().catch((error) => {
+      llmState().error = error.message || "加载失败";
+      showToast({ title: "打开失败", text: llmState().error, kind: "error" });
+      renderAll();
+    }));
+    U.llmConfigCreate?.addEventListener("click", () => void openCreateModal());
+    U.llmEditorBackdrop?.addEventListener("click", closeEditor);
+    U.llmEditorShell?.addEventListener("change", (event) => {
+      if (event.target?.id === "llm-provider-select") void handleProviderChange();
+      const memoryTemplateSection = event.target?.dataset?.llmMemoryTemplate;
+      if (memoryTemplateSection) void handleMemoryTemplateChange(memoryTemplateSection);
+    });
+    U.llmEditorShell?.addEventListener("input", (event) => {
+      const sectionKey = memorySectionKeyFromTextareaId(event.target?.id);
+      if (!sectionKey) return;
+      handleMemorySectionInput(sectionKey);
+    });
+    U.llmEditorShell?.addEventListener("click", (event) => {
+      const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
+      if (!action) return;
+      if (action === "close") { closeEditor(); return; }
+      if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "test-max-concurrency") { void handleTestMaxConcurrency().catch((error) => { llmState().error = error.message || "测试最大并发数失败"; showToast({ title: "测试最大并发数失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "save-memory") { void handleMemorySavePartial().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
+    });
+    llmState().eventsBound = true;
+  }
+
   window.renderModelList = renderBindings;
   window.renderModelRoleEditors = renderRoutes;
   window.renderModelDetail = renderEditor;
@@ -1460,6 +1766,12 @@
   window.startCreateModel = function startCreateModel() { void openCreateModal(); };
   window.clearModelSelection = closeEditor;
   window.loadModels = async function loadModels() { await loadAll(); };
+  window.__llmTestHooks = {
+    expandSingleApiKeyMaxConcurrencyForEditor,
+    parseSingleApiKeyMaxConcurrencyInput,
+    validateSingleApiKeyMaxConcurrencyInput,
+    bindingNotesTitle,
+  };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.roleEditing) {
       startModelRoleEditing();

@@ -8,8 +8,10 @@ from .exceptions import (
     ValidationFailedError,
 )
 from .models import (
+    APIKeyMaxConcurrencyProbeItem,
     FieldError,
     GenericRuntimeConfig,
+    MaxConcurrencyProbeResult,
     MemoryModelBinding,
     ModelBindingDraft,
     NormalizedProviderConfig,
@@ -37,7 +39,9 @@ __all__ = [
     "FieldInputType",
     "GenericRuntimeConfig",
     "AuthMode",
+    "APIKeyMaxConcurrencyProbeItem",
     "MemoryModelBinding",
+    "MaxConcurrencyProbeResult",
     "MissingMasterKeyError",
     "ModelBindingDraft",
     "NormalizedProviderConfig",

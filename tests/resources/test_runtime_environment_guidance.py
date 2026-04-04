@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import g3ku.runtime.frontdoor.prompt_builder as prompt_builder_module
@@ -110,7 +111,7 @@ def test_node_runner_runtime_environment_uses_task_temp_dir_from_runtime_meta(mo
     payload = runner._runtime_environment_payload(task=task)
     prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='execution'))
 
-    assert payload['task_temp_dir'] == task_temp_dir
+    assert os.path.normcase(payload['task_temp_dir']) == os.path.normcase(task_temp_dir)
     assert payload['path_policy']['exec_default_working_dir'] == 'task_temp_dir'
     assert 'task_temp_dir' in prompt
     assert '所有文件都放在' in prompt

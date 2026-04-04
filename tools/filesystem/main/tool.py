@@ -108,6 +108,10 @@ class FilesystemTool:
         **kwargs: Any,
     ) -> str:
         runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
+        if not runtime:
+            fallback_runtime = kwargs.get('__g3ku_runtime')
+            if isinstance(fallback_runtime, dict):
+                runtime = fallback_runtime
         operation = str(action or '').strip().lower()
         if not operation:
             return 'Error: action is required'
@@ -167,6 +171,18 @@ class FilesystemTool:
 
     def _temp_root(self) -> Path:
         return self._workspace_root() / 'temp'
+
+    def _canonical_temp_root(self, runtime: dict[str, Any] | None = None) -> Path:
+        payload = runtime if isinstance(runtime, dict) else {}
+        raw = str(payload.get('task_temp_dir') or '').strip()
+        if raw:
+            try:
+                candidate = Path(raw).expanduser().resolve(strict=False)
+            except Exception:
+                candidate = None
+            if candidate is not None and _is_relative_to(candidate, self._workspace_root()):
+                return candidate
+        return self._temp_root()
 
     def _externaltools_root(self) -> Path:
         return self._workspace_root() / 'externaltools'
@@ -277,10 +293,10 @@ class FilesystemTool:
                 return True
         return False
 
-    def _enforce_workspace_path_policy(self, *, file_path: Path, action: str) -> None:
+    def _enforce_workspace_path_policy(self, *, file_path: Path, action: str, runtime: dict[str, Any] | None = None) -> None:
         resolved = file_path.expanduser().resolve()
         workspace_root = self._workspace_root()
-        temp_root = self._temp_root()
+        temp_root = self._canonical_temp_root(runtime)
         externaltools_root = self._externaltools_root()
         tools_root = self._tools_root()
 
@@ -389,7 +405,7 @@ class FilesystemTool:
         if content is None:
             return 'Error: content is required when action=write'
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
-        self._enforce_workspace_path_policy(file_path=file_path, action='write')
+        self._enforce_workspace_path_policy(file_path=file_path, action='write', runtime=runtime)
         existed_before = file_path.exists()
         original = ''
         if existed_before and file_path.is_file():
@@ -444,7 +460,7 @@ class FilesystemTool:
         if not text_mode and not range_mode:
             return 'Error: edit requires exactly one mode: text-replace or line-range'
         file_path = _resolve_path(path, self._workspace, self._allowed_dir)
-        self._enforce_workspace_path_policy(file_path=file_path, action='edit')
+        self._enforce_workspace_path_policy(file_path=file_path, action='edit', runtime=runtime)
         if not file_path.exists():
             return f'Error: File not found: {path}'
         if not file_path.is_file():

@@ -60,7 +60,7 @@ parameters:
       description: Filesystem action to execute.
     path:
       type: string
-      description: Target absolute path. `describe`/`open`/`head`/`tail`/`write`/`edit`/`delete`/`propose_patch` require a file path, `list` requires a directory path, and `search` accepts either a file or directory path. When restrict_to_workspace is enabled, the path must stay inside the workspace.
+      description: Target absolute path. `describe`/`open`/`head`/`tail`/`write`/`edit`/`delete`/`propose_patch` require a file path, `list` requires a directory path, and `search` accepts either a file or directory path. Temporary scratch files, generated scripts, fetch outputs, caches, and debug files should default to `runtime_environment.task_temp_dir` when that runtime field is available; otherwise fall back to workspace `temp/`. When restrict_to_workspace is enabled, the path must stay inside the workspace.
     query:
       type: string
       description: Required when action=search on a file or directory.
@@ -90,7 +90,7 @@ parameters:
       description: Optional line count when action=head or action=tail.
     content:
       type: string
-      description: Required when action=write.
+      description: Required when action=write. If this write is creating temporary scratch content, the target path should normally live under `runtime_environment.task_temp_dir` when available, or workspace `temp/` as fallback.
     old_text:
       type: string
       description: Required when action=edit in text-replace mode or action=propose_patch. Must match exactly once. Mutually exclusive with start_line/end_line/replacement.

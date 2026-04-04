@@ -1854,6 +1854,16 @@ async def probe_llm_draft(payload: dict = Body(...)):
     return {'ok': True, 'result': result}
 
 
+@router.post('/llm/drafts/probe-max-concurrency')
+async def probe_llm_draft_max_concurrency(payload: dict = Body(...)):
+    manager = ModelManager.load()
+    try:
+        result = await manager.probe_max_concurrency_draft(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'ok': True, 'result': result}
+
+
 @router.get('/llm/configs')
 async def list_llm_configs():
     manager = ModelManager.load()

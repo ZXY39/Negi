@@ -17,7 +17,7 @@ from loguru import logger
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
-from g3ku.utils.api_keys import parse_api_keys
+from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
 from g3ku.web.worker_control import managed_worker_snapshot
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
@@ -350,6 +350,7 @@ class MainRuntimeService:
             execution_max_concurrency=execution_max_concurrency,
             acceptance_max_concurrency=acceptance_max_concurrency,
             context_enricher=self._enrich_node_messages,
+            workspace_root_getter=lambda: self._workspace_root(),
         )
         self.task_governance_manager = TaskGovernanceManager(service=self)
         self.node_runner.governance_child_created_observer = self.task_governance_manager.on_execution_child_created
@@ -910,6 +911,10 @@ class MainRuntimeService:
             metadata=metadata,
         )
         record, root = self.log_service.initialize_task(record, root)
+        self.log_service.update_task_runtime_meta(
+            record.task_id,
+            task_temp_dir=str(self._task_temp_dir(record.task_id)),
+        )
         if self.execution_mode in {'embedded', 'worker'}:
             await self.global_scheduler.enqueue_task(record.task_id)
         else:
@@ -3142,6 +3147,20 @@ class MainRuntimeService:
         workspace = getattr(manager, 'workspace', None)
         return Path(workspace).resolve(strict=False) if workspace is not None else Path.cwd().resolve()
 
+    @staticmethod
+    def _safe_task_dir_name(task_id: str) -> str:
+        return str(task_id or '').strip().replace(':', '_').replace('/', '_').replace('\\', '_')
+
+    def _task_temp_root(self) -> Path:
+        root = self._workspace_root() / 'temp' / 'tasks'
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _task_temp_dir(self, task_id: str) -> Path:
+        path = self._task_temp_root() / self._safe_task_dir_name(task_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _resource_base_dir(self, kind: ResourceKind) -> Path:
         manager = getattr(self, '_resource_manager', None)
         registry = getattr(manager, '_registry', None)
@@ -4323,17 +4342,27 @@ class MainRuntimeService:
         config = self._app_config
         normalized_model_ref = str(model_ref or '').strip()
         if config is None or not normalized_model_ref:
-            return {'key_count': 1, 'per_key_limit': None}
+            return {'key_count': 1, 'key_indexes': [0], 'per_key_limits': {0: None}}
         try:
             target = resolve_chat_target(config, normalized_model_ref, workspace=config.workspace_path)
         except Exception:
-            return {'key_count': 1, 'per_key_limit': None}
+            return {'key_count': 1, 'key_indexes': [0], 'per_key_limits': {0: None}}
         raw_api_key = str((dict(getattr(target, 'secret_payload', {}) or {})).get('api_key', '') or '')
         key_count = max(1, len(parse_api_keys(raw_api_key)))
-        raw_limit = getattr(target, 'single_api_key_max_concurrency', None)
+        layout = resolve_api_key_concurrency_layout(
+            raw_api_key,
+            getattr(target, 'single_api_key_max_concurrency', None),
+            include_empty_slot=True,
+            reject_all_zero=False,
+        )
+        key_indexes = list(layout.key_indexes) or [0]
+        per_key_limits = {index: None for index in key_indexes}
+        for index, limit in zip(layout.key_indexes, layout.key_limits):
+            per_key_limits[int(index)] = limit
         return {
             'key_count': key_count,
-            'per_key_limit': None if raw_limit in (None, '') else max(1, int(raw_limit)),
+            'key_indexes': key_indexes,
+            'per_key_limits': per_key_limits,
         }
 
     def _tool_pressure_status_payload(self, item: dict[str, Any] | None) -> dict[str, Any]:

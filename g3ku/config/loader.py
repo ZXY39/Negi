@@ -367,8 +367,9 @@ def _normalize_inline_model_bindings(cfg: Config) -> bool:
 
 
 def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[str, list[str]]]:
-    catalog = [
-        {
+    catalog = []
+    for item in cfg.models.catalog:
+        payload: dict[str, object] = {
             "key": item.key,
             "llmConfigId": item.llm_config_id,
             "enabled": item.enabled,
@@ -376,8 +377,9 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
             "retryCount": int(getattr(item, "retry_count", 0) or 0),
             "description": item.description,
         }
-        for item in cfg.models.catalog
-    ]
+        if getattr(item, "single_api_key_max_concurrency", None) is not None:
+            payload["singleApiKeyMaxConcurrency"] = item.single_api_key_max_concurrency
+        catalog.append(payload)
     routes = {
         "ceo": list(cfg.models.roles.ceo),
         "execution": list(cfg.models.roles.execution),

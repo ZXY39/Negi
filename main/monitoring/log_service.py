@@ -336,12 +336,28 @@ class TaskLogService:
         state['frames'] = []
         return cls._sanitize_runtime_state(state)
 
-    @staticmethod
-    def _default_runtime_meta(*, last_visible_output_at: str = '') -> dict[str, Any]:
+    def _workspace_root_for_runtime_meta(self) -> Path:
+        workspace = getattr(self._content_store, '_workspace', None) if self._content_store is not None else None
+        return Path(workspace).resolve(strict=False) if workspace is not None else Path.cwd().resolve()
+
+    def _fallback_task_temp_dir(self) -> str:
+        return str((self._workspace_root_for_runtime_meta() / 'temp').resolve(strict=False))
+
+    def _normalize_task_temp_dir(self, value: Any) -> str:
+        raw = str(value or '').strip()
+        if not raw:
+            return self._fallback_task_temp_dir()
+        try:
+            return str(Path(raw).expanduser().resolve(strict=False))
+        except Exception:
+            return self._fallback_task_temp_dir()
+
+    def _default_runtime_meta(self, *, last_visible_output_at: str = '') -> dict[str, Any]:
         return {
             'updated_at': now_iso(),
             'last_visible_output_at': str(last_visible_output_at or '').strip(),
             'last_stall_notice_bucket_minutes': 0,
+            'task_temp_dir': self._fallback_task_temp_dir(),
             'dispatch_limits': {'execution': 0, 'inspection': 0},
             'dispatch_running': {'execution': 0, 'inspection': 0},
             'dispatch_queued': {'execution': 0, 'inspection': 0},
@@ -1602,6 +1618,8 @@ class TaskLogService:
                     current['last_stall_notice_bucket_minutes'] = max(0, int(payload.get('last_stall_notice_bucket_minutes') or 0))
                 except (TypeError, ValueError):
                     current['last_stall_notice_bucket_minutes'] = 0
+            if 'task_temp_dir' in payload:
+                current['task_temp_dir'] = self._normalize_task_temp_dir(payload.get('task_temp_dir'))
             if 'dispatch_limits' in payload:
                 current['dispatch_limits'] = self._sanitize_dispatch_counters(payload.get('dispatch_limits'))
             if 'dispatch_running' in payload:
@@ -1671,6 +1689,7 @@ class TaskLogService:
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
         current['governance'] = normalize_task_governance_state(current.get('governance'))
+        current['task_temp_dir'] = self._normalize_task_temp_dir(current.get('task_temp_dir'))
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
         except (TypeError, ValueError):

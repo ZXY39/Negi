@@ -2043,6 +2043,41 @@ def test_llm_binding_retry_count_update_persists_without_provider_probe(tmp_path
     assert saved['models']['catalog'][0]['retryCount'] == 4
 
 
+def test_llm_binding_per_key_concurrency_update_persists_without_provider_probe(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    config_path = workspace / '.g3ku' / 'config.json'
+    runtime_config = json.loads(config_path.read_text(encoding='utf-8'))
+    runtime_config['models']['catalog'][0]['apiKey'] = 'demo-key-1,demo-key-2'
+    config_path.write_text(json.dumps(runtime_config), encoding='utf-8')
+    monkeypatch.chdir(workspace)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/llm/bindings/m', json={'single_api_key_max_concurrency': [3, 5]})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['single_api_key_max_concurrency'] == [3, 5]
+    assert captured == {'force': True, 'reason': 'admin_llm_binding_update'}
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['catalog'][0]['singleApiKeyMaxConcurrency'] == [3, 5]
+
+
 def test_llm_memory_binding_update_refreshes_runtime(monkeypatch):
     captured: dict[str, object] = {}
 

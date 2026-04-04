@@ -11,7 +11,12 @@ from g3ku.providers.custom_provider import CustomProvider
 from g3ku.providers.litellm_provider import LiteLLMProvider
 from g3ku.providers.openai_codex_provider import OpenAICodexProvider
 from g3ku.providers.responses_provider import ResponsesProvider
-from g3ku.utils.api_keys import parse_api_keys
+from g3ku.utils.api_keys import (
+    APIKeyConfigurationError,
+    SingleAPIKeyMaxConcurrency,
+    parse_api_keys,
+    resolve_api_key_concurrency_layout,
+)
 
 
 @dataclass(slots=True)
@@ -27,7 +32,8 @@ class ProviderTarget:
     retry_on: list[str] = field(default_factory=lambda: ['network', '429', '5xx'])
     retry_count: int = 0
     api_key_count: int = 0
-    single_api_key_max_concurrency: int | None = None
+    api_key_indexes: list[int] | None = None
+    single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
 
 
 def _resolve_litellm_model(provider_id: str, model_id: str) -> str:
@@ -98,9 +104,30 @@ def build_provider_from_model_key(
     model_id = target.resolved_model
     raw_api_key = str(target.secret_payload.get('api_key', '') or '')
     api_keys = parse_api_keys(raw_api_key)
-    selected_index = 0
-    if api_keys and api_key_index is not None:
-        selected_index = max(0, min(int(api_key_index), len(api_keys) - 1))
+    try:
+        key_layout = resolve_api_key_concurrency_layout(
+            raw_api_key,
+            getattr(target, 'single_api_key_max_concurrency', None),
+            include_empty_slot=not api_keys,
+            reject_all_zero=bool(api_keys),
+        )
+    except ValueError as exc:
+        raise APIKeyConfigurationError(
+            f"Invalid API key concurrency config for model {provider_ref}: {exc}"
+        ) from exc
+    if api_keys and not key_layout.key_indexes:
+        raise APIKeyConfigurationError(f"All configured API keys are disabled for model {provider_ref}")
+
+    selected_index = key_layout.key_indexes[0] if key_layout.key_indexes else 0
+    if api_key_index is not None:
+        requested_index = max(0, int(api_key_index))
+        if key_layout.key_indexes and requested_index not in key_layout.key_indexes:
+            raise APIKeyConfigurationError(
+                f"API key index {requested_index} is disabled for model {provider_ref}"
+            )
+        selected_index = requested_index
+    if api_keys:
+        selected_index = max(0, min(selected_index, len(api_keys) - 1))
     api_key = api_keys[selected_index] if api_keys else raw_api_key.strip()
     api_base = target.base_url
     managed = config.get_model_runtime_profile(provider_ref)
@@ -113,6 +140,7 @@ def build_provider_from_model_key(
     retry_on = list(managed.retry_on or []) if managed is not None else ['network', '429', '5xx']
     retry_count = int(getattr(managed, 'retry_count', 0) or 0) if managed is not None else 0
     api_key_count = len(api_keys)
+    api_key_indexes = list(key_layout.key_indexes or ([0] if not api_keys else []))
     extra_headers = dict(getattr(target, 'headers', {}) or {})
 
     if provider_id == 'responses' or _uses_openai_responses_protocol(target):
@@ -127,11 +155,11 @@ def build_provider_from_model_key(
             default_model=model_id,
             extra_headers=extra_headers,
         )
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, api_key_indexes=api_key_indexes, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
 
     if provider_id == 'openai_codex':
         provider = OpenAICodexProvider(default_model=f'openai_codex/{model_id}')
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
+        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, api_key_indexes=api_key_indexes, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
 
     if provider_id == 'custom' or _uses_openai_direct_chat_protocol(target):
         provider = CustomProvider(
@@ -152,6 +180,7 @@ def build_provider_from_model_key(
             retry_on=retry_on,
             retry_count=retry_count,
             api_key_count=api_key_count,
+            api_key_indexes=api_key_indexes,
             single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None),
         )
 
@@ -163,4 +192,4 @@ def build_provider_from_model_key(
         extra_headers=extra_headers,
         provider_name=provider_id,
     )
-    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
+    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, api_key_indexes=api_key_indexes, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))

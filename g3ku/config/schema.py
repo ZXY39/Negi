@@ -7,7 +7,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
-from g3ku.utils.api_keys import has_api_keys
+from g3ku.utils.api_keys import (
+    SingleAPIKeyMaxConcurrency,
+    has_api_keys,
+    normalize_single_api_key_max_concurrency,
+    resolve_api_key_concurrency_layout,
+)
 
 ROLE_SCOPE_ALIASES = {
     "ceo": "ceo",
@@ -278,7 +283,7 @@ class ManagedModelConfig(Base):
     reasoning_effort: str | None = None
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
     retry_count: int = Field(default=0, ge=0)
-    single_api_key_max_concurrency: int | None = Field(default=None, ge=1)
+    single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
     description: str = ""
 
     @field_validator("key")
@@ -333,12 +338,8 @@ class ManagedModelConfig(Base):
 
     @field_validator("single_api_key_max_concurrency", mode="before")
     @classmethod
-    def _normalize_single_api_key_max_concurrency(cls, value: Any) -> int | None:
-        if value is None:
-            return None
-        if isinstance(value, str) and not value.strip():
-            return None
-        return int(value)
+    def _normalize_single_api_key_max_concurrency(cls, value: Any) -> SingleAPIKeyMaxConcurrency:
+        return normalize_single_api_key_max_concurrency(value)
 
     @model_validator(mode="after")
     def _validate_binding_or_inline_credentials(self) -> "ManagedModelConfig":
@@ -352,6 +353,12 @@ class ManagedModelConfig(Base):
             raise ValueError("models.catalog[].provider_model or llm_config_id is required")
         if not has_api_keys(api_key):
             raise ValueError("models.catalog[].api_key is required before migration")
+        resolve_api_key_concurrency_layout(
+            api_key,
+            self.single_api_key_max_concurrency,
+            include_empty_slot=False,
+            reject_all_zero=True,
+        )
         return self
 
 

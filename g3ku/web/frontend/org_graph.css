@@ -3777,6 +3777,21 @@ textarea {
     flex-wrap: wrap;
 }
 
+.llm-inline-field-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+}
+
+.llm-inline-field-actions .resource-search {
+    flex: 1 1 220px;
+}
+
+.llm-note-btn {
+    flex: 0 0 auto;
+}
+
 .llm-binding-meta,
 .llm-config-meta,
 .llm-muted {

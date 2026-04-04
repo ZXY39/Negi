@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from g3ku.utils.api_keys import SingleAPIKeyMaxConcurrency, normalize_single_api_key_max_concurrency
 
 from .enums import AuthMode, Capability, FieldInputType, ProbeStatus, ProtocolAdapter
 
@@ -116,6 +118,29 @@ class ProbeResult(StrictModel):
     diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
+class APIKeyMaxConcurrencyProbeItem(StrictModel):
+    key_index: int
+    api_key_mask: str
+    suggested_limit: int = Field(default=0, ge=0)
+    connection_probe: ProbeResult
+    attempted_levels: list[int] = Field(default_factory=list)
+    last_successful_limit: int = Field(default=0, ge=0)
+    first_failed_limit: int | None = Field(default=None, ge=1)
+
+
+class MaxConcurrencyProbeResult(StrictModel):
+    success: bool
+    provider_id: str
+    protocol_adapter: ProtocolAdapter
+    capability: Capability = Capability.CHAT
+    resolved_base_url: str
+    checked_model: str
+    message: str
+    suggested_limits: list[int] = Field(default_factory=list)
+    per_key_results: list[APIKeyMaxConcurrencyProbeItem] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
 class StoredConfigSummary(StrictModel):
     config_id: str
     provider_id: str
@@ -157,7 +182,7 @@ class RuntimeTarget(StrictModel):
     default_reasoning_effort: str | None = None
     retry_on: list[str] = Field(default_factory=list)
     retry_count: int = Field(default=0, ge=0)
-    single_api_key_max_concurrency: int | None = Field(default=None, ge=1)
+    single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
     extra_options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -168,7 +193,12 @@ class ModelBindingDraft(StrictModel):
     description: str = ""
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
     retry_count: int = Field(default=0, ge=0)
-    single_api_key_max_concurrency: int | None = Field(default=None, ge=1)
+    single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
+
+    @field_validator("single_api_key_max_concurrency", mode="before")
+    @classmethod
+    def _normalize_single_api_key_max_concurrency(cls, value: Any) -> SingleAPIKeyMaxConcurrency:
+        return normalize_single_api_key_max_concurrency(value)
 
 
 class MemoryModelBinding(StrictModel):
