@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from g3ku.runtime.frontdoor.checkpoint_inspection import (
     get_frontdoor_checkpoint,
     get_frontdoor_checkpoint_history,
+    serialize_state_snapshot,
 )
 
 
@@ -93,3 +95,65 @@ async def test_get_frontdoor_checkpoint_history_serializes_reverse_chronological
             "limit": 2,
         }
     ]
+
+
+def test_serialize_state_snapshot_coerces_nested_complex_objects_to_json_safe_values() -> None:
+    class _OpaqueValue:
+        def __str__(self) -> str:
+            return "opaque-value"
+
+    class _OpaqueState:
+        def __str__(self) -> str:
+            return "opaque-state"
+
+    class _OpaqueInterrupt:
+        def __str__(self) -> str:
+            return "opaque-interrupt"
+
+    snapshot = SimpleNamespace(
+        values={
+            "route_kind": "direct_reply",
+            "result": _OpaqueValue(),
+            "nested": {"items": [1, _OpaqueValue()]},
+        },
+        next=("finalize_turn", _OpaqueValue()),
+        config={"configurable": {"thread_id": "web:shared", "checkpoint_ns": "", "checkpoint_id": "cp-9"}},
+        metadata={
+            "step": 9,
+            "writes": {"finalize_turn": {"result": _OpaqueValue()}},
+        },
+        created_at="2026-04-04T12:09:00+08:00",
+        parent_config={"configurable": {"thread_id": "web:shared", "checkpoint_ns": "", "checkpoint_id": "cp-8"}},
+        tasks=(
+            SimpleNamespace(
+                id="task-1",
+                name="await_input",
+                error="",
+                state=_OpaqueState(),
+                interrupts=(SimpleNamespace(id="interrupt-1", value={"payload": _OpaqueInterrupt()}),),
+            ),
+        ),
+    )
+
+    item = serialize_state_snapshot(snapshot)
+
+    assert item["values"] == {
+        "route_kind": "direct_reply",
+        "result": "opaque-value",
+        "nested": {"items": [1, "opaque-value"]},
+    }
+    assert item["next"] == ["finalize_turn", "opaque-value"]
+    assert item["metadata"] == {
+        "step": 9,
+        "writes": {"finalize_turn": {"result": "opaque-value"}},
+    }
+    assert item["tasks"] == [
+        {
+            "id": "task-1",
+            "name": "await_input",
+            "error": "",
+            "interrupts": [{"id": "interrupt-1", "value": {"payload": "opaque-interrupt"}}],
+            "state": "opaque-state",
+        }
+    ]
+    json.dumps(item)
