@@ -16,6 +16,14 @@ def _json_safe(value: Any) -> Any:
         }
     if isinstance(value, list | tuple | set):
         return [_json_safe(item) for item in value]
+    if hasattr(value, "__dict__"):
+        payload = dict(vars(value))
+        if not payload:
+            return str(value)
+        return {
+            str(key): _json_safe(item)
+            for key, item in payload.items()
+        }
     return str(value)
 
 
@@ -104,6 +112,7 @@ async def get_frontdoor_checkpoint_history(
     metadata_filter: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     runner = await _runner_for_loop(loop)
+    normalized_limit = 20 if limit is None else max(1, int(limit))
     before = (
         _thread_config(session_id=session_id, checkpoint_id=before_checkpoint_id)
         if str(before_checkpoint_id or "").strip()
@@ -114,7 +123,7 @@ async def get_frontdoor_checkpoint_history(
         _thread_config(session_id=session_id),
         filter=dict(metadata_filter or {}) or None,
         before=before,
-        limit=max(1, int(limit or 20)),
+        limit=normalized_limit,
     ):
         items.append(serialize_state_snapshot(snapshot))
     return items
@@ -123,18 +132,24 @@ async def get_frontdoor_checkpoint_history(
 def build_frontdoor_replay_diagnostics(snapshot: dict[str, Any]) -> dict[str, Any]:
     item = dict(snapshot or {})
     metadata = dict(item.get("metadata") or {})
+    configurable = {
+        "thread_id": str(item.get("thread_id") or ""),
+    }
+    checkpoint_id = str(item.get("checkpoint_id") or "")
+    checkpoint_ns = str(item.get("checkpoint_ns") or "")
+    if checkpoint_id:
+        configurable["checkpoint_id"] = checkpoint_id
+    if checkpoint_ns:
+        configurable["checkpoint_ns"] = checkpoint_ns
     return {
         "thread_id": str(item.get("thread_id") or ""),
-        "checkpoint_id": str(item.get("checkpoint_id") or ""),
+        "checkpoint_id": checkpoint_id,
         "parent_checkpoint_id": str(item.get("parent_checkpoint_id") or ""),
         "step": int(metadata.get("step") or 0),
         "source": str(metadata.get("source") or ""),
         "next": list(item.get("next") or []),
         "has_interrupts": bool(item.get("has_interrupts")),
         "replay_config": {
-            "configurable": {
-                "thread_id": str(item.get("thread_id") or ""),
-                "checkpoint_id": str(item.get("checkpoint_id") or ""),
-            }
+            "configurable": configurable
         },
     }
