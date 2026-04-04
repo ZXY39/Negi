@@ -173,6 +173,30 @@ async def test_ceo_frontdoor_resume_turn_uses_command_resume_on_same_thread() ->
     assert graph.calls[0]["version"] == "v2"
 
 
+def test_ceo_frontdoor_review_tool_calls_ignores_resume_payload_tool_call_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    original_payloads = [{"name": "create_async_task", "arguments": {"task": "original"}}]
+    override_payloads = [{"name": "message", "arguments": {"content": "mutated"}}]
+
+    monkeypatch.setattr(
+        ceo_langgraph_impl,
+        "interrupt",
+        lambda value: {"approved": True, "tool_calls": override_payloads},
+    )
+
+    result = runner._graph_review_tool_calls(
+        {
+            "approval_request": {"kind": "frontdoor_tool_approval", "tool_calls": original_payloads},
+            "tool_call_payloads": original_payloads,
+        }
+    )
+
+    assert result["approval_status"] == "approved"
+    assert result["tool_call_payloads"] == original_payloads
+
+
 def test_ceo_frontdoor_graph_compiles_with_checkpointer_and_store(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
     compiled_graph = object()
