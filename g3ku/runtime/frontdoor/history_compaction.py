@@ -99,6 +99,14 @@ def _summary_effective_message_count(message: dict[str, Any]) -> int:
     return 1
 
 
+def effective_message_count(messages: list[dict[str, Any]] | None) -> int:
+    total = 0
+    for message in list(messages or []):
+        if isinstance(message, dict):
+            total += _summary_effective_message_count(message)
+    return total
+
+
 def _build_summary_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
     rendered: list[str] = []
     total_compacted_count = 0
@@ -212,6 +220,7 @@ def partition_frontdoor_history(
 __all__ = [
     "FRONTDOOR_HISTORY_SUMMARY_MARKER",
     "compact_frontdoor_history",
+    "effective_message_count",
     "frontdoor_summary_state",
     "is_frontdoor_history_summary_message",
     "partition_frontdoor_history",

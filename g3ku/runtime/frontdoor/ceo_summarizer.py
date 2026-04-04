@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable
 
 from .history_compaction import (
     compact_frontdoor_history,
+    effective_message_count,
     frontdoor_summary_state,
     partition_frontdoor_history,
 )
@@ -19,6 +20,68 @@ class CeoSummaryResult:
     summary_payload: dict[str, Any]
     summary_version: int
     summary_model_key: str
+
+
+class _ModelSummaryValidationError(ValueError):
+    pass
+
+
+def _normalize_string_list_field(payload: dict[str, Any], field_name: str) -> list[str]:
+    raw_value = payload.get(field_name)
+    if raw_value is None:
+        return []
+    if not isinstance(raw_value, list):
+        raise _ModelSummaryValidationError(f"{field_name} must be a list of strings")
+    normalized: list[str] = []
+    for item in raw_value:
+        if not isinstance(item, str):
+            raise _ModelSummaryValidationError(f"{field_name} must be a list of strings")
+        text = item.strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _normalize_summary_payload(raw_payload: Any) -> dict[str, Any]:
+    if not isinstance(raw_payload, dict):
+        raise _ModelSummaryValidationError("model summary payload must be a dict")
+
+    raw_narrative = raw_payload.get("narrative")
+    if raw_narrative is None:
+        narrative = ""
+    elif isinstance(raw_narrative, str):
+        narrative = raw_narrative.strip()
+    else:
+        raise _ModelSummaryValidationError("narrative must be a string")
+
+    return {
+        "stable_preferences": _normalize_string_list_field(raw_payload, "stable_preferences"),
+        "stable_facts": _normalize_string_list_field(raw_payload, "stable_facts"),
+        "open_loops": _normalize_string_list_field(raw_payload, "open_loops"),
+        "recent_actions": _normalize_string_list_field(raw_payload, "recent_actions"),
+        "narrative": narrative,
+    }
+
+
+def _heuristic_fallback_result(
+    *,
+    normalized_messages: list[dict[str, Any]],
+    keep_count: int,
+    trigger_message_count: int,
+) -> CeoSummaryResult:
+    compacted = compact_frontdoor_history(
+        normalized_messages,
+        recent_message_count=keep_count,
+        summary_trigger_message_count=max(1, int(trigger_message_count)),
+    )
+    state = frontdoor_summary_state(compacted)
+    return CeoSummaryResult(
+        messages=compacted,
+        summary_text=str(state.get("summary_text") or ""),
+        summary_payload={"fallback": "heuristic"},
+        summary_version=int(state.get("summary_version") or 1),
+        summary_model_key="",
+    )
 
 
 def _render_summary_text(payload: dict[str, Any]) -> str:
@@ -83,21 +146,20 @@ async def summarize_frontdoor_history(
     try:
         raw_payload = await model_invoke(prompt)
     except Exception:
-        compacted = compact_frontdoor_history(
-            normalized_messages,
-            recent_message_count=keep_count,
-            summary_trigger_message_count=max(1, int(trigger_message_count)),
+        return _heuristic_fallback_result(
+            normalized_messages=normalized_messages,
+            keep_count=keep_count,
+            trigger_message_count=trigger_message_count,
         )
-        state = frontdoor_summary_state(compacted)
-        return CeoSummaryResult(
-            messages=compacted,
-            summary_text=str(state.get("summary_text") or ""),
-            summary_payload={"fallback": "heuristic"},
-            summary_version=int(state.get("summary_version") or 1),
-            summary_model_key="",
+    try:
+        payload = _normalize_summary_payload(raw_payload)
+        summary_text = _render_summary_text(payload)
+    except _ModelSummaryValidationError:
+        return _heuristic_fallback_result(
+            normalized_messages=normalized_messages,
+            keep_count=keep_count,
+            trigger_message_count=trigger_message_count,
         )
-    payload = dict(raw_payload or {})
-    summary_text = _render_summary_text(payload)
     summary_message = {
         "role": "assistant",
         "content": summary_text,
@@ -105,7 +167,7 @@ async def summarize_frontdoor_history(
             "frontdoor_history_summary": True,
             "summary_version": 2,
             "summary_model_key": str(model_key or "").strip(),
-            "compacted_message_count": len(compactable_messages),
+            "compacted_message_count": effective_message_count(compactable_messages),
         },
     }
     return CeoSummaryResult(

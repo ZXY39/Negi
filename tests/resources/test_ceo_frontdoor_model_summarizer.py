@@ -200,3 +200,85 @@ async def test_summarize_frontdoor_history_prefix_retention_matches_fallback_pat
     assert [item["content"] for item in fallback_result.messages[-2:]] == [
         item["content"] for item in heuristic_messages[-2:]
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        {"stable_preferences": "reply in Chinese"},
+        ["not", "a", "dict"],
+    ],
+)
+async def test_summarize_frontdoor_history_malformed_model_output_falls_back_heuristically(
+    model_output: object,
+) -> None:
+    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(10)]
+    compacted = compact_frontdoor_history(
+        messages,
+        recent_message_count=4,
+        summary_trigger_message_count=6,
+    )
+    heuristic_state = frontdoor_summary_state(compacted)
+
+    async def _bad_model(prompt: dict[str, object]) -> object:
+        _ = prompt
+        return model_output
+
+    result = await summarize_frontdoor_history(
+        messages=messages,
+        previous_summary_text="",
+        previous_summary_payload={},
+        keep_message_count=4,
+        trigger_message_count=6,
+        model_key="summary-model",
+        model_invoke=_bad_model,
+    )
+
+    assert result.summary_payload["fallback"] == "heuristic"
+    assert [item["content"] for item in result.messages[-4:]] == [f"message {idx}" for idx in range(6, 10)]
+    assert result.summary_model_key == ""
+    assert result.summary_version == int(heuristic_state["summary_version"])
+
+
+@pytest.mark.asyncio
+async def test_summarize_frontdoor_history_model_summary_preserves_effective_compacted_count() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": "## Existing Summary [frontdoor-history-summary]",
+            "metadata": {
+                "frontdoor_history_summary": True,
+                "summary_version": 2,
+                "summary_model_key": "existing-model",
+                "compacted_message_count": 7,
+            },
+        },
+        {"role": "user", "content": "message 1"},
+        {"role": "assistant", "content": "message 2"},
+        {"role": "user", "content": "message 3"},
+        {"role": "assistant", "content": "message 4"},
+        {"role": "user", "content": "message 5"},
+        {"role": "assistant", "content": "message 6"},
+        {"role": "user", "content": "message 7"},
+    ]
+
+    async def _fake_model(prompt: dict[str, object]) -> dict[str, object]:
+        _ = prompt
+        return {
+            "stable_preferences": ["reply in Chinese"],
+            "narrative": "Preserve existing compacted counts.",
+        }
+
+    result = await summarize_frontdoor_history(
+        messages=messages,
+        previous_summary_text="",
+        previous_summary_payload={},
+        keep_message_count=2,
+        trigger_message_count=4,
+        model_key="summary-model",
+        model_invoke=_fake_model,
+    )
+
+    summary_message = result.messages[0]
+    assert summary_message["metadata"]["compacted_message_count"] == 12
