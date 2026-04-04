@@ -21,7 +21,7 @@ from main.api import admin_rest
 from main.governance.resource_filter import list_effective_tool_names
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
 from main.models import TaskRecord
-from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService
+from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService, TaskNodeDetailTool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -799,6 +799,24 @@ def test_main_runtime_service_node_detail_defaults_to_summary_payload():
     assert result['item']['detail_level'] == 'summary'
     assert 'artifacts_preview' in result
     assert 'artifacts' not in result
+
+
+def test_task_node_detail_tool_parameters_match_resource_contract():
+    tool = TaskNodeDetailTool(SimpleNamespace())
+
+    assert tool.parameters == {
+        'type': 'object',
+        'properties': {
+            '任务id': {'type': 'string', 'description': '目标任务 id。'},
+            '节点id': {'type': 'string', 'description': '目标节点 id。'},
+            'detail_level': {
+                'type': 'string',
+                'enum': ['summary', 'full'],
+                'description': 'summary 返回轻量节点详情与 refs/工件预览；full 返回完整执行轨迹和完整工件列表。',
+            },
+        },
+        'required': ['任务id', '节点id'],
+    }
 
 
 @pytest.mark.asyncio

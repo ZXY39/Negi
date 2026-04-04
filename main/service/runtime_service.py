@@ -4523,7 +4523,7 @@ class TaskFailedNodesTool(Tool):
         return self._service.failed_node_ids(task_id)
 
 
-class TaskNodeDetailTool(Tool):
+class _LegacyTaskNodeDetailToolMojibakeB(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service
 
@@ -4553,7 +4553,7 @@ class TaskNodeDetailTool(Tool):
         return self._service.node_detail(task_id, node_id)
 
 
-class TaskNodeDetailTool(Tool):
+class _LegacyTaskNodeDetailToolMojibakeA(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service
 
@@ -4583,6 +4583,40 @@ class TaskNodeDetailTool(Tool):
         await self._service.startup()
         task_id = str(kwargs.get('浠诲姟id') or '').strip()
         node_id = str(kwargs.get('鑺傜偣id') or '').strip()
+        detail_level = str(kwargs.get('detail_level') or 'summary').strip()
+        return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+
+
+class TaskNodeDetailTool(Tool):
+    def __init__(self, service: MainRuntimeService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return 'task_node_detail'
+
+    @property
+    def description(self) -> str:
+        return '按任务 id 和节点 id 返回节点详情及关联工件列表。'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                '任务id': {'type': 'string', 'description': '目标任务 id。'},
+                '节点id': {'type': 'string', 'description': '目标节点 id。'},
+                'detail_level': build_detail_level_schema(
+                    description='summary 返回轻量节点详情与 refs/工件预览；full 返回完整执行轨迹和完整工件列表。',
+                ),
+            },
+            'required': ['任务id', '节点id'],
+        }
+
+    async def execute(self, **kwargs: Any) -> dict[str, Any] | str:
+        await self._service.startup()
+        task_id = str(kwargs.get('任务id') or '').strip()
+        node_id = str(kwargs.get('节点id') or '').strip()
         detail_level = str(kwargs.get('detail_level') or 'summary').strip()
         return self._service.node_detail(task_id, node_id, detail_level=detail_level)
 
