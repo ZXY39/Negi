@@ -294,6 +294,37 @@ def test_build_frontdoor_replay_diagnostics_keeps_replay_pointer_and_step() -> N
     }
 
 
+def test_build_frontdoor_replay_diagnostics_surfaces_prompt_cache_diagnostics() -> None:
+    snapshot = {
+        "thread_id": "web:shared",
+        "checkpoint_id": "cp-2",
+        "metadata": {"step": 2, "source": "loop"},
+        "next": [],
+        "has_interrupts": False,
+        "values": {
+            "prompt_cache_diagnostics": {
+                "stable_prompt_signature": "stable-abc",
+                "tool_signature_count": 2,
+                "tool_signature_hash": "tool-hash",
+                "overlay_present": True,
+                "overlay_section_count": 3,
+                "overlay_text_hash": "overlay-hash",
+            }
+        },
+    }
+
+    item = build_frontdoor_replay_diagnostics(snapshot)
+
+    assert item["prompt_cache_diagnostics"] == {
+        "stable_prompt_signature": "stable-abc",
+        "tool_signature_count": 2,
+        "tool_signature_hash": "tool-hash",
+        "overlay_present": True,
+        "overlay_section_count": 3,
+        "overlay_text_hash": "overlay-hash",
+    }
+
+
 def test_ceo_session_checkpoint_history_endpoint_returns_serialized_history(monkeypatch, tmp_path) -> None:
     app = _build_checkpoint_app()
     client = TestClient(app)

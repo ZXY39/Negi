@@ -12,13 +12,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 from pydantic import ConfigDict, Field, create_model
-from typing_extensions import TypedDict
 
 from g3ku.agent.tools.base import Tool
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.project_environment import current_project_environment
-from main.runtime.chat_backend import build_session_prompt_cache_key
+from main.runtime.chat_backend import build_prompt_cache_diagnostics, build_session_prompt_cache_key
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -27,49 +26,18 @@ from main.runtime.tool_call_repair import (
 )
 
 from ._ceo_support import CeoFrontDoorSupport
-from .history_compaction import compact_frontdoor_history
+from .history_compaction import compact_frontdoor_history, frontdoor_summary_state
 from .state_models import (
     CeoFrontdoorInterrupted,
     CeoPendingInterrupt,
+    CeoPersistentState,
     CeoRuntimeContext,
     initial_persistent_state,
 )
 
 
-class CeoGraphState(TypedDict, total=False):
-    user_input: Any
-    approval_request: dict[str, Any] | None
-    approval_status: str
-    query_text: str
-    messages: list[dict[str, Any]]
-    tool_names: list[str]
-    used_tools: list[str]
-    route_kind: str
-    repair_overlay_text: str | None
-    xml_repair_attempt_count: int
-    xml_repair_excerpt: str
-    xml_repair_tool_names: list[str]
-    xml_repair_last_issue: str
-    empty_response_retry_count: int
-    heartbeat_internal: bool
-    cron_internal: bool
-    final_output: str
-    error_message: str
-    model_refs: list[str]
-    prompt_cache_key: str
-    parallel_enabled: bool
-    max_parallel_tool_calls: int | None
-    max_iterations: int | None
-    iteration: int
-    response_message: Any
-    response_content: Any
-    synthetic_tool_calls_used: bool
-    analysis_text: str
-    tool_call_payloads: list[dict[str, Any]]
-    next_step: str
-
-
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
+CeoGraphState = CeoPersistentState
 
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 
@@ -119,6 +87,11 @@ def _user_input_content(value: Any) -> Any:
 def _user_input_metadata(value: Any) -> dict[str, Any]:
     metadata = value.get("metadata", {}) if isinstance(value, dict) else getattr(value, "metadata", {})
     return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _join_overlay_text(*parts: Any) -> str:
+    sections = [str(part or "").strip() for part in parts if str(part or "").strip()]
+    return "\n\n".join(sections).strip()
 
 
 def _json_schema_annotation(schema: dict[str, Any] | None) -> Any:
@@ -196,7 +169,7 @@ def _build_visible_tool_bundle(*, tools: dict[str, Tool], executor: ToolExecutor
 
 
 def _build_langgraph_ceo_graph(runner):
-    graph = StateGraph(CeoGraphState, context_schema=CeoRuntimeContext)
+    graph = StateGraph(CeoPersistentState, context_schema=CeoRuntimeContext)
     graph.add_node("prepare_turn", runner._graph_prepare_turn)
     graph.add_node("call_model", runner._graph_call_model)
     graph.add_node("normalize_model_output", runner._graph_normalize_model_output)
@@ -297,6 +270,25 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
         return self._registered_tools(list(state.get("tool_names") or []))
 
+    def _selected_tool_schemas(self, tool_names: list[str] | None) -> list[dict[str, Any]]:
+        schemas: list[dict[str, Any]] = []
+        for name in list(tool_names or []):
+            tool = self._loop.tools.get(str(name or "").strip())
+            if tool is None:
+                continue
+            try:
+                schemas.append(tool.to_schema())
+            except Exception:
+                continue
+        return schemas
+
+    @staticmethod
+    def _effective_turn_overlay_text(state: CeoGraphState) -> str:
+        return _join_overlay_text(
+            state.get("turn_overlay_text"),
+            state.get("repair_overlay_text"),
+        )
+
     def _frontdoor_compaction_settings(self) -> tuple[int, int]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
         recent_count = max(1, int(getattr(assembly_cfg, "frontdoor_recent_message_count", 8) or 8))
@@ -313,6 +305,13 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             recent_message_count=recent_count,
             summary_trigger_message_count=trigger_count,
         )
+
+    def _compacted_frontdoor_state(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        compacted = self._compact_frontdoor_messages(messages)
+        return {
+            "messages": compacted,
+            **frontdoor_summary_state(compacted),
+        }
 
     def _reviewable_tool_names(self) -> set[str]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
@@ -398,7 +397,21 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         return list(tool_bundle.langchain_tools)
 
     @staticmethod
-    def _model_response_view(message: AIMessage) -> Any:
+    def _model_response_view(message: AIMessage | dict[str, Any]) -> Any:
+        if isinstance(message, dict):
+            payload = dict(message or {})
+            return type(
+                "ModelResponseView",
+                (),
+                {
+                    "content": payload.get("content", ""),
+                    "tool_calls": list(payload.get("tool_calls", None) or []),
+                    "finish_reason": str(payload.get("finish_reason", "stop") or "stop"),
+                    "error_text": str(payload.get("error_text", "") or ""),
+                    "reasoning_content": payload.get("reasoning_content"),
+                    "thinking_blocks": payload.get("thinking_blocks"),
+                },
+            )()
         response_metadata = dict(getattr(message, "response_metadata", {}) or {})
         additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
         return type(
@@ -413,6 +426,19 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
                 "thinking_blocks": additional_kwargs.get("thinking_blocks"),
             },
         )()
+
+    def _checkpoint_safe_model_response_payload(self, message: AIMessage) -> dict[str, Any]:
+        response_view = self._model_response_view(message)
+        return {
+            "content": _checkpoint_safe_value(response_view.content),
+            "tool_calls": _checkpoint_safe_value(
+                self._tool_call_payloads_from_calls(list(response_view.tool_calls or []))
+            ),
+            "finish_reason": str(response_view.finish_reason or "stop"),
+            "error_text": str(response_view.error_text or ""),
+            "reasoning_content": _checkpoint_safe_value(response_view.reasoning_content),
+            "thinking_blocks": _checkpoint_safe_value(response_view.thinking_blocks),
+        }
 
     @staticmethod
     def _tool_call_payloads_from_calls(calls: list[Any]) -> list[dict[str, Any]]:
@@ -557,14 +583,27 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
         if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
             messages.append({"role": "user", "content": self._model_content(user_content)})
-        messages = self._compact_frontdoor_messages(messages)
+        compacted_state = self._compacted_frontdoor_state(messages)
+        messages = list(compacted_state.get("messages") or [])
 
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
+        tool_schemas = self._selected_tool_schemas(tool_names)
         prompt_cache_key = build_session_prompt_cache_key(
             session_key=str(getattr(session.state, "session_key", "") or ""),
             provider_model=provider_model,
             scope="ceo_frontdoor",
+            stable_messages=messages,
+            tool_schemas=tool_schemas,
+        )
+        prompt_cache_diagnostics = build_prompt_cache_diagnostics(
+            stable_messages=messages,
+            tool_schemas=tool_schemas,
+            provider_model=provider_model,
+            scope="ceo_frontdoor",
+            prompt_cache_key=prompt_cache_key,
+            overlay_text=str(getattr(assembly, "turn_overlay_text", "") or ""),
+            overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
         )
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
@@ -573,6 +612,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             "approval_status": "",
             "query_text": query_text,
             "messages": messages,
+            "summary_text": str(compacted_state.get("summary_text") or ""),
+            "summary_version": int(compacted_state.get("summary_version") or 0),
+            "turn_overlay_text": str(getattr(assembly, "turn_overlay_text", "") or "").strip() or None,
             "tool_names": list(tool_names),
             "used_tools": [],
             "route_kind": "direct_reply",
@@ -586,6 +628,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             "cron_internal": cron_internal,
             "model_refs": model_refs,
             "prompt_cache_key": prompt_cache_key,
+            "prompt_cache_diagnostics": prompt_cache_diagnostics,
             "parallel_enabled": parallel_enabled,
             "max_parallel_tool_calls": max_parallel_tool_calls,
             "max_iterations": getattr(self._loop, "max_iterations", 12),
@@ -609,7 +652,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         langchain_tools = self._build_langchain_tools_for_state(state=state, runtime=runtime)
         request_messages = self._apply_turn_overlay(
             list(state.get("messages") or []),
-            overlay_text=state.get("repair_overlay_text"),
+            overlay_text=self._effective_turn_overlay_text(state),
         )
         provider_retry_count = 0
         empty_response_retry_count = 0
@@ -637,8 +680,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         return {
             "iteration": iteration,
             "repair_overlay_text": None,
-            "response_message": message,
-            "response_content": getattr(message, "content", ""),
+            "response_payload": self._checkpoint_safe_model_response_payload(message),
             "empty_response_retry_count": empty_response_retry_count,
         }
 
@@ -648,8 +690,8 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         *,
         runtime: Runtime[CeoRuntimeContext],
     ) -> dict[str, Any]:
-        response_message = state["response_message"]
-        response_view = self._model_response_view(response_message)
+        response_payload = dict(state.get("response_payload") or {})
+        response_view = self._model_response_view(response_payload)
         visible_tools = self._registered_tools_for_state(state)
         visible_tool_names = {
             str(name or "").strip()
@@ -894,15 +936,21 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
 
         tool_results = await asyncio.gather(*[_run_single(payload) for payload in tool_call_payloads])
         tool_messages = [dict(item.get("tool_message") or {}) for item in tool_results]
+        response_payload = dict(state.get("response_payload") or {})
         assistant_message = {
             "role": "assistant",
-            "content": None if state.get("synthetic_tool_calls_used") else self._model_content(state.get("response_content", "")),
+            "content": (
+                None
+                if state.get("synthetic_tool_calls_used")
+                else self._model_content(response_payload.get("content", ""))
+            ),
             "tool_calls": self._assistant_tool_calls_from_payloads(tool_call_payloads),
         }
         messages = list(state.get("messages") or [])
         messages.append(assistant_message)
         messages.extend(tool_messages)
-        messages = self._compact_frontdoor_messages(messages)
+        compacted_state = self._compacted_frontdoor_state(messages)
+        messages = list(compacted_state.get("messages") or [])
 
         used_tools = list(state.get("used_tools") or [])
         used_tools.extend(
@@ -935,6 +983,8 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         if successful_dispatch is not None and set(substantive_tool_names) == {"create_async_task"}:
             return {
                 "messages": messages,
+                "summary_text": str(compacted_state.get("summary_text") or ""),
+                "summary_version": int(compacted_state.get("summary_version") or 0),
                 "used_tools": used_tools,
                 "route_kind": route_kind,
                 "analysis_text": "",
@@ -947,6 +997,8 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             }
         return {
             "messages": messages,
+            "summary_text": str(compacted_state.get("summary_text") or ""),
+            "summary_version": int(compacted_state.get("summary_version") or 0),
             "used_tools": used_tools,
             "route_kind": route_kind,
             "analysis_text": "",
@@ -969,7 +1021,12 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
             if last_role != "assistant":
                 messages.append({"role": "assistant", "content": output})
-            result["messages"] = self._compact_frontdoor_messages(messages)
+            compacted_state = self._compacted_frontdoor_state(messages)
+            result["messages"] = compacted_state["messages"]
+            result["summary_text"] = str(compacted_state.get("summary_text") or "")
+            result["summary_version"] = int(compacted_state.get("summary_version") or 0)
+            return result
+        result.update(frontdoor_summary_state(messages))
         return result
 
     async def _invoke_graph_input(self, *, graph_input, session, on_progress=None) -> dict[str, Any]:

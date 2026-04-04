@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -223,6 +224,11 @@ class CeoMessageBuilder:
             if l2:
                 lines.append(f"  L2: {l2}")
         return '\n'.join(lines).strip()
+
+    @staticmethod
+    def _join_turn_overlay_sections(parts: list[str] | None) -> str:
+        sections = [str(part or '').strip() for part in list(parts or []) if str(part or '').strip()]
+        return '\n\n'.join(sections).strip()
 
     def _select_skills(
         self,
@@ -547,7 +553,16 @@ class CeoMessageBuilder:
             top_k=inventory_top_k,
             ranked_skill_ids=semantic_frontdoor['skill_ids'],
         )
-        system_prompt = self._prompt_builder.build(skills=list(selected_skills))
+        split_prompt_builder = (
+            callable(getattr(self._prompt_builder, 'build_base_prompt', None))
+            and callable(getattr(self._prompt_builder, 'build_visible_skills_block', None))
+        )
+        if split_prompt_builder:
+            system_prompt = self._prompt_builder.build_base_prompt()
+            visible_skills_block = self._prompt_builder.build_visible_skills_block(skills=list(selected_skills))
+        else:
+            system_prompt = self._prompt_builder.build(skills=list(selected_skills))
+            visible_skills_block = ''
         external_tools_block, external_trace = self._build_external_tool_block(
             visible_families=visible_families,
             visible_tool_names=list(exposure.get('tool_names') or []),
@@ -561,8 +576,14 @@ class CeoMessageBuilder:
             for name in list(exposure.get('tool_names') or [])
             if str(name or '').strip()
         }
+        turn_overlay_parts: list[str] = []
+        if split_prompt_builder and visible_skills_block:
+            turn_overlay_parts.append(visible_skills_block)
         if memory_write_terms and memory_write_visible:
-            system_prompt = f"{system_prompt}\n\n{self._memory_write_hint_block(memory_write_terms)}"
+            if split_prompt_builder:
+                turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
+            else:
+                system_prompt = f"{system_prompt}\n\n{self._memory_write_hint_block(memory_write_terms)}"
 
         selected_tool_names, tool_trace = self._select_tools(
             query_text=query_text,
@@ -605,7 +626,12 @@ class CeoMessageBuilder:
 
         retrieved_markdown = self._render_retrieved_context(retrieved_bundle)
         if memory_write_terms and retrieved_markdown:
-            retrieved_markdown = f"{self._retrieved_memory_resolution_hint_block()}\n\n{retrieved_markdown}"
+            if split_prompt_builder:
+                turn_overlay_parts.append(self._retrieved_memory_resolution_hint_block())
+            else:
+                retrieved_markdown = f"{self._retrieved_memory_resolution_hint_block()}\n\n{retrieved_markdown}"
+        if split_prompt_builder and retrieved_markdown:
+            turn_overlay_parts.append(retrieved_markdown)
 
         checkpoint_history = self._checkpoint_history(checkpoint_messages)
         transcript_history = self._transcript_history(persisted_session)
@@ -628,8 +654,9 @@ class CeoMessageBuilder:
             query_text=query_text,
             user_metadata=user_metadata,
         )
+        turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts) if split_prompt_builder else ''
         model_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-        if retrieved_markdown:
+        if retrieved_markdown and not split_prompt_builder:
             model_messages.append({"role": "assistant", "content": retrieved_markdown})
         model_messages.extend(history_messages)
         if not current_user_in_history:
@@ -660,9 +687,20 @@ class CeoMessageBuilder:
             'current_user_in_transcript': current_user_in_transcript,
             'retrieved_record_count': len(list(retrieved_bundle.records or [])),
             'model_messages_count': len(model_messages),
+            'stable_prefix_message_count': len(model_messages),
+            'turn_overlay_present': bool(turn_overlay_text),
+            'turn_overlay_section_count': len(turn_overlay_parts),
+            'turn_overlay_character_count': len(turn_overlay_text),
+            'turn_overlay_text_hash': (
+                hashlib.sha256(turn_overlay_text.encode('utf-8')).hexdigest()
+                if turn_overlay_text
+                else ''
+            ),
+            'stable_prompt_split': split_prompt_builder,
         }
         return ContextAssemblyResult(
             model_messages=model_messages,
             tool_names=selected_tool_names,
             trace=trace,
+            turn_overlay_text=turn_overlay_text,
         )

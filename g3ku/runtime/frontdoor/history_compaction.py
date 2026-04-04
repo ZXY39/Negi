@@ -5,6 +5,7 @@ from typing import Any
 FRONTDOOR_HISTORY_SUMMARY_MARKER = "[frontdoor-history-summary]"
 _SUMMARY_HEADER = f"## Frontdoor History Summary {FRONTDOOR_HISTORY_SUMMARY_MARKER}"
 _SUMMARY_METADATA_KEY = "frontdoor_history_summary"
+_SUMMARY_VERSION = 1
 _MAX_SUMMARY_LINE_LENGTH = 240
 
 
@@ -122,7 +123,32 @@ def _build_summary_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
         "metadata": {
             _SUMMARY_METADATA_KEY: True,
             "compacted_message_count": total_compacted_count,
+            "summary_version": _SUMMARY_VERSION,
         },
+    }
+
+
+def frontdoor_summary_state(messages: list[dict[str, Any]] | None) -> dict[str, Any]:
+    for message in list(messages or []):
+        if not is_frontdoor_history_summary_message(message):
+            continue
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        summary_version = _SUMMARY_VERSION
+        if isinstance(metadata, dict):
+            raw_version = metadata.get("summary_version")
+            if isinstance(raw_version, int | float):
+                summary_version = max(1, int(raw_version))
+            else:
+                text_version = str(raw_version or "").strip()
+                if text_version.isdigit():
+                    summary_version = max(1, int(text_version))
+        return {
+            "summary_text": _message_text(message.get("content")),
+            "summary_version": summary_version,
+        }
+    return {
+        "summary_text": "",
+        "summary_version": 0,
     }
 
 
@@ -162,5 +188,6 @@ def compact_frontdoor_history(
 __all__ = [
     "FRONTDOOR_HISTORY_SUMMARY_MARKER",
     "compact_frontdoor_history",
+    "frontdoor_summary_state",
     "is_frontdoor_history_summary_message",
 ]
