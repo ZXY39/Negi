@@ -134,8 +134,12 @@ def frontdoor_summary_state(messages: list[dict[str, Any]] | None) -> dict[str, 
             continue
         metadata = message.get("metadata") if isinstance(message, dict) else None
         summary_version = _SUMMARY_VERSION
+        summary_model_key = ""
         if isinstance(metadata, dict):
             raw_version = metadata.get("summary_version")
+            raw_model_key = metadata.get("summary_model_key")
+            if isinstance(raw_model_key, str):
+                summary_model_key = raw_model_key.strip()
             if isinstance(raw_version, int | float):
                 summary_version = max(1, int(raw_version))
             else:
@@ -145,10 +149,12 @@ def frontdoor_summary_state(messages: list[dict[str, Any]] | None) -> dict[str, 
         return {
             "summary_text": _message_text(message.get("content")),
             "summary_version": summary_version,
+            "summary_model_key": summary_model_key,
         }
     return {
         "summary_text": "",
         "summary_version": 0,
+        "summary_model_key": "",
     }
 
 
