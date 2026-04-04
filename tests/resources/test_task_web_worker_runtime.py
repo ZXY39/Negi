@@ -1849,6 +1849,55 @@ def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path:
     assert node_payload["item"]["output"] == "projection-output"
 
 
+def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    inner = service.content_store.maybe_externalize_text(
+        "alpha\nneedle\nomega\n",
+        runtime={"task_id": record.task_id, "node_id": root.node_id},
+        display_name="inner",
+        source_kind="node_output",
+        force=True,
+    )
+
+    assert inner is not None
+
+    wrapped = json.dumps(inner.to_dict(), ensure_ascii=False)
+    service.log_service.record_tool_result_batch(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        response_tool_calls=[SimpleNamespace(id="call:content", name="content", arguments={})],
+        results=[
+            {
+                "tool_message": {
+                    "tool_call_id": "call:content",
+                    "name": "content",
+                    "content": wrapped,
+                    "status": "success",
+                },
+                "live_state": {"tool_call_id": "call:content", "tool_name": "content", "status": "success"},
+            }
+        ],
+    )
+
+    tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
+
+    assert tool_results[-1].output_ref == inner.ref
+    assert str(tool_results[-1].payload["parsed_payload"]["wrapper_ref"]).startswith("artifact:")
+
+
 def test_refresh_task_view_skips_upsert_when_semantically_unchanged(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
