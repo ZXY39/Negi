@@ -291,6 +291,15 @@ class TaskQueryService:
                 if isinstance(item, dict)
             ],
         )
+        if normalized_detail_level == 'summary':
+            detail.input_preview = self._preview_text(detail.input)
+            detail.output_preview = self._preview_text(detail.output)
+            detail.check_result_preview = self._preview_text(detail.check_result)
+            detail.final_output_preview = self._preview_text(detail.final_output)
+            detail.input = ''
+            detail.output = ''
+            detail.check_result = ''
+            detail.final_output = ''
         if normalized_detail_level == 'full':
             final_output_full = self._resolve_detail_text(detail.final_output, detail.final_output_ref)
             if final_output_full:
@@ -368,6 +377,13 @@ class TaskQueryService:
                 if resolved:
                     return resolved
         return str(text or '')
+
+    @staticmethod
+    def _preview_text(value: str, *, max_chars: int = 400) -> str:
+        text = str(value or '').strip()
+        if len(text) <= max_chars:
+            return text
+        return f'{text[: max_chars - 3].rstrip()}...'
 
     def _resolve_execution_trace(
         self,

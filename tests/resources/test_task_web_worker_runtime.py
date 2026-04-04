@@ -3228,6 +3228,63 @@ def test_get_node_detail_payload_uses_summary_mode_and_execution_trace_ref(tmp_p
     assert "execution_trace" not in payload["item"]
 
 
+def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inline_text(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    input_text = "\n".join(f"input line {index:03d}" for index in range(160))
+    output_text = "\n".join(f"output line {index:03d}" for index in range(180))
+    check_result = "\n".join(f"check line {index:03d}" for index in range(170))
+    final_output = "\n".join(f"final line {index:03d}" for index in range(200))
+
+    service.log_service.update_node_input(record.task_id, root.node_id, input_text)
+    service.log_service.append_node_output(record.task_id, root.node_id, content=output_text)
+    service.log_service.update_node_check_result(record.task_id, root.node_id, check_result)
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="success",
+        final_output=final_output,
+    )
+
+    payload = service.get_node_detail_payload(record.task_id, root.node_id)
+
+    assert payload is not None
+    item = payload["item"]
+    assert item["detail_level"] == "summary"
+    assert item["input"] == ""
+    assert item["output"] == ""
+    assert item["check_result"] == ""
+    assert item["final_output"] == ""
+    assert item["input_preview"]
+    assert item["output_preview"]
+    assert item["check_result_preview"]
+    assert item["final_output_preview"]
+    assert item["input_preview"] != input_text
+    assert item["output_preview"] != final_output
+    assert item["check_result_preview"] != check_result
+    assert item["final_output_preview"] != final_output
+    assert len(item["input_preview"]) < len(input_text)
+    assert len(item["output_preview"]) < len(final_output)
+    assert len(item["check_result_preview"]) < len(check_result)
+    assert len(item["final_output_preview"]) < len(final_output)
+    assert item["input_ref"].startswith("artifact:")
+    assert item["output_ref"].startswith("artifact:")
+    assert item["check_result_ref"].startswith("artifact:")
+    assert item["final_output_ref"].startswith("artifact:")
+
+
 def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

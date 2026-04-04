@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from datetime import datetime
+import inspect
 from pathlib import Path
 import json
 from types import SimpleNamespace
@@ -817,6 +818,12 @@ def test_task_node_detail_tool_parameters_match_resource_contract():
         },
         'required': ['任务id', '节点id'],
     }
+
+
+def test_runtime_service_has_single_live_task_node_detail_tool_definition():
+    source = inspect.getsource(__import__("main.service.runtime_service", fromlist=["TaskNodeDetailTool"]))
+
+    assert source.count("return 'task_node_detail'") == 1
 
 
 @pytest.mark.asyncio
