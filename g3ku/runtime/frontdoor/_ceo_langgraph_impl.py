@@ -26,6 +26,7 @@ from main.runtime.tool_call_repair import (
 )
 
 from ._ceo_support import CeoFrontDoorSupport
+from .ceo_summarizer import summarize_frontdoor_history
 from .history_compaction import compact_frontdoor_history, frontdoor_summary_state
 from .state_models import (
     CeoFrontdoorInterrupted,
@@ -34,7 +35,6 @@ from .state_models import (
     CeoRuntimeContext,
     initial_persistent_state,
 )
-
 
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 CeoGraphState = CeoPersistentState
@@ -272,10 +272,74 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             **frontdoor_summary_state(compacted),
         }
 
+    def _summarizer_settings(self) -> tuple[bool, str | None, int, int]:
+        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        enabled = bool(getattr(assembly_cfg, "frontdoor_summarizer_enabled", True))
+        model_key = getattr(assembly_cfg, "frontdoor_summarizer_model_key", None)
+        keep_count = int(
+            getattr(
+                assembly_cfg,
+                "frontdoor_summarizer_keep_message_count",
+                getattr(assembly_cfg, "frontdoor_recent_message_count", 8),
+            )
+            or 8
+        )
+        trigger_count = int(
+            getattr(
+                assembly_cfg,
+                "frontdoor_summarizer_trigger_message_count",
+                getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 24),
+            )
+            or 24
+        )
+        keep_count = max(1, keep_count)
+        trigger_count = max(keep_count + 1, trigger_count)
+        return enabled, model_key, trigger_count, keep_count
+
+    async def _summarize_messages(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        state: CeoGraphState,
+    ) -> dict[str, Any]:
+        enabled, model_key, trigger_count, keep_count = self._summarizer_settings()
+        model_invoke = getattr(self, "_invoke_summary_model", None)
+        if enabled and not callable(model_invoke):
+            enabled = False
+        if not enabled:
+            compacted = compact_frontdoor_history(
+                list(messages or []),
+                recent_message_count=keep_count,
+                summary_trigger_message_count=trigger_count,
+            )
+            summary_state = frontdoor_summary_state(compacted)
+            return {
+                "messages": compacted,
+                "summary_text": str(summary_state.get("summary_text") or ""),
+                "summary_payload": {},
+                "summary_version": int(summary_state.get("summary_version") or 0),
+                "summary_model_key": str(summary_state.get("summary_model_key") or ""),
+            }
+
+        result = await summarize_frontdoor_history(
+            messages=list(messages or []),
+            previous_summary_text=str(state.get("summary_text") or ""),
+            previous_summary_payload=dict(state.get("summary_payload") or {}),
+            keep_message_count=keep_count,
+            trigger_message_count=trigger_count,
+            model_key=model_key,
+            model_invoke=model_invoke,
+        )
+        return {
+            "messages": list(result.messages),
+            "summary_text": str(result.summary_text or ""),
+            "summary_payload": dict(result.summary_payload or {}),
+            "summary_version": int(result.summary_version or 0),
+            "summary_model_key": str(result.summary_model_key or ""),
+        }
+
     def _reviewable_tool_names(self) -> set[str]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        if not bool(getattr(assembly_cfg, "frontdoor_interrupt_approval_enabled", False)):
-            return set()
         raw_names = list(
             getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task"]) or []
         )
@@ -482,16 +546,99 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             prompt_cache_key=prompt_cache_key,
         )
 
+    async def _invoke_summary_model(
+        self,
+        prompt: dict[str, Any],
+        *,
+        explicit_model_key: str | None = None,
+    ) -> dict[str, Any]:
+        from g3ku.config.live_runtime import get_runtime_config
+        from g3ku.providers.chatmodels import build_chat_model
+
+        config, _revision, _changed = get_runtime_config(force=False)
+        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        model_key = str(explicit_model_key or getattr(assembly_cfg, "frontdoor_summarizer_model_key", None) or "").strip()
+        if model_key:
+            model = build_chat_model(config, model_key=model_key)
+        else:
+            model = build_chat_model(config, role="ceo")
+
+        system_prompt = (
+            "You summarize CEO frontdoor conversation history.\n"
+            "Return strict JSON only.\n"
+            "Required keys: stable_preferences, stable_facts, open_loops, recent_actions, narrative.\n"
+            "The first four keys must be arrays of strings. narrative must be a string.\n"
+            "Be concise and preserve durable user context and unresolved work."
+        )
+        user_payload = json.dumps(
+            {
+                "previous_summary_text": str(prompt.get("previous_summary_text") or ""),
+                "previous_summary_payload": dict(prompt.get("previous_summary_payload") or {}),
+                "messages": [dict(item) for item in list(prompt.get("messages") or []) if isinstance(item, dict)],
+            },
+            ensure_ascii=False,
+        )
+        response = await model.ainvoke(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_payload},
+            ]
+        )
+        raw = getattr(response, "content", response)
+        if isinstance(raw, list):
+            parts: list[str] = []
+            for item in raw:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text_part = item.get("text") or item.get("content") or ""
+                    if isinstance(text_part, str):
+                        parts.append(text_part)
+            raw = "\n".join(parts)
+        text = str(raw or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, count=1)
+            text = re.sub(r"\s*```$", "", text, count=1)
+            text = text.strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match is None:
+                raise
+            parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict):
+            raise ValueError("summary model response must be a JSON object")
+        return dict(parsed)
+
     async def _graph_prepare_turn(
         self,
         state: CeoGraphState,
         *,
         runtime: Runtime[CeoRuntimeContext],
     ) -> dict[str, Any]:
+        if getattr(getattr(runtime, "context", None), "session", None) is None:
+            compacted_state = await self._summarize_messages(
+                messages=list(state.get("messages") or []),
+                state=state,
+            )
+            get_value = (
+                compacted_state.get
+                if isinstance(compacted_state, dict)
+                else lambda key, default=None: getattr(compacted_state, key, default)
+            )
+            return {
+                "messages": list(get_value("messages") or []),
+                "summary_text": str(get_value("summary_text") or ""),
+                "summary_payload": dict(get_value("summary_payload") or {}),
+                "summary_version": int(get_value("summary_version") or 0),
+                "summary_model_key": str(get_value("summary_model_key") or ""),
+            }
+
         user_input = _persistent_user_input_payload(state.get("user_input"))
         user_content = _user_input_content(user_input)
         session = runtime.context.session
-        on_progress = runtime.context.on_progress
         query_text = self._content_text(user_content)
         metadata = _user_input_metadata(user_input)
         heartbeat_internal = bool(metadata.get("heartbeat_internal"))
@@ -501,8 +648,6 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         if main_service is not None:
             await main_service.startup()
 
-        memory_channel = getattr(session, "_memory_channel", getattr(session, "_channel", "cli"))
-        memory_chat_id = getattr(session, "_memory_chat_id", getattr(session, "_chat_id", session.state.session_key))
         for name in ("message", "cron"):
             tool = self._loop.tools.get(name)
             if tool is not None and hasattr(tool, "set_context"):
@@ -544,7 +689,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
         if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
             messages.append({"role": "user", "content": self._model_content(user_content)})
-        compacted_state = self._compacted_frontdoor_state(messages)
+        compacted_state = await self._summarize_messages(messages=messages, state=state)
         messages = list(compacted_state.get("messages") or [])
 
         model_refs = self._resolve_ceo_model_refs()
@@ -574,7 +719,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             "query_text": query_text,
             "messages": messages,
             "summary_text": str(compacted_state.get("summary_text") or ""),
+            "summary_payload": dict(compacted_state.get("summary_payload") or {}),
             "summary_version": int(compacted_state.get("summary_version") or 0),
+            "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
             "turn_overlay_text": str(getattr(assembly, "turn_overlay_text", "") or "").strip() or None,
             "tool_names": list(tool_names),
             "used_tools": [],
@@ -910,7 +1057,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         messages = list(state.get("messages") or [])
         messages.append(assistant_message)
         messages.extend(tool_messages)
-        compacted_state = self._compacted_frontdoor_state(messages)
+        compacted_state = await self._summarize_messages(messages=messages, state=state)
         messages = list(compacted_state.get("messages") or [])
 
         used_tools = list(state.get("used_tools") or [])
@@ -945,7 +1092,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             return {
                 "messages": messages,
                 "summary_text": str(compacted_state.get("summary_text") or ""),
+                "summary_payload": dict(compacted_state.get("summary_payload") or {}),
                 "summary_version": int(compacted_state.get("summary_version") or 0),
+                "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
                 "used_tools": used_tools,
                 "route_kind": route_kind,
                 "analysis_text": "",
@@ -959,7 +1108,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         return {
             "messages": messages,
             "summary_text": str(compacted_state.get("summary_text") or ""),
+            "summary_payload": dict(compacted_state.get("summary_payload") or {}),
             "summary_version": int(compacted_state.get("summary_version") or 0),
+            "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
             "used_tools": used_tools,
             "route_kind": route_kind,
             "analysis_text": "",
@@ -982,12 +1133,19 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
             if last_role != "assistant":
                 messages.append({"role": "assistant", "content": output})
-            compacted_state = self._compacted_frontdoor_state(messages)
-            result["messages"] = compacted_state["messages"]
+            compacted_state = await self._summarize_messages(messages=messages, state=state)
+            result["messages"] = list(compacted_state.get("messages") or [])
             result["summary_text"] = str(compacted_state.get("summary_text") or "")
+            result["summary_payload"] = dict(compacted_state.get("summary_payload") or {})
             result["summary_version"] = int(compacted_state.get("summary_version") or 0)
+            result["summary_model_key"] = str(compacted_state.get("summary_model_key") or "")
             return result
-        result.update(frontdoor_summary_state(messages))
+        compacted_state = await self._summarize_messages(messages=messages, state=state)
+        result["messages"] = list(compacted_state.get("messages") or [])
+        result["summary_text"] = str(compacted_state.get("summary_text") or "")
+        result["summary_payload"] = dict(compacted_state.get("summary_payload") or {})
+        result["summary_version"] = int(compacted_state.get("summary_version") or 0)
+        result["summary_model_key"] = str(compacted_state.get("summary_model_key") or "")
         return result
 
     async def _invoke_graph_input(self, *, graph_input, session, on_progress=None) -> dict[str, Any]:

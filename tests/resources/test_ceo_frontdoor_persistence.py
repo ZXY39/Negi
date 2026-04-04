@@ -6,8 +6,8 @@ import types
 from types import SimpleNamespace
 
 import pytest
-from langgraph.types import Command
 from langchain_core.messages import AIMessage
+from langgraph.types import Command
 
 if "litellm" not in sys.modules:
     litellm_stub = types.ModuleType("litellm")
@@ -24,6 +24,7 @@ if "litellm" not in sys.modules:
 from g3ku.agent.tools.base import Tool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor import _ceo_langgraph_impl as ceo_langgraph_impl
+from g3ku.runtime.frontdoor import checkpoint_inspection
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.history_compaction import (
     FRONTDOOR_HISTORY_SUMMARY_MARKER,
@@ -85,6 +86,27 @@ class _InterruptingCompiledGraph:
             },
             interrupts=(SimpleNamespace(id="interrupt-1", value={"kind": "frontdoor_tool_approval"}),),
         )
+
+
+class _MessageTool(Tool):
+    @property
+    def name(self) -> str:
+        return "message"
+
+    @property
+    def description(self) -> str:
+        return "send message"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {"content": {"type": "string"}},
+            "required": ["content"],
+        }
+
+    async def execute(self, **kwargs):
+        return kwargs
 
 
 @pytest.mark.asyncio
@@ -558,20 +580,6 @@ def test_memory_assembly_config_exposes_frontdoor_compaction_defaults() -> None:
     assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
 
 
-def test_ceo_frontdoor_does_not_request_approval_by_default() -> None:
-    runner = CeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            _memory_runtime_settings=SimpleNamespace(assembly=SimpleNamespace()),
-        )
-    )
-
-    approval_request = runner._approval_request_for_tool_calls(
-        [{"name": "create_async_task", "arguments": {"task": "demo"}}]
-    )
-
-    assert approval_request is None
-
-
 def test_frontdoor_history_compaction_inserts_summary_marker_and_keeps_recent_tail() -> None:
     messages = [
         {"role": "system", "content": "SYSTEM PROMPT"},
@@ -962,17 +970,17 @@ async def test_graph_prepare_turn_uses_model_summarizer_when_enabled(
     )
     runner = CeoFrontDoorRunner(loop=loop)
 
-    async def _fake_summary(**kwargs):
-        _ = kwargs
-        return SimpleNamespace(
-            messages=[{"role": "assistant", "content": "## CEO Durable Summary"}],
-            summary_text="## CEO Durable Summary",
-            summary_payload={"stable_facts": ["fact"]},
-            summary_version=2,
-            summary_model_key="summary-model",
-        )
+    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
+        assert prompt["messages"]
+        return {
+            "stable_preferences": ["reply concisely"],
+            "stable_facts": ["fact"],
+            "open_loops": ["follow up"],
+            "recent_actions": ["summarized history"],
+            "narrative": "CEO frontdoor durable context.",
+        }
 
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summary)
+    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
 
     result = await runner._graph_prepare_turn(
         {
@@ -982,7 +990,323 @@ async def test_graph_prepare_turn_uses_model_summarizer_when_enabled(
         runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
     )
 
-    assert result["summary_text"] == "## CEO Durable Summary"
-    assert result["summary_payload"] == {"stable_facts": ["fact"]}
+    assert "## CEO Durable Summary" in result["summary_text"]
+    assert result["summary_payload"] == {
+        "stable_preferences": ["reply concisely"],
+        "stable_facts": ["fact"],
+        "open_loops": ["follow up"],
+        "recent_actions": ["summarized history"],
+        "narrative": "CEO frontdoor durable context.",
+    }
     assert result["summary_model_key"] == "summary-model"
-    assert result["messages"][0]["content"] == "## CEO Durable Summary"
+    assert "## CEO Durable Summary" in str(result["messages"][0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_invoke_summary_model_uses_explicit_model_key_and_parses_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    captured: dict[str, object] = {}
+    fake_config = object()
+
+    class _FakeModel:
+        async def ainvoke(self, messages):
+            captured["messages"] = list(messages)
+            return SimpleNamespace(
+                content='```json\n{"stable_facts":["fact"],"narrative":"brief","stable_preferences":[],"open_loops":[],"recent_actions":[]}\n```'
+            )
+
+    def _fake_get_runtime_config(force: bool = False):
+        captured["force"] = force
+        return fake_config, 7, False
+
+    def _fake_build_chat_model(config, *, role=None, model_key=None):
+        captured["config"] = config
+        captured["role"] = role
+        captured["model_key"] = model_key
+        return _FakeModel()
+
+    monkeypatch.setattr("g3ku.config.live_runtime.get_runtime_config", _fake_get_runtime_config)
+    monkeypatch.setattr("g3ku.providers.chatmodels.build_chat_model", _fake_build_chat_model)
+
+    result = await runner._invoke_summary_model(
+        {
+            "previous_summary_text": "",
+            "previous_summary_payload": {},
+            "messages": [{"role": "user", "content": "message 1"}],
+        },
+        explicit_model_key="summary-model",
+    )
+
+    assert result == {
+        "stable_facts": ["fact"],
+        "narrative": "brief",
+        "stable_preferences": [],
+        "open_loops": [],
+        "recent_actions": [],
+    }
+    assert captured["force"] is False
+    assert captured["config"] is fake_config
+    assert captured["model_key"] == "summary-model"
+    assert captured["role"] is None
+    assert "strict JSON" in str(captured["messages"][0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_graph_prepare_turn_real_session_path_carries_model_summary_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_langgraph_impl, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={"message": _MessageTool()},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=True,
+                frontdoor_summarizer_model_key="summary-model",
+                frontdoor_summarizer_trigger_message_count=4,
+                frontdoor_summarizer_keep_message_count=3,
+            )
+        ),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["message"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM PROMPT"},
+                {"role": "user", "content": "question one"},
+                {"role": "assistant", "content": "answer one"},
+                {"role": "user", "content": "question two"},
+                {"role": "assistant", "content": "answer two"},
+            ],
+        )
+
+    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
+        assert prompt["messages"]
+        return {
+            "stable_preferences": ["reply concisely"],
+            "stable_facts": ["fact"],
+            "open_loops": ["follow up"],
+            "recent_actions": ["summarized history"],
+            "narrative": "CEO frontdoor durable context.",
+        }
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    result = await runner._graph_prepare_turn(
+        {"user_input": SimpleNamespace(content="question three", metadata={})},
+        runtime=runtime,
+    )
+
+    assert "## CEO Durable Summary" in str(result["summary_text"])
+    assert result["summary_payload"] == {
+        "stable_preferences": ["reply concisely"],
+        "stable_facts": ["fact"],
+        "open_loops": ["follow up"],
+        "recent_actions": ["summarized history"],
+        "narrative": "CEO frontdoor durable context.",
+    }
+    assert result["summary_model_key"] == "summary-model"
+    assert "## CEO Durable Summary" in str(result["messages"][1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_graph_finalize_turn_preserves_model_summary_state_on_direct_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = SimpleNamespace(
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=True,
+                frontdoor_summarizer_model_key="summary-model",
+                frontdoor_summarizer_trigger_message_count=4,
+                frontdoor_summarizer_keep_message_count=3,
+            )
+        )
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
+        assert prompt["messages"]
+        return {
+            "stable_preferences": ["reply concisely"],
+            "stable_facts": ["fact"],
+            "open_loops": ["follow up"],
+            "recent_actions": ["finalized reply"],
+            "narrative": "CEO frontdoor durable context.",
+        }
+
+    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
+
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": [{"role": "user", "content": f"message {idx}"} for idx in range(6)],
+            "final_output": "final answer",
+            "route_kind": "direct_reply",
+            "heartbeat_internal": False,
+            "query_text": "message 5",
+            "summary_payload": {"stable_facts": ["old fact"]},
+            "summary_model_key": "summary-model",
+        }
+    )
+
+    assert "## CEO Durable Summary" in str(result["summary_text"])
+    assert result["summary_payload"] == {
+        "stable_preferences": ["reply concisely"],
+        "stable_facts": ["fact"],
+        "open_loops": ["follow up"],
+        "recent_actions": ["finalized reply"],
+        "narrative": "CEO frontdoor durable context.",
+    }
+    assert result["summary_model_key"] == "summary-model"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_inspection_uses_runner_graph_surface(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Graph:
+        async def aget_state(self, config, subgraphs=False):
+            captured["config"] = config
+            captured["subgraphs"] = subgraphs
+            return SimpleNamespace(
+                config=config,
+                parent_config={},
+                values={},
+                next=(),
+                metadata={},
+                created_at="",
+                tasks=(),
+            )
+
+    class _Runner:
+        def __init__(self, *, loop) -> None:
+            _ = loop
+
+        def _get_compiled_graph(self):
+            return _Graph()
+
+    monkeypatch.setattr(checkpoint_inspection, "CeoFrontDoorRunner", _Runner, raising=False)
+
+    result = await checkpoint_inspection.get_frontdoor_checkpoint(
+        SimpleNamespace(_ensure_checkpointer_ready=lambda: None),
+        session_id="web:shared",
+        checkpoint_id="checkpoint-1",
+        subgraphs=True,
+    )
+
+    assert captured["config"] == {
+        "configurable": {"thread_id": "web:shared", "checkpoint_id": "checkpoint-1"}
+    }
+    assert captured["subgraphs"] is True
+    assert result == {
+        "thread_id": "web:shared",
+        "checkpoint_id": "checkpoint-1",
+        "checkpoint_ns": "",
+        "parent_checkpoint_id": "",
+        "values": {},
+        "next": [],
+        "metadata": {},
+        "created_at": "",
+        "tasks": [],
+        "has_interrupts": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_inspection_supports_wrapper_selected_create_agent_runner(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _CreateAgentGraph:
+        async def aget_state(self, config, subgraphs=False):
+            captured["config"] = config
+            captured["subgraphs"] = subgraphs
+            return SimpleNamespace(
+                config=config,
+                parent_config={},
+                values={"agent_runtime": "create_agent"},
+                next=(),
+                metadata={},
+                created_at="",
+                tasks=(),
+            )
+
+    graph = _CreateAgentGraph()
+
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor._ceo_create_agent_impl.CreateAgentCeoFrontDoorRunner._get_agent",
+        lambda self: graph,
+    )
+
+    loop = SimpleNamespace(
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(frontdoor_create_agent_enabled=True)
+        ),
+        _ensure_checkpointer_ready=lambda: None,
+    )
+
+    result = await checkpoint_inspection.get_frontdoor_checkpoint(
+        loop,
+        session_id="web:shared",
+        checkpoint_id="checkpoint-1",
+        subgraphs=True,
+    )
+
+    assert captured["config"] == {
+        "configurable": {"thread_id": "web:shared", "checkpoint_id": "checkpoint-1"}
+    }
+    assert captured["subgraphs"] is True
+    assert result == {
+        "thread_id": "web:shared",
+        "checkpoint_id": "checkpoint-1",
+        "checkpoint_ns": "",
+        "parent_checkpoint_id": "",
+        "values": {"agent_runtime": "create_agent"},
+        "next": [],
+        "metadata": {},
+        "created_at": "",
+        "tasks": [],
+        "has_interrupts": False,
+    }

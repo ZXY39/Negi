@@ -13,10 +13,10 @@ from fastapi.testclient import TestClient
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
-from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
-from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
+from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
+from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
@@ -553,6 +553,53 @@ async def test_runtime_agent_session_resume_frontdoor_interrupt_clears_pending_i
     assert result.output == "approved reply"
     assert session.state.pending_interrupts == []
     assert session.state.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_resume_frontdoor_interrupt_reenters_paused_state_on_interrupt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _Runner:
+        async def resume_turn(self, *, session, resume_value, on_progress):
+            _ = session, resume_value, on_progress
+            raise CeoFrontdoorInterrupted(
+                interrupts=[
+                    CeoPendingInterrupt(
+                        interrupt_id="interrupt-2",
+                        value={"kind": "frontdoor_tool_approval", "tool_calls": [{"name": "create_async_task"}]},
+                    )
+                ],
+                values={"tool_call_payloads": [{"name": "create_async_task"}]},
+            )
+
+    loop = SimpleNamespace(
+        multi_agent_runner=_Runner(),
+        model="gpt-test",
+        reasoning_effort=None,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session.state.pending_interrupts = [{"id": "interrupt-1", "value": {"kind": "frontdoor_tool_approval"}}]
+    session.state.paused = True
+    session.state.status = "paused"
+
+    result = await session.resume_frontdoor_interrupt(resume_value={"approved": True})
+
+    assert result.output == ""
+    assert session.state.status == "paused"
+    assert session.state.paused is True
+    assert session.state.pending_interrupts == [
+        {
+            "id": "interrupt-2",
+            "value": {"kind": "frontdoor_tool_approval", "tool_calls": [{"name": "create_async_task"}]},
+        }
+    ]
 
 
 @pytest.mark.asyncio

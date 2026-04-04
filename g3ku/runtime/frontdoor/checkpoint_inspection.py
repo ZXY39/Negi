@@ -79,12 +79,18 @@ def serialize_state_snapshot(snapshot: Any) -> dict[str, Any]:
 async def _runner_for_loop(loop) -> CeoFrontDoorRunner | Any:
     runner = getattr(loop, "multi_agent_runner", None)
     if runner is None:
-        from .ceo_runner import CeoFrontDoorRunner
+        runner_cls = globals().get("CeoFrontDoorRunner")
+        if runner_cls is None:
+            from .ceo_runner import CeoFrontDoorRunner
 
-        runner = CeoFrontDoorRunner(loop=loop)
+            runner_cls = CeoFrontDoorRunner
+
+        runner = runner_cls(loop=loop)
     ensure_ready = getattr(loop, "_ensure_checkpointer_ready", None)
     if callable(ensure_ready):
-        await ensure_ready()
+        result = ensure_ready()
+        if hasattr(result, "__await__"):
+            await result
     return runner
 
 

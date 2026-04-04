@@ -99,6 +99,14 @@ def _summary_effective_message_count(message: dict[str, Any]) -> int:
     return 1
 
 
+def effective_message_count(messages: list[dict[str, Any]] | None) -> int:
+    total = 0
+    for message in list(messages or []):
+        if isinstance(message, dict):
+            total += _summary_effective_message_count(message)
+    return total
+
+
 def _build_summary_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
     rendered: list[str] = []
     total_compacted_count = 0
@@ -134,8 +142,12 @@ def frontdoor_summary_state(messages: list[dict[str, Any]] | None) -> dict[str, 
             continue
         metadata = message.get("metadata") if isinstance(message, dict) else None
         summary_version = _SUMMARY_VERSION
+        summary_model_key = ""
         if isinstance(metadata, dict):
             raw_version = metadata.get("summary_version")
+            raw_model_key = metadata.get("summary_model_key")
+            if isinstance(raw_model_key, str):
+                summary_model_key = raw_model_key.strip()
             if isinstance(raw_version, int | float):
                 summary_version = max(1, int(raw_version))
             else:
@@ -145,10 +157,12 @@ def frontdoor_summary_state(messages: list[dict[str, Any]] | None) -> dict[str, 
         return {
             "summary_text": _message_text(message.get("content")),
             "summary_version": summary_version,
+            "summary_model_key": summary_model_key,
         }
     return {
         "summary_text": "",
         "summary_version": 0,
+        "summary_model_key": "",
     }
 
 
@@ -162,19 +176,11 @@ def compact_frontdoor_history(
     if not normalized:
         return []
 
-    prefix_length = _summary_prefix_length(normalized)
-    prefix = normalized[:prefix_length]
-    history = normalized[prefix_length:]
-    trigger_count = max(1, int(summary_trigger_message_count))
-    if len(history) <= trigger_count:
-        return normalized
-
-    tail_start = _tail_start_index(history, recent_message_count=recent_message_count)
-    if tail_start <= 0:
-        return normalized
-
-    older_messages = history[:tail_start]
-    recent_tail = history[tail_start:]
+    prefix, older_messages, recent_tail = partition_frontdoor_history(
+        normalized,
+        recent_message_count=recent_message_count,
+        summary_trigger_message_count=summary_trigger_message_count,
+    )
     if not older_messages or not recent_tail:
         return normalized
 
@@ -185,9 +191,37 @@ def compact_frontdoor_history(
     ]
 
 
+def partition_frontdoor_history(
+    messages: list[dict[str, Any]] | None,
+    *,
+    recent_message_count: int,
+    summary_trigger_message_count: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized = [dict(message) for message in list(messages or []) if isinstance(message, dict)]
+    if not normalized:
+        return [], [], []
+
+    prefix_length = _summary_prefix_length(normalized)
+    prefix = normalized[:prefix_length]
+    history = normalized[prefix_length:]
+    trigger_count = max(1, int(summary_trigger_message_count))
+    if len(history) <= trigger_count:
+        return prefix, [], history
+
+    tail_start = _tail_start_index(history, recent_message_count=recent_message_count)
+    if tail_start <= 0:
+        return prefix, [], history
+
+    older_messages = history[:tail_start]
+    recent_tail = history[tail_start:]
+    return prefix, older_messages, recent_tail
+
+
 __all__ = [
     "FRONTDOOR_HISTORY_SUMMARY_MARKER",
     "compact_frontdoor_history",
+    "effective_message_count",
     "frontdoor_summary_state",
     "is_frontdoor_history_summary_message",
+    "partition_frontdoor_history",
 ]

@@ -658,6 +658,12 @@ class MemoryAssemblyConfig(Base):
     frontdoor_interrupt_tool_names: list[str] = Field(
         default_factory=lambda: ["message", "create_async_task"]
     )
+    frontdoor_summarizer_enabled: bool = True
+    frontdoor_summarizer_model_key: str | None = None
+    frontdoor_summarizer_trigger_message_count: int = Field(default=24, ge=1)
+    frontdoor_summarizer_keep_message_count: int = Field(default=8, ge=1)
+    frontdoor_create_agent_enabled: bool = False
+    frontdoor_create_agent_shadow_mode: bool = False
     core_tools: list[str] = Field(
         default_factory=lambda: [
             'content',
