@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
+from g3ku.content import ContentNavigationService, content_summary_and_ref
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
@@ -472,17 +472,7 @@ class TaskLogService:
                     output_ref=str(output_ref or ''),
                     ephemeral=bool(tool_message.get('ephemeral') or live_state.get('ephemeral')),
                     payload={
-                        'parsed_payload': self._parse_tool_result_payload(
-                            content,
-                            task_id=task_id,
-                            node_id=node_id,
-                            tool_name=str(
-                                tool_message.get('name')
-                                or getattr(call, 'name', '')
-                                or live_state.get('tool_name')
-                                or 'tool'
-                            ),
-                        ),
+                        'parsed_payload': self._parse_tool_result_payload(content),
                     },
                 )
                 self._store.upsert_task_node_tool_result(record)
@@ -929,14 +919,8 @@ class TaskLogService:
             source_kind='node_input',
         )
 
-    def _parse_tool_result_payload(
-        self,
-        content: Any,
-        *,
-        task_id: str,
-        node_id: str,
-        tool_name: str,
-    ) -> dict[str, Any]:
+    @staticmethod
+    def _parse_tool_result_payload(content: Any) -> dict[str, Any]:
         if not isinstance(content, str):
             return {}
         text = content.strip()
@@ -946,37 +930,7 @@ class TaskLogService:
             parsed = json.loads(text)
         except Exception:
             return {}
-        if not isinstance(parsed, dict):
-            return {}
-        envelope = parse_content_envelope(parsed)
-        if envelope is None:
-            return dict(parsed)
-        origin_ref = str(getattr(envelope.handle, 'origin_ref', '') or '').strip()
-        if origin_ref and origin_ref != str(envelope.ref or '').strip():
-            payload = dict(parsed)
-            payload.setdefault('resolved_ref', str(origin_ref or envelope.ref or '').strip())
-            payload.setdefault('wrapper_ref', str(envelope.ref or '').strip())
-            return payload
-        store = self._content_store
-        if store is None:
-            return dict(parsed)
-        handle = store._persist_text(
-            text,
-            runtime={'task_id': task_id, 'node_id': node_id},
-            display_name=f'tool:{tool_name}',
-            source_kind=f'tool_result:{tool_name}',
-            mime_type='application/json',
-            origin_ref=str(envelope.ref or '').strip(),
-        )
-        payload = {
-            'type': 'content_ref',
-            'summary': handle.head_preview,
-            'ref': str(handle.ref or '').strip(),
-            'resolved_ref': str(envelope.ref or '').strip(),
-            'wrapper_ref': str(handle.ref or '').strip(),
-            'handle': handle.to_dict(),
-        }
-        return payload
+        return dict(parsed) if isinstance(parsed, dict) else {}
 
     @staticmethod
     def _coerce_elapsed_seconds(value: Any) -> float | None:

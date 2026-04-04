@@ -1895,7 +1895,6 @@ def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_pat
     tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
 
     assert tool_results[-1].output_ref == inner.ref
-    assert str(tool_results[-1].payload["parsed_payload"]["wrapper_ref"]).startswith("artifact:")
 
 
 def test_refresh_task_view_skips_upsert_when_semantically_unchanged(tmp_path: Path):
