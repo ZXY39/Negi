@@ -191,6 +191,26 @@ def _parsed_json_payload(value: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _structured_resolved_ref_and_depth(value: Any) -> tuple[str, int]:
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return "", 0
+    resolved_ref = str(payload.get("resolved_ref") or "").strip()
+    if not resolved_ref:
+        return "", 0
+    try:
+        wrapper_depth = max(0, int(payload.get("wrapper_depth") or 0))
+    except (TypeError, ValueError):
+        wrapper_depth = 0
+    if wrapper_depth:
+        return resolved_ref, wrapper_depth
+    wrapper_ref = str(payload.get("wrapper_ref") or "").strip()
+    requested_ref = str(payload.get("requested_ref") or payload.get("ref") or "").strip()
+    if wrapper_ref or (requested_ref and requested_ref != resolved_ref):
+        return resolved_ref, 1
+    return resolved_ref, 0
+
+
 def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
     if not normalized.startswith("tool_result:"):
@@ -736,7 +756,7 @@ class ContentNavigationService:
     def _resolved_ref_and_depth_from_value(cls, value: Any) -> tuple[str, int]:
         envelope = parse_content_envelope(value)
         if envelope is None:
-            return "", 0
+            return _structured_resolved_ref_and_depth(value)
         resolved_ref = cls._canonical_ref_from_value(envelope)
         handle = envelope.handle
         if handle is not None:
