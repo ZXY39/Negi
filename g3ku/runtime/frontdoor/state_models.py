@@ -38,7 +38,10 @@ class CeoPersistentState(TypedDict, total=False):
     tool_call_payloads: list[dict[str, Any]]
     next_step: str
     summary_text: str
+    summary_payload: dict[str, Any]
     summary_version: int
+    summary_model_key: str
+    agent_runtime: str
 
 
 @dataclass(slots=True)
@@ -72,7 +75,10 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "tool_names": [],
         "route_kind": "direct_reply",
         "summary_text": "",
+        "summary_payload": {},
         "summary_version": 0,
+        "summary_model_key": "",
+        "agent_runtime": "langgraph",
     }
 
 
