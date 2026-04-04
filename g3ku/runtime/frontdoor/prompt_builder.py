@@ -21,6 +21,13 @@ class CeoPromptBuilder:
         self._repo_prompt_dir = Path(__file__).resolve().parents[1] / 'prompts'
 
     def build(self, *, skills: list) -> str:
+        rendered = self.build_base_prompt()
+        visible_skills_block = self.build_visible_skills_block(skills=skills)
+        if not visible_skills_block:
+            return rendered
+        return f'{rendered}\n\n{visible_skills_block}'.strip()
+
+    def build_base_prompt(self) -> str:
         project_environment = current_project_environment(workspace_root=getattr(self._loop, 'workspace', None))
         prompt = self._read_prompt('ceo_frontdoor.md')
         rendered = self._render_prompt(
@@ -30,10 +37,25 @@ class CeoPromptBuilder:
             },
         )
         rendered = self._sanitize_prompt(rendered)
-        visible_skills_block = self._visible_skills_block(skills)
-        if not visible_skills_block:
-            return rendered
-        return f'{rendered}\n\n{visible_skills_block}'.strip()
+        runtime_environment_block = self._runtime_environment_block(project_environment)
+        if runtime_environment_block:
+            rendered = f'{rendered}\n\n{runtime_environment_block}'.strip()
+        return rendered
+
+    def build_visible_skills_block(self, *, skills: list) -> str:
+        return self._visible_skills_block(skills)
+
+    @staticmethod
+    def _runtime_environment_block(project_environment: dict[str, Any]) -> str:
+        project_python_hint = str(project_environment.get('project_python_hint') or 'python').strip() or 'python'
+        return '\n'.join(
+            [
+                '## Runtime Environment',
+                '- When a command must use the exact project interpreter, prefer the runtime-exported environment variables `G3KU_PROJECT_PYTHON`, `G3KU_PROJECT_PYTHON_DIR`, `G3KU_PROJECT_SCRIPTS_DIR`, and `G3KU_PROJECT_PYTHON_HINT`.',
+                f'- When the exact interpreter command matters, prefer `{project_python_hint}` instead of assuming plain `python`.',
+                '- If the user asks to search, inspect, install, or update a ClawHub skill, first load `clawhub-skill-manager` with `load_skill_context(skill_id="clawhub-skill-manager")` and treat it as the required workflow entry.',
+            ]
+        ).strip()
 
     def _read_prompt(self, name: str) -> str:
         path = self._repo_prompt_dir / name

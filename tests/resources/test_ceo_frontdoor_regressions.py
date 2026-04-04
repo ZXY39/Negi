@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
+
+if "litellm" not in sys.modules:
+    litellm_stub = types.ModuleType("litellm")
+
+    async def _unreachable_acompletion(*args, **kwargs):
+        raise AssertionError("litellm acompletion should not be used in CEO regression tests")
+
+    litellm_stub.acompletion = _unreachable_acompletion
+    litellm_stub.api_base = None
+    litellm_stub.suppress_debug_info = True
+    litellm_stub.drop_params = True
+    sys.modules["litellm"] = litellm_stub
 
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.base import Tool
@@ -579,6 +593,9 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
         max_iterations=8,
         resource_manager=None,
         tool_execution_manager=None,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(frontdoor_interrupt_tool_names=["message"])
+        ),
     )
     runner = CeoFrontDoorRunner(loop=loop)
 

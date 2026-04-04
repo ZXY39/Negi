@@ -19,6 +19,7 @@ class ContextAssemblyResult:
     model_messages: list[dict[str, Any]]
     tool_names: list[str]
     trace: dict[str, Any]
+    turn_overlay_text: str
 
     def __init__(
         self,
@@ -26,6 +27,7 @@ class ContextAssemblyResult:
         model_messages: list[dict[str, Any]] | None = None,
         tool_names: list[str] | None = None,
         trace: dict[str, Any] | None = None,
+        turn_overlay_text: str | None = None,
         system_prompt: str | None = None,
         recent_history: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -39,6 +41,7 @@ class ContextAssemblyResult:
             self.model_messages = list(model_messages or [])
         self.tool_names = list(tool_names or [])
         self.trace = dict(trace or {})
+        self.turn_overlay_text = str(turn_overlay_text or "").strip()
 
     @property
     def system_prompt(self) -> str:

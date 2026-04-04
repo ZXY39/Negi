@@ -25,6 +25,35 @@ class _PromptBuilder:
         return "BASE PROMPT"
 
 
+class _SplitPromptBuilder:
+    def __init__(self) -> None:
+        self.base_calls = 0
+        self.skill_calls: list[list[str]] = []
+
+    def build(self, *, skills: list) -> str:
+        raise AssertionError("message builder should use split prompt builder methods")
+
+    def build_base_prompt(self) -> str:
+        self.base_calls += 1
+        return "BASE PROMPT"
+
+    def build_visible_skills_block(self, *, skills: list) -> str:
+        ids = [
+            str(getattr(item, "skill_id", "") or "").strip()
+            for item in list(skills or [])
+            if str(getattr(item, "skill_id", "") or "").strip()
+        ]
+        self.skill_calls.append(ids)
+        if not ids:
+            return ""
+        lines = [
+            "## Visible Skills For This Turn",
+            "- Only the listed skills are available in this turn.",
+        ]
+        lines.extend(f'- `{skill_id}` available for this turn.' for skill_id in ids)
+        return "\n".join(lines)
+
+
 class _MemoryManager:
     def __init__(self, response: str = "") -> None:
         self.calls: list[dict[str, object]] = []
@@ -265,6 +294,51 @@ async def test_message_builder_uses_memory_only_retrieval_for_memory_intent() ->
 
 
 @pytest.mark.asyncio
+async def test_message_builder_moves_turn_specific_context_into_overlay_for_stable_prefix() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="authoritative preference")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "prior question")
+    persisted_session.add_message("assistant", "prior answer")
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="from now on default to the focused browser workflow",
+        exposure={
+            "skills": [_skill("focused-skill", "Primary workflow")],
+            "tool_families": [_family("agent_browser", "Browser automation via semantic shortlist.")],
+            "tool_names": ["filesystem", "agent_browser", "memory_write"],
+        },
+        persisted_session=persisted_session,
+        user_content="from now on default to the focused browser workflow",
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    rendered_messages = "\n\n".join(contents)
+    overlay = str(getattr(result, "turn_overlay_text", "") or "")
+
+    assert contents[0] == "BASE PROMPT"
+    assert "## Retrieved Context" not in rendered_messages
+    assert "Visible Skills For This Turn" not in rendered_messages
+    assert "Long-Term Memory Write Hint" not in rendered_messages
+    assert contents[-3:] == [
+        "prior question",
+        "prior answer",
+        "from now on default to the focused browser workflow",
+    ]
+    assert "## Retrieved Context" in overlay
+    assert "Visible Skills For This Turn" in overlay
+    assert "Long-Term Memory Write Hint" in overlay
+    assert prompt_builder.base_calls == 1
+    assert prompt_builder.skill_calls == [["focused-skill"]]
+    assert result.trace["turn_overlay_present"] is True
+    assert result.trace["stable_prefix_message_count"] == len(result.model_messages)
+    assert result.trace["turn_overlay_character_count"] == len(overlay)
+    assert str(result.trace["turn_overlay_text_hash"] or "").strip()
+
+
+@pytest.mark.asyncio
 async def test_message_builder_includes_retrieval_and_full_transcript_without_duplicate_current_user() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="authoritative preference")
@@ -298,3 +372,147 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     assert "Stage Context" not in rendered
     assert "Archive Overview" not in rendered
     assert "live_raw_tail" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_message_builder_prefers_checkpoint_history_over_transcript_once_available() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "bootstrap transcript question")
+    persisted_session.add_message("assistant", "bootstrap transcript answer")
+    persisted_session.add_message(
+        "user",
+        "latest question from transcript",
+        metadata={"_transcript_turn_id": "turn-2", "_transcript_state": "pending"},
+    )
+
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {"role": "assistant", "content": "## Retrieved Context\n- stale memory"},
+        {"role": "user", "content": "checkpoint question"},
+        {"role": "assistant", "content": "checkpoint answer"},
+        {"role": "user", "content": "follow up question"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="follow up question",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        checkpoint_messages=checkpoint_messages,
+        user_content="follow up question",
+        user_metadata={"_transcript_turn_id": "turn-2"},
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert contents[0] == "BASE PROMPT"
+    assert "OLD SYSTEM" not in contents
+    assert "## Retrieved Context\n- stale memory" not in contents
+    assert "checkpoint question" in contents
+    assert "checkpoint answer" in contents
+    assert "bootstrap transcript question" not in contents
+    assert "bootstrap transcript answer" not in contents
+    assert contents.count("follow up question") == 1
+    assert contents[-1] == "follow up question"
+    assert result.trace["current_user_in_transcript"] is True
+
+
+@pytest.mark.asyncio
+async def test_message_builder_falls_back_to_transcript_when_checkpoint_history_is_incomplete() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "prior question")
+    persisted_session.add_message("assistant", "prior answer")
+
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {"role": "user", "content": "prior question"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="next question",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        checkpoint_messages=checkpoint_messages,
+        user_content="next question",
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert "OLD SYSTEM" not in contents
+    assert "prior question" in contents
+    assert "prior answer" in contents
+    assert contents.count("next question") == 1
+    assert contents[-1] == "next question"
+    assert result.trace["history_source"] == "transcript"
+
+
+@pytest.mark.asyncio
+async def test_message_builder_keeps_repeated_user_text_after_completed_turn() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {"role": "user", "content": "repeat this"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="repeat this",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="repeat this",
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert contents.count("repeat this") == 2
+    assert contents[-2:] == ["done", "repeat this"]
+    assert result.trace["current_user_in_history"] is False
+
+
+@pytest.mark.asyncio
+async def test_message_builder_does_not_dedupe_same_text_when_turn_ids_mismatch() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message(
+        "user",
+        "repeat this",
+        metadata={"_transcript_turn_id": "old-turn", "_transcript_state": "complete"},
+    )
+    persisted_session.add_message("assistant", "done")
+
+    checkpoint_messages = [
+        {"role": "system", "content": "OLD SYSTEM"},
+        {
+            "role": "user",
+            "content": "repeat this",
+            "metadata": {"_transcript_turn_id": "old-turn"},
+        },
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="repeat this",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        checkpoint_messages=checkpoint_messages,
+        user_content="repeat this",
+        user_metadata={"_transcript_turn_id": "new-turn"},
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert "OLD SYSTEM" not in contents
+    assert contents.count("repeat this") == 2
+    assert contents[-2:] == ["done", "repeat this"]
+    assert result.trace["current_user_in_checkpoint"] is False
+    assert result.trace["history_source"] == "transcript"

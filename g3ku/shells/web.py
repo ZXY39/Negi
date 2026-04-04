@@ -624,7 +624,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
         if main_task_service is not None:
             await main_task_service.startup()
             # Avoid blocking unlock on worker warmup; the UI can surface worker readiness separately.
-            await ensure_managed_task_worker(main_task_service, wait_timeout_s=5.0)
+            await ensure_managed_task_worker(main_task_service, wait_timeout_s=1.0)
         heartbeat = await start_web_session_heartbeat(
             runtime_agent,
             get_runtime_manager(runtime_agent),
