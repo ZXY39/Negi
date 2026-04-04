@@ -4,25 +4,67 @@ from collections.abc import Callable
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain.messages import SystemMessage
+from langgraph.types import Command
+
 from main.runtime.chat_backend import build_prompt_cache_diagnostics, build_session_prompt_cache_key
 
 
-def _stable_messages_from_state(state: Any) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = []
-    for item in list((state or {}).get("messages") or []):
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").strip()
-        if not role:
-            continue
-        messages.append(
+def _message_role(value: Any) -> str:
+    if isinstance(value, dict):
+        role = str(value.get("role") or "").strip().lower()
+    else:
+        role = str(getattr(value, "type", "") or getattr(value, "role", "")).strip().lower()
+    if role == "human":
+        return "user"
+    if role == "ai":
+        return "assistant"
+    return role
+
+
+def _message_content(value: Any) -> Any:
+    if isinstance(value, dict):
+        content = value.get("content", "")
+    else:
+        content = getattr(value, "content", "")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    parts.append(text)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text", item.get("content", ""))
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        return "\n\n".join(parts).strip()
+    return content
+
+
+def _stable_messages_from_request(*, system_message: Any, messages: list[Any] | None) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if system_message is not None:
+        result.append(
             {
-                "role": role,
-                "content": item.get("content", ""),
+                "role": "system",
+                "content": _message_content(system_message),
             }
         )
-    return messages
+    for item in list(messages or []):
+        role = _message_role(item)
+        if not role:
+            continue
+        result.append(
+            {
+                "role": role,
+                "content": _message_content(item),
+            }
+        )
+    return result
 
 
 def _tool_schema(tool: Any) -> dict[str, Any] | None:
@@ -47,25 +89,35 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
         super().__init__()
         self._runner = runner
 
-    def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
         prompt_context = self._runner.build_prompt_context(
-            state=state,
-            runtime=runtime,
-            tools=self._runner.visible_langchain_tools(state=state, runtime=runtime),
+            state=request.state,
+            runtime=request.runtime,
+            tools=request.tools,
         )
-        stable_messages = _stable_messages_from_state(state)
+        current_blocks = list((request.system_message or SystemMessage(content="")).content_blocks)
+        overlay_text = str(prompt_context.get("system_overlay") or "").strip()
+        blocks = current_blocks + [{"type": "text", "text": overlay_text}]
+        system_message = SystemMessage(content=blocks)
         tool_schemas = [
             schema
             for schema in (
                 _tool_schema(tool)
-                for tool in self._runner.visible_langchain_tools(state=state, runtime=runtime)
+                for tool in list(request.tools or [])
             )
             if schema is not None
         ]
         model_refs = list(self._runner._resolve_ceo_model_refs() or [])
         provider_model = str(model_refs[0] if model_refs else "").strip()
-        session_key = str(getattr(getattr(runtime, "context", None), "session_key", "") or "").strip()
-        overlay_text = str(prompt_context.get("system_overlay") or "").strip()
+        session_key = str(getattr(getattr(request.runtime, "context", None), "session_key", "") or "").strip()
+        stable_messages = _stable_messages_from_request(
+            system_message=system_message,
+            messages=list(request.messages or []),
+        )
         prompt_cache_key = build_session_prompt_cache_key(
             session_key=session_key,
             provider_model=provider_model,
@@ -82,24 +134,21 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
             overlay_text=overlay_text,
             overlay_section_count=len([section for section in overlay_text.split("\n\n") if section.strip()]),
         )
-        return {
+        response = handler(request.override(system_message=system_message))
+        update = {
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
         }
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
-        prompt_context = self._runner.build_prompt_context(
-            state=request.state,
-            runtime=request.runtime,
-            tools=request.tools,
+        if isinstance(response, ExtendedModelResponse):
+            existing_update = dict(getattr(getattr(response, "command", None), "update", {}) or {})
+            return ExtendedModelResponse(
+                model_response=response.model_response,
+                command=Command(update={**existing_update, **update}),
+            )
+        return ExtendedModelResponse(
+            model_response=response,
+            command=Command(update=update),
         )
-        current_blocks = list((request.system_message or SystemMessage(content="")).content_blocks)
-        blocks = current_blocks + [{"type": "text", "text": prompt_context["system_overlay"]}]
-        return handler(request.override(system_message=SystemMessage(content=blocks)))
 
 
 class CeoToolExposureMiddleware(AgentMiddleware):

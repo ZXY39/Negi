@@ -1,12 +1,14 @@
 from types import SimpleNamespace
 
 import pytest
+from langchain.agents.middleware import ModelRequest, ModelResponse
+from langchain.agents.middleware.types import ExtendedModelResponse
+from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import Command
 
 from g3ku.config.schema import MemoryAssemblyConfig
-from g3ku.runtime.frontdoor import ceo_runner
-from g3ku.runtime.frontdoor import ceo_agent_middleware
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
+from g3ku.runtime.frontdoor import ceo_agent_middleware, ceo_runner
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 
 
@@ -244,7 +246,9 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
     assert [item.interrupt_id for item in exc_info.value.interrupts] == ["interrupt-2"]
 
 
-def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics(monkeypatch) -> None:
+def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_real_request_shape(
+    monkeypatch,
+) -> None:
     captured: dict[str, object] = {}
 
     def _fake_build_session_prompt_cache_key(**kwargs):
@@ -267,36 +271,73 @@ def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics(monkeyp
     )
     middleware = ceo_agent_middleware.CeoPromptAssemblyMiddleware(runner=runner)
 
-    update = middleware.before_model(
-        {
-            "messages": [
-                {"role": "system", "content": "You are the CEO frontdoor agent."},
-                {"role": "user", "content": "hello"},
-            ]
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+    tool_schema = {
+        "name": "create_async_task",
+        "description": "dispatch async task",
+        "parameters": {"type": "object", "properties": {"task": {"type": "string"}}},
+    }
+    seen_request: dict[str, object] = {}
+
+    def _handler(request):
+        seen_request["system_message"] = request.system_message
+        seen_request["tools"] = list(request.tools or [])
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    response = middleware.wrap_model_call(
+        ModelRequest(
+            model=SimpleNamespace(),
+            system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+            messages=[HumanMessage(content="hello")],
+            tools=[tool_schema],
+            state={"messages": [{"role": "user", "content": "hello"}]},
+            runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+        ),
+        _handler,
     )
 
-    assert update == {
+    assert isinstance(response, ExtendedModelResponse)
+    assert response.model_response.result == [AIMessage(content="ok")]
+    assert isinstance(response.command, Command)
+    assert response.command.update == {
         "prompt_cache_key": "cache-key",
         "prompt_cache_diagnostics": {"stable_prompt_signature": "sig-1"},
     }
+    content_blocks = list(getattr(seen_request["system_message"], "content_blocks", []))
+    assert content_blocks == [
+        {"type": "text", "text": "You are the CEO frontdoor agent."},
+        {"type": "text", "text": "Use the existing CEO layered context rules.\n\n## Retrieved Context\n- memory"},
+    ]
+    assert seen_request["tools"] == [tool_schema]
     assert captured["cache_key_kwargs"] == {
         "session_key": "web:shared",
         "provider_model": "openai:gpt-4.1",
         "scope": "ceo_frontdoor",
         "stable_messages": [
-            {"role": "system", "content": "You are the CEO frontdoor agent."},
+            {
+                "role": "system",
+                "content": (
+                    "You are the CEO frontdoor agent.\n\n"
+                    "Use the existing CEO layered context rules.\n\n"
+                    "## Retrieved Context\n- memory"
+                ),
+            },
             {"role": "user", "content": "hello"},
         ],
-        "tool_schemas": [],
+        "tool_schemas": [tool_schema],
     }
     assert captured["diagnostics_kwargs"] == {
         "stable_messages": [
-            {"role": "system", "content": "You are the CEO frontdoor agent."},
+            {
+                "role": "system",
+                "content": (
+                    "You are the CEO frontdoor agent.\n\n"
+                    "Use the existing CEO layered context rules.\n\n"
+                    "## Retrieved Context\n- memory"
+                ),
+            },
             {"role": "user", "content": "hello"},
         ],
-        "tool_schemas": [],
+        "tool_schemas": [tool_schema],
         "provider_model": "openai:gpt-4.1",
         "scope": "ceo_frontdoor",
         "prompt_cache_key": "cache-key",
