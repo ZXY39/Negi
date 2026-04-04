@@ -27,6 +27,10 @@ parameters:
     节点id:
       type: string
       description: 目标节点 id。
+    detail_level:
+      type: string
+      enum: [summary, full]
+      description: summary 返回轻量节点详情与 refs/工件预览；full 返回完整执行轨迹和完整工件列表。
   required: [任务id, 节点id]
 exposure:
   agent: true

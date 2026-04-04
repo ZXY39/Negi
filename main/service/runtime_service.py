@@ -63,6 +63,7 @@ from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_runner import NodeRunner
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
+from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
@@ -3791,12 +3792,17 @@ class MainRuntimeService:
             return None
         return {'ok': True, **snapshot.model_dump(mode='json')}
 
-    def get_node_detail_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+    def get_node_detail_payload(self, task_id: str, node_id: str, detail_level: str = 'summary') -> dict[str, Any] | None:
         normalized_task_id = self.normalize_task_id(task_id)
-        detail = self.query_service.get_node_detail(normalized_task_id, node_id)
+        normalized_detail_level = self._normalize_node_detail_level(detail_level)
+        detail = self.query_service.get_node_detail(normalized_task_id, node_id, detail_level=normalized_detail_level)
         if detail is None:
             return None
         item = self._repair_legacy_display_payload(detail.model_dump(mode='json'))
+        if normalized_detail_level == 'summary':
+            item.pop('execution_trace', None)
+        else:
+            item.pop('execution_trace_summary', None)
         return {
             'ok': True,
             'task_id': normalized_task_id,
@@ -3840,25 +3846,16 @@ class MainRuntimeService:
             change_type=change_type,
         )
 
-    def node_detail(self, task_id: str, node_id: str) -> dict[str, Any] | str:
+    def node_detail(self, task_id: str, node_id: str, detail_level: str = 'summary') -> dict[str, Any] | str:
         normalized_task_id = self.normalize_task_id(task_id)
         task = self.get_task(normalized_task_id)
         if task is None:
             return f'Error: Task not found: {normalized_task_id}'
 
-        payload = self.get_node_detail_payload(normalized_task_id, node_id)
+        normalized_detail_level = self._normalize_node_detail_level(detail_level)
+        payload = self.get_node_detail_payload(normalized_task_id, node_id, detail_level=normalized_detail_level)
         if payload is None:
             return f'Error: Node not found: {node_id}'
-
-        item = payload.get('item') if isinstance(payload, dict) else None
-        if isinstance(item, dict):
-            payload = {
-                **payload,
-                'item': {
-                    **item,
-                    'execution_trace': self._compact_execution_trace_for_tool(item.get('execution_trace')),
-                },
-            }
 
         artifacts = [
             {
@@ -3867,11 +3864,30 @@ class MainRuntimeService:
             }
             for artifact in self.list_artifacts(normalized_task_id)
             if str(getattr(artifact, 'node_id', '') or '').strip() == str(node_id or '').strip()
+            and str(getattr(artifact, 'kind', '') or '').strip() not in {'task_execution_trace', 'task_runtime_messages'}
         ]
+        artifacts_preview = artifacts[:3]
+        item = payload.get('item') if isinstance(payload, dict) else None
+        if isinstance(item, dict):
+            payload = {
+                **payload,
+                'item': {
+                    **item,
+                    'detail_level': normalized_detail_level,
+                    'artifact_count': len(artifacts),
+                    'artifacts_preview': artifacts_preview if normalized_detail_level == 'summary' else [],
+                },
+            }
+        if normalized_detail_level == 'full':
+            return {
+                **payload,
+                'artifact_count': len(artifacts),
+                'artifacts': artifacts,
+            }
         return {
             **payload,
             'artifact_count': len(artifacts),
-            'artifacts': artifacts,
+            'artifacts_preview': artifacts_preview,
         }
 
     @staticmethod
@@ -3929,6 +3945,11 @@ class MainRuntimeService:
             'output_text': output_text,
             'output_ref': output_ref,
         }
+
+    @staticmethod
+    def _normalize_node_detail_level(detail_level: str | None) -> str:
+        normalized = str(detail_level or 'summary').strip().lower()
+        return normalized if normalized in {'summary', 'full'} else 'summary'
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
         task_id = self.normalize_task_id(task_id)
@@ -4530,6 +4551,40 @@ class TaskNodeDetailTool(Tool):
         task_id = str(kwargs.get('任务id') or '').strip()
         node_id = str(kwargs.get('节点id') or '').strip()
         return self._service.node_detail(task_id, node_id)
+
+
+class TaskNodeDetailTool(Tool):
+    def __init__(self, service: MainRuntimeService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return 'task_node_detail'
+
+    @property
+    def description(self) -> str:
+        return '按任务 id 和节点 id 返回节点详情及关联工件列表。'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                '浠诲姟id': {'type': 'string', 'description': '目标任务 id。'},
+                '鑺傜偣id': {'type': 'string', 'description': '目标节点 id。'},
+                'detail_level': build_detail_level_schema(
+                    description='summary 返回轻量节点详情与 refs；full 返回完整执行轨迹和完整工件列表。',
+                ),
+            },
+            'required': ['浠诲姟id', '鑺傜偣id'],
+        }
+
+    async def execute(self, **kwargs: Any) -> dict[str, Any] | str:
+        await self._service.startup()
+        task_id = str(kwargs.get('浠诲姟id') or '').strip()
+        node_id = str(kwargs.get('鑺傜偣id') or '').strip()
+        detail_level = str(kwargs.get('detail_level') or 'summary').strip()
+        return self._service.node_detail(task_id, node_id, detail_level=detail_level)
 
 
 class CreateAsyncTaskTool(Tool):

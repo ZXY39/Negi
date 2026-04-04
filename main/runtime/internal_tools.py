@@ -9,6 +9,14 @@ from main.models import NodeEvidenceItem, SpawnChildResult, SpawnChildSpec, buil
 from main.runtime.stage_budget import FINAL_RESULT_TOOL_NAME, STAGE_TOOL_NAME
 
 
+def build_detail_level_schema(*, description: str) -> dict[str, Any]:
+    return {
+        'type': 'string',
+        'enum': ['summary', 'full'],
+        'description': str(description or '').strip() or 'Choose summary for lightweight detail or full for the complete payload.',
+    }
+
+
 class SubmitNextStageTool(Tool):
     def __init__(
         self,

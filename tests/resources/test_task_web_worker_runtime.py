@@ -3200,10 +3200,32 @@ def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
     assert payload["task_id"] == record.task_id
     assert payload["node_id"] == root.node_id
     assert payload["item"]["node_id"] == root.node_id
+    assert payload["item"]["detail_level"] == "summary"
     assert payload["artifact_count"] == 1
-    assert payload["artifacts"][0]["artifact_id"] == matching.artifact_id
-    assert payload["artifacts"][0]["node_id"] == root.node_id
-    assert payload["artifacts"][0]["ref"] == f'artifact:{matching.artifact_id}'
+    assert payload["artifacts_preview"][0]["artifact_id"] == matching.artifact_id
+    assert payload["artifacts_preview"][0]["node_id"] == root.node_id
+    assert payload["artifacts_preview"][0]["ref"] == f'artifact:{matching.artifact_id}'
+    assert "artifacts" not in payload
+
+
+def test_get_node_detail_payload_uses_summary_mode_and_execution_trace_ref(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert payload is not None
+    assert payload["item"]["detail_level"] == "summary"
+    assert payload["item"]["execution_trace_ref"].startswith("artifact:")
+    assert "execution_trace_summary" in payload["item"]
+    assert "execution_trace" not in payload["item"]
 
 
 def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path: Path):
@@ -3237,7 +3259,7 @@ def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path:
     )
     service.record_node_file_change(record.task_id, root.node_id, path=str((tmp_path / "created.txt").resolve()), change_type="created")
 
-    payload = service.get_node_detail_payload(record.task_id, root.node_id)
+    payload = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="full")
 
     assert payload is not None
     item = payload["item"]
