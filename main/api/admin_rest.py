@@ -69,12 +69,25 @@ def _service():
     return service
 
 
+def _checkpoint_agent():
+    try:
+        return get_agent()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if is_no_ceo_model_configured_error(exc):
+            raise HTTPException(status_code=503, detail='no_model_configured') from exc
+        if str(exc or '').strip() == 'project is locked':
+            raise HTTPException(status_code=423, detail='project_locked') from exc
+        raise
+
+
 @router.get("/ceo/checkpoints/{session_id}")
 async def get_ceo_checkpoint(
     session_id: str,
     checkpoint_id: str | None = Query(None),
 ):
-    agent = get_agent()
+    agent = _checkpoint_agent()
     item = get_frontdoor_checkpoint(agent, session_id=session_id, checkpoint_id=checkpoint_id)
     if isawaitable(item):
         item = await item
@@ -89,7 +102,7 @@ async def get_ceo_checkpoint_history(
     limit: int = Query(20, ge=1, le=100),
     before_checkpoint_id: str | None = Query(None),
 ):
-    agent = get_agent()
+    agent = _checkpoint_agent()
     items = get_frontdoor_checkpoint_history(
         agent,
         session_id=session_id,
@@ -106,7 +119,7 @@ async def get_ceo_replay_diagnostics(
     session_id: str,
     checkpoint_id: str = Query(...),
 ):
-    agent = get_agent()
+    agent = _checkpoint_agent()
     snapshot = get_frontdoor_checkpoint(agent, session_id=session_id, checkpoint_id=checkpoint_id)
     if isawaitable(snapshot):
         snapshot = await snapshot
