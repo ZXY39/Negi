@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.runtime.frontdoor.checkpoint_inspection import (
+    build_frontdoor_replay_diagnostics,
     get_frontdoor_checkpoint,
     get_frontdoor_checkpoint_history,
     serialize_state_snapshot,
@@ -97,6 +98,28 @@ async def test_get_frontdoor_checkpoint_history_serializes_reverse_chronological
     ]
 
 
+@pytest.mark.asyncio
+async def test_get_frontdoor_checkpoint_history_clamps_zero_limit_to_one() -> None:
+    graph = _FakeCompiledGraph()
+
+    async def _ready() -> None:
+        return None
+
+    loop = SimpleNamespace(_ensure_checkpointer_ready=_ready, multi_agent_runner=SimpleNamespace(_get_compiled_graph=lambda: graph))
+
+    items = await get_frontdoor_checkpoint_history(loop, session_id="web:shared", limit=0)
+
+    assert [item["checkpoint_id"] for item in items] == ["cp-2", "cp-1"]
+    assert graph.history_calls == [
+        {
+            "config": {"configurable": {"thread_id": "web:shared"}},
+            "filter": None,
+            "before": None,
+            "limit": 1,
+        }
+    ]
+
+
 def test_serialize_state_snapshot_coerces_nested_complex_objects_to_json_safe_values() -> None:
     class _OpaqueValue:
         def __str__(self) -> str:
@@ -157,3 +180,85 @@ def test_serialize_state_snapshot_coerces_nested_complex_objects_to_json_safe_va
         }
     ]
     json.dumps(item)
+
+
+def test_serialize_state_snapshot_preserves_structured_task_state_as_json_safe_data() -> None:
+    class _OpaqueLeaf:
+        def __str__(self) -> str:
+            return "opaque-leaf"
+
+    structured_state = SimpleNamespace(
+        values={"child": SimpleNamespace(node="planner", payload={"result": _OpaqueLeaf()})},
+        next=("finalize_turn",),
+        metadata={"step": 3, "source": "subgraph"},
+    )
+    snapshot = SimpleNamespace(
+        values={"route_kind": "direct_reply"},
+        next=(),
+        config={"configurable": {"thread_id": "web:shared", "checkpoint_ns": "", "checkpoint_id": "cp-10"}},
+        metadata={"step": 10},
+        created_at="2026-04-04T12:10:00+08:00",
+        parent_config=None,
+        tasks=(
+            SimpleNamespace(
+                id="task-subgraph",
+                name="subgraph",
+                error="",
+                state=structured_state,
+                interrupts=(),
+            ),
+        ),
+    )
+
+    item = serialize_state_snapshot(snapshot)
+
+    assert item["tasks"] == [
+        {
+            "id": "task-subgraph",
+            "name": "subgraph",
+            "error": "",
+            "interrupts": [],
+            "state": {
+                "values": {
+                    "child": {
+                        "node": "planner",
+                        "payload": {"result": "opaque-leaf"},
+                    }
+                },
+                "next": ["finalize_turn"],
+                "metadata": {"step": 3, "source": "subgraph"},
+            },
+        }
+    ]
+    json.dumps(item)
+
+
+def test_build_frontdoor_replay_diagnostics_preserves_available_checkpoint_config() -> None:
+    snapshot = {
+        "thread_id": "web:shared",
+        "checkpoint_id": "cp-10",
+        "checkpoint_ns": "subgraph:planner",
+        "parent_checkpoint_id": "cp-9",
+        "metadata": {"step": 10, "source": "loop"},
+        "next": ["finalize_turn"],
+        "has_interrupts": False,
+    }
+
+    item = build_frontdoor_replay_diagnostics(snapshot)
+
+    assert item == {
+        "thread_id": "web:shared",
+        "checkpoint_id": "cp-10",
+        "parent_checkpoint_id": "cp-9",
+        "step": 10,
+        "source": "loop",
+        "next": ["finalize_turn"],
+        "has_interrupts": False,
+        "replay_config": {
+            "configurable": {
+                "thread_id": "web:shared",
+                "checkpoint_id": "cp-10",
+                "checkpoint_ns": "subgraph:planner",
+            }
+        },
+    }
