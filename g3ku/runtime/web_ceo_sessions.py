@@ -925,7 +925,7 @@ def build_session_summary(
     if _inflight_user_message(inflight_turn) is not None:
         message_count += 1
     last_llm_output = latest_llm_output_at(session)
-    return {
+    item = {
         "session_id": session_key,
         "title": title,
         "preview_text": preview_text,
@@ -942,6 +942,11 @@ def build_session_summary(
         "can_rename": True,
         "can_delete": True,
     }
+    snapshot = resolve_execution_snapshot(None, session)[0] if inflight_turn is None else inflight_turn
+    pending_interrupts = list((snapshot or {}).get("interrupts") or [])
+    item["pending_interrupt_count"] = len(pending_interrupts)
+    item["has_pending_interrupts"] = bool(pending_interrupts)
+    return item
 
 
 def ceo_session_family(session_id: str) -> str:

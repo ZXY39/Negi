@@ -256,6 +256,32 @@ async def get_ceo_session_checkpoint_history(
     return {"ok": True, "session_id": session.key, "items": items}
 
 
+@router.get("/ceo/sessions/{session_id}/pending-interrupts")
+async def get_ceo_session_pending_interrupts(session_id: str):
+    _agent, session_manager, runtime_manager, _state_store = _sessions()
+    session = _assert_known_session(session_manager, session_id)
+    runtime_session = _runtime_session(runtime_manager, session.key)
+    if runtime_session is not None:
+        items = list(getattr(getattr(runtime_session, "state", None), "pending_interrupts", []) or [])
+    else:
+        snapshot = read_paused_execution_context(session.key) or {}
+        items = list(snapshot.get("interrupts") or [])
+    return {"ok": True, "session_id": session.key, "items": items}
+
+
+@router.post("/ceo/sessions/{session_id}/resume-interrupt")
+async def resume_ceo_session_interrupt(session_id: str, payload: dict | None = Body(default=None)):
+    agent, session_manager, runtime_manager, _state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    session = _assert_known_session(session_manager, session_id)
+    runtime_session = _runtime_session(runtime_manager, session.key)
+    if runtime_session is None or not hasattr(runtime_session, "resume_frontdoor_interrupt"):
+        raise HTTPException(status_code=409, detail="interrupt_resume_unavailable")
+    result = await runtime_session.resume_frontdoor_interrupt(resume_value=(payload or {}).get("resume"))
+    return {"ok": True, "session_id": session.key, "output": result.output, "state": runtime_session.state_dict()}
+
+
 @router.get("/ceo/sessions")
 async def list_ceo_sessions():
     _agent, session_manager, runtime_manager, state_store = _sessions()
