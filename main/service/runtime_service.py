@@ -4529,7 +4529,7 @@ class _LegacyTaskNodeDetailToolMojibakeB(Tool):
 
     @property
     def name(self) -> str:
-        return 'task_node_detail'
+        return '_legacy_task_node_detail_removed_b0'
 
     @property
     def description(self) -> str:
@@ -4627,7 +4627,7 @@ class TaskNodeDetailTool(Tool):
 
     @property
     def name(self) -> str:
-        return '_legacy_task_node_detail_removed_b0'
+        return 'task_node_detail'
 
     @property
     def description(self) -> str:
