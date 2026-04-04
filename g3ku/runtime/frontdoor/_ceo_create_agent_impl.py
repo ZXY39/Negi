@@ -67,6 +67,20 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
     def _thread_config(session_key: str) -> dict[str, object]:
         return {"configurable": {"thread_id": str(session_key or "").strip()}}
 
+    @staticmethod
+    def _unwrap_graph_output(graph_output: Any) -> dict[str, Any]:
+        interrupts = [
+            CeoPendingInterrupt(
+                interrupt_id=str(getattr(item, "id", "") or ""),
+                value=getattr(item, "value", None),
+            )
+            for item in list(getattr(graph_output, "interrupts", ()) or ())
+        ]
+        values = dict(getattr(graph_output, "value", graph_output) or {})
+        if interrupts:
+            raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
+        return values
+
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._ensure_ready()
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
@@ -88,16 +102,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
             ),
             version="v2",
         )
-        interrupts = [
-            CeoPendingInterrupt(
-                interrupt_id=str(getattr(item, "id", "") or ""),
-                value=getattr(item, "value", None),
-            )
-            for item in list(getattr(graph_output, "interrupts", ()) or ())
-        ]
-        values = dict(getattr(graph_output, "value", graph_output) or {})
-        if interrupts:
-            raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
+        values = self._unwrap_graph_output(graph_output)
         return str(values.get("final_output") or "")
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
@@ -114,5 +119,5 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
             ),
             version="v2",
         )
-        values = dict(getattr(graph_output, "value", graph_output) or {})
+        values = self._unwrap_graph_output(graph_output)
         return str(values.get("final_output") or "")
