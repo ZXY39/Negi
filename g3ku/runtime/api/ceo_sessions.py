@@ -66,6 +66,35 @@ def _runtime_session(runtime_manager, session_id: str):
     return getter(session_id) if callable(getter) else None
 
 
+def _recreate_runtime_session(runtime_manager, session) -> object | None:
+    creator = getattr(runtime_manager, "get_or_create", None)
+    if not callable(creator):
+        return None
+    paused_snapshot = read_paused_execution_context(session.key) or {}
+    if not isinstance(paused_snapshot, dict) or not paused_snapshot:
+        return None
+    normalized_metadata = normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session.key)
+    memory_scope = dict(normalized_metadata.get("memory_scope") or {})
+    session_key = str(getattr(session, "key", "") or "").strip()
+    chat_id = session_key.split(":", 1)[1] if ":" in session_key else session_key
+    runtime_session = creator(
+        session_key=session_key,
+        channel="web",
+        chat_id=chat_id or "shared",
+        memory_channel=str(memory_scope.get("channel") or "").strip() or None,
+        memory_chat_id=str(memory_scope.get("chat_id") or "").strip() or None,
+    )
+    state = getattr(runtime_session, "state", None)
+    if state is not None:
+        if not getattr(state, "pending_interrupts", None):
+            setattr(state, "pending_interrupts", list(paused_snapshot.get("interrupts") or []))
+        if not bool(getattr(state, "is_running", False)):
+            setattr(state, "status", str(paused_snapshot.get("status") or "paused"))
+        if hasattr(state, "paused"):
+            setattr(state, "paused", str(paused_snapshot.get("status") or "paused").strip().lower() == "paused")
+    return runtime_session
+
+
 def _session_is_running(runtime_manager, session_id: str) -> bool:
     session = _runtime_session(runtime_manager, session_id)
     if session is None:
@@ -261,9 +290,8 @@ async def get_ceo_session_pending_interrupts(session_id: str):
     _agent, session_manager, runtime_manager, _state_store = _sessions()
     session = _assert_known_session(session_manager, session_id)
     runtime_session = _runtime_session(runtime_manager, session.key)
-    if runtime_session is not None:
-        items = list(getattr(getattr(runtime_session, "state", None), "pending_interrupts", []) or [])
-    else:
+    items = list(getattr(getattr(runtime_session, "state", None), "pending_interrupts", []) or [])
+    if not items:
         snapshot = read_paused_execution_context(session.key) or {}
         items = list(snapshot.get("interrupts") or [])
     return {"ok": True, "session_id": session.key, "items": items}
@@ -276,6 +304,8 @@ async def resume_ceo_session_interrupt(session_id: str, payload: dict | None = B
         raise HTTPException(status_code=503, detail="no_model_configured")
     session = _assert_known_session(session_manager, session_id)
     runtime_session = _runtime_session(runtime_manager, session.key)
+    if runtime_session is None:
+        runtime_session = _recreate_runtime_session(runtime_manager, session)
     if runtime_session is None or not hasattr(runtime_session, "resume_frontdoor_interrupt"):
         raise HTTPException(status_code=409, detail="interrupt_resume_unavailable")
     result = await runtime_session.resume_frontdoor_interrupt(resume_value=(payload or {}).get("resume"))
