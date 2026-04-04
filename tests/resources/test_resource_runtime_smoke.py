@@ -1857,7 +1857,7 @@ def test_content_navigation_populates_path_ref_metadata(tmp_path: Path):
     store.close()
 
 
-def test_content_summary_and_ref_keeps_wrapper_ref_for_content_envelopes(tmp_path: Path):
+def test_content_summary_and_ref_uses_canonical_ref_for_content_envelopes(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
     navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
@@ -1865,7 +1865,7 @@ def test_content_summary_and_ref_keeps_wrapper_ref_for_content_envelopes(tmp_pat
     wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
     summary, ref = content_summary_and_ref(wrapped.to_dict())
     assert summary == wrapped.summary
-    assert ref == wrapped.ref
+    assert ref == inner.ref
     store.close()
 
 

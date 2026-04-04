@@ -329,7 +329,8 @@ def parse_content_envelope(value: Any) -> ContentEnvelope | None:
 def content_summary_and_ref(value: Any) -> tuple[str, str]:
     envelope = parse_content_envelope(value)
     if envelope is not None:
-        return envelope.summary, str(envelope.ref or "")
+        canonical_ref = str(envelope.resolved_ref or getattr(envelope.handle, "resolved_ref", "") or envelope.ref or "")
+        return envelope.summary, canonical_ref
     if isinstance(value, (dict, list)):
         return _stringify(value), ""
     return str(value or ""), ""
