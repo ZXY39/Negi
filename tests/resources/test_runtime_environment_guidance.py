@@ -69,6 +69,7 @@ def test_node_runner_runtime_context_and_prompt_contract_include_project_python(
 
     assert runtime_context['project_python'] == r'C:\Python314\python.exe'
     assert runtime_context['project_python_hint'] == r"& 'C:\Python314\python.exe'"
+    assert runtime_context['task_temp_dir'].endswith(r'G3KU\temp')
     assert 'runtime_environment' in prompt
     assert 'project_python_hint' in prompt
     assert 'tool_guidance' in prompt
@@ -91,3 +92,42 @@ def test_node_execution_prompt_mentions_visible_skill_only_policy(monkeypatch) -
 
     assert 'visible_skills' in prompt
     assert 'load_skill_context(skill_id="' in prompt
+
+
+def test_node_runner_runtime_environment_uses_task_temp_dir_from_runtime_meta(monkeypatch) -> None:
+    monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
+    task_temp_dir = r'D:\projects\G3KU\temp\tasks\task_1'
+    runner = NodeRunner(
+        store=None,
+        log_service=SimpleNamespace(read_task_runtime_meta=lambda _task_id: {'task_temp_dir': task_temp_dir}),
+        react_loop=None,
+        tool_provider=None,
+        execution_model_refs=['execution_model'],
+        acceptance_model_refs=['acceptance_model'],
+    )
+    task = SimpleNamespace(task_id='task:1', session_id='web:shared', metadata={})
+
+    payload = runner._runtime_environment_payload(task=task)
+    prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='execution'))
+
+    assert payload['task_temp_dir'] == task_temp_dir
+    assert payload['path_policy']['exec_default_working_dir'] == 'task_temp_dir'
+    assert 'task_temp_dir' in prompt
+    assert '所有文件都放在' in prompt
+
+
+def test_acceptance_prompt_mentions_task_temp_dir_rule(monkeypatch) -> None:
+    monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
+    runner = NodeRunner(
+        store=None,
+        log_service=None,
+        react_loop=None,
+        tool_provider=None,
+        execution_model_refs=['execution_model'],
+        acceptance_model_refs=['acceptance_model'],
+    )
+
+    prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='acceptance'))
+
+    assert 'task_temp_dir' in prompt
+    assert '所有文件都放在' in prompt

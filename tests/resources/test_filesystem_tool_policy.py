@@ -94,3 +94,46 @@ async def test_filesystem_allows_tool_payloads_under_externaltools(tmp_path: Pat
 
     assert result.startswith('Successfully wrote')
     assert target.read_text(encoding='utf-8') == 'archive payload'
+
+
+@pytest.mark.asyncio
+async def test_filesystem_allows_temp_like_write_inside_task_temp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_filesystem_module()
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    task_temp_dir = workspace / 'temp' / 'tasks' / 'task_abc'
+    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = module.FilesystemTool(workspace=workspace)
+    target = task_temp_dir / 'notes.tmp'
+
+    result = await tool.execute(
+        action='write',
+        path=str(target),
+        content='ok',
+        __g3ku_runtime={'task_temp_dir': str(task_temp_dir)},
+    )
+
+    assert result.startswith('Successfully wrote')
+    assert target.read_text(encoding='utf-8') == 'ok'
+
+
+@pytest.mark.asyncio
+async def test_filesystem_blocks_temp_like_write_outside_task_temp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_filesystem_module()
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    task_temp_dir = workspace / 'temp' / 'tasks' / 'task_abc'
+    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = module.FilesystemTool(workspace=workspace)
+    target = workspace / 'temp' / 'notes.tmp'
+
+    result = await tool.execute(
+        action='write',
+        path=str(target),
+        content='blocked',
+        __g3ku_runtime={'task_temp_dir': str(task_temp_dir)},
+    )
+
+    assert result.startswith('Error:')
+    assert str(task_temp_dir) in result
+    assert not target.exists()

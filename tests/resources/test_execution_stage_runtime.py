@@ -90,6 +90,11 @@ async def _create_web_task(service: MainRuntimeService):
     return await service.create_task('stage test task', session_id='web:shared')
 
 
+def _task_temp_dir_for(service: MainRuntimeService, task_id: str) -> str:
+    runtime_meta = service.log_service.read_task_runtime_meta(task_id) or {}
+    return str(runtime_meta.get('task_temp_dir') or '')
+
+
 def _tool_result_payload(
     *,
     call_id: str,
@@ -279,6 +284,44 @@ async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget
             runtime_context=runtime_context,
         )
         assert exhausted.startswith('Error: current stage budget is exhausted')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_create_task_assigns_distinct_task_temp_dirs_and_injects_runtime_environment(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    service._workspace_root = lambda: tmp_path
+    try:
+        original = await _create_web_task(service)
+        continuation = await service.create_task(
+            'continued task',
+            session_id='web:shared',
+            metadata={'continuation_of_task_id': original.task_id},
+        )
+        original_temp_dir = _task_temp_dir_for(service, original.task_id)
+        continuation_temp_dir = _task_temp_dir_for(service, continuation.task_id)
+
+        assert original_temp_dir == str(tmp_path / 'temp' / 'tasks' / original.task_id.replace(':', '_'))
+        assert continuation_temp_dir == str(tmp_path / 'temp' / 'tasks' / continuation.task_id.replace(':', '_'))
+        assert original_temp_dir != continuation_temp_dir
+        assert Path(original_temp_dir).is_dir()
+        assert Path(continuation_temp_dir).is_dir()
+
+        root = service.store.get_node(original.root_node_id)
+        assert root is not None
+        messages = await service.node_runner._build_messages(task=original, node=root)
+        payload = json.loads(messages[1]['content'])
+
+        assert payload['runtime_environment']['task_temp_dir'] == original_temp_dir
+        assert payload['runtime_environment']['path_policy']['exec_default_working_dir'] == 'task_temp_dir'
     finally:
         await service.close()
 

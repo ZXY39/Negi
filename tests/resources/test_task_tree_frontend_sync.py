@@ -424,6 +424,60 @@ def test_build_node_execution_trace_uses_summary_execution_trace_when_full_trace
     assert result["outputText"] == "repo listing"
 
 
+def test_build_node_execution_trace_preserves_summary_stage_budget() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:test",
+            goal: "inspect repository",
+          },
+          {
+            execution_trace_summary: {
+              stages: [
+                {
+                  stage_goal: "inspect repository",
+                  tool_round_budget: 5,
+                  tool_calls: [
+                    {
+                      tool_name: "filesystem",
+                      arguments_text: "{\\"path\\": \\".\\"}",
+                      output_text: "repo listing",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+
+        console.log(JSON.stringify({
+          stageTotalSteps: trace.stages[0]?.stage_total_steps ?? null,
+        }));
+        """
+    )
+
+    assert result["stageTotalSteps"] == 5
+
+
 def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_duplicate_goal_field() -> None:
     result = _run_node_script(
         """
@@ -488,6 +542,166 @@ def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_dupli
     assert result["containsStageGoalField"] is False
     assert result["containsStatusField"] is True
     assert result["containsToolOutput"] is True
+
+
+def test_build_execution_trace_steps_label_summary_rounds_by_spawn_presence() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:test",
+            goal: "inspect repository",
+          },
+          {
+            execution_trace_summary: {
+              stages: [
+                {
+                  stage_goal: "normal stage",
+                  mode: "自主执行",
+                  tool_calls: [
+                    {
+                      tool_name: "filesystem",
+                      arguments_text: "{\\"path\\": \\".\\"}",
+                      output_text: "repo listing",
+                    },
+                  ],
+                },
+                {
+                  stage_goal: "spawn stage",
+                  mode: "包含派生",
+                  tool_calls: [
+                    {
+                      tool_name: "spawn_child_nodes",
+                      arguments_text: "{\\"children\\": 3}",
+                      output_text: "spawned",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+        const steps = buildExecutionTraceSteps(trace, { state: "in_progress" });
+
+        console.log(JSON.stringify({
+          normalStageHasSelfMode: String(steps[1]?.bodyHtml || "").includes("\\u81ea\\u4e3b\\u6267\\u884c"),
+          normalStageHasDerivedLabel: String(steps[1]?.bodyHtml || "").includes("\\u6d3e\\u751f\\u8282\\u70b9"),
+          spawnStageHasWithChildrenMode: String(steps[2]?.bodyHtml || "").includes("\\u5305\\u542b\\u6d3e\\u751f"),
+          spawnStageHasDerivedLabel: String(steps[2]?.bodyHtml || "").includes("\\u6d3e\\u751f\\u8282\\u70b9"),
+        }));
+        """
+    )
+
+    assert result["normalStageHasSelfMode"] is True
+    assert result["normalStageHasDerivedLabel"] is False
+    assert result["spawnStageHasWithChildrenMode"] is True
+    assert result["spawnStageHasDerivedLabel"] is False
+
+
+def test_build_execution_trace_steps_label_mixed_full_round_as_with_children() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:test",
+            goal: "inspect repository",
+          },
+          {
+            execution_trace: {
+              stages: [
+                {
+                  stage_id: "stage:test",
+                  stage_index: 1,
+                  mode: "包含派生",
+                  status: "完成",
+                  stage_goal: "mixed stage",
+                  tool_round_budget: 3,
+                  tool_rounds_used: 1,
+                  rounds: [
+                    {
+                      round_id: "round:1",
+                      round_index: 1,
+                      budget_counted: true,
+                      tools: [
+                        {
+                          tool_name: "filesystem",
+                          arguments_text: "{\\"path\\": \\".\\"}",
+                          output_text: "repo listing",
+                          status: "success",
+                        },
+                        {
+                          tool_name: "spawn_child_nodes",
+                          arguments_text: "{\\"children\\": 2}",
+                          output_text: "spawned",
+                          status: "success",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+        const steps = buildExecutionTraceSteps(trace, { state: "completed" });
+
+        console.log(JSON.stringify({
+          stageHasWithChildrenMode: String(steps[1]?.bodyHtml || "").includes("\\u5305\\u542b\\u6d3e\\u751f"),
+          stageHasRoundIndexLabel: String(steps[1]?.bodyHtml || "").includes("\\u7b2c 1 \\u8f6e"),
+          stageHasDerivedLabel: String(steps[1]?.bodyHtml || "").includes("\\u6d3e\\u751f\\u8282\\u70b9"),
+        }));
+        """
+    )
+
+    assert result["stageHasWithChildrenMode"] is True
+    assert result["stageHasRoundIndexLabel"] is False
+    assert result["stageHasDerivedLabel"] is False
 
 
 def test_summary_execution_trace_defaults_running_when_stage_or_tool_lacks_completion_signal() -> None:

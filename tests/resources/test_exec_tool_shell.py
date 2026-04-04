@@ -103,6 +103,45 @@ def test_exec_tool_builds_subprocess_env_with_managed_temp_and_externaltools(tmp
     assert (tmp_path / 'externaltools').is_dir()
 
 
+def test_exec_tool_uses_task_temp_dir_for_default_cwd_and_env(tmp_path) -> None:
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    task_temp_dir = workspace / 'temp' / 'tasks' / 'task_abc'
+    tool = ExecTool(workspace_root=str(workspace))
+
+    cwd = tool._resolve_cwd(None, runtime={'task_temp_dir': str(task_temp_dir)})
+    env = tool._build_subprocess_env(
+        runtime={'session_key': 'web:shared', 'task_temp_dir': str(task_temp_dir)},
+        cwd=str(task_temp_dir),
+    )
+
+    assert cwd == str(task_temp_dir)
+    assert env['G3KU_TMP_DIR'] == str(task_temp_dir)
+    assert env['G3KU_TEMP_DIR'] == str(task_temp_dir)
+    assert env['G3KU_RUNTIME_TEMP_DIR'] == str(task_temp_dir)
+    assert env['TMP'] == str(task_temp_dir)
+    assert env['TEMP'] == str(task_temp_dir)
+    assert env['TMPDIR'] == str(task_temp_dir)
+    assert task_temp_dir.is_dir()
+
+
+def test_exec_tool_policy_errors_reference_task_temp_dir(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    task_temp_dir = workspace / 'temp' / 'tasks' / 'task_abc'
+    monkeypatch.setattr(ExecTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = ExecTool(workspace_root=str(workspace))
+
+    error = tool._enforce_command_path_policy(
+        command='Invoke-WebRequest https://example.com -OutFile "$env:TEMP\\demo.txt"',
+        cwd=str(task_temp_dir),
+        runtime={'task_temp_dir': str(task_temp_dir)},
+    )
+
+    assert error is not None
+    assert str(task_temp_dir) in error
+
+
 def test_exec_tool_blocks_downloads_outside_managed_dirs(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / 'workspace'
     workspace.mkdir()

@@ -1014,7 +1014,7 @@ function normalizeExecutionStageTrace(stage, index = 0) {
         mode: String(stage?.mode || "自主执行").trim() || "自主执行",
         status: String(stage?.status || "进行中").trim() || "进行中",
         stage_goal: String(stage?.stage_goal || "").trim(),
-        stage_total_steps: normalizeInt(stage?.tool_round_budget, 0),
+        stage_total_steps: normalizeInt(stage?.tool_round_budget ?? stage?.stage_total_steps, 0),
         tool_rounds_used: normalizeInt(stage?.tool_rounds_used, 0),
         created_at: String(stage?.created_at || ""),
         finished_at: String(stage?.finished_at || ""),
@@ -1107,16 +1107,23 @@ function renderTraceMessage(value, emptyText = "暂无内容") {
     `;
 }
 
+function resolveExecutionStageRoundLabel(stage, round) {
+    const tools = Array.isArray(round?.tools) ? round.tools : [];
+    const hasSpawnChildren = tools.some((step) => String(step?.tool_name || "").trim() === "spawn_child_nodes");
+    if (hasSpawnChildren) return "包含派生";
+    const stageMode = String(stage?.mode || "").trim();
+    if (stageMode === "包含派生" && !tools.length) return "包含派生";
+    return "自主执行";
+}
+
 function renderExecutionStageRounds(stage) {
     const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
     if (!rounds.length) {
         return renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次");
     }
     return rounds.map((round, index) => {
-        const title = round.budget_counted
-            ? `第 ${round.round_index || index + 1} 轮`
-            : "派生节点";
         const tools = Array.isArray(round.tools) ? round.tools : [];
+        const title = resolveExecutionStageRoundLabel(stage, round);
         const toolDetails = tools.length
             ? tools.map((step, toolIndex) => renderTraceStep({
                 traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}:tool:${step.tool_call_id || toolIndex}`,
