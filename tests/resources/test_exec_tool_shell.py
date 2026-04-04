@@ -133,20 +133,6 @@ def test_exec_tool_allows_downloads_when_target_is_temp(tmp_path, monkeypatch) -
     assert error is None
 
 
-def test_exec_tool_allows_downloads_when_target_uses_managed_temp_env_var(tmp_path, monkeypatch) -> None:
-    workspace = tmp_path / 'workspace'
-    workspace.mkdir()
-    monkeypatch.setattr(ExecTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
-    tool = ExecTool(workspace_root=str(workspace))
-
-    error = tool._enforce_command_path_policy(
-        command='Invoke-WebRequest -UseBasicParsing https://example.com/rss.xml -OutFile "$env:TEMP\\ai_news.xml"',
-        cwd=str(workspace),
-    )
-
-    assert error is None
-
-
 def test_exec_tool_blocks_install_payloads_under_tools_directory(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
@@ -175,24 +161,6 @@ def test_exec_tool_blocks_global_tool_install_commands(tmp_path, monkeypatch) ->
 
     assert error is not None
     assert 'global tool installs are blocked' in error.lower()
-
-
-@pytest.mark.asyncio
-async def test_exec_tool_returns_windows_shell_guidance_before_running_bash_chaining(monkeypatch) -> None:
-    tool = ExecTool()
-    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
-
-    payload = json.loads(
-        await tool.execute(
-            command='pwd && echo $HOME || ls -la ~/Desktop',
-            __g3ku_runtime={'session_key': 'web:shared'},
-        )
-    )
-
-    assert payload['status'] == 'error'
-    assert payload['exit_code'] is None
-    assert 'windows powershell' in str(payload.get('error') or '').lower()
-    assert '&&' in str(payload.get('error') or '')
 
 
 @pytest.mark.asyncio

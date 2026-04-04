@@ -59,10 +59,7 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
-            "Execute a shell command and return its output. "
-            "On Windows commands run in Windows PowerShell, not bash, and TMP/TEMP are remapped to the workspace temp directory."
-        )
+        return "Execute a shell command and return its output. Use with caution."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -94,17 +91,6 @@ class ExecTool(Tool):
                 stderr_text=policy_error,
                 runtime=runtime,
                 error=policy_error,
-            )
-        shell_guidance_error = self._shell_syntax_guidance(command)
-        if shell_guidance_error:
-            return self._build_payload(
-                status="error",
-                exit_code=None,
-                command=command,
-                stdout_text="",
-                stderr_text=shell_guidance_error,
-                runtime=runtime,
-                error=shell_guidance_error,
             )
         guard_error = self._guard_command(command, cwd)
         if guard_error:
@@ -277,18 +263,6 @@ class ExecTool(Tool):
                 f"either via working_dir or an explicit target path."
             )
 
-        return None
-
-    @staticmethod
-    def _shell_syntax_guidance(command: str) -> str | None:
-        if os.name != "nt":
-            return None
-        if re.search(r"(?<![&])&&(?!=[&])", command) or re.search(r"(?<!\|)\|\|(?!=\|)", command):
-            return (
-                "Error: Windows exec runs commands in Windows PowerShell, not bash. "
-                "Replace `&&`/`||` with PowerShell flow such as `;`, "
-                "`if ($?) { ... }`, or `if ($LASTEXITCODE -eq 0) { ... }`."
-            )
         return None
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
@@ -469,7 +443,12 @@ class ExecTool(Tool):
     @staticmethod
     def _mentions_system_temp_token(normalized_command: str) -> bool:
         return bool(
-            re.search(r"/tmp(?:/|$)", str(normalized_command or ""))
+            re.search(r"%temp%", normalized_command)
+            or re.search(r"%tmp%", normalized_command)
+            or re.search(r"\$env:temp\b", normalized_command)
+            or re.search(r"\$env:tmp\b", normalized_command)
+            or re.search(r"\$tmpdir\b", normalized_command)
+            or re.search(r"/tmp(?:/|$)", str(normalized_command or ""))
         )
 
     @staticmethod
@@ -477,13 +456,6 @@ class ExecTool(Tool):
         return bool(
             re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?temp(?:\\|$)", normalized_command)
             or re.search(r"(?:^|[\s'\"`>|;(])(?:\.\s*\\)?externaltools(?:\\|$)", normalized_command)
-            or re.search(r"%temp%", normalized_command)
-            or re.search(r"%tmp%", normalized_command)
-            or re.search(r"\$env:temp\b", normalized_command)
-            or re.search(r"\$env:tmp\b", normalized_command)
-            or re.search(r"\$tmpdir\b", normalized_command)
-            or re.search(r"\$env:g3ku_tmp_dir\b", normalized_command)
-            or re.search(r"\$env:g3ku_temp_dir\b", normalized_command)
         )
 
     def _command_references_any_root(self, command: str, roots: list[Path]) -> bool:

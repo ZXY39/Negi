@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager, _RagMemoryBackend
+from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
@@ -711,7 +711,7 @@ def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context()
         ContextRecordV2(record_id="skill:tmux", context_type="skill", uri="g3ku://skill/tmux"),
     ]
 
-    filtered = _RagMemoryBackend._filter_retrieved_records(
+    filtered = MemoryManager._filter_retrieved_records(
         records,
         allowed_context_types=["memory", "resource", "skill"],
         allowed_resource_record_ids=["tool:filesystem"],
@@ -759,8 +759,7 @@ async def test_execute_tool_blocks_repeated_overflowed_search() -> None:
         runtime_context={'prior_overflow_signatures': ['filesystem|/tmp/demo.py|needle']},
     )
 
-    assert result.status == 'error'
-    assert result.content == 'Error: previous search overflowed; refine query before retrying'
+    assert result == 'Error: previous search overflowed; refine query before retrying'
 
 
 @pytest.mark.asyncio
@@ -803,8 +802,7 @@ async def test_execute_tool_passes_runtime_context_to_name_mangled_class_tool() 
         runtime_context={'current_tool_call_id': 'call:test-runtime'},
     )
 
-    assert result.status == 'success'
-    payload = json.loads(result.content)
+    payload = json.loads(result)
     assert payload['value'] == 'demo'
     assert payload['current_tool_call_id'] == 'call:test-runtime'
     assert payload['kwargs_runtime'] is None

@@ -155,26 +155,6 @@ def build_provider_from_model_key(
             single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None),
         )
 
-    if _uses_openai_completions_protocol(target):
-        provider = CustomProvider(
-            api_key=api_key or 'no-key',
-            api_base=api_base or 'http://localhost:8000/v1',
-            default_model=model_id,
-            extra_headers=extra_headers,
-        )
-        return ProviderTarget(
-            provider_ref=provider_ref,
-            provider_id=provider_id,
-            model_id=model_id,
-            provider=provider,
-            max_tokens_limit=max_tokens_limit,
-            default_temperature=default_temperature,
-            default_reasoning_effort=default_reasoning_effort,
-            retry_on=retry_on,
-            retry_count=retry_count,
-            api_key_count=api_key_count,
-        )
-
     resolved_model = _resolve_litellm_model(provider_id, model_id)
     provider = LiteLLMProvider(
         api_key=api_key or None,

@@ -2978,10 +2978,6 @@ class MainRuntimeService:
         return {
             'ok': True,
             'tool_id': resolved_tool_id,
-            'family_tool_id': toolskill.get('family_tool_id'),
-            'requested_tool_id': toolskill.get('requested_tool_id'),
-            'primary_executor_name': toolskill.get('primary_executor_name'),
-            'resolved_executor_name': toolskill.get('resolved_executor_name'),
             'content': content,
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
@@ -3028,10 +3024,6 @@ class MainRuntimeService:
         return {
             'ok': True,
             'tool_id': resolved_tool_id,
-            'family_tool_id': toolskill.get('family_tool_id'),
-            'requested_tool_id': toolskill.get('requested_tool_id'),
-            'primary_executor_name': toolskill.get('primary_executor_name'),
-            'resolved_executor_name': toolskill.get('resolved_executor_name'),
             'uri': f'g3ku://resource/tool/{resolved_tool_id}',
             'level': payload['level'],
             'content': payload['content'],

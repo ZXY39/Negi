@@ -148,8 +148,7 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
             arguments={},
             runtime_context=runtime_context,
         )
-        assert blocked.status == 'error'
-        assert blocked.content.startswith('Error: no active stage')
+        assert blocked.startswith('Error: no active stage')
 
         service.log_service.submit_next_stage(
             record.task_id,
@@ -164,8 +163,7 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
             arguments={},
             runtime_context=runtime_context,
         )
-        assert allowed.status == 'success'
-        assert allowed.content == 'ok'
+        assert allowed == 'ok'
 
         service.log_service.record_execution_stage_round(
             record.task_id,
@@ -250,8 +248,7 @@ async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget
             arguments={},
             runtime_context=runtime_context,
         )
-        assert blocked.status == 'error'
-        assert blocked.content.startswith('Error: no active stage')
+        assert blocked.startswith('Error: no active stage')
 
         service.log_service.submit_next_stage(
             record.task_id,
@@ -266,8 +263,7 @@ async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget
             arguments={},
             runtime_context=runtime_context,
         )
-        assert allowed.status == 'success'
-        assert allowed.content == 'ok'
+        assert allowed == 'ok'
 
         service.log_service.record_execution_stage_round(
             record.task_id,
@@ -282,8 +278,7 @@ async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget
             arguments={},
             runtime_context=runtime_context,
         )
-        assert exhausted.status == 'error'
-        assert exhausted.content.startswith('Error: current stage budget is exhausted')
+        assert exhausted.startswith('Error: current stage budget is exhausted')
     finally:
         await service.close()
 
@@ -616,8 +611,7 @@ async def test_final_budgeted_round_is_allowed_and_next_turn_is_blocked(tmp_path
             arguments={},
             runtime_context=runtime_context,
         )
-        assert allowed.status == 'success'
-        assert allowed.content == 'round-ok'
+        assert allowed == 'round-ok'
 
         blocked = await service._react_loop._execute_tool(
             tools={'filesystem': ordinary},
@@ -625,8 +619,7 @@ async def test_final_budgeted_round_is_allowed_and_next_turn_is_blocked(tmp_path
             arguments={},
             runtime_context={k: v for k, v in runtime_context.items() if k != 'stage_turn_granted'},
         )
-        assert blocked.status == 'error'
-        assert blocked.content.startswith('Error: current stage budget is exhausted')
+        assert blocked.startswith('Error: current stage budget is exhausted')
     finally:
         await service.close()
 

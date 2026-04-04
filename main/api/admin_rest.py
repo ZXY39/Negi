@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import asyncio
 from contextlib import contextmanager
 import json
 import errno
@@ -48,8 +47,6 @@ CHINA_CHANNEL_INDEX: dict[str, dict[str, Any]] = {item['id']: item for item in C
 CHINA_CHANNEL_ALIASES = china_channel_aliases()
 
 CHINA_PROBE_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
-CHINA_PROBE_RETRY_ATTEMPTS = 3
-CHINA_PROBE_RETRY_BACKOFF_SECONDS = 0.35
 QQBOT_ACCESS_TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken'
 QQBOT_GATEWAY_URL = 'https://api.sgroup.qq.com/gateway'
 DINGTALK_ACCESS_TOKEN_URL = 'https://api.dingtalk.com/v1.0/oauth2/accessToken'
@@ -1194,26 +1191,15 @@ async def _probe_http_json(
     headers: dict[str, str] | None = None,
     json_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    response: httpx.Response | None = None
-    for attempt in range(1, CHINA_PROBE_RETRY_ATTEMPTS + 1):
-        try:
-            response = await client.request(
-                method,
-                url,
-                headers=headers,
-                json=json_payload,
-            )
-            break
-        except httpx.TransportError as exc:
-            if attempt >= CHINA_PROBE_RETRY_ATTEMPTS:
-                raise RuntimeError(
-                    f'请求失败（已重试 {attempt} 次）：{_describe_http_error(exc, url)}'
-                ) from exc
-            await asyncio.sleep(CHINA_PROBE_RETRY_BACKOFF_SECONDS * attempt)
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f'请求失败：{_describe_http_error(exc, url)}') from exc
-    if response is None:
-        raise RuntimeError('请求失败：未收到平台响应。')
+    try:
+        response = await client.request(
+            method,
+            url,
+            headers=headers,
+            json=json_payload,
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f'请求失败：{_describe_http_error(exc, url)}') from exc
     if response.status_code >= 400:
         body = _trim_probe_response_text(response.text)
         suffix = f'：{body}' if body else ''

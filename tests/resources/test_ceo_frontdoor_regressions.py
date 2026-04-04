@@ -252,17 +252,7 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
                 ],
                 finish_reason="tool_calls",
             ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="deliver-1",
-                        name="deliver_final_answer",
-                        arguments={"answer": "done", "disposition": "completed"},
-                    )
-                ],
-                finish_reason="tool_calls",
-            ),
+            LLMResponse(content="done", finish_reason="stop"),
         ]
     )
     loop = SimpleNamespace(

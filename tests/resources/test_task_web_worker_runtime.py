@@ -1905,57 +1905,6 @@ def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> Non
     assert str(model_call["prepared_prefix_hash"]).strip()
 
 
-def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> None:
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-
-    record = asyncio.run(_create_web_task(service))
-    model_messages = [
-        {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "user prompt"},
-    ]
-    request_messages = [
-        {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "user prompt\n\nSystem note for this turn only:\nstage overlay"},
-    ]
-    service.log_service.append_node_output(
-        record.task_id,
-        record.root_node_id,
-        content='{"status":"success"}',
-        tool_calls=[],
-        usage_attempts=[
-            LLMModelAttempt(
-                model_key="sub gpt-5.4",
-                provider_id="openai",
-                provider_model="gpt-5.4",
-                usage={"input_tokens": 10, "output_tokens": 5, "cache_hit_tokens": 2},
-            )
-        ],
-        model_messages=model_messages,
-        request_messages=request_messages,
-        prompt_cache_key="stable-cache-key",
-        request_message_count=len(request_messages),
-        request_message_chars=321,
-    )
-
-    events = service.store.list_task_events(task_id=record.task_id, limit=20)
-    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
-
-    assert model_call["prompt_cache_key_present"] is True
-    assert str(model_call["prompt_cache_key_hash"]).strip()
-    assert model_call["request_overlay_applied"] is True
-    assert model_call["model_message_count"] == 2
-    assert model_call["prepared_message_count"] == 2
-    assert str(model_call["model_prefix_hash"]).strip()
-    assert str(model_call["prepared_prefix_hash"]).strip()
-
-
 def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

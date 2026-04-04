@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.core.results import ContentEnvelope, ContentHandle
-from g3ku.runtime.tool_result_status import infer_tool_result_status
 
 INLINE_CHAR_LIMIT = 1200
 INLINE_LINE_LIMIT = 60
@@ -33,7 +32,7 @@ _ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
 
 
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _stringify(value: Any) -> str:
@@ -169,29 +168,6 @@ def _extract_origin_ref(value: Any) -> str:
 
     _visit(payload)
     return refs[0] if refs else ""
-
-
-def _tool_result_model_fields(value: Any, *, source_kind: str) -> dict[str, Any]:
-    normalized_kind = str(source_kind or "").strip().lower()
-    if not normalized_kind.startswith("tool_result:"):
-        return {}
-    payload = _parsed_json_payload(value)
-    fields: dict[str, Any] = {}
-    status = infer_tool_result_status(value)
-    if str(status or "").strip():
-        fields["status"] = str(status or "").strip()
-    if not isinstance(payload, dict):
-        return fields
-    exit_code = payload.get("exit_code")
-    if isinstance(exit_code, int):
-        fields["exit_code"] = int(exit_code)
-    error_text = str(payload.get("error") or "").strip()
-    if error_text:
-        fields["error"] = error_text
-    execution_id = str(payload.get("execution_id") or "").strip()
-    if execution_id:
-        fields["execution_id"] = execution_id
-    return fields
 
 
 def _parsed_json_payload(value: Any) -> dict[str, Any] | None:
@@ -335,10 +311,6 @@ def parse_content_envelope(value: Any) -> ContentEnvelope | None:
         ref=str(payload.get("ref") or getattr(handle, "ref", "") or "").strip(),
         handle=handle,
         next_actions=[str(item) for item in list(payload.get("next_actions") or []) if str(item or "").strip()],
-        status=str(payload.get("status") or "").strip(),
-        exit_code=(int(payload.get("exit_code")) if isinstance(payload.get("exit_code"), int) else None),
-        error=str(payload.get("error") or "").strip(),
-        execution_id=str(payload.get("execution_id") or "").strip(),
     )
 
 
@@ -400,12 +372,7 @@ class ContentNavigationService:
             origin_ref=origin_ref,
         )
         summary = _content_summary(handle)
-        return ContentEnvelope(
-            summary=summary,
-            ref=handle.ref,
-            handle=handle,
-            **_tool_result_model_fields(value, source_kind=source_kind),
-        )
+        return ContentEnvelope(summary=summary, ref=handle.ref, handle=handle)
 
     def externalize_for_message(
         self,

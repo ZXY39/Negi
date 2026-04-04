@@ -1831,34 +1831,6 @@ async def test_memory_search_reads_manifest_settings(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_memory_search_coerces_non_json_manager_payload_to_strings(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_search', workspace / 'tools' / 'memory_search')
-
-    class _WeirdMemoryManager:
-        def helper(self):
-            return 'ok'
-
-        async def search_tool_view(self, **kwargs):
-            _ = kwargs
-            return {'ok': True, 'callback': self.helper}
-
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_search']
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=True), 'memory_manager': _WeirdMemoryManager()},
-    )
-
-    payload = json.loads(await tool.execute(query='remember this', __g3ku_runtime={'session_key': 'cli:demo'}))
-    assert payload['ok'] is True
-    assert isinstance(payload['callback'], str)
-    assert 'helper' in payload['callback']
-
-
-@pytest.mark.asyncio
 async def test_memory_write_builds_without_rag_store_and_writes_explicit_items(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

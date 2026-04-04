@@ -2,13 +2,6 @@
 
 执行 shell 命令并返回结构化结果。`exec` 不会再把未指定的 `working_dir` 绑定到工作区；只有你显式传入 `working_dir` 时，才会切换目录。
 
-## Windows Notes
-
-- On Windows, `exec` runs commands in Windows PowerShell, not bash.
-- Do not use bash-only control operators like `&&` or `||`; use PowerShell flow such as `;`, `if ($?) { ... }`, or `if ($LASTEXITCODE -eq 0) { ... }`.
-- The subprocess environment remaps `TMP` / `TEMP` / `TMPDIR` to the workspace `temp/` directory.
-- For temporary files, prefer explicit workspace paths or `$env:G3KU_TMP_DIR`. If you use `$env:TEMP` / `%TEMP%`, they resolve to the managed workspace temp directory inside `exec`.
-
 以下规则是 `exec` 工具的补充使用说明。
 
 ## 使用原则
