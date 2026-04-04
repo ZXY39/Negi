@@ -1759,6 +1759,43 @@ def test_externalize_for_message_still_externalizes_large_non_direct_load_search
     store.close()
 
 
+def test_content_navigation_search_uses_canonical_ref_for_wrapped_content(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("alpha\nneedle\nomega\n", runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
+    result = navigator.search(ref=wrapped.ref, query="needle")
+    assert result["count"] == 1
+    assert result["resolved_ref"] == inner.ref
+    store.close()
+
+
+def test_content_navigation_open_raw_view_reads_wrapper_json(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text("canonical body", runtime={"task_id": "task:test", "node_id": "node:inner"}, display_name="inner", source_kind="node_output", force=True)
+    wrapped = navigator.maybe_externalize_text(json.dumps(inner.to_dict(), ensure_ascii=False), runtime={"task_id": "task:test", "node_id": "node:wrapper"}, display_name="wrapped", source_kind="tool_result:content", force=True)
+    raw_result = navigator.open(ref=wrapped.ref, view="raw", start_line=1, end_line=20)
+    assert raw_result["resolved_ref"] == wrapped.ref
+    assert inner.ref in raw_result["excerpt"]
+    store.close()
+
+
+def test_content_navigation_detects_wrapper_ref_cycles(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    a = artifact_store.create_text_artifact(task_id="task:test", node_id="node:a", kind="tool_result:content", title="A", content="seed-a")
+    b = artifact_store.create_text_artifact(task_id="task:test", node_id="node:b", kind="tool_result:content", title="B", content="seed-b")
+    Path(a.path).write_text(json.dumps({"type": "content_ref", "ref": f"artifact:{b.artifact_id}"}), encoding="utf-8")
+    Path(b.path).write_text(json.dumps({"type": "content_ref", "ref": f"artifact:{a.artifact_id}"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="content ref cycle detected"):
+        navigator.describe(ref=f"artifact:{a.artifact_id}")
+    store.close()
+
+
 @pytest.mark.asyncio
 async def test_memory_search_reads_manifest_settings(tmp_path: Path):
     workspace = tmp_path / 'workspace'

@@ -253,10 +253,10 @@ async def get_artifact(
 
 
 @router.get('/content/describe')
-async def describe_content(ref: str | None = Query(None), path: str | None = Query(None)):
+async def describe_content(ref: str | None = Query(None), path: str | None = Query(None), view: str = Query('canonical')):
     service = _service()
     await service.startup()
-    return {'ok': True, **service.describe_content(ref=ref, path=path)}
+    return {'ok': True, **service.content_store.describe(ref=ref, path=path, view=view)}
 
 
 @router.get('/content/search')
@@ -264,19 +264,21 @@ async def search_content(
     query: str = Query(...),
     ref: str | None = Query(None),
     path: str | None = Query(None),
+    view: str = Query('canonical'),
     limit: int = Query(10),
     before: int = Query(2),
     after: int = Query(2),
 ):
     service = _service()
     await service.startup()
-    return {'ok': True, **service.search_content(query=query, ref=ref, path=path, limit=limit, before=before, after=after)}
+    return {'ok': True, **service.content_store.search(query=query, ref=ref, path=path, view=view, limit=limit, before=before, after=after)}
 
 
 @router.get('/content/open')
 async def open_content(
     ref: str | None = Query(None),
     path: str | None = Query(None),
+    view: str = Query('canonical'),
     start_line: int | None = Query(None),
     end_line: int | None = Query(None),
     around_line: int | None = Query(None),
@@ -286,9 +288,10 @@ async def open_content(
     await service.startup()
     return {
         'ok': True,
-        **service.open_content(
+        **service.content_store.open(
             ref=ref,
             path=path,
+            view=view,
             start_line=start_line,
             end_line=end_line,
             around_line=around_line,

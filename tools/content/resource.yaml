@@ -45,6 +45,12 @@ parameters:
     query:
       type: string
       description: Search query used by action=search.
+    view:
+      type: string
+      enum:
+        - canonical
+        - raw
+      description: Content view mode. `canonical` resolves wrapped content refs before describe/search/open/head/tail. `raw` reads the wrapper artifact itself.
     limit:
       type: integer
       description: Max hits for action=search.
