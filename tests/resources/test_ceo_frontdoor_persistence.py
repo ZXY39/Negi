@@ -151,6 +151,69 @@ async def test_ceo_frontdoor_run_turn_raises_structured_interrupt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_run_turn_serializes_interrupt_payloads() -> None:
+    class _OpaqueArg:
+        def __str__(self) -> str:
+            return "opaque-arg"
+
+    class _OpaqueInterruptingCompiledGraph:
+        async def ainvoke(self, input, config=None, *, context=None, version="v1", **kwargs):
+            _ = input, config, context, version, kwargs
+            payloads = [{"name": "create_async_task", "arguments": {"task": _OpaqueArg()}}]
+            return _FakeGraphOutput(
+                value={
+                    "approval_request": {"kind": "frontdoor_tool_approval", "tool_calls": payloads},
+                    "tool_call_payloads": payloads,
+                },
+                interrupts=(
+                    SimpleNamespace(
+                        id="interrupt-1",
+                        value={"kind": "frontdoor_tool_approval", "tool_calls": payloads},
+                    ),
+                ),
+            )
+
+    async def _noop_ready() -> None:
+        return None
+
+    loop = SimpleNamespace(_ensure_checkpointer_ready=_noop_ready)
+    runner = CeoFrontDoorRunner(loop=loop)
+    runner._compiled_graph = _OpaqueInterruptingCompiledGraph()
+    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))
+
+    with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
+        await runner.run_turn(
+            user_input=SimpleNamespace(content="create a task", metadata={}),
+            session=session,
+            on_progress=None,
+        )
+
+    assert exc_info.value.interrupts[0].interrupt_id == "interrupt-1"
+    assert exc_info.value.interrupts[0].value == {
+        "kind": "frontdoor_tool_approval",
+        "tool_calls": [{"name": "create_async_task", "arguments": {"task": "opaque-arg"}}],
+    }
+    assert exc_info.value.values == {
+        "approval_request": {
+            "kind": "frontdoor_tool_approval",
+            "tool_calls": [{"name": "create_async_task", "arguments": {"task": "opaque-arg"}}],
+        },
+        "tool_call_payloads": [{"name": "create_async_task", "arguments": {"task": "opaque-arg"}}],
+    }
+    json.dumps(
+        {
+            "interrupts": [
+                {
+                    "id": exc_info.value.interrupts[0].interrupt_id,
+                    "value": exc_info.value.interrupts[0].value,
+                }
+            ],
+            "values": exc_info.value.values,
+        }
+    )
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_resume_turn_uses_command_resume_on_same_thread() -> None:
     async def _noop_ready() -> None:
         return None
