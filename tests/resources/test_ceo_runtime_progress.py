@@ -16,7 +16,7 @@ from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatServ
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime import web_ceo_sessions
-from g3ku.runtime.api import websocket_ceo
+from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
@@ -1168,6 +1168,119 @@ def test_runtime_agent_session_can_clear_paused_execution_context_explicitly(
 
     assert session.paused_execution_context_snapshot() is None
     assert web_ceo_sessions.read_paused_execution_context("web:shared") is None
+
+
+def test_ceo_session_pending_interrupts_fall_back_to_paused_disk_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            "status": "paused",
+            "interrupts": [{"id": "interrupt-disk-1", "value": {"kind": "frontdoor_tool_approval"}}],
+        },
+    )
+    session_manager = SessionManager(tmp_path)
+    session_manager.save(session_manager.get_or_create("web:shared"))
+    live_session = SimpleNamespace(
+        state=SimpleNamespace(status="paused", is_running=False, pending_interrupts=[]),
+    )
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix="/api")
+
+    monkeypatch.setattr(ceo_sessions, "get_agent", lambda: SimpleNamespace(sessions=session_manager))
+    monkeypatch.setattr(
+        ceo_sessions,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get=lambda _session_id: live_session),
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/ceo/sessions/web:shared/pending-interrupts")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {"id": "interrupt-disk-1", "value": {"kind": "frontdoor_tool_approval"}}
+    ]
+
+
+def test_ceo_session_resume_interrupt_recreates_runtime_from_persisted_pause(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            "status": "paused",
+            "interrupts": [{"id": "interrupt-disk-1", "value": {"kind": "frontdoor_tool_approval"}}],
+            "user_message": {"content": "create the task"},
+        },
+    )
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create("web:shared")
+    persisted.metadata = web_ceo_sessions.normalize_ceo_metadata(
+        {"memory_scope": {"channel": "memory-web", "chat_id": "memory-shared"}},
+        session_key="web:shared",
+    )
+    session_manager.save(persisted)
+
+    class _RecreatedSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(
+                status="paused",
+                is_running=False,
+                pending_interrupts=[{"id": "interrupt-disk-1", "value": {"kind": "frontdoor_tool_approval"}}],
+            )
+            self.resume_payloads: list[object] = []
+
+        async def resume_frontdoor_interrupt(self, *, resume_value):
+            self.resume_payloads.append(resume_value)
+            self.state.status = "completed"
+            self.state.pending_interrupts = []
+            return SimpleNamespace(output="approved reply")
+
+        def state_dict(self) -> dict[str, object]:
+            return {
+                "status": self.state.status,
+                "is_running": self.state.is_running,
+                "pending_interrupts": list(self.state.pending_interrupts),
+            }
+
+    created: list[dict[str, object]] = []
+    recreated = _RecreatedSession()
+
+    class _RuntimeManager:
+        def get(self, _session_id: str):
+            return None
+
+        def get_or_create(self, **kwargs):
+            created.append(dict(kwargs))
+            return recreated
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix="/api")
+
+    monkeypatch.setattr(ceo_sessions, "get_agent", lambda: SimpleNamespace(sessions=session_manager))
+    monkeypatch.setattr(ceo_sessions, "get_runtime_manager", lambda _agent: _RuntimeManager())
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/ceo/sessions/web:shared/resume-interrupt",
+        json={"resume": {"approved": True}},
+    )
+
+    assert response.status_code == 200
+    assert created == [
+        {
+            "session_key": "web:shared",
+            "channel": "web",
+            "chat_id": "shared",
+            "memory_channel": "memory-web",
+            "memory_chat_id": "memory-shared",
+        }
+    ]
+    assert recreated.resume_payloads == [{"approved": True}]
+    assert response.json()["output"] == "approved reply"
 
 
 def test_read_inflight_turn_snapshot_ignores_terminal_error_snapshot(tmp_path: Path, monkeypatch) -> None:
