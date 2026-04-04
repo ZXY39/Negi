@@ -523,9 +523,13 @@ async def test_runtime_agent_session_resume_frontdoor_interrupt_clears_pending_i
 
     monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
 
+    captured: dict[str, object] = {}
+
     class _Runner:
         async def resume_turn(self, *, session, resume_value, on_progress):
-            _ = session, resume_value, on_progress
+            captured["session"] = session
+            captured["resume_value"] = resume_value
+            captured["on_progress"] = on_progress
             return "approved reply"
 
     loop = SimpleNamespace(
@@ -543,6 +547,8 @@ async def test_runtime_agent_session_resume_frontdoor_interrupt_clears_pending_i
     assert result.output == "approved reply"
     assert session.state.pending_interrupts == []
     assert session.state.status == "completed"
+    assert captured["session"] is session
+    assert captured["resume_value"] == {"approved": True}
 
 
 @pytest.mark.asyncio

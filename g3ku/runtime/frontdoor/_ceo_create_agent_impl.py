@@ -4,10 +4,17 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain.messages import SystemMessage
+from langgraph.types import Command
 
 from ._ceo_support import CeoFrontDoorSupport
 from .ceo_agent_middleware import CeoPromptAssemblyMiddleware, CeoToolExposureMiddleware
-from .state_models import CeoPersistentState, CeoRuntimeContext
+from .state_models import (
+    CeoFrontdoorInterrupted,
+    CeoPendingInterrupt,
+    CeoPersistentState,
+    CeoRuntimeContext,
+    initial_persistent_state,
+)
 
 
 class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
@@ -48,3 +55,64 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
                 middleware=self._middleware(),
             )
         return self._agent
+
+    async def _ensure_ready(self) -> None:
+        ensure_ready = getattr(self._loop, "_ensure_checkpointer_ready", None)
+        if callable(ensure_ready):
+            result = ensure_ready()
+            if hasattr(result, "__await__"):
+                await result
+
+    @staticmethod
+    def _thread_config(session_key: str) -> dict[str, object]:
+        return {"configurable": {"thread_id": str(session_key or "").strip()}}
+
+    async def run_turn(self, *, user_input, session, on_progress=None) -> str:
+        await self._ensure_ready()
+        session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        payload = initial_persistent_state(
+            user_input={
+                "content": getattr(user_input, "content", ""),
+                "metadata": dict(getattr(user_input, "metadata", {}) or {}),
+            }
+        )
+        payload["agent_runtime"] = "create_agent"
+        graph_output = await self._get_agent().ainvoke(
+            payload,
+            config=self._thread_config(session_key),
+            context=CeoRuntimeContext(
+                loop=self._loop,
+                session=session,
+                session_key=session_key,
+                on_progress=on_progress,
+            ),
+            version="v2",
+        )
+        interrupts = [
+            CeoPendingInterrupt(
+                interrupt_id=str(getattr(item, "id", "") or ""),
+                value=getattr(item, "value", None),
+            )
+            for item in list(getattr(graph_output, "interrupts", ()) or ())
+        ]
+        values = dict(getattr(graph_output, "value", graph_output) or {})
+        if interrupts:
+            raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
+        return str(values.get("final_output") or "")
+
+    async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
+        await self._ensure_ready()
+        session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        graph_output = await self._get_agent().ainvoke(
+            Command(resume=resume_value),
+            config=self._thread_config(session_key),
+            context=CeoRuntimeContext(
+                loop=self._loop,
+                session=session,
+                session_key=session_key,
+                on_progress=on_progress,
+            ),
+            version="v2",
+        )
+        values = dict(getattr(graph_output, "value", graph_output) or {})
+        return str(values.get("final_output") or "")

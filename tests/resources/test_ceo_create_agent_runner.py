@@ -1,8 +1,17 @@
 from types import SimpleNamespace
 
+import pytest
+from langgraph.types import Command
+
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
-from g3ku.runtime.frontdoor.state_models import initial_persistent_state
+from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
+
+
+class _FakeGraphOutput:
+    def __init__(self, *, value, interrupts=()):
+        self.value = dict(value or {})
+        self.interrupts = tuple(interrupts)
 
 
 def test_memory_assembly_config_exposes_create_agent_and_summarizer_defaults() -> None:
@@ -56,3 +65,82 @@ def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None
     assert kwargs["context_schema"].__name__ == "CeoRuntimeContext"
     assert kwargs["state_schema"].__name__ == "CeoPersistentState"
     assert kwargs["middleware"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_passes_thread_id_and_context() -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeAgent:
+        async def ainvoke(self, payload, config=None, *, context=None, version="v1"):
+            captured["payload"] = payload
+            captured["config"] = config
+            captured["context"] = context
+            captured["version"] = version
+            return {"messages": [], "route_kind": "direct_reply", "final_output": "ok"}
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
+    )
+    runner._agent = _FakeAgent()
+
+    output = await runner.run_turn(
+        user_input=SimpleNamespace(content="hello", metadata={}),
+        session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+        on_progress=None,
+    )
+
+    assert output == "ok"
+    assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
+    assert getattr(captured["context"], "session_key") == "web:shared"
+    assert captured["payload"]["agent_runtime"] == "create_agent"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_raises_structured_interrupt() -> None:
+    class _InterruptingAgent:
+        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
+            _ = payload, config, context, version
+            return _FakeGraphOutput(
+                value={"approval_request": {"kind": "frontdoor_tool_approval"}},
+                interrupts=(SimpleNamespace(id="interrupt-1", value={"kind": "frontdoor_tool_approval"}),),
+            )
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
+    )
+    runner._agent = _InterruptingAgent()
+
+    with pytest.raises(CeoFrontdoorInterrupted):
+        await runner.run_turn(
+            user_input=SimpleNamespace(content="create a task", metadata={}),
+            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+            on_progress=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_resume_uses_command_resume() -> None:
+    captured: dict[str, object] = {}
+
+    class _ResumeAgent:
+        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
+            _ = context, version
+            captured["payload"] = payload
+            captured["config"] = config
+            return {"messages": [], "route_kind": "direct_reply", "final_output": "approved"}
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
+    )
+    runner._agent = _ResumeAgent()
+
+    result = await runner.resume_turn(
+        session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+        resume_value={"decisions": [{"type": "approve"}]},
+        on_progress=None,
+    )
+
+    assert result == "approved"
+    assert isinstance(captured["payload"], Command)
+    assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
