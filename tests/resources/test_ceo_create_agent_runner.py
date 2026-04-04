@@ -262,37 +262,47 @@ def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_re
     monkeypatch.setattr(ceo_agent_middleware, "build_session_prompt_cache_key", _fake_build_session_prompt_cache_key)
     monkeypatch.setattr(ceo_agent_middleware, "build_prompt_cache_diagnostics", _fake_build_prompt_cache_diagnostics)
 
-    runner = SimpleNamespace(
-        _resolve_ceo_model_refs=lambda: ["openai:gpt-4.1"],
-        build_prompt_context=lambda **kwargs: {
-            "system_overlay": "Use the existing CEO layered context rules.\n\n## Retrieved Context\n- memory"
-        },
-        visible_langchain_tools=lambda **kwargs: [],
-    )
-    middleware = ceo_agent_middleware.CeoPromptAssemblyMiddleware(runner=runner)
-
-    tool_schema = {
+    initial_tool_schema = {
+        "name": "stale_tool",
+        "description": "stale tool that should not reach cache diagnostics",
+        "parameters": {"type": "object", "properties": {"value": {"type": "string"}}},
+    }
+    exposed_tool_schema = {
         "name": "create_async_task",
         "description": "dispatch async task",
         "parameters": {"type": "object", "properties": {"task": {"type": "string"}}},
     }
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner.visible_langchain_tools = lambda **kwargs: [exposed_tool_schema]
     seen_request: dict[str, object] = {}
 
-    def _handler(request):
+    def _terminal_handler(request):
         seen_request["system_message"] = request.system_message
         seen_request["tools"] = list(request.tools or [])
         return ModelResponse(result=[AIMessage(content="ok")])
 
-    response = middleware.wrap_model_call(
+    handler = _terminal_handler
+    for middleware in reversed(runner._middleware()):
+        previous_handler = handler
+
+        def _wrap(request, handler=previous_handler, middleware=middleware):
+            return middleware.wrap_model_call(request, handler)
+
+        handler = _wrap
+
+    response = handler(
         ModelRequest(
             model=SimpleNamespace(),
             system_message=SystemMessage(content="You are the CEO frontdoor agent."),
             messages=[HumanMessage(content="hello")],
-            tools=[tool_schema],
-            state={"messages": [{"role": "user", "content": "hello"}]},
+            tools=[initial_tool_schema],
+            state={
+                "messages": [{"role": "user", "content": "hello"}],
+                "summary_text": "## Retrieved Context\n- memory",
+            },
             runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
-        ),
-        _handler,
+        )
     )
 
     assert isinstance(response, ExtendedModelResponse)
@@ -307,7 +317,7 @@ def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_re
         {"type": "text", "text": "You are the CEO frontdoor agent."},
         {"type": "text", "text": "Use the existing CEO layered context rules.\n\n## Retrieved Context\n- memory"},
     ]
-    assert seen_request["tools"] == [tool_schema]
+    assert seen_request["tools"] == [exposed_tool_schema]
     assert captured["cache_key_kwargs"] == {
         "session_key": "web:shared",
         "provider_model": "openai:gpt-4.1",
@@ -323,7 +333,7 @@ def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_re
             },
             {"role": "user", "content": "hello"},
         ],
-        "tool_schemas": [tool_schema],
+        "tool_schemas": [exposed_tool_schema],
     }
     assert captured["diagnostics_kwargs"] == {
         "stable_messages": [
@@ -337,7 +347,7 @@ def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_re
             },
             {"role": "user", "content": "hello"},
         ],
-        "tool_schemas": [tool_schema],
+        "tool_schemas": [exposed_tool_schema],
         "provider_model": "openai:gpt-4.1",
         "scope": "ceo_frontdoor",
         "prompt_cache_key": "cache-key",

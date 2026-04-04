@@ -36,8 +36,8 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
 
     def _middleware(self) -> list[Any]:
         return [
-            CeoPromptAssemblyMiddleware(runner=self),
             CeoToolExposureMiddleware(runner=self),
+            CeoPromptAssemblyMiddleware(runner=self),
         ]
 
     def _get_agent(self):
