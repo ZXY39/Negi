@@ -369,7 +369,7 @@ async def test_stage_round_counts_once_and_spawn_promotes_stage_mode_in_trace(tm
         assert active['mode'] == '包含派生'
         assert active['tool_rounds_used'] == 1
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         stages = detail['item']['execution_trace']['stages']
         assert len(stages) == 1
@@ -454,7 +454,7 @@ async def test_execution_trace_uses_tool_result_records_for_completed_stage_step
             completed_stage_summary='skills loaded',
         )
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
 
         assert detail is not None
         stages = detail['item']['execution_trace']['stages']
@@ -543,7 +543,7 @@ async def test_persisted_tool_result_output_ref_stays_canonical_while_execution_
         assert len(tool_results) == 1
         assert tool_results[0].output_ref == inner.ref
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         tool_step = detail['item']['execution_trace']['stages'][0]['rounds'][0]['tools'][0]
         assert tool_step['output_ref'] == wrapped.ref
@@ -593,7 +593,7 @@ async def test_ref_based_content_reads_now_consume_stage_budget(tmp_path: Path):
         assert active['stage_id'] == stage['stage_id']
         assert active['tool_rounds_used'] == 1
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         rounds = detail['item']['execution_trace']['stages'][0]['rounds']
         assert len(rounds) == 1
@@ -644,7 +644,7 @@ async def test_mixed_ref_reads_and_regular_tools_still_consume_stage_budget(tmp_
         assert active['stage_id'] == stage['stage_id']
         assert active['tool_rounds_used'] == 1
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         rounds = detail['item']['execution_trace']['stages'][0]['rounds']
         assert len(rounds) == 1
@@ -826,7 +826,7 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
             key_refs=[{'ref': 'artifact:artifact:stage-one', 'note': 'stage one note'}],
         )
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         stages = detail['item']['execution_trace']['stages']
         assert [stage['status'] for stage in stages] == ['完成', '进行中']
@@ -908,7 +908,7 @@ async def test_submit_next_stage_rejects_zero_progress_stage_switch(tmp_path: Pa
                 tool_round_budget=4,
             )
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         stages = detail['item']['execution_trace']['stages']
         assert len(stages) == 1
@@ -951,7 +951,7 @@ async def test_submit_next_stage_allows_switch_after_spawn_only_progress(tmp_pat
             completed_stage_summary='spawn-only progress is still substantive',
         )
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         stages = detail['item']['execution_trace']['stages']
         assert [stage['stage_id'] for stage in stages] == [first['stage_id'], second['stage_id']]
@@ -1119,7 +1119,7 @@ async def test_submit_next_stage_ignores_completed_recap_without_active_stage(tm
             key_refs=[{'ref': 'artifact:artifact:ignored', 'note': 'ignored note'}],
         )
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         stages = detail['item']['execution_trace']['stages']
         assert len(stages) == 1
@@ -1165,7 +1165,7 @@ async def test_completed_stage_archives_oldest_ten_and_inserts_compression_stage
                 key_refs=[{'ref': f'artifact:artifact:stage-{previous}', 'note': f'note {previous}'}],
             )
 
-        detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         stages = detail['item']['execution_trace']['stages']
         compression_stages = [stage for stage in stages if stage['stage_kind'] == 'compression']

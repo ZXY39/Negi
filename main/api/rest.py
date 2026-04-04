@@ -83,12 +83,16 @@ async def get_task_tree_snapshot(task_id: str):
 
 
 @router.get('/tasks/{task_id}/nodes/{node_id}')
-async def get_task_node_detail(task_id: str, node_id: str):
+async def get_task_node_detail(
+    task_id: str,
+    node_id: str,
+    detail_level: str = Query('summary'),
+):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_node_detail_payload(task_id, node_id)
+    payload = service.get_node_detail_payload(task_id, node_id, detail_level=detail_level)
     if payload is None:
         raise HTTPException(status_code=404, detail='node_not_found')
     return payload

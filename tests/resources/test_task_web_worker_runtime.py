@@ -3429,6 +3429,49 @@ def test_node_detail_and_latest_context_repair_legacy_mojibake(tmp_path: Path):
     assert latest_context["title"] == f"最终验收:{root.goal}"
 
 
+def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    captured: dict[str, str] = {}
+
+    def _get_node_detail_payload(task_id: str, node_id: str, detail_level: str = "summary"):
+        captured["task_id"] = task_id
+        captured["node_id"] = node_id
+        captured["detail_level"] = detail_level
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "node_id": node_id,
+            "item": {
+                "task_id": task_id,
+                "node_id": node_id,
+                "detail_level": detail_level,
+                "execution_trace": {"stages": []},
+            },
+        }
+
+    service.get_node_detail_payload = _get_node_detail_payload
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    client = TestClient(_build_app())
+
+    response = client.get("/api/tasks/task:demo/nodes/node:demo?detail_level=full")
+
+    assert response.status_code == 200
+    assert captured == {
+        "task_id": "task:demo",
+        "node_id": "node:demo",
+        "detail_level": "full",
+    }
+    assert response.json()["item"]["detail_level"] == "full"
+
+
 def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -3628,7 +3671,7 @@ def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_pa
     )
 
     progress = service.query_service.view_progress(record.task_id, mark_read=False)
-    acceptance_detail = service.get_node_detail_payload(record.task_id, acceptance.node_id)
+    acceptance_detail = service.get_node_detail_payload(record.task_id, acceptance.node_id, detail_level="full")
 
     assert progress is not None
     assert acceptance_detail is not None
@@ -3707,7 +3750,7 @@ def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_pat
     )
 
     progress = service.query_service.view_progress(record.task_id, mark_read=False)
-    node_payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+    node_payload = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level="full")
 
     assert progress is not None
     assert node_payload is not None
