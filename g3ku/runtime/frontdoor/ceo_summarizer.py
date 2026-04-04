@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .history_compaction import (
+    FRONTDOOR_HISTORY_SUMMARY_MARKER,
     compact_frontdoor_history,
     effective_message_count,
     frontdoor_summary_state,
@@ -66,6 +67,7 @@ def _normalize_summary_payload(raw_payload: Any) -> dict[str, Any]:
 def _heuristic_fallback_result(
     *,
     normalized_messages: list[dict[str, Any]],
+    previous_summary_payload: dict[str, Any],
     keep_count: int,
     trigger_message_count: int,
 ) -> CeoSummaryResult:
@@ -75,10 +77,12 @@ def _heuristic_fallback_result(
         summary_trigger_message_count=max(1, int(trigger_message_count)),
     )
     state = frontdoor_summary_state(compacted)
+    summary_payload = dict(previous_summary_payload or {})
+    summary_payload["fallback"] = "heuristic"
     return CeoSummaryResult(
         messages=compacted,
         summary_text=str(state.get("summary_text") or ""),
-        summary_payload={"fallback": "heuristic"},
+        summary_payload=summary_payload,
         summary_version=int(state.get("summary_version") or 1),
         summary_model_key="",
     )
@@ -86,7 +90,7 @@ def _heuristic_fallback_result(
 
 def _render_summary_text(payload: dict[str, Any]) -> str:
     lines = [
-        "## CEO Durable Summary",
+        f"## CEO Durable Summary {FRONTDOOR_HISTORY_SUMMARY_MARKER}",
         "",
         "### Stable Preferences",
         *[f"- {item}" for item in list(payload.get("stable_preferences") or [])],
@@ -148,6 +152,7 @@ async def summarize_frontdoor_history(
     except Exception:
         return _heuristic_fallback_result(
             normalized_messages=normalized_messages,
+            previous_summary_payload=previous_summary_payload,
             keep_count=keep_count,
             trigger_message_count=trigger_message_count,
         )
@@ -157,6 +162,7 @@ async def summarize_frontdoor_history(
     except _ModelSummaryValidationError:
         return _heuristic_fallback_result(
             normalized_messages=normalized_messages,
+            previous_summary_payload=previous_summary_payload,
             keep_count=keep_count,
             trigger_message_count=trigger_message_count,
         )

@@ -1,7 +1,11 @@
 import pytest
 
 from g3ku.runtime.frontdoor.ceo_summarizer import summarize_frontdoor_history
-from g3ku.runtime.frontdoor.history_compaction import compact_frontdoor_history, frontdoor_summary_state
+from g3ku.runtime.frontdoor.history_compaction import (
+    compact_frontdoor_history,
+    frontdoor_summary_state,
+    is_frontdoor_history_summary_message,
+)
 
 
 @pytest.mark.asyncio
@@ -31,12 +35,18 @@ async def test_summarize_frontdoor_history_returns_structured_payload_and_preser
     assert result.summary_model_key == "summary-model"
     assert result.summary_payload["stable_preferences"] == ["reply in Chinese"]
     assert "The user asked to migrate the CEO runtime" in result.summary_text
+    assert "frontdoor-history-summary" in result.summary_text
+    assert is_frontdoor_history_summary_message(result.messages[0])
     assert [item["content"] for item in result.messages[-4:]] == [f"message {idx}" for idx in range(6, 10)]
 
 
 @pytest.mark.asyncio
 async def test_summarize_frontdoor_history_falls_back_to_heuristic_compaction() -> None:
     messages = [{"role": "user", "content": f"message {idx}"} for idx in range(10)]
+    previous_summary_payload = {
+        "stable_preferences": ["reply in Chinese"],
+        "stable_facts": ["project root is D:/NewProjects/G3KU"],
+    }
     compacted = compact_frontdoor_history(
         messages,
         recent_message_count=4,
@@ -51,7 +61,7 @@ async def test_summarize_frontdoor_history_falls_back_to_heuristic_compaction() 
     result = await summarize_frontdoor_history(
         messages=messages,
         previous_summary_text="",
-        previous_summary_payload={},
+        previous_summary_payload=previous_summary_payload,
         keep_message_count=4,
         trigger_message_count=6,
         model_key="summary-model",
@@ -59,6 +69,8 @@ async def test_summarize_frontdoor_history_falls_back_to_heuristic_compaction() 
     )
 
     assert result.summary_payload["fallback"] == "heuristic"
+    assert result.summary_payload["stable_preferences"] == ["reply in Chinese"]
+    assert result.summary_payload["stable_facts"] == ["project root is D:/NewProjects/G3KU"]
     assert "frontdoor-history-summary" in str(result.summary_text)
     assert [item["content"] for item in result.messages[-4:]] == [f"message {idx}" for idx in range(6, 10)]
     assert result.summary_model_key == ""
@@ -214,6 +226,10 @@ async def test_summarize_frontdoor_history_malformed_model_output_falls_back_heu
     model_output: object,
 ) -> None:
     messages = [{"role": "user", "content": f"message {idx}"} for idx in range(10)]
+    previous_summary_payload = {
+        "stable_preferences": ["reply in Chinese"],
+        "stable_facts": ["project root is D:/NewProjects/G3KU"],
+    }
     compacted = compact_frontdoor_history(
         messages,
         recent_message_count=4,
@@ -228,7 +244,7 @@ async def test_summarize_frontdoor_history_malformed_model_output_falls_back_heu
     result = await summarize_frontdoor_history(
         messages=messages,
         previous_summary_text="",
-        previous_summary_payload={},
+        previous_summary_payload=previous_summary_payload,
         keep_message_count=4,
         trigger_message_count=6,
         model_key="summary-model",
@@ -236,6 +252,8 @@ async def test_summarize_frontdoor_history_malformed_model_output_falls_back_heu
     )
 
     assert result.summary_payload["fallback"] == "heuristic"
+    assert result.summary_payload["stable_preferences"] == ["reply in Chinese"]
+    assert result.summary_payload["stable_facts"] == ["project root is D:/NewProjects/G3KU"]
     assert [item["content"] for item in result.messages[-4:]] == [f"message {idx}" for idx in range(6, 10)]
     assert result.summary_model_key == ""
     assert result.summary_version == int(heuristic_state["summary_version"])
