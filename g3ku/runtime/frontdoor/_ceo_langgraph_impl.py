@@ -588,6 +588,72 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             prompt_cache_key=prompt_cache_key,
         )
 
+    async def _invoke_summary_model(
+        self,
+        prompt: dict[str, Any],
+        *,
+        explicit_model_key: str | None = None,
+    ) -> dict[str, Any]:
+        from g3ku.config.live_runtime import get_runtime_config
+        from g3ku.providers.chatmodels import build_chat_model
+
+        config, _revision, _changed = get_runtime_config(force=False)
+        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        model_key = str(explicit_model_key or getattr(assembly_cfg, "frontdoor_summarizer_model_key", None) or "").strip()
+        if model_key:
+            model = build_chat_model(config, model_key=model_key)
+        else:
+            model = build_chat_model(config, role="ceo")
+
+        system_prompt = (
+            "You summarize CEO frontdoor conversation history.\n"
+            "Return strict JSON only.\n"
+            "Required keys: stable_preferences, stable_facts, open_loops, recent_actions, narrative.\n"
+            "The first four keys must be arrays of strings. narrative must be a string.\n"
+            "Be concise and preserve durable user context and unresolved work."
+        )
+        user_payload = json.dumps(
+            {
+                "previous_summary_text": str(prompt.get("previous_summary_text") or ""),
+                "previous_summary_payload": dict(prompt.get("previous_summary_payload") or {}),
+                "messages": [dict(item) for item in list(prompt.get("messages") or []) if isinstance(item, dict)],
+            },
+            ensure_ascii=False,
+        )
+        response = await model.ainvoke(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_payload},
+            ]
+        )
+        raw = getattr(response, "content", response)
+        if isinstance(raw, list):
+            parts: list[str] = []
+            for item in raw:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text_part = item.get("text") or item.get("content") or ""
+                    if isinstance(text_part, str):
+                        parts.append(text_part)
+            raw = "\n".join(parts)
+        text = str(raw or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, count=1)
+            text = re.sub(r"\s*```$", "", text, count=1)
+            text = text.strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match is None:
+                raise
+            parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict):
+            raise ValueError("summary model response must be a JSON object")
+        return dict(parsed)
+
     async def _graph_prepare_turn(
         self,
         state: CeoGraphState,

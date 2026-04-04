@@ -947,17 +947,17 @@ async def test_graph_prepare_turn_uses_model_summarizer_when_enabled(
     )
     runner = CeoFrontDoorRunner(loop=loop)
 
-    async def _fake_summary(**kwargs):
-        _ = kwargs
-        return SimpleNamespace(
-            messages=[{"role": "assistant", "content": "## CEO Durable Summary"}],
-            summary_text="## CEO Durable Summary",
-            summary_payload={"stable_facts": ["fact"]},
-            summary_version=2,
-            summary_model_key="summary-model",
-        )
+    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
+        assert prompt["messages"]
+        return {
+            "stable_preferences": ["reply concisely"],
+            "stable_facts": ["fact"],
+            "open_loops": ["follow up"],
+            "recent_actions": ["summarized history"],
+            "narrative": "CEO frontdoor durable context.",
+        }
 
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summary)
+    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
 
     result = await runner._graph_prepare_turn(
         {
@@ -967,7 +967,64 @@ async def test_graph_prepare_turn_uses_model_summarizer_when_enabled(
         runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
     )
 
-    assert result["summary_text"] == "## CEO Durable Summary"
-    assert result["summary_payload"] == {"stable_facts": ["fact"]}
+    assert "## CEO Durable Summary" in result["summary_text"]
+    assert result["summary_payload"] == {
+        "stable_preferences": ["reply concisely"],
+        "stable_facts": ["fact"],
+        "open_loops": ["follow up"],
+        "recent_actions": ["summarized history"],
+        "narrative": "CEO frontdoor durable context.",
+    }
     assert result["summary_model_key"] == "summary-model"
-    assert result["messages"][0]["content"] == "## CEO Durable Summary"
+    assert "## CEO Durable Summary" in str(result["messages"][0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_invoke_summary_model_uses_explicit_model_key_and_parses_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    captured: dict[str, object] = {}
+    fake_config = object()
+
+    class _FakeModel:
+        async def ainvoke(self, messages):
+            captured["messages"] = list(messages)
+            return SimpleNamespace(
+                content='```json\n{"stable_facts":["fact"],"narrative":"brief","stable_preferences":[],"open_loops":[],"recent_actions":[]}\n```'
+            )
+
+    def _fake_get_runtime_config(force: bool = False):
+        captured["force"] = force
+        return fake_config, 7, False
+
+    def _fake_build_chat_model(config, *, role=None, model_key=None):
+        captured["config"] = config
+        captured["role"] = role
+        captured["model_key"] = model_key
+        return _FakeModel()
+
+    monkeypatch.setattr("g3ku.config.live_runtime.get_runtime_config", _fake_get_runtime_config)
+    monkeypatch.setattr("g3ku.providers.chatmodels.build_chat_model", _fake_build_chat_model)
+
+    result = await runner._invoke_summary_model(
+        {
+            "previous_summary_text": "",
+            "previous_summary_payload": {},
+            "messages": [{"role": "user", "content": "message 1"}],
+        },
+        explicit_model_key="summary-model",
+    )
+
+    assert result == {
+        "stable_facts": ["fact"],
+        "narrative": "brief",
+        "stable_preferences": [],
+        "open_loops": [],
+        "recent_actions": [],
+    }
+    assert captured["force"] is False
+    assert captured["config"] is fake_config
+    assert captured["model_key"] == "summary-model"
+    assert captured["role"] is None
+    assert "strict JSON" in str(captured["messages"][0]["content"])
