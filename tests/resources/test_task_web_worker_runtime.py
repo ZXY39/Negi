@@ -34,6 +34,46 @@ class _DummyChatBackend:
         raise AssertionError(f"chat backend should not be called in this test: {kwargs!r}")
 
 
+class _GovernanceReviewChatBackend:
+    def __init__(self, *, decision: str = "cap_current_depth") -> None:
+        self.calls: list[dict[str, object]] = []
+        self._decision = str(decision or "cap_current_depth").strip()
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        payload = {
+            "decision": self._decision,
+            "reason": "检查结论：存在明显过度派生，继续扩展会偏离第一性原理。",
+            "evidence": [
+                "满足检查点：当前任务树继续增加深度，已超出以结果为中心的必要拆分。",
+                "不满足检查点：当前子节点的任务操作过于细致全面，出现节外生枝。",
+            ],
+        }
+        return LLMResponse(content=json.dumps(payload, ensure_ascii=False), finish_reason="stop")
+
+
+class _GovernanceReviewRetryChatBackend:
+    def __init__(self, responses: list[str]) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._responses = list(responses)
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if not self._responses:
+            raise AssertionError("governance retry backend exhausted")
+        return LLMResponse(content=self._responses.pop(0), finish_reason="stop")
+
+
+class _GovernanceReviewExceptionChatBackend:
+    def __init__(self, *, message: str = "inspection chain failed") -> None:
+        self.calls: list[dict[str, object]] = []
+        self._message = str(message or "inspection chain failed")
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        raise RuntimeError(self._message)
+
+
 def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(rest_router, prefix="/api")
@@ -4474,8 +4514,9 @@ async def test_task_snapshot_includes_governance_state(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_governance_depth_trigger_caps_task_and_records_history(tmp_path: Path):
+    backend = _GovernanceReviewChatBackend(decision="cap_current_depth")
     service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
+        chat_backend=backend,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4527,6 +4568,145 @@ async def test_governance_depth_trigger_caps_task_and_records_history(tmp_path: 
         assert governance.get("review_inflight") is False
         assert governance["history"][-1]["decision"] == "cap_current_depth"
         assert governance["history"][-1]["limited_depth"] == 2
+        assert backend.calls
+        call = backend.calls[-1]
+        assert call["model_refs"] == service.node_runner._acceptance_model_refs
+        messages = list(call["messages"])
+        assert len(messages) == 2
+        assert "你负责检查整个任务树是否过度派生" in str(messages[0]["content"])
+        assert "第一性原理" in str(messages[0]["content"])
+        assert "当前子节点的任务操作是否过于细致全面" in str(messages[0]["content"])
+        assert "节外生枝" in str(messages[0]["content"])
+        assert "满足了哪些点或不满足哪些点" in str(messages[0]["content"])
+        assert governance["history"][-1]["evidence"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_governance_review_retries_until_valid_model_result(tmp_path: Path):
+    backend = _GovernanceReviewRetryChatBackend(
+        responses=[
+            "not-json",
+            json.dumps(
+                {
+                    "decision": "allow",
+                    "reason": "检查结论：当前扩展仍然围绕核心目标推进，可以继续执行。",
+                    "evidence": [
+                        "满足检查点：新增深度仍服务于解决关键问题，没有偏离第一性原理。",
+                        "满足检查点：当前子节点拆分仍是必要拆分，不属于节外生枝。",
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        _mark_worker_online(service)
+        record = await service.create_task("governance retry", session_id="web:shared", max_depth=3)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="child", prompt="child prompt", execution_policy=_execution_policy()),
+        )
+        refreshed_task = service.get_task(record.task_id)
+        refreshed_child = service.get_node(child.node_id)
+        assert refreshed_task is not None
+        assert refreshed_child is not None
+
+        service.node_runner._create_execution_child(
+            task=refreshed_task,
+            parent=refreshed_child,
+            spec=SpawnChildSpec(goal="grandchild", prompt="grandchild prompt", execution_policy=_execution_policy()),
+        )
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
+            if governance.get("history"):
+                break
+            await asyncio.sleep(0.05)
+
+        current_task = service.get_task(record.task_id)
+        governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
+        assert current_task is not None
+        assert int(current_task.max_depth or 0) == 3
+        assert governance.get("frozen") is False
+        assert governance.get("review_inflight") is False
+        assert governance["history"][-1]["decision"] == "allow"
+        assert governance.get("depth_baseline") == 2
+        assert len(backend.calls) == 2
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_governance_review_defaults_to_cap_on_model_chain_exception(tmp_path: Path):
+    backend = _GovernanceReviewExceptionChatBackend(message="inspection provider offline")
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        _mark_worker_online(service)
+        record = await service.create_task("governance exception", session_id="web:shared", max_depth=3)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="child", prompt="child prompt", execution_policy=_execution_policy()),
+        )
+        refreshed_task = service.get_task(record.task_id)
+        refreshed_child = service.get_node(child.node_id)
+        assert refreshed_task is not None
+        assert refreshed_child is not None
+
+        service.node_runner._create_execution_child(
+            task=refreshed_task,
+            parent=refreshed_child,
+            spec=SpawnChildSpec(goal="grandchild", prompt="grandchild prompt", execution_policy=_execution_policy()),
+        )
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            current_task = service.get_task(record.task_id)
+            governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
+            if current_task is not None and int(current_task.max_depth or 0) == 2 and governance.get("history"):
+                break
+            await asyncio.sleep(0.05)
+
+        current_task = service.get_task(record.task_id)
+        governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
+        assert current_task is not None
+        assert int(current_task.max_depth or 0) == 2
+        assert governance["history"][-1]["decision"] == "cap_current_depth"
+        assert "RuntimeError: inspection provider offline" in governance["history"][-1]["decision_reason"]
+        assert "默认限深" in governance["history"][-1]["decision_reason"]
+        assert any("默认限深" in str(item) for item in governance["history"][-1]["evidence"])
+        assert len(backend.calls) == 1
     finally:
         await service.close()
 

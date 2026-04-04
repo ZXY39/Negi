@@ -13,6 +13,7 @@ from g3ku.session.manager import SessionManager
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 from main.service.task_stall_callback import (
+    TASK_STALL_REASON_GOVERNANCE_REVIEW,
     TASK_STALL_REASON_SUSPECTED_STALL,
     TASK_STALL_REASON_USER_PAUSED,
     TASK_STALL_REASON_WORKER_UNAVAILABLE,
@@ -133,6 +134,49 @@ async def test_task_stall_notifier_emits_and_resets_after_visible_output(tmp_pat
         assert any(str(payload.get("task_id") or "") == record.task_id for payload in new_payloads)
     finally:
         blocker.set()
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_task_stall_notifier_skips_governance_review_inflight(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    heartbeat = _TaskStallRecorder()
+    service.bind_runtime_loop(SimpleNamespace(web_session_heartbeat=heartbeat))
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    service.task_stall_notifier.minute_seconds = 0.01
+
+    try:
+        task = await service.create_task("governance review stall skip", session_id="web:stall-governance")
+        service.log_service.upsert_task_governance(
+            task.task_id,
+            {
+                "enabled": True,
+                "frozen": True,
+                "review_inflight": True,
+                "history": [],
+            },
+        )
+        service.task_stall_notifier.start_task(task.task_id)
+
+        assert service.classify_task_stall_reason(task.task_id) == TASK_STALL_REASON_GOVERNANCE_REVIEW
+
+        await asyncio.sleep(0.06)
+        await asyncio.sleep(0.06)
+
+        assert heartbeat.payloads == []
+        assert service.build_task_stall_payload(
+            task.task_id,
+            bucket_minutes=5,
+            last_visible_output_at="2000-01-01T00:00:00+00:00",
+        ) == {}
+    finally:
         await service.close()
 
 

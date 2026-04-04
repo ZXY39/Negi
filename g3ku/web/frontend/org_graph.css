@@ -889,6 +889,18 @@ textarea {
     color: var(--text-secondary);
 }
 
+.task-governance-evidence {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    color: var(--text-secondary);
+    font-size: 0.77rem;
+    line-height: 1.5;
+}
+
+.task-governance-evidence li + li {
+    margin-top: 4px;
+}
+
 .panel {
     min-height: 0;
     display: flex;

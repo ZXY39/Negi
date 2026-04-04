@@ -33,6 +33,9 @@ function normalizeTaskGovernanceHistoryEntry(value = {}) {
         decision: String(value?.decision || "allow").trim().toLowerCase() || "allow",
         decision_reason: String(value?.decision_reason || "").trim(),
         limited_depth: Math.max(0, treeNormalizeInt(value?.limited_depth, 0)),
+        evidence: (Array.isArray(value?.evidence) ? value.evidence : [])
+            .map((item) => String(item || "").trim())
+            .filter(Boolean),
     };
 }
 
@@ -603,6 +606,7 @@ function renderTaskGovernancePanel() {
             </div>
             <div class="task-governance-entry-meta">${esc(item.triggerSummary)} · ${esc(item.snapshotSummary)}${item.limitedDepthSummary ? ` · ${esc(item.limitedDepthSummary)}` : ""}</div>
             <div class="task-governance-entry-reason">${esc(item.decisionReason || "暂无说明")}</div>
+            ${Array.isArray(item.evidence) && item.evidence.length ? `<ul class="task-governance-evidence">${item.evidence.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>` : ""}
         </article>
     `).join("");
 }

@@ -64,7 +64,7 @@ from main.runtime.node_runner import NodeRunner
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
-from main.runtime.task_governance import GOVERNANCE_PATCH_EVENT_TYPE, TaskGovernanceManager
+from main.runtime.task_governance import GOVERNANCE_PATCH_EVENT_TYPE, TaskGovernanceManager, normalize_task_governance_state
 from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.event_registry import TaskEventRegistry
@@ -81,6 +81,7 @@ from main.service.task_terminal_callback import (
 )
 from main.service.task_stall_callback import (
     TASK_STALL_REASON_CANCEL_REQUESTED,
+    TASK_STALL_REASON_GOVERNANCE_REVIEW,
     TASK_STALL_REASON_MISSING_TASK,
     TASK_STALL_REASON_NOT_IN_PROGRESS,
     TASK_STALL_REASON_SUSPECTED_STALL,
@@ -1728,6 +1729,11 @@ class MainRuntimeService:
             return TASK_STALL_REASON_USER_PAUSED
         if bool(current_runtime_state.get('paused')) or bool(current_runtime_state.get('pause_requested')):
             return TASK_STALL_REASON_USER_PAUSED
+        governance_state = normalize_task_governance_state(
+            (self.log_service.read_task_runtime_meta(task.task_id) or {}).get('governance')
+        )
+        if bool(governance_state.get('review_inflight')) or bool(governance_state.get('frozen')):
+            return TASK_STALL_REASON_GOVERNANCE_REVIEW
         if bool(getattr(task, 'cancel_requested', False)):
             return TASK_STALL_REASON_CANCEL_REQUESTED
         if bool(current_runtime_state.get('cancel_requested')):
