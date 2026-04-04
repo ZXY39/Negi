@@ -985,11 +985,13 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             ),
             version="v2",
         )
-        values = dict(getattr(graph_output, "value", graph_output) or {})
+        values = _checkpoint_safe_value(dict(getattr(graph_output, "value", graph_output) or {}))
+        if not isinstance(values, dict):
+            values = {}
         pending_interrupts = [
             CeoPendingInterrupt(
                 interrupt_id=str(getattr(item, "id", "") or ""),
-                value=getattr(item, "value", None),
+                value=_checkpoint_safe_value(getattr(item, "value", None)),
             )
             for item in list(getattr(graph_output, "interrupts", ()) or ())
         ]

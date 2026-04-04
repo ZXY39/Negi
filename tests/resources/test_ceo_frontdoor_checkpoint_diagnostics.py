@@ -275,6 +275,25 @@ def test_build_frontdoor_replay_diagnostics_preserves_available_checkpoint_confi
     }
 
 
+def test_build_frontdoor_replay_diagnostics_keeps_replay_pointer_and_step() -> None:
+    snapshot = {
+        "thread_id": "web:shared",
+        "checkpoint_id": "cp-2",
+        "parent_checkpoint_id": "cp-1",
+        "metadata": {"step": 2, "source": "loop"},
+        "next": ["review_tool_calls"],
+        "has_interrupts": True,
+    }
+
+    item = build_frontdoor_replay_diagnostics(snapshot)
+
+    assert item["step"] == 2
+    assert item["has_interrupts"] is True
+    assert item["replay_config"] == {
+        "configurable": {"thread_id": "web:shared", "checkpoint_id": "cp-2"}
+    }
+
+
 def test_ceo_session_checkpoint_history_endpoint_returns_serialized_history(monkeypatch, tmp_path) -> None:
     app = _build_checkpoint_app()
     client = TestClient(app)

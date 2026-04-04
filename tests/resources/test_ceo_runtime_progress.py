@@ -513,6 +513,39 @@ async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_st
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_resume_frontdoor_interrupt_clears_pending_interrupts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _Runner:
+        async def resume_turn(self, *, session, resume_value, on_progress):
+            _ = session, resume_value, on_progress
+            return "approved reply"
+
+    loop = SimpleNamespace(
+        multi_agent_runner=_Runner(),
+        model="gpt-test",
+        reasoning_effort=None,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session.state.pending_interrupts = [{"id": "interrupt-1", "value": {"kind": "frontdoor_tool_approval"}}]
+    session.state.paused = True
+    session.state.status = "paused"
+
+    result = await session.resume_frontdoor_interrupt(resume_value={"approved": True})
+
+    assert result.output == "approved reply"
+    assert session.state.pending_interrupts == []
+    assert session.state.status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_prompt(
     tmp_path: Path,
     monkeypatch,
