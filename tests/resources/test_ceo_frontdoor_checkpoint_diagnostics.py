@@ -323,6 +323,99 @@ def test_ceo_session_checkpoint_history_endpoint_returns_serialized_history(monk
     assert body["items"][0]["metadata"]["step"] == 2
 
 
+def test_ceo_session_checkpoint_endpoint_returns_serialized_snapshot(monkeypatch, tmp_path) -> None:
+    app = _build_checkpoint_app()
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        ceo_sessions,
+        "_sessions",
+        lambda: (
+            SimpleNamespace(),
+            SimpleNamespace(
+                get_path=lambda _key: tmp_path / "web.shared.json",
+                get_or_create=lambda key: SimpleNamespace(key=key, metadata={}),
+            ),
+            SimpleNamespace(get=lambda _key: None),
+            SimpleNamespace(),
+        ),
+    )
+    monkeypatch.setattr(
+        ceo_sessions,
+        "_assert_known_session",
+        lambda _manager, session_id: SimpleNamespace(key=session_id, metadata={}),
+    )
+    monkeypatch.setattr(
+        ceo_sessions,
+        "get_frontdoor_checkpoint",
+        lambda loop, *, session_id, checkpoint_id=None, subgraphs=False: {
+            "thread_id": session_id,
+            "checkpoint_id": checkpoint_id,
+            "parent_checkpoint_id": "cp-1",
+            "metadata": {"step": 2, "source": "loop"},
+            "next": [],
+            "values": {"route_kind": "direct_reply"},
+            "tasks": [],
+            "has_interrupts": False,
+        },
+    )
+
+    response = client.get("/api/ceo/sessions/web:ceo-demo/checkpoint?checkpoint_id=cp-2")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == "web:ceo-demo"
+    assert body["item"]["checkpoint_id"] == "cp-2"
+    assert body["item"]["parent_checkpoint_id"] == "cp-1"
+
+
+def test_admin_checkpoint_history_endpoint_returns_serialized_history(monkeypatch) -> None:
+    app = _build_checkpoint_app()
+    client = TestClient(app)
+
+    monkeypatch.setattr(admin_rest, "get_agent", lambda: SimpleNamespace(multi_agent_runner=SimpleNamespace()))
+    monkeypatch.setattr(
+        admin_rest,
+        "get_frontdoor_checkpoint_history",
+        lambda loop, *, session_id, limit=20, before_checkpoint_id=None, metadata_filter=None: [
+            {
+                "thread_id": session_id,
+                "checkpoint_id": "cp-2",
+                "parent_checkpoint_id": "cp-1",
+                "metadata": {"step": 2, "source": "loop"},
+                "next": [],
+                "values": {"route_kind": "direct_reply"},
+                "tasks": [],
+                "has_interrupts": False,
+            }
+        ],
+    )
+
+    response = client.get("/api/ceo/checkpoints/web:ceo-demo/history?limit=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"][0]["checkpoint_id"] == "cp-2"
+    assert body["items"][0]["metadata"]["source"] == "loop"
+
+
+def test_admin_checkpoint_endpoint_returns_404_for_missing_checkpoint(monkeypatch) -> None:
+    app = _build_checkpoint_app()
+    client = TestClient(app)
+
+    monkeypatch.setattr(admin_rest, "get_agent", lambda: SimpleNamespace(multi_agent_runner=SimpleNamespace()))
+    monkeypatch.setattr(
+        admin_rest,
+        "get_frontdoor_checkpoint",
+        lambda loop, *, session_id, checkpoint_id=None, subgraphs=False: None,
+    )
+
+    response = client.get("/api/ceo/checkpoints/web:ceo-demo?checkpoint_id=cp-missing")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "checkpoint_not_found"
+
+
 def test_admin_replay_diagnostics_endpoint_returns_replay_ready_payload(monkeypatch) -> None:
     app = _build_checkpoint_app()
     client = TestClient(app)
@@ -351,3 +444,30 @@ def test_admin_replay_diagnostics_endpoint_returns_replay_ready_payload(monkeypa
     assert body["item"]["replay_config"] == {
         "configurable": {"thread_id": "web:ceo-demo", "checkpoint_id": "cp-2"}
     }
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_status", "error"),
+    [
+        ("/api/ceo/checkpoints/web:ceo-demo?checkpoint_id=cp-2", 503, RuntimeError("No model configured for role 'ceo'.")),
+        ("/api/ceo/checkpoints/web:ceo-demo/history?limit=1", 503, RuntimeError("No model configured for role 'ceo'.")),
+        ("/api/ceo/checkpoints/web:ceo-demo/replay-diagnostics?checkpoint_id=cp-2", 503, RuntimeError("No model configured for role 'ceo'.")),
+        ("/api/ceo/checkpoints/web:ceo-demo?checkpoint_id=cp-2", 423, RuntimeError("project is locked")),
+        ("/api/ceo/checkpoints/web:ceo-demo/history?limit=1", 423, RuntimeError("project is locked")),
+        ("/api/ceo/checkpoints/web:ceo-demo/replay-diagnostics?checkpoint_id=cp-2", 423, RuntimeError("project is locked")),
+    ],
+)
+def test_admin_checkpoint_endpoints_translate_unavailable_runtime_errors(monkeypatch, path: str, expected_status: int, error: RuntimeError) -> None:
+    app = _build_checkpoint_app()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    def _raise():
+        raise error
+
+    monkeypatch.setattr(admin_rest, "get_agent", _raise)
+
+    response = client.get(path)
+
+    assert response.status_code == expected_status
+    expected_detail = "no_model_configured" if expected_status == 503 else "project_locked"
+    assert response.json()["detail"] == expected_detail
