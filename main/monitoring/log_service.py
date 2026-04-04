@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
+from g3ku.content import ContentNavigationService, content_summary_and_ref
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
@@ -449,7 +449,7 @@ class TaskLogService:
                 arguments = dict(getattr(call, 'arguments', {}) or {})
                 arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else ''
                 content = tool_message.get('content')
-                preview_text, output_ref = self._tool_result_preview_and_ref(content)
+                preview_text, output_ref = content_summary_and_ref(content)
                 record = TaskProjectionToolResultRecord(
                     task_id=task_id,
                     node_id=node_id,
@@ -931,16 +931,6 @@ class TaskLogService:
         except Exception:
             return {}
         return dict(parsed) if isinstance(parsed, dict) else {}
-
-    @staticmethod
-    def _tool_result_preview_and_ref(content: Any) -> tuple[str, str]:
-        preview_text, output_ref = content_summary_and_ref(content)
-        envelope = parse_content_envelope(content)
-        if envelope is not None:
-            wrapper_ref = str(envelope.ref or "").strip()
-            if wrapper_ref:
-                return preview_text, wrapper_ref
-        return preview_text, output_ref
 
     @staticmethod
     def _coerce_elapsed_seconds(value: Any) -> float | None:

@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from g3ku.content import parse_content_envelope
 from main.models import NodeRecord, normalize_execution_stage_metadata
 from main.monitoring.models import TaskProjectionToolResultRecord
 
@@ -40,7 +41,7 @@ def build_execution_trace(
             else:
                 arguments_text = str(arguments or '')
             output_text = str(record.output_preview_text or '') if record is not None else ''
-            output_ref = str(record.output_ref or '') if record is not None else ''
+            output_ref = _execution_trace_output_ref(record) if record is not None else ''
 
             if tool_name in _CONTROL_TOOL_NAMES:
                 execution_id = str((payload or {}).get('execution_id') or '').strip()
@@ -187,6 +188,18 @@ def _live_tool_call_map(live_tool_calls: list[dict[str, Any]] | None) -> dict[st
         if tool_call_id:
             result[tool_call_id] = dict(item)
     return result
+
+
+def _execution_trace_output_ref(record: TaskProjectionToolResultRecord) -> str:
+    output_ref = str(getattr(record, 'output_ref', '') or '').strip()
+    payload = dict(getattr(record, 'payload', {}) or {})
+    parsed_payload = payload.get('parsed_payload')
+    envelope = parse_content_envelope(parsed_payload)
+    if envelope is not None:
+        wrapper_ref = str(envelope.ref or '').strip()
+        if wrapper_ref:
+            return wrapper_ref
+    return output_ref
 
 
 def _resolve_tool_elapsed_seconds(

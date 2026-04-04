@@ -472,7 +472,7 @@ async def test_execution_trace_uses_tool_result_records_for_completed_stage_step
 
 
 @pytest.mark.asyncio
-async def test_execution_trace_tool_result_output_ref_preserves_wrapper_ref(tmp_path: Path):
+async def test_persisted_tool_result_output_ref_stays_canonical_while_execution_trace_preserves_wrapper_ref(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -538,6 +538,10 @@ async def test_execution_trace_tool_result_output_ref_preserves_wrapper_ref(tmp_
             tool_calls=[{'id': 'call:content', 'name': 'content', 'arguments': {'action': 'open', 'ref': wrapped.ref}}],
             created_at=now_iso(),
         )
+
+        tool_results = service.store.list_task_node_tool_results(record.task_id, record.root_node_id)
+        assert len(tool_results) == 1
+        assert tool_results[0].output_ref == inner.ref
 
         detail = service.get_node_detail_payload(record.task_id, record.root_node_id)
         assert detail is not None

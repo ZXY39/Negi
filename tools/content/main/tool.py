@@ -19,22 +19,36 @@ class ContentTool:
             return str(envelope.ref or '').strip()
         return str(ref or '').strip()
 
-    @classmethod
-    def _guard_ref_access(cls, *, runtime: dict[str, Any] | None, ref: str | None) -> str | None:
+    def _canonical_artifact_ref(self, ref: str | None) -> str:
+        normalized = self._normalize_ref(ref)
+        if not normalized.startswith('artifact:'):
+            return normalized
+        try:
+            payload = self._content_store.describe(ref=normalized, view='canonical')
+        except Exception:
+            return normalized
+        resolved_ref = self._normalize_ref(payload.get('resolved_ref'))
+        return resolved_ref if resolved_ref.startswith('artifact:') else normalized
+
+    def _guard_ref_access(self, *, runtime: dict[str, Any] | None, ref: str | None) -> str | None:
         payload = runtime if isinstance(runtime, dict) else {}
         if not bool(payload.get('enforce_content_ref_allowlist')):
             return None
-        requested_ref = cls._normalize_ref(ref)
+        requested_ref = self._normalize_ref(ref)
         if not requested_ref.startswith('artifact:'):
             return None
         allowed_refs = sorted(
             {
-                cls._normalize_ref(item)
+                self._normalize_ref(item)
                 for item in list(payload.get('allowed_content_refs') or [])
-                if cls._normalize_ref(item).startswith('artifact:')
+                if self._normalize_ref(item).startswith('artifact:')
             }
         )
         if requested_ref in allowed_refs:
+            return None
+        requested_canonical = self._canonical_artifact_ref(requested_ref)
+        allowed_canonical_refs = {self._canonical_artifact_ref(item) for item in allowed_refs}
+        if requested_canonical in allowed_canonical_refs:
             return None
         return json.dumps(
             {

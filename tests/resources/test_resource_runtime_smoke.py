@@ -1485,6 +1485,83 @@ async def test_content_tool_rejects_artifact_refs_outside_acceptance_allowlist(t
         store.close()
 
 
+@pytest.mark.asyncio
+async def test_content_tool_accepts_wrapped_content_when_allowlist_uses_wrapper_or_canonical_ref(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    service = _ArtifactService(artifact_store)
+    navigator = service.content_store
+    inner = navigator.maybe_externalize_text(
+        'alpha\nallowed\nomega\n',
+        runtime={'task_id': 'task:test', 'node_id': 'node:inner'},
+        display_name='inner',
+        source_kind='node_output',
+        force=True,
+    )
+    wrapped = navigator.maybe_externalize_text(
+        json.dumps(inner.to_dict(), ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:wrapper'},
+        display_name='wrapped',
+        source_kind='tool_result:content',
+        force=True,
+    )
+    assert inner is not None
+    assert wrapped is not None
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content')
+        assert tool is not None
+
+        canonical_allowed = json.loads(
+            await tool.execute(
+                action='open',
+                ref=wrapped.ref,
+                start_line=1,
+                end_line=5,
+                __g3ku_runtime={
+                    'task_id': 'task:test',
+                    'node_id': 'node:acceptance',
+                    'node_kind': 'acceptance',
+                    'enforce_content_ref_allowlist': True,
+                    'allowed_content_refs': [inner.ref],
+                },
+            )
+        )
+        wrapper_allowed = json.loads(
+            await tool.execute(
+                action='open',
+                ref=inner.ref,
+                start_line=1,
+                end_line=5,
+                __g3ku_runtime={
+                    'task_id': 'task:test',
+                    'node_id': 'node:acceptance',
+                    'node_kind': 'acceptance',
+                    'enforce_content_ref_allowlist': True,
+                    'allowed_content_refs': [wrapped.ref],
+                },
+            )
+        )
+
+        assert canonical_allowed['ok'] is True
+        assert canonical_allowed['resolved_ref'] == inner.ref
+        assert 'allowed' in canonical_allowed['excerpt']
+        assert wrapper_allowed['ok'] is True
+        assert wrapper_allowed['resolved_ref'] == inner.ref
+        assert 'allowed' in wrapper_allowed['excerpt']
+    finally:
+        manager.close()
+        store.close()
+
+
 def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
