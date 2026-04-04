@@ -1,16 +1,16 @@
 schema_version: 1
 kind: tool
-display_name: "\u4efb\u52a1\u6c47\u603b\u5de5\u5177"
+display_name: "任务汇总工具"
 name: task_summary
-description: 返回总任务、进行中任务、失败任务数量。
+description: Summarize total, in-progress, and failed task counts.
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: 当前版本表示仓库内置实现；更新时需同步代码、参数契约和资源描述。
-  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文案不单独视为版本升级。
-  source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
+  summary: Resource-local task runtime tool. Handler and governance live with the resource so discovery can refresh without a host restart.
+  compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
   tools: []
   bins: []
@@ -21,6 +21,17 @@ permissions:
 parameters:
   type: object
   properties: {}
+governance:
+  family: task_runtime
+  display_name: Task Runtime
+  description: Summarize background tasks.
+  actions:
+    - id: summary_cn
+      label: Task Summary
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
 exposure:
   agent: true
   main_runtime: false

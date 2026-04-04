@@ -2239,7 +2239,6 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null } = {}) {
 function applyCeoState(state = {}, meta = {}) {
     const status = String(state?.status || "").trim().toLowerCase();
     const source = String(meta?.source || state?.source || "").trim().toLowerCase();
-    const manualPauseWaitingReason = !!(state?.manual_pause_waiting_reason || meta?.manual_pause_waiting_reason);
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
     const activeTurn = source ? getActiveCeoTurn(source) : getActiveCeoTurn();
@@ -2255,7 +2254,7 @@ function applyCeoState(state = {}, meta = {}) {
             ensureActiveCeoTurn({ source });
         }
     }
-    if (paused && !manualPauseWaitingReason) finalizePausedCeoTurn("已暂停", { source });
+    if (paused) finalizePausedCeoTurn("已暂停", { source });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
 }
@@ -2294,6 +2293,7 @@ function handleCeoControlAck(payload = {}) {
                     : inflightTurn,
             };
         });
+        finalizePausedCeoTurn("已暂停", { source });
         syncCeoSessionActions();
         syncCeoPrimaryButton();
         return;
@@ -2458,10 +2458,17 @@ function ceoNeedsAssistantTurn(snapshot = null) {
     return ceoInflightTurnHasVisibleAssistantState(snapshot) || (source !== "heartbeat" && status === "running");
 }
 
-function renderCeoAssistantTextIntoTurn(turn, text = "") {
+function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
     if (!turn?.textEl) return;
     const normalizedText = String(text || "").trim();
+    const normalizedStatus = String(status || "").trim().toLowerCase();
     if (!normalizedText) {
+        if (normalizedStatus === "paused") {
+            turn.textEl.textContent = "已暂停";
+            turn.textEl.classList.remove("pending");
+            turn.textEl.classList.remove("markdown-content");
+            return;
+        }
         if (!turn.textEl.textContent?.trim()) turn.textEl.textContent = "处理中...";
         turn.textEl.classList.add("pending");
         turn.textEl.classList.remove("markdown-content");
@@ -2511,7 +2518,7 @@ function patchCeoInflightTurn(snapshot = null) {
     const turn = existingTurn || ensureActiveCeoTurn({ source });
     if (!turn?.textEl || !turn?.flowEl) return false;
     mutateCeoFeed(() => {
-        renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "");
+        renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
         const toolCount = renderCeoToolEventsIntoTurn(turn, snapshot?.tool_events || [], { source });
         if (!toolCount) {
             if (status === "paused") updateCeoTurnMeta(turn, "已暂停");

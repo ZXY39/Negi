@@ -70,6 +70,7 @@ async def test_probe_max_concurrency_draft_derives_limits_and_zeroes_failed_keys
         )
 
     monkeypatch.setattr("g3ku.llm_config.service.probe_config", _fake_probe_config)
+    monkeypatch.setattr("g3ku.llm_config.service.probe_config_for_concurrency", _fake_probe_config)
 
     result = await service.probe_max_concurrency_draft(_build_draft("bad-key,key-2,key-3"))
 
@@ -114,11 +115,96 @@ async def test_probe_max_concurrency_draft_limits_parallel_key_probes_to_five(tm
         )
 
     monkeypatch.setattr("g3ku.llm_config.service.probe_config", _fake_probe_config)
+    monkeypatch.setattr("g3ku.llm_config.service.probe_config_for_concurrency", _fake_probe_config)
 
     result = await service.probe_max_concurrency_draft(_build_draft(",".join(thresholds.keys())))
 
     assert result.suggested_limits == [1, 1, 1, 1, 1, 1]
     assert max_parallel_keys <= 5
+
+
+@pytest.mark.asyncio
+async def test_probe_max_concurrency_draft_uses_standard_probe_for_connection_and_concurrency_probe_for_levels(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+    calls = {"connection": 0, "concurrency": 0}
+
+    def _fake_probe_config(config, *, transport=None):
+        _ = transport
+        calls["connection"] += 1
+        return ProbeResult(
+            status=ProbeStatus.SUCCESS,
+            success=True,
+            provider_id=config.provider_id,
+            protocol_adapter=config.protocol_adapter,
+            capability=config.capability,
+            resolved_base_url=config.base_url,
+            checked_model=config.default_model,
+            message="ok",
+            diagnostics={},
+        )
+
+    def _fake_probe_config_for_concurrency(config, *, transport=None):
+        _ = transport
+        calls["concurrency"] += 1
+        return ProbeResult(
+            status=ProbeStatus.SUCCESS,
+            success=True,
+            provider_id=config.provider_id,
+            protocol_adapter=config.protocol_adapter,
+            capability=config.capability,
+            resolved_base_url=config.base_url,
+            checked_model=config.default_model,
+            message="ok",
+            diagnostics={},
+        )
+
+    monkeypatch.setattr("g3ku.llm_config.service.probe_config", _fake_probe_config)
+    monkeypatch.setattr("g3ku.llm_config.service.probe_config_for_concurrency", _fake_probe_config_for_concurrency)
+
+    result = await service.probe_max_concurrency_draft(_build_draft("key-1,key-2"))
+
+    assert result.suggested_limits == [32, 32]
+    assert calls["connection"] == 2
+    assert calls["concurrency"] > 2
+
+
+@pytest.mark.asyncio
+async def test_probe_concurrency_level_caps_high_level_request_fanout(tmp_path: Path, monkeypatch) -> None:
+    service = _build_service(tmp_path)
+    normalized = service.validate_draft(_build_draft("key-1")).normalized_preview
+    assert normalized is not None
+
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    async def _fake_probe_single_config_async(config):
+        nonlocal active, max_active
+        _ = config
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        await __import__("asyncio").sleep(0.02)
+        with lock:
+            active -= 1
+        return ProbeResult(
+            status=ProbeStatus.SUCCESS,
+            success=True,
+            provider_id=normalized.provider_id,
+            protocol_adapter=normalized.protocol_adapter,
+            capability=normalized.capability,
+            resolved_base_url=normalized.base_url,
+            checked_model=normalized.default_model,
+            message="ok",
+            diagnostics={},
+        )
+
+    monkeypatch.setattr(service, "_probe_single_config_async", _fake_probe_single_config_async)
+
+    ok = await service._probe_concurrency_level(normalized, 16)
+
+    assert ok is True
+    assert max_active <= 8
 
 
 def test_probe_max_concurrency_route_returns_result(monkeypatch) -> None:

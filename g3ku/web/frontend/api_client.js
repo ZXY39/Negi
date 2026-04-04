@@ -623,7 +623,10 @@ class ApiClient {
     }
 
     static async probeLlmDraftMaxConcurrency(payload) {
-        const data = await this.post("/api/llm/drafts/probe-max-concurrency", payload || {});
+        const data = await this._request("POST", "/api/llm/drafts/probe-max-concurrency", {
+            body: payload || {},
+            timeoutMs: 120000,
+        });
         return data.result || null;
     }
 

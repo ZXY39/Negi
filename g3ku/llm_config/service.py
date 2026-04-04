@@ -22,13 +22,14 @@ from .models import (
     ValidationResult,
 )
 from .normalization import normalize_draft
-from .probe_strategies import probe_config
+from .probe_strategies import probe_config, probe_config_for_concurrency
 from .repositories import EncryptedConfigRepository
 from .template_registry import TemplateRegistry
 from g3ku.utils.api_keys import parse_api_keys
 
 _MAX_CONCURRENCY_PROBE_LEVELS = (1, 2, 4, 8, 16, 32)
-_MAX_CONCURRENCY_PARALLEL_KEYS = 5
+_MAX_CONCURRENCY_PARALLEL_KEYS = 1
+_MAX_CONCURRENCY_REQUEST_FANOUT = 8
 
 
 def _redact_config(config: NormalizedProviderConfig) -> NormalizedProviderConfig:
@@ -139,7 +140,7 @@ class ConfigService:
         single_key_config = normalized.model_copy(
             update={"auth": {**dict(normalized.auth), "api_key": str(api_key or "").strip()}}
         )
-        connection_probe = await self._probe_single_config_async(single_key_config)
+        connection_probe = await self._probe_connection_config_async(single_key_config)
         if not connection_probe.success:
             return APIKeyMaxConcurrencyProbeItem(
                 key_index=key_index,
@@ -186,12 +187,20 @@ class ConfigService:
         )
 
     async def _probe_concurrency_level(self, normalized: NormalizedProviderConfig, level: int) -> bool:
-        results = await asyncio.gather(
-            *[self._probe_single_config_async(normalized) for _ in range(max(1, int(level or 1)))]
-        )
+        target_count = max(1, int(level or 1))
+        semaphore = asyncio.Semaphore(min(target_count, _MAX_CONCURRENCY_REQUEST_FANOUT))
+
+        async def _run_single() -> ProbeResult:
+            async with semaphore:
+                return await self._probe_single_config_async(normalized)
+
+        results = await asyncio.gather(*[_run_single() for _ in range(target_count)])
         return all(bool(item.success) for item in results)
 
     async def _probe_single_config_async(self, normalized: NormalizedProviderConfig) -> ProbeResult:
+        return await asyncio.to_thread(probe_config_for_concurrency, normalized, transport=self.transport)
+
+    async def _probe_connection_config_async(self, normalized: NormalizedProviderConfig) -> ProbeResult:
         return await asyncio.to_thread(probe_config, normalized, transport=self.transport)
 
     @staticmethod

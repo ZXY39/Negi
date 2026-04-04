@@ -209,3 +209,10 @@ externaltools/
 
 - `references/toolskill-checklist.md`
 - `skills/update-tool/SKILL.md`
+
+## Parameter Contract Discipline
+
+- Treat `tools/<tool_id>/resource.yaml -> parameters` as the single source of truth for the callable schema.
+- Every top-level and nested parameter should have a precise `description`.
+- If the tool uses nested objects or arrays, `toolskills/SKILL.md` must include at least one complete JSON example call.
+- Do not rely on prose-only toolskill text to communicate required fields or enum values.

@@ -1,0 +1,60 @@
+schema_version: 1
+kind: tool
+display_name: "任务统计工具"
+name: task_stats
+description: Inspect saved tasks, prompt previews, and disk usage.
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Resource-local task runtime tool. Handler and governance live with the resource so discovery can refresh without a host restart.
+  compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    mode:
+      type: string
+      enum: [list, id]
+      description: "`list` filters by date range; `id` returns explicit task ids."
+    任务关键词:
+      type: array
+      items:
+        type: string
+      description: Optional keyword list for `list` mode. Matches `user_request` with OR semantics.
+    from:
+      type: string
+      description: "Required in `list` mode. Format `YYYY/M/D`."
+    to:
+      type: string
+      description: "Required in `list` mode. Format `YYYY/M/D`."
+    任务id列表:
+      type: array
+      items:
+        type: string
+      description: Required in `id` mode. Returned in input order.
+  required: [mode]
+governance:
+  family: task_runtime
+  display_name: Task Runtime
+  description: Inspect saved tasks and disk usage.
+  actions:
+    - id: stats_cn
+      label: Task Stats
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: true

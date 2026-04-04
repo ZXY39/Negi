@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -4677,4 +4678,58 @@ async def test_run_node_short_circuits_when_task_is_already_terminal(tmp_path: P
     assert latest_child is not None
     assert latest_child.status == "failed"
     assert latest_child.failure_reason == "root failed"
+
+
+@pytest.mark.asyncio
+async def test_spawn_child_nodes_refusal_includes_governance_limit_reason(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        _mark_worker_online(service)
+        record = await service.create_task("spawn refusal reason", session_id="web:shared", max_depth=2)
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        service.store.update_task(
+            record.task_id,
+            lambda item: item.model_copy(update={"max_depth": 0}),
+        )
+        service.log_service.upsert_task_governance(
+            record.task_id,
+            {
+                "enabled": True,
+                "frozen": False,
+                "review_inflight": False,
+                "hard_limited_depth": 0,
+                "supervision_disabled_after_limit": True,
+                "history": [
+                    {
+                        "triggered_at": now_iso(),
+                        "trigger_reason": "depth+1",
+                        "trigger_snapshot": {"max_depth": 1, "total_nodes": 3},
+                        "decision": "cap_current_depth",
+                        "decision_reason": "检查结论：当前子节点拆分已经偏离主目标，继续派生属于节外生枝。",
+                        "limited_depth": 1,
+                        "evidence": [],
+                    }
+                ],
+            },
+        )
+
+        expected_message = "[派生被拦截，接下来不允许再派生任何子节点，请自行执行!拦截原因：（检查结论：当前子节点拆分已经偏离主目标，继续派生属于节外生枝。）]"
+        with pytest.raises(ValueError, match=re.escape(expected_message)):
+            await service.node_runner._spawn_children(
+                task_id=record.task_id,
+                parent_node_id=root.node_id,
+                specs=[SpawnChildSpec(goal="child", prompt="prompt", execution_policy=_execution_policy())],
+                call_id="call:reason",
+            )
+    finally:
+        await service.close()
 

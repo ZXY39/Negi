@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import inspect
+import keyword
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -103,6 +104,8 @@ class ResourceLoader:
                 raise TypeError(f"tool build() must be synchronous: {descriptor.name}")
             if built is None:
                 return None
+            if self._requires_manifest_backed_tool(descriptor):
+                return ManifestBackedTool(descriptor, built)
             return EmbeddedMCPTool(descriptor, built)
         if hasattr(module, "execute"):
             return EmbeddedMCPTool(descriptor, getattr(module, "execute"))
@@ -117,3 +120,16 @@ class ResourceLoader:
         digest = descriptor.entrypoint_hash or hashlib.sha256(str(descriptor.entrypoint_path).encode("utf-8")).hexdigest()
         safe_name = descriptor.name.replace("-", "_")
         return f"g3ku_runtime_tools_{safe_name}_{digest[:12]}_{descriptor.generation}"
+
+    @staticmethod
+    def _requires_manifest_backed_tool(descriptor: ToolResourceDescriptor) -> bool:
+        properties = dict((descriptor.parameters or {}).get('properties') or {})
+        for name in properties:
+            text = str(name or '').strip()
+            if not text:
+                return True
+            if keyword.iskeyword(text):
+                return True
+            if not text.isidentifier():
+                return True
+        return False

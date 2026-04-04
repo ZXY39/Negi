@@ -1702,7 +1702,21 @@ async def create_model(payload: dict = Body(...)):
     return {'ok': True, 'item': item}
 
 
-@router.put('/models/{model_key}')
+@router.put('/models/routes/batch')
+async def update_model_roles_bulk(payload: dict = Body(...)):
+    manager = ModelManager.load()
+    try:
+        result = manager.update_scope_routes_bulk(_bulk_scope_route_updates(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _refresh_runtime('admin_model_roles')
+    return {
+        'ok': True,
+        **result,
+    }
+
+
+@router.put('/models/{model_key:path}')
 async def update_model(model_key: str, payload: dict = Body(...)):
     manager = ModelManager.load()
     body = payload if isinstance(payload, dict) else {}
@@ -1749,7 +1763,7 @@ async def update_model(model_key: str, payload: dict = Body(...)):
     return {'ok': True, 'item': item}
 
 
-@router.post('/models/{model_key}/enable')
+@router.post('/models/{model_key:path}/enable')
 async def enable_model(model_key: str):
     manager = ModelManager.load()
     try:
@@ -1760,7 +1774,7 @@ async def enable_model(model_key: str):
     return {'ok': True, 'item': item}
 
 
-@router.post('/models/{model_key}/disable')
+@router.post('/models/{model_key:path}/disable')
 async def disable_model(model_key: str):
     manager = ModelManager.load()
     try:
@@ -1771,7 +1785,7 @@ async def disable_model(model_key: str):
     return {'ok': True, 'item': item}
 
 
-@router.delete('/models/{model_key}')
+@router.delete('/models/{model_key:path}')
 async def delete_model(model_key: str):
     manager = ModelManager.load()
     try:
@@ -1801,20 +1815,6 @@ async def update_model_roles(scope: str, payload: dict = Body(...)):
         'all_roles': _model_roles(manager),
         'role_iterations': _model_role_iterations(manager),
         'role_concurrency': _model_role_concurrency(manager),
-    }
-
-
-@router.put('/models/routes/batch')
-async def update_model_roles_bulk(payload: dict = Body(...)):
-    manager = ModelManager.load()
-    try:
-        result = manager.update_scope_routes_bulk(_bulk_scope_route_updates(payload))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _refresh_runtime('admin_model_roles')
-    return {
-        'ok': True,
-        **result,
     }
 
 
@@ -1935,7 +1935,7 @@ async def create_llm_binding(payload: dict = Body(...)):
     return {'ok': True, 'item': item}
 
 
-@router.put('/llm/bindings/{model_key}')
+@router.put('/llm/bindings/{model_key:path}')
 async def update_llm_binding(model_key: str, payload: dict = Body(...)):
     manager = ModelManager.load()
     try:
@@ -1947,7 +1947,7 @@ async def update_llm_binding(model_key: str, payload: dict = Body(...)):
     return {'ok': True, 'item': item}
 
 
-@router.post('/llm/bindings/{model_key}/enable')
+@router.post('/llm/bindings/{model_key:path}/enable')
 async def enable_llm_binding(model_key: str):
     manager = ModelManager.load()
     try:
@@ -1958,7 +1958,7 @@ async def enable_llm_binding(model_key: str):
     return {'ok': True, 'item': item}
 
 
-@router.post('/llm/bindings/{model_key}/disable')
+@router.post('/llm/bindings/{model_key:path}/disable')
 async def disable_llm_binding(model_key: str):
     manager = ModelManager.load()
     try:
@@ -1969,7 +1969,7 @@ async def disable_llm_binding(model_key: str):
     return {'ok': True, 'item': item}
 
 
-@router.delete('/llm/bindings/{model_key}')
+@router.delete('/llm/bindings/{model_key:path}')
 async def delete_llm_binding(model_key: str):
     manager = ModelManager.load()
     try:

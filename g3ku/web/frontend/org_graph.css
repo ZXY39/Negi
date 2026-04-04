@@ -854,6 +854,12 @@ textarea {
 .task-governance-history {
     display: grid;
     gap: 10px;
+    max-height: min(48vh, 360px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;
+    scrollbar-width: thin;
+    overscroll-behavior: contain;
 }
 
 .task-governance-entry {

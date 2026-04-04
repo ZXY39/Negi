@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from g3ku.json_schema_utils import (
+    build_example_from_schema,
+    normalize_object_json_schema,
+    render_parameter_contract_markdown,
+)
+
 
 def find_tool_family(
     tool_id: str,
@@ -159,6 +165,12 @@ def build_tool_toolskill_payload(
         or getattr(family, "description", "")
         or requested_name
     ).strip() or requested_name
+    parameters_schema = normalize_object_json_schema(getattr(effective_descriptor, "parameters", None))
+    required_parameters = [
+        str(item or "").strip()
+        for item in list(parameters_schema.get("required") or [])
+        if str(item or "").strip()
+    ]
 
     return {
         "tool_id": requested_name,
@@ -173,6 +185,10 @@ def build_tool_toolskill_payload(
         "callable": callable_flag,
         "available": available_flag,
         "repair_required": callable_flag and not available_flag,
+        "parameters_schema": parameters_schema,
+        "required_parameters": required_parameters,
+        "parameter_contract_markdown": render_parameter_contract_markdown(parameters_schema),
+        "example_arguments": build_example_from_schema(parameters_schema),
         "warnings": warnings,
         "errors": errors,
     }

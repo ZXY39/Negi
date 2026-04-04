@@ -1729,8 +1729,20 @@ async function selectArtifact(artifactId, { preserveViewState = true } = {}) {
     void preserveViewState;
 }
 
-function renderNodeContextPlaceholder(text = "展开后查看节点完整上下文。") {
+function renderNodeContextPlaceholder(text = "展开后查看节点完整上下文。", { preserveViewState = false } = {}) {
+    const viewState = preserveViewState && typeof captureTaskDetailViewState === "function"
+        ? captureTaskDetailViewState()
+        : null;
     if (U.artifactContent) U.artifactContent.textContent = String(text || "").trim();
+    if (viewState && typeof restoreTaskDetailViewState === "function") {
+        restoreTaskDetailViewState(viewState, {
+            detail: true,
+            trace: false,
+            traceItems: false,
+            artifactList: false,
+            artifactContent: true,
+        });
+    }
 }
 
 async function ensureTaskNodeLatestContext(nodeId, { force = false } = {}) {
@@ -1763,16 +1775,16 @@ async function loadSelectedNodeLatestContext({ force = false } = {}) {
     const taskId = String(S.currentTaskId || "").trim();
     const nodeId = String(S.selectedNodeId || "").trim();
     if (!taskId || !nodeId) return null;
-    renderNodeContextPlaceholder("正在加载节点完整上下文...");
+    renderNodeContextPlaceholder("正在加载节点完整上下文...", { preserveViewState: true });
     try {
         const payload = await ensureTaskNodeLatestContext(nodeId, { force });
         if (String(S.currentTaskId || "").trim() !== taskId) return null;
         if (String(S.selectedNodeId || "").trim() !== nodeId) return null;
         const content = String(payload?.content || "");
-        renderNodeContextPlaceholder(content.trim() || "当前节点暂无可用上下文快照。");
+        renderNodeContextPlaceholder(content.trim() || "当前节点暂无可用上下文快照。", { preserveViewState: true });
         return payload;
     } catch (error) {
-        renderNodeContextPlaceholder(`加载完整上下文失败：${error?.message || error || "未知错误"}`);
+        renderNodeContextPlaceholder(`加载完整上下文失败：${error?.message || error || "未知错误"}`, { preserveViewState: true });
         return null;
     }
 }

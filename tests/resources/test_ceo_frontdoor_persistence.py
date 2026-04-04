@@ -554,7 +554,22 @@ def test_memory_assembly_config_exposes_frontdoor_compaction_defaults() -> None:
 
     assert config.frontdoor_recent_message_count == 8
     assert config.frontdoor_summary_trigger_message_count == 24
+    assert config.frontdoor_interrupt_approval_enabled is False
     assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
+
+
+def test_ceo_frontdoor_does_not_request_approval_by_default() -> None:
+    runner = CeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(assembly=SimpleNamespace()),
+        )
+    )
+
+    approval_request = runner._approval_request_for_tool_calls(
+        [{"name": "create_async_task", "arguments": {"task": "demo"}}]
+    )
+
+    assert approval_request is None
 
 
 def test_frontdoor_history_compaction_inserts_summary_marker_and_keeps_recent_tail() -> None:

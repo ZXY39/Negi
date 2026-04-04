@@ -100,42 +100,6 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
             }
         ],
     },
-    'create_async_task': {
-        'tool_id': 'task_runtime',
-        'display_name': 'Task Runtime',
-        'description': 'Create background tasks in the main runtime.',
-        'actions': [{'id': 'create_async_task', 'label': 'Create Async Task', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo']}],
-    },
-    'task_summary': {
-        'tool_id': 'task_runtime',
-        'display_name': 'Task Runtime',
-        'description': 'Summarize background tasks.',
-        'actions': [{'id': 'summary_cn', 'label': 'Task Summary', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
-    },
-    'task_list': {
-        'tool_id': 'task_runtime',
-        'display_name': 'Task Runtime',
-        'description': 'List background tasks.',
-        'actions': [{'id': 'list_cn', 'label': 'Task List', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
-    },
-    'task_progress': {
-        'tool_id': 'task_runtime',
-        'display_name': 'Task Runtime',
-        'description': 'View task status and stage-goal-aware tree text, and mark the task as read.',
-        'actions': [{'id': 'progress_cn', 'label': 'Task Progress', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
-    },
-    'task_failed_nodes': {
-        'tool_id': 'task_runtime',
-        'display_name': 'Task Runtime',
-        'description': 'List failed node ids for a task tree.',
-        'actions': [{'id': 'failed_nodes_cn', 'label': 'Task Failed Nodes', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
-    },
-    'task_node_detail': {
-        'tool_id': 'task_runtime',
-        'display_name': 'Task Runtime',
-        'description': 'View task node detail and related artifacts.',
-        'actions': [{'id': 'node_detail_cn', 'label': 'Task Node Detail', 'risk_level': 'low', 'destructive': False, 'allowed_roles': ['ceo']}],
-    },
     'load_skill_context': {
         'tool_id': 'skill_access',
         'display_name': 'Skill Access',

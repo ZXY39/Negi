@@ -10,7 +10,7 @@ from main.prompts import load_prompt
 from main.protocol import now_iso
 
 GOVERNANCE_PATCH_EVENT_TYPE = "task.governance.patch"
-GOVERNANCE_LIMIT_REJECTION_TEXT = "[当前已达到最大深度，不允许派生子节点，请自行执行!]"
+GOVERNANCE_LIMIT_REJECTION_TEXT = "[派生被拦截，接下来不允许再派生任何子节点，请自行执行!拦截原因：（{reason}）]"
 GOVERNANCE_REVIEW_RETRY_DELAY_SECONDS = 0.1
 
 
@@ -161,8 +161,22 @@ class TaskGovernanceManager:
             return ""
         next_depth = int(parent_depth or 0) + 1
         if next_depth > int(task.max_depth or 0):
-            return GOVERNANCE_LIMIT_REJECTION_TEXT
+            return GOVERNANCE_LIMIT_REJECTION_TEXT.format(
+                reason=self._latest_limit_reason(state),
+            )
         return ""
+
+    @staticmethod
+    def _latest_limit_reason(state: dict[str, Any]) -> str:
+        for item in reversed(list(state.get("history") or [])):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("decision") or "").strip().lower() != "cap_current_depth":
+                continue
+            reason = " ".join(str(item.get("decision_reason") or "").split()).strip()
+            if reason:
+                return reason
+        return "监管已判定任务树存在过度派生风险，继续派生会偏离核心目标。"
 
     async def close(self) -> None:
         tasks = list(self._review_tasks.values())

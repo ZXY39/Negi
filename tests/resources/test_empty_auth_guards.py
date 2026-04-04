@@ -8,7 +8,7 @@ import pytest
 
 from g3ku.llm_config.enums import AuthMode, Capability, ProbeStatus, ProtocolAdapter
 from g3ku.llm_config.models import NormalizedProviderConfig
-from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config
+from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config, probe_config_for_concurrency
 from g3ku.providers.custom_provider import CustomProvider
 from g3ku.providers.fallback import FallbackProvider
 from g3ku.providers.base import LLMResponse
@@ -285,6 +285,28 @@ def test_probe_config_falls_back_when_model_catalog_returns_500() -> None:
     assert result.diagnostics["fallback_used"] is True
     assert result.diagnostics["api_key_count"] == 1
     assert result.diagnostics["api_key_attempts"] == 1
+
+
+def test_probe_config_for_concurrency_uses_minimal_inference_request_for_openai_compatible() -> None:
+    config = _config(
+        provider_id="custom",
+        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        base_url="https://example.com/v1",
+        default_model="custom-model",
+        api_key="test-key",
+    )
+    seen_paths: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        assert request.method == "POST"
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    result = probe_config_for_concurrency(config, transport=httpx.MockTransport(_handler))
+
+    assert result.success is True
+    assert seen_paths == ["/v1/chat/completions"]
 
 
 def test_probe_config_rotates_api_keys_after_auth_failure() -> None:

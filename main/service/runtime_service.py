@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import os
 import re
@@ -123,6 +124,7 @@ _TASK_SUMMARY_BATCH_WINDOW_SECONDS = 0.25
 _TASK_SUMMARY_BATCH_MAX_ITEMS = 128
 _TASK_SUMMARY_BATCH_MAX_BYTES = 64 * 1024
 _TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
+_TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
 _WORKER_STATE_STARTING = 'starting'
 _WORKER_STATE_ONLINE = 'online'
 _WORKER_STATE_STALE = 'stale'
@@ -336,6 +338,7 @@ class MainRuntimeService:
             step_up=int(adaptive_budget_settings['step_up']),
         ) if adaptive_budget_enabled else None
         react_loop._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
+        self._pending_task_delete_confirmations: dict[str, dict[str, Any]] = {}
         self._react_loop = react_loop
         self.node_runner = NodeRunner(
             store=self.store,
@@ -1027,13 +1030,9 @@ class MainRuntimeService:
         artifacts = self.list_artifacts(task_id)
         self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
         self.file_store.delete_task_files(task_id)
+        shutil.rmtree(self._task_temp_dir(task_id, create=False), ignore_errors=True)
         self.store.delete_task(task_id)
-        self.log_service.append_task_event(
-            task_id=task.task_id,
-            session_id=task.session_id,
-            event_type='task.deleted',
-            data={'task_id': task.task_id},
-        )
+        shutil.rmtree(self._task_event_history_dir(task_id), ignore_errors=True)
         self._publish_task_deleted_event(session_id=task.session_id, task_id=task.task_id)
         await self.registry.forget_task(task.session_id, task_id)
         return task
@@ -1046,6 +1045,251 @@ class MainRuntimeService:
     def get_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         return self.store.get_task(task_id)
+
+    def task_stats(
+        self,
+        *,
+        mode: str,
+        task_keywords: list[str] | None = None,
+        date_from: str = '',
+        date_to: str = '',
+        task_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_mode = str(mode or '').strip().lower()
+        if normalized_mode not in {'list', 'id'}:
+            raise ValueError('invalid_mode')
+        if normalized_mode == 'list':
+            start_at = self._parse_task_stats_date(date_from, field_name='from')
+            end_at = self._parse_task_stats_date(date_to, field_name='to') + timedelta(days=1) - timedelta(milliseconds=1)
+            if end_at < start_at:
+                raise ValueError('invalid_date_range')
+            keywords = self._normalize_task_keyword_list(task_keywords)
+            matched: list[tuple[float, dict[str, Any]]] = []
+            for task in list(self.store.list_tasks()):
+                created_at = self._parse_task_timestamp(str(getattr(task, 'created_at', '') or ''))
+                if created_at is None or created_at < start_at or created_at > end_at:
+                    continue
+                prompt = str(getattr(task, 'user_request', '') or '')
+                if keywords and not any(keyword.casefold() in prompt.casefold() for keyword in keywords):
+                    continue
+                matched.append((created_at.timestamp(), self._task_stats_item(task)))
+            matched.sort(key=lambda item: item[0], reverse=True)
+            return {
+                'mode': 'list',
+                'from': str(date_from or '').strip(),
+                'to': str(date_to or '').strip(),
+                'items': [item for _, item in matched],
+            }
+        normalized_task_ids = self._normalize_task_id_list(task_ids, allow_empty=False)
+        items: list[dict[str, Any]] = []
+        for task_id in normalized_task_ids:
+            task = self.get_task(task_id)
+            if task is None:
+                items.append(self._task_not_found_item(task_id))
+                continue
+            item = self._task_stats_item(task)
+            item['result'] = 'ok'
+            items.append(item)
+        return {
+            'mode': 'id',
+            'items': items,
+        }
+
+    def task_delete_preview(self, *, task_ids: list[str] | None, session_id: str = 'web:shared') -> dict[str, Any]:
+        normalized_task_ids = self._normalize_task_id_list(task_ids, allow_empty=False)
+        normalized_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+        items: list[dict[str, Any]] = []
+        for task_id in normalized_task_ids:
+            task = self.get_task(task_id)
+            if task is None:
+                items.append(self._task_not_found_item(task_id))
+                continue
+            items.append(self._task_stats_item(task))
+        self._prune_pending_task_delete_confirmations()
+        confirmation_token = new_command_id()
+        self._pending_task_delete_confirmations[confirmation_token] = {
+            'task_ids': list(normalized_task_ids),
+            'session_id': normalized_session_id,
+            'created_mono': time.monotonic(),
+            'preview_items': list(items),
+        }
+        return {
+            'mode': 'preview',
+            'confirmation_token': confirmation_token,
+            'items': items,
+        }
+
+    async def task_delete_confirm(
+        self,
+        *,
+        task_ids: list[str] | None,
+        confirmation_token: str,
+        session_id: str = 'web:shared',
+    ) -> dict[str, Any]:
+        normalized_task_ids = self._normalize_task_id_list(task_ids, allow_empty=False)
+        normalized_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+        normalized_token = str(confirmation_token or '').strip()
+        if not normalized_token:
+            raise ValueError('confirmation_token_required')
+        self._prune_pending_task_delete_confirmations()
+        pending = self._pending_task_delete_confirmations.pop(normalized_token, None)
+        if pending is None:
+            return {
+                'mode': 'confirm',
+                'items': [self._task_token_mismatch_item(task_id) for task_id in normalized_task_ids],
+            }
+        if list(pending.get('task_ids') or []) != normalized_task_ids or str(pending.get('session_id') or '') != normalized_session_id:
+            return {
+                'mode': 'confirm',
+                'items': [self._task_token_mismatch_item(task_id) for task_id in normalized_task_ids],
+            }
+        items: list[dict[str, Any]] = []
+        for task_id in normalized_task_ids:
+            items.append(await self._delete_task_with_confirmation(task_id))
+        return {
+            'mode': 'confirm',
+            'items': items,
+        }
+
+    async def _delete_task_with_confirmation(self, task_id: str) -> dict[str, Any]:
+        task = self.get_task(task_id)
+        if task is None:
+            return self._task_not_found_item(task_id)
+        snapshot = self._task_stats_item(task)
+        if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress' and not bool(getattr(task, 'is_paused', False)):
+            await self.pause_task(task_id)
+        try:
+            deleted = await self.delete_task(task_id)
+        except ValueError as exc:
+            if str(exc) in {'task_not_paused', 'task_still_stopping'}:
+                snapshot['result'] = 'still_stopping'
+                return snapshot
+            raise
+        if deleted is None:
+            return self._task_not_found_item(task_id)
+        snapshot['result'] = 'deleted'
+        return snapshot
+
+    def _prune_pending_task_delete_confirmations(self) -> None:
+        now_mono = time.monotonic()
+        expired = [
+            token
+            for token, entry in list(self._pending_task_delete_confirmations.items())
+            if (now_mono - float(entry.get('created_mono') or 0.0)) > _TASK_DELETE_CONFIRM_TTL_SECONDS
+        ]
+        for token in expired:
+            self._pending_task_delete_confirmations.pop(token, None)
+
+    @staticmethod
+    def _normalize_task_keyword_list(raw_keywords: list[str] | None) -> list[str]:
+        if raw_keywords in (None, ''):
+            return []
+        if not isinstance(raw_keywords, list):
+            raise ValueError('任务关键词 must be an array')
+        return [str(item or '').strip() for item in list(raw_keywords or []) if str(item or '').strip()]
+
+    def _normalize_task_id_list(self, raw_task_ids: list[str] | None, *, allow_empty: bool) -> list[str]:
+        if not isinstance(raw_task_ids, list):
+            raise ValueError('任务id列表 must be an array')
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_task_id in list(raw_task_ids or []):
+            task_id = self.normalize_task_id(str(raw_task_id or '').strip())
+            if not task_id or task_id in seen:
+                continue
+            seen.add(task_id)
+            normalized.append(task_id)
+        if not allow_empty and not normalized:
+            raise ValueError('任务id列表 must not be empty')
+        return normalized
+
+    @staticmethod
+    def _parse_task_stats_date(value: str, *, field_name: str) -> datetime:
+        text = str(value or '').strip()
+        parts = text.split('/')
+        if len(parts) != 3:
+            raise ValueError(f'{field_name}_invalid')
+        try:
+            year, month, day = (int(part) for part in parts)
+            local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+            return datetime(year, month, day, tzinfo=local_tz)
+        except ValueError as exc:
+            raise ValueError(f'{field_name}_invalid') from exc
+
+    @staticmethod
+    def _parse_task_timestamp(value: str) -> datetime | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=local_tz)
+        return parsed.astimezone(local_tz)
+
+    @staticmethod
+    def _prompt_preview_100(value: Any) -> str:
+        text = ' '.join(str(value or '').split())
+        return text[:100]
+
+    def _task_stats_item(self, task: TaskRecord) -> dict[str, Any]:
+        return {
+            'task_id': task.task_id,
+            'created_at': str(getattr(task, 'created_at', '') or ''),
+            'status': str(getattr(task, 'status', '') or ''),
+            'prompt_preview_100': self._prompt_preview_100(getattr(task, 'user_request', '')),
+            'disk_usage_bytes': self._task_disk_usage_bytes(task.task_id),
+        }
+
+    def _task_not_found_item(self, task_id: str) -> dict[str, Any]:
+        return {
+            'task_id': str(task_id or '').strip(),
+            'created_at': '',
+            'status': 'not_found',
+            'prompt_preview_100': '',
+            'disk_usage_bytes': 0,
+            'result': 'not_found',
+        }
+
+    def _task_token_mismatch_item(self, task_id: str) -> dict[str, Any]:
+        return {
+            'task_id': str(task_id or '').strip(),
+            'result': 'token_mismatch',
+        }
+
+    def _task_disk_usage_bytes(self, task_id: str) -> int:
+        normalized_task_id = self.normalize_task_id(task_id)
+        return sum(
+            self._directory_size_bytes(path)
+            for path in (
+                self._task_file_dir_path(normalized_task_id),
+                self._task_artifact_dir(normalized_task_id),
+                self._task_event_history_dir(normalized_task_id),
+                self._effective_task_temp_dir(normalized_task_id),
+            )
+        )
+
+    @staticmethod
+    def _directory_size_bytes(path: Path) -> int:
+        target = Path(path)
+        if not target.exists():
+            return 0
+        if target.is_file():
+            try:
+                return int(target.stat().st_size)
+            except OSError:
+                return 0
+        total = 0
+        for child in target.rglob('*'):
+            try:
+                if child.is_file():
+                    total += int(child.stat().st_size)
+            except OSError:
+                continue
+        return total
 
     def latest_worker_status(self) -> dict[str, Any] | None:
         items = self.store.list_worker_status(role='task_worker')
@@ -2990,6 +3234,10 @@ class MainRuntimeService:
             'install_dir': toolskill.get('install_dir'),
             'callable': toolskill.get('callable'),
             'available': toolskill.get('available'),
+            'parameters_schema': toolskill.get('parameters_schema') or {'type': 'object', 'properties': {}, 'required': []},
+            'required_parameters': list(toolskill.get('required_parameters') or []),
+            'parameter_contract_markdown': str(toolskill.get('parameter_contract_markdown') or ''),
+            'example_arguments': toolskill.get('example_arguments') or {},
             'warnings': list(toolskill.get('warnings') or []),
             'errors': list(toolskill.get('errors') or []),
         }
@@ -3041,6 +3289,10 @@ class MainRuntimeService:
             'install_dir': toolskill.get('install_dir'),
             'callable': toolskill.get('callable'),
             'available': toolskill.get('available'),
+            'parameters_schema': toolskill.get('parameters_schema') or {'type': 'object', 'properties': {}, 'required': []},
+            'required_parameters': list(toolskill.get('required_parameters') or []),
+            'parameter_contract_markdown': str(toolskill.get('parameter_contract_markdown') or ''),
+            'example_arguments': toolskill.get('example_arguments') or {},
             'warnings': list(toolskill.get('warnings') or []),
             'errors': list(toolskill.get('errors') or []),
         }
@@ -3151,15 +3403,36 @@ class MainRuntimeService:
     def _safe_task_dir_name(task_id: str) -> str:
         return str(task_id or '').strip().replace(':', '_').replace('/', '_').replace('\\', '_')
 
-    def _task_temp_root(self) -> Path:
+    def _task_temp_root(self, *, create: bool = True) -> Path:
         root = self._workspace_root() / 'temp' / 'tasks'
-        root.mkdir(parents=True, exist_ok=True)
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
         return root
 
-    def _task_temp_dir(self, task_id: str) -> Path:
-        path = self._task_temp_root() / self._safe_task_dir_name(task_id)
-        path.mkdir(parents=True, exist_ok=True)
+    def _task_temp_dir(self, task_id: str, *, create: bool = True) -> Path:
+        path = self._task_temp_root(create=create) / self._safe_task_dir_name(task_id)
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _task_file_dir_path(self, task_id: str) -> Path:
+        return Path(self.file_store.base_dir) / self._safe_task_dir_name(task_id)
+
+    def _task_artifact_dir(self, task_id: str) -> Path:
+        return Path(self.artifact_store._task_dir(task_id))
+
+    def _task_event_history_dir(self, task_id: str) -> Path:
+        return Path(self.store._event_history_dir) / self._safe_task_dir_name(task_id)
+
+    def _effective_task_temp_dir(self, task_id: str) -> Path:
+        runtime_meta = self.log_service.read_task_runtime_meta(task_id) or {}
+        configured = str(runtime_meta.get('task_temp_dir') or '').strip()
+        legacy_temp_root = (self._workspace_root() / 'temp').resolve(strict=False)
+        if configured:
+            configured_path = Path(configured).expanduser().resolve(strict=False)
+            if configured_path != legacy_temp_root:
+                return configured_path
+        return self._task_temp_dir(task_id, create=False)
 
     def _resource_base_dir(self, kind: ResourceKind) -> Path:
         manager = getattr(self, '_resource_manager', None)
@@ -4469,6 +4742,12 @@ def _tool_runtime_payload(runtime: dict[str, Any] | None, kwargs: dict[str, Any]
         return runtime
     fallback = kwargs.get('__g3ku_runtime')
     return fallback if isinstance(fallback, dict) else {}
+
+
+_TASK_KEYWORDS_PARAM = '\u4efb\u52a1\u5173\u952e\u8bcd'
+_TASK_ID_LIST_PARAM = '\u4efb\u52a1id\u5217\u8868'
+
+
 class TaskSummaryTool(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service
@@ -4518,6 +4797,137 @@ class GetTasksTool(Tool):
         await self._service.startup()
         task_type = int(kwargs.get('任务类型'))
         return self._service.get_tasks(str(runtime.get('session_key') or 'web:shared'), task_type)
+
+
+class TaskStatsTool(Tool):
+    def __init__(self, service: MainRuntimeService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return 'task_stats'
+
+    @property
+    def description(self) -> str:
+        return 'List task statistics globally or by task id, including prompt preview and task disk usage.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'mode': {
+                    'type': 'string',
+                    'enum': ['list', 'id'],
+                    'description': 'list lists tasks by date range; id returns specific task ids.',
+                },
+                _TASK_KEYWORDS_PARAM: {
+                    'type': 'array',
+                    'items': {'type': 'string'},
+                    'description': 'Optional keyword list for list mode. Matches the initial user_request with OR semantics.',
+                },
+                'from': {
+                    'type': 'string',
+                    'description': 'Required in list mode. Date format: YYYY/M/D.',
+                },
+                'to': {
+                    'type': 'string',
+                    'description': 'Required in list mode. Date format: YYYY/M/D.',
+                },
+                _TASK_ID_LIST_PARAM: {
+                    'type': 'array',
+                    'items': {'type': 'string'},
+                    'description': 'Required in id mode. Task ids to inspect in input order.',
+                },
+            },
+            'required': ['mode'],
+        }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        normalized_mode = str((params or {}).get('mode') or '').strip().lower()
+        if normalized_mode == 'list':
+            if not str((params or {}).get('from') or '').strip():
+                errors.append('from is required when mode=list')
+            if not str((params or {}).get('to') or '').strip():
+                errors.append('to is required when mode=list')
+        if normalized_mode == 'id' and not list((params or {}).get(_TASK_ID_LIST_PARAM) or []):
+            errors.append(f'{_TASK_ID_LIST_PARAM} is required when mode=id')
+        return errors
+
+    async def execute(self, **kwargs: Any) -> str:
+        await self._service.startup()
+        result = self._service.task_stats(
+            mode=str(kwargs.get('mode') or '').strip(),
+            task_keywords=kwargs.get(_TASK_KEYWORDS_PARAM),
+            date_from=str(kwargs.get('from') or '').strip(),
+            date_to=str(kwargs.get('to') or '').strip(),
+            task_ids=kwargs.get(_TASK_ID_LIST_PARAM),
+        )
+        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+
+class TaskDeleteTool(Tool):
+    def __init__(self, service: MainRuntimeService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return 'task_delete'
+
+    @property
+    def description(self) -> str:
+        return 'Preview or confirm deletion of one or more saved tasks.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'mode': {
+                    'type': 'string',
+                    'enum': ['preview', 'confirm'],
+                    'description': 'preview returns candidate tasks and a confirmation token; confirm performs deletion.',
+                },
+                _TASK_ID_LIST_PARAM: {
+                    'type': 'array',
+                    'items': {'type': 'string'},
+                    'description': 'Task ids to delete. Supports batch operations.',
+                },
+                'confirmation_token': {
+                    'type': 'string',
+                    'description': 'Required in confirm mode. Must come from a prior preview of the same task id batch.',
+                },
+            },
+            'required': ['mode', _TASK_ID_LIST_PARAM],
+        }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        normalized_mode = str((params or {}).get('mode') or '').strip().lower()
+        if normalized_mode == 'confirm' and not str((params or {}).get('confirmation_token') or '').strip():
+            errors.append('confirmation_token is required when mode=confirm')
+        return errors
+
+    async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
+        await self._service.startup()
+        normalized_mode = str(kwargs.get('mode') or '').strip().lower()
+        session_id = str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared'
+        if normalized_mode == 'preview':
+            result = self._service.task_delete_preview(
+                task_ids=kwargs.get(_TASK_ID_LIST_PARAM),
+                session_id=session_id,
+            )
+        else:
+            result = self._service.task_delete_confirm(
+                task_ids=kwargs.get(_TASK_ID_LIST_PARAM),
+                confirmation_token=str(kwargs.get('confirmation_token') or '').strip(),
+                session_id=session_id,
+            )
+            if inspect.isawaitable(result):
+                result = await result
+        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 
 class ViewTaskProgressTool(Tool):
@@ -4630,11 +5040,12 @@ class _LegacyTaskNodeDetailToolMojibakeA(Tool):
         node_id = str(kwargs.get('鑺傜偣id') or '').strip()
         detail_level = str(kwargs.get('detail_level') or 'summary').strip()
         try:
-            return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+            result = self._service.node_detail(task_id, node_id, detail_level=detail_level)
         except TypeError as exc:
             if "unexpected keyword argument 'detail_level'" not in str(exc):
                 raise
-            return self._service.node_detail(task_id, node_id)
+            result = self._service.node_detail(task_id, node_id)
+        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 
 class _TaskNodeDetailToolMojibakeCurrent(Tool):
@@ -4708,11 +5119,12 @@ class TaskNodeDetailTool(Tool):
         node_id = str(kwargs.get('节点id') or '').strip()
         detail_level = str(kwargs.get('detail_level') or 'summary').strip()
         try:
-            return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+            result = self._service.node_detail(task_id, node_id, detail_level=detail_level)
         except TypeError as exc:
             if "unexpected keyword argument 'detail_level'" not in str(exc):
                 raise
-            return self._service.node_detail(task_id, node_id)
+            result = self._service.node_detail(task_id, node_id)
+        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 
 class CreateAsyncTaskTool(Tool):

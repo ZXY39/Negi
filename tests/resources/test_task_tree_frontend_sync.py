@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -875,6 +876,75 @@ def test_render_execution_stage_rounds_show_completed_round_and_tool_result_labe
     assert result["classes"][:3] == ["success", "success", "error"]
 
 
+def test_load_selected_node_latest_context_preserves_detail_and_context_scroll() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        const detail = { scrollTop: 184 };
+        const artifactContent = {
+          _text: "old context\\n".repeat(120),
+          scrollTop: 92,
+          get textContent() {
+            return this._text;
+          },
+          set textContent(value) {
+            this._text = String(value ?? "");
+            this.scrollTop = 0;
+            detail.scrollTop = 0;
+          },
+        };
+        global.S = {
+          currentTaskId: "task:test",
+          selectedNodeId: "node:1",
+          taskNodeLatestContexts: {},
+          taskNodeLatestContextRequests: {},
+        };
+        global.U = {
+          detail,
+          artifactContent,
+        };
+        global.ApiClient = {
+          getTaskNodeLatestContext: async () => ({
+            content: "fresh context\\n".repeat(120),
+          }),
+        };
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.captureTaskDetailViewState = () => ({
+          detailScrollTop: detail.scrollTop,
+          traceScrollTop: 0,
+          artifactListScrollTop: 0,
+          artifactContentScrollTop: artifactContent.scrollTop,
+          traceItems: [],
+        });
+        global.restoreTaskDetailViewState = (state, options = {}) => {
+          if (!state || typeof state !== "object") return;
+          if (options.detail !== false) detail.scrollTop = Number(state.detailScrollTop || 0);
+          if (options.artifactContent !== false) artifactContent.scrollTop = Number(state.artifactContentScrollTop || 0);
+        };
+        global.scheduleTaskDetailSessionPersist = () => {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        loadSelectedNodeLatestContext({ force: true }).then((payload) => {
+          console.log(JSON.stringify({
+            detailScrollTop: detail.scrollTop,
+            artifactContentScrollTop: artifactContent.scrollTop,
+            contentLoaded: artifactContent.textContent.startsWith("fresh context"),
+            payloadLength: String(payload?.content || "").length,
+          }));
+        });
+        """
+    )
+
+    assert result["detailScrollTop"] == 184
+    assert result["artifactContentScrollTop"] == 92
+    assert result["contentLoaded"] is True
+    assert result["payloadLength"] > 0
+
+
 def test_task_governance_view_model_marks_breathing_and_formats_history() -> None:
     result = _run_node_script(
         """
@@ -929,3 +999,17 @@ def test_task_governance_view_model_marks_breathing_and_formats_history() -> Non
     assert result["historyCount"] == 2
     assert result["firstDecision"] == "限制深度"
     assert result["secondReason"] == "breadth only"
+
+
+def test_task_governance_history_region_is_scrollable() -> None:
+    css_text = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    match = re.search(
+        r"\.task-governance-history\s*\{(?P<body>[^}]+)\}",
+        css_text,
+        flags=re.MULTILINE,
+    )
+
+    assert match is not None
+    block = match.group("body")
+    assert "max-height:" in block
+    assert "overflow-y: auto;" in block

@@ -11,8 +11,9 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, convert_to_openai_messages
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import BaseTool
-from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ConfigDict
+
+from g3ku.json_schema_utils import to_openai_tool_definition
 
 
 def _as_message_dicts(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
@@ -96,7 +97,7 @@ class G3kuChatModelAdapter(BaseChatModel):
 
         openai_messages = _as_message_dicts(messages)
         tools_arg = kwargs.get("tools") or []
-        openai_tools = [convert_to_openai_tool(tool) for tool in tools_arg] or None
+        openai_tools = [to_openai_tool_definition(tool) for tool in tools_arg] or None
         requested_tool_choice = kwargs.get("tool_choice")
         normalized_tool_choice = _normalize_tool_choice(requested_tool_choice)
         parallel_tool_calls = kwargs.get("parallel_tool_calls")

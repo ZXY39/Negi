@@ -145,3 +145,8 @@
 - 关键 warnings / errors 已消失，或剩余 warning 不影响当前任务
 - 若它应当可调用，则在新的工具选择阶段能重新进入 callable function tool list
 - 安装目录和临时目录仍符合 `externaltools/` / `temp/` 规范
+
+## Parameter Contract Discipline
+
+- If the repair touches tool arguments, update `resource.yaml -> parameters` first, then keep runtime validation and toolskill examples in sync.
+- If the tool has nested object or array arguments, verify `load_tool_context` exposes the full shape and add or refresh a complete JSON example in `toolskills/SKILL.md`.

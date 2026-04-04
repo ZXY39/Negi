@@ -341,6 +341,18 @@ class _MainTaskService:
     def get_tasks(self, session_id: str, task_type: int) -> str:
         return f'list:{session_id}:{task_type}'
 
+    def task_stats(self, **kwargs):
+        _ = kwargs
+        return 'task-stats'
+
+    def task_delete_preview(self, **kwargs):
+        _ = kwargs
+        return 'task-delete'
+
+    async def task_delete_confirm(self, **kwargs):
+        _ = kwargs
+        return 'task-delete'
+
     def failed_node_ids(self, task_id: str) -> str:
         return f'failed:{task_id}'
 
@@ -962,7 +974,7 @@ async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    for name in ('task_summary_cn', 'task_fetch_cn', 'task_failed_nodes_cn', 'task_node_detail_cn', 'task_progress_cn'):
+    for name in ('task_summary_cn', 'task_fetch_cn', 'task_delete_cn', 'task_failed_nodes_cn', 'task_node_detail_cn', 'task_progress_cn', 'task_stats_cn'):
         shutil.copytree(REPO_ROOT / 'tools' / name, workspace / 'tools' / name)
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
@@ -972,17 +984,22 @@ async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
     try:
         summary_tool = manager.get_tool('task_summary')
         fetch_tool = manager.get_tool('task_list')
+        delete_tool = manager.get_tool('task_delete')
         failed_nodes_tool = manager.get_tool('task_failed_nodes')
         node_detail_tool = manager.get_tool('task_node_detail')
         progress_tool = manager.get_tool('task_progress')
+        stats_tool = manager.get_tool('task_stats')
 
         assert summary_tool is not None
         assert fetch_tool is not None
+        assert delete_tool is not None
         assert failed_nodes_tool is not None
         assert node_detail_tool is not None
         assert progress_tool is not None
+        assert stats_tool is not None
         assert await summary_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}) == 'summary:web:shared'
         assert await fetch_tool.execute(__g3ku_runtime={'session_key': 'web:shared'}, **{'任务类型': 4}) == 'list:web:shared:4'
+        assert await delete_tool.execute(mode='preview', **{'任务id列表': ['task:demo']}) == 'task-delete'
         assert await failed_nodes_tool.execute(**{'任务id': 'task:demo'}) == 'failed:task:demo'
         assert json.loads(await node_detail_tool.execute(**{'任务id': 'task:demo', '节点id': 'node:demo'})) == {
             'ok': True,
@@ -1006,6 +1023,7 @@ async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
             ],
         }
         assert await progress_tool.execute(**{'任务id': 'task:demo'}) == 'progress:task:demo:True'
+        assert await stats_tool.execute(mode='id', **{'任务id列表': ['task:demo']}) == 'task-stats'
     finally:
         manager.close()
 

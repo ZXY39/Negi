@@ -319,6 +319,16 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         assert 'tool_handler_unavailable' in toolskill['errors']
         assert '# memory_write' in toolskill['content']
         assert '# memory_search' not in toolskill['content']
+        assert toolskill['required_parameters'] == ['items']
+        assert toolskill['parameters_schema']['properties']['items']['items']['required'] == [
+            'kind',
+            'key',
+            'value',
+            'statement',
+            'source_excerpt',
+        ]
+        assert 'items[*].kind' in str(toolskill['parameter_contract_markdown'])
+        assert dict(toolskill['example_arguments']).get('items')
 
         payload = service.load_tool_context(
             actor_role='ceo',
@@ -329,6 +339,22 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         assert payload['tool_id'] == 'memory_write'
         assert payload['available'] is False
         assert '# memory_write' in payload['content']
+
+        payload_v2 = service.load_tool_context_v2(
+            actor_role='ceo',
+            session_id='web:shared',
+            tool_id='memory_write',
+        )
+        assert payload_v2['required_parameters'] == ['items']
+        assert payload_v2['parameters_schema']['properties']['items']['items']['required'] == [
+            'kind',
+            'key',
+            'value',
+            'statement',
+            'source_excerpt',
+        ]
+        assert 'items[*].kind' in str(payload_v2['parameter_contract_markdown'])
+        assert dict(payload_v2['example_arguments']).get('items')
     finally:
         await service.close()
         manager.close()
@@ -3025,6 +3051,11 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
         assert payload['content'] == expected
         assert payload['l0']
         assert payload['l1']
+        assert payload['parameters_schema']['properties']['path']['type'] == 'string'
+        assert 'action' in payload['required_parameters']
+        assert 'path' in payload['parameters_schema']['properties']
+        assert dict(payload['example_arguments']).get('action')
+        assert '## Parameter Contract' in str(payload['parameter_contract_markdown'])
     finally:
         await service.close()
         manager.close()
@@ -3149,9 +3180,11 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         'load_tool_context',
         'create_async_task_cn',
         'task_fetch_cn',
+        'task_delete_cn',
         'task_failed_nodes_cn',
         'task_node_detail_cn',
         'task_progress_cn',
+        'task_stats_cn',
         'task_summary_cn',
     )
 
@@ -3306,9 +3339,11 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         'load_tool_context',
         'create_async_task_cn',
         'task_fetch_cn',
+        'task_delete_cn',
         'task_failed_nodes_cn',
         'task_node_detail_cn',
         'task_progress_cn',
+        'task_stats_cn',
         'task_summary_cn',
     )
 
@@ -3347,7 +3382,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in after
         assert 'memory_write' in after
-        assert {'task_list', 'task_failed_nodes', 'task_node_detail', 'task_progress', 'task_summary'}.issubset(set(after))
+        assert {'task_list', 'task_delete', 'task_failed_nodes', 'task_node_detail', 'task_progress', 'task_stats', 'task_summary'}.issubset(set(after))
     finally:
         await service.close()
         manager.close()
@@ -3367,9 +3402,11 @@ async def test_core_tool_admin_endpoints_block_disable_delete_and_ceo_removal(tm
         'load_tool_context',
         'create_async_task_cn',
         'task_fetch_cn',
+        'task_delete_cn',
         'task_failed_nodes_cn',
         'task_node_detail_cn',
         'task_progress_cn',
+        'task_stats_cn',
         'task_summary_cn',
     )
 

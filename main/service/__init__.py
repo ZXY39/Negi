@@ -2,8 +2,10 @@ from main.service.runtime_service import (
     CreateAsyncTaskTool,
     GetTasksTool,
     MainRuntimeService,
+    TaskDeleteTool,
     TaskFailedNodesTool,
     TaskNodeDetailTool,
+    TaskStatsTool,
     TaskSummaryTool,
     ViewTaskProgressTool,
 )
@@ -13,9 +15,11 @@ __all__ = [
     'CreateAsyncTaskTool',
     'GetTasksTool',
     'MainRuntimeService',
+    'TaskDeleteTool',
     'TaskFailedNodesTool',
     'TaskNodeDetailTool',
     'TaskService',
+    'TaskStatsTool',
     'TaskSummaryTool',
     'ViewTaskProgressTool',
 ]

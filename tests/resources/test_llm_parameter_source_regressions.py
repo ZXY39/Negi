@@ -4,16 +4,20 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 import main.runtime.chat_backend as chat_backend_module
+from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.llm_config.enums import AuthMode, Capability, ProtocolAdapter
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
 from g3ku.llm_config.models import NormalizedProviderConfig, ProviderConfigDraft
 from g3ku.llm_config.normalization import normalize_draft
 from g3ku.llm_config.template_registry import TemplateRegistry
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.provider_factory import ProviderTarget
-from g3ku.runtime.frontdoor.ceo_runner import _DirectProviderChatBackend
+from g3ku.runtime.frontdoor._ceo_support import _DirectProviderChatBackend
 from main.runtime.internal_tools import SubmitFinalResultTool
 from main.runtime.react_loop import ReActToolLoop
 
@@ -65,6 +69,48 @@ def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalRes
         return dict(payload)
 
     return SubmitFinalResultTool(_submit, node_kind=node_kind)
+
+
+class _NestedSchemaTool(Tool):
+    @property
+    def name(self) -> str:
+        return "nested_schema_tool"
+
+    @property
+    def description(self) -> str:
+        return "preserve nested schema"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "Nested items to preserve.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["profile", "preference"],
+                                "description": "Nested enum field.",
+                            },
+                            "value": {
+                                "type": "string",
+                                "description": "Nested value field.",
+                            },
+                        },
+                        "required": ["kind", "value"],
+                    },
+                }
+            },
+            "required": ["items"],
+        }
+
+    async def execute(self, items: list[dict[str, object]], **kwargs) -> str:
+        _ = kwargs
+        return str(items)
 
 
 def test_template_marks_model_parameters_optional_and_removes_timeout() -> None:
@@ -296,3 +342,33 @@ async def test_direct_provider_chat_backend_omits_optional_model_parameters_when
     assert "max_tokens" not in captured[0]
     assert "temperature" not in captured[0]
     assert "reasoning_effort" not in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_g3ku_chat_model_adapter_preserves_nested_tool_schema_when_sending_tools() -> None:
+    captured: list[dict[str, object]] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            captured.append(dict(kwargs))
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    registry = ToolRegistry()
+    registry.register(_NestedSchemaTool())
+    tool = registry.to_langchain_tools_filtered(["nested_schema_tool"])[0]
+    adapter = G3kuChatModelAdapter(chat_backend=_Backend(), default_model="demo:model")
+
+    await adapter._agenerate(
+        [HumanMessage(content="hello")],
+        tools=[tool],
+    )
+
+    tool_payload = dict(captured[0]["tools"][0]["function"])
+    parameters = dict(tool_payload["parameters"])
+    items_schema = dict((parameters.get("properties") or {}).get("items") or {})
+    nested_item = dict(items_schema.get("items") or {})
+    nested_properties = dict(nested_item.get("properties") or {})
+
+    assert parameters.get("required") == ["items"]
+    assert nested_item.get("required") == ["kind", "value"]
+    assert dict(nested_properties.get("kind") or {}).get("enum") == ["profile", "preference"]

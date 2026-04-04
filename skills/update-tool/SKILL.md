@@ -104,3 +104,9 @@
 - `references/update-tool-checklist.md`
 - `skills/add-tool/SKILL.md`
 - `skills/add-tool/references/toolskill-checklist.md`
+
+## Parameter Contract Discipline
+
+- Keep `resource.yaml -> parameters`, runtime behavior, and `toolskills/SKILL.md` aligned in the same change.
+- When nested object or array parameters change, update the toolskill example payload at the same time.
+- Required fields, enum values, and shape changes must never live only in prose or only in code.

@@ -152,6 +152,46 @@ def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[st
     }
 
 
+def _probe_openai_minimal_inference(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
+    headers = _build_openai_headers(config)
+    endpoint, payload = _build_openai_fallback_payload(config)
+    start = time.perf_counter()
+    response = client.post(_join_url(config.base_url, endpoint), headers=headers, json=payload)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    if response.status_code in {401, 403}:
+        return _failure_result(
+            config,
+            status=ProbeStatus.AUTH_ERROR,
+            http_status=response.status_code,
+            latency_ms=latency_ms,
+            message="Authentication failed during minimal inference request.",
+        )
+    try:
+        response_payload = response.json()
+    except json.JSONDecodeError:
+        return _non_json_failure(
+            config,
+            response=response,
+            latency_ms=latency_ms,
+            label="Minimal inference endpoint returned a non-JSON response",
+        )
+    if 200 <= response.status_code < 300:
+        return _success_result(
+            config,
+            latency_ms=latency_ms,
+            http_status=response.status_code,
+            message="Minimal inference request succeeded.",
+            diagnostics={"response_keys": sorted(response_payload.keys()) if isinstance(response_payload, dict) else []},
+        )
+    return _failure_result(
+        config,
+        status=ProbeStatus.INVALID_RESPONSE,
+        http_status=response.status_code,
+        latency_ms=latency_ms,
+        message="Minimal inference request failed.",
+    )
+
+
 def _config_with_api_key(config: NormalizedProviderConfig, api_key: str) -> NormalizedProviderConfig:
     auth = dict(config.auth)
     auth["api_key"] = str(api_key or "").strip()
@@ -482,6 +522,32 @@ def _probe_single_config(
         )
 
 
+def _probe_single_config_for_concurrency(
+    config: NormalizedProviderConfig,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> ProbeResult:
+    timeout_value = _PROBE_TIMEOUT_SECONDS
+    try:
+        with httpx.Client(timeout=timeout_value, transport=transport, follow_redirects=True) as client:
+            if config.protocol_adapter in {
+                ProtocolAdapter.OPENAI_COMPLETIONS,
+                ProtocolAdapter.OPENAI_RESPONSES,
+                ProtocolAdapter.CUSTOM_DIRECT,
+                ProtocolAdapter.OAUTH_PROXY,
+            }:
+                return _probe_openai_minimal_inference(client, config)
+            return _probe_single_config(config, transport=transport)
+    except httpx.TimeoutException:
+        return _failure_result(config, status=ProbeStatus.TIMEOUT, message="Probe timed out.")
+    except (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError):
+        return _failure_result(
+            config,
+            status=ProbeStatus.CONNECTION_ERROR,
+            message="Could not connect to the provider endpoint.",
+        )
+
+
 def probe_config(
     config: NormalizedProviderConfig,
     *,
@@ -501,6 +567,41 @@ def probe_config(
     last_result: ProbeResult | None = None
     for attempt_index, api_key in enumerate(api_keys, start=1):
         result = _probe_single_config(_config_with_api_key(config, api_key), transport=transport)
+        result = _with_probe_attempt_diagnostics(
+            result,
+            api_key_count=len(api_keys),
+            api_key_attempts=attempt_index,
+        )
+        if result.success:
+            return result
+        last_result = result
+        if not _should_switch_api_key_for_probe_result(result):
+            return result
+
+    if last_result is not None:
+        return last_result
+    return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, message="Probe failed.")
+
+
+def probe_config_for_concurrency(
+    config: NormalizedProviderConfig,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> ProbeResult:
+    if config.auth_mode != AuthMode.API_KEY:
+        return _probe_single_config_for_concurrency(config, transport=transport)
+
+    api_keys = parse_api_keys(str(config.auth.get("api_key", "") or ""))
+    if not api_keys:
+        return _with_probe_attempt_diagnostics(
+            _probe_single_config_for_concurrency(config, transport=transport),
+            api_key_count=0,
+            api_key_attempts=0,
+        )
+
+    last_result: ProbeResult | None = None
+    for attempt_index, api_key in enumerate(api_keys, start=1):
+        result = _probe_single_config_for_concurrency(_config_with_api_key(config, api_key), transport=transport)
         result = _with_probe_attempt_diagnostics(
             result,
             api_key_count=len(api_keys),

@@ -21,6 +21,7 @@ if "litellm" not in sys.modules:
 
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.types import ContextAssemblyResult
@@ -167,6 +168,58 @@ class _ContinuationTaskTool(Tool):
         return "创建任务成功task:demo-123"
 
 
+class _NestedContractTool(Tool):
+    @property
+    def name(self) -> str:
+        return "nested_contract_tool"
+
+    @property
+    def description(self) -> str:
+        return "preserve nested schema contract"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "Nested items to preserve.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["profile", "preference"],
+                                "description": "Nested enum field.",
+                            },
+                            "value": {
+                                "type": "string",
+                                "description": "Nested required value field.",
+                            },
+                            "meta": {
+                                "type": "object",
+                                "properties": {
+                                    "source_excerpt": {
+                                        "type": "string",
+                                        "description": "Nested object leaf.",
+                                    }
+                                },
+                                "required": ["source_excerpt"],
+                            },
+                        },
+                        "required": ["kind", "value", "meta"],
+                    },
+                }
+            },
+            "required": ["items"],
+        }
+
+    async def execute(self, items: list[dict[str, object]], **kwargs) -> str:
+        _ = kwargs
+        return json.dumps({"ok": True, "items": items}, ensure_ascii=False)
+
+
 def _assembly_result(*, tool_names: list[str], recent_history: list[dict[str, object]] | None = None, trace: dict[str, object] | None = None) -> ContextAssemblyResult:
     return ContextAssemblyResult(
         system_prompt="SYSTEM PROMPT",
@@ -174,6 +227,16 @@ def _assembly_result(*, tool_names: list[str], recent_history: list[dict[str, ob
         tool_names=tool_names,
         trace=dict(trace or {}),
     )
+
+
+def _nested_items_item_schema(schema: dict[str, object]) -> dict[str, object]:
+    properties = dict(schema.get("properties") or {})
+    items_schema = dict(properties.get("items") or {})
+    nested = items_schema.get("items")
+    if isinstance(nested, dict) and "$ref" in nested:
+        ref_name = str(nested.get("$ref") or "").split("/")[-1]
+        return dict((schema.get("$defs") or {}).get(ref_name) or {})
+    return dict(nested or {})
 
 
 def test_build_args_schema_preserves_declared_json_types() -> None:
@@ -199,6 +262,37 @@ def test_build_args_schema_preserves_declared_json_types() -> None:
     assert task_schema.get("type") == "string"
     assert "string" in continuation_types or continuation_schema.get("type") == "string"
     assert "boolean" in reuse_types or reuse_schema.get("type") == "boolean"
+
+
+def test_build_args_schema_preserves_nested_array_object_contracts() -> None:
+    schema_model = _build_args_schema(_NestedContractTool())
+    schema = schema_model.model_json_schema()
+    nested_item = _nested_items_item_schema(schema)
+    nested_properties = dict(nested_item.get("properties") or {})
+    meta_schema = dict(nested_properties.get("meta") or {})
+    if "$ref" in meta_schema:
+        ref_name = str(meta_schema.get("$ref") or "").split("/")[-1]
+        meta_schema = dict((schema.get("$defs") or {}).get(ref_name) or {})
+
+    assert schema.get("required") == ["items"]
+    assert nested_item.get("required") == ["kind", "value", "meta"]
+    assert dict(nested_properties.get("kind") or {}).get("enum") == ["profile", "preference"]
+    assert "value" in nested_properties
+    assert dict(meta_schema.get("properties") or {}).get("source_excerpt") is not None
+
+
+def test_tool_registry_langchain_tool_preserves_nested_array_object_contracts() -> None:
+    registry = ToolRegistry()
+    registry.register(_NestedContractTool())
+
+    langchain_tool = registry.to_langchain_tools_filtered(["nested_contract_tool"])[0]
+    schema = langchain_tool.args_schema.model_json_schema()
+    nested_item = _nested_items_item_schema(schema)
+    nested_properties = dict(nested_item.get("properties") or {})
+
+    assert schema.get("required") == ["items"]
+    assert nested_item.get("required") == ["kind", "value", "meta"]
+    assert dict(nested_properties.get("kind") or {}).get("enum") == ["profile", "preference"]
 
 
 @pytest.mark.asyncio

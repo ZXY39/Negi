@@ -8,9 +8,9 @@ import json
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import ConfigDict, Field, create_model
 
 from g3ku.agent.tools.base import Tool
+from g3ku.json_schema_utils import attach_raw_parameters_schema, build_args_schema_model
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -149,12 +149,15 @@ class ToolRegistry:
             args_schema = self._build_args_schema(tool)
             coroutine = self._build_tool_coroutine(tool.name, runtime_context_snapshot=runtime_context)
             tools.append(
-                StructuredTool.from_function(
-                    coroutine=coroutine,
-                    name=tool.name,
-                    description=tool.description,
-                    args_schema=args_schema,
-                    infer_schema=False,
+                attach_raw_parameters_schema(
+                    StructuredTool.from_function(
+                        coroutine=coroutine,
+                        name=tool.name,
+                        description=tool.description,
+                        args_schema=args_schema,
+                        infer_schema=False,
+                    ),
+                    tool.parameters,
                 )
             )
         tools.extend(self._langchain_tools.values())
@@ -171,12 +174,15 @@ class ToolRegistry:
             args_schema = self._build_args_schema(tool)
             coroutine = self._build_tool_coroutine(tool.name, runtime_context_snapshot=runtime_context)
             tools.append(
-                StructuredTool.from_function(
-                    coroutine=coroutine,
-                    name=tool.name,
-                    description=tool.description,
-                    args_schema=args_schema,
-                    infer_schema=False,
+                attach_raw_parameters_schema(
+                    StructuredTool.from_function(
+                        coroutine=coroutine,
+                        name=tool.name,
+                        description=tool.description,
+                        args_schema=args_schema,
+                        infer_schema=False,
+                    ),
+                    tool.parameters,
                 )
             )
         for name, tool in self._langchain_tools.items():
@@ -376,21 +382,7 @@ class ToolRegistry:
 
     @staticmethod
     def _build_args_schema(tool: Tool):
-        schema = tool.parameters or {}
-        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
-        required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
-
-        fields: dict[str, tuple[Any, Any]] = {}
-        for key, prop in props.items():
-            description = prop.get("description") if isinstance(prop, dict) else None
-            default = ... if key in required else None
-            if description:
-                fields[key] = (Any, Field(default=default, description=description))
-            else:
-                fields[key] = (Any, default)
-
-        model_name = "".join(part.capitalize() for part in tool.name.split("_")) + "Args"
-        return create_model(model_name, __config__=ConfigDict(extra="allow"), **fields)
+        return build_args_schema_model(tool.name, tool.parameters)
 
     @property
     def tool_names(self) -> list[str]:
