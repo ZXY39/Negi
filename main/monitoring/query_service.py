@@ -171,6 +171,8 @@ class TaskQueryService:
             task = self._store.get_task(task_id) or task
         live_state = self._projection_live_state(task.task_id)
         root_node = self.get_node_detail(task.task_id, task.root_node_id)
+        runtime_meta = self._log_service.read_task_runtime_meta(task.task_id) or {}
+        governance = dict(runtime_meta.get('governance') or {})
         runtime_summary = live_state.model_dump(mode='json') if live_state is not None else {
             'active_node_ids': [],
             'runnable_node_ids': [],
@@ -196,7 +198,7 @@ class TaskQueryService:
             for item in self._projection_token_usage_by_model(task.task_id)
         ]
         payload = {
-            'task': task.model_dump(mode='json'),
+            'task': {**task.model_dump(mode='json'), 'governance': governance},
             'summary': {
                 'task_id': task.task_id,
                 'status': task.status,
@@ -205,6 +207,7 @@ class TaskQueryService:
                 'token_usage_by_model': token_usage_by_model,
                 **counts,
             },
+            'governance': governance,
             'runtime_summary': runtime_summary,
             'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
             'frontier': frontier,

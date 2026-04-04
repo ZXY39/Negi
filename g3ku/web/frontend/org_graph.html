@@ -462,6 +462,21 @@
 
                 <div class="project-dashboard">
                     <div class="org-tree-panel panel">
+                        <div class="task-tree-floating-governance" aria-live="polite">
+                            <div id="task-governance-panel" class="task-governance-panel" hidden>
+                                <details id="task-governance-details" class="task-governance-card">
+                                    <summary class="task-governance-summary" aria-label="展开或折叠任务监管记录">
+                                        <span id="task-governance-status" class="task-governance-status">监管空闲</span>
+                                        <span id="task-governance-last-decision" class="task-governance-chip">暂无决策</span>
+                                        <span id="task-governance-history-count" class="task-governance-chip">0 次</span>
+                                    </summary>
+                                    <div class="task-governance-body">
+                                        <div id="task-governance-empty" class="task-governance-empty">暂无监管记录。</div>
+                                        <div id="task-governance-history" class="task-governance-history"></div>
+                                    </div>
+                                </details>
+                            </div>
+                        </div>
                         <div class="task-tree-floating-tools" aria-live="polite">
                             <button id="task-tree-reset-rounds-btn" class="toolbar-btn ghost small task-tree-floating-reset"
                                 type="button" hidden disabled>回到最新树</button>

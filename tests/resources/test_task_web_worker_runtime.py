@@ -349,6 +349,56 @@ def test_internal_task_event_callback_forwards_live_patch(tmp_path: Path, monkey
         assert pushed["data"]["task_id"] == record.task_id
 
 
+def test_internal_task_event_callback_forwards_governance_patch(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.websocket_task.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+
+    client = TestClient(_build_app())
+    record = asyncio.run(_create_web_task(service))
+    with client.websocket_connect(f"/api/ws/tasks/{record.task_id}?after_seq=0") as ws:
+        assert ws.receive_json()["type"] == "hello"
+
+        payload = {
+            "event_type": "task.governance.patch",
+            "session_id": record.session_id,
+            "task_id": record.task_id,
+            "data": {
+                "task_id": record.task_id,
+                "governance": {
+                    "enabled": True,
+                    "frozen": True,
+                    "review_inflight": True,
+                    "history": [],
+                },
+            },
+        }
+        response = client.post(
+            "/api/internal/task-event",
+            json=payload,
+            headers={"x-g3ku-internal-token": "secret-token"},
+        )
+        assert response.status_code == 200
+        assert response.json()["accepted"] is True
+
+        pushed = _receive_until_type(ws, "task.governance.patch")
+        assert pushed["data"]["task_id"] == record.task_id
+        assert pushed["data"]["governance"]["frozen"] is True
+
+
 def test_internal_task_event_batch_callback_forwards_summary_patches(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -1847,6 +1897,55 @@ def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path:
 
     assert node_payload is not None
     assert node_payload["item"]["output"] == "projection-output"
+
+
+def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    inner = service.content_store.maybe_externalize_text(
+        "alpha\nneedle\nomega\n",
+        runtime={"task_id": record.task_id, "node_id": root.node_id},
+        display_name="inner",
+        source_kind="node_output",
+        force=True,
+    )
+
+    assert inner is not None
+
+    wrapped = json.dumps(inner.to_dict(), ensure_ascii=False)
+    service.log_service.record_tool_result_batch(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        response_tool_calls=[SimpleNamespace(id="call:content", name="content", arguments={})],
+        results=[
+            {
+                "tool_message": {
+                    "tool_call_id": "call:content",
+                    "name": "content",
+                    "content": wrapped,
+                    "status": "success",
+                },
+                "live_state": {"tool_call_id": "call:content", "tool_name": "content", "status": "success"},
+            }
+        ],
+    )
+
+    tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
+
+    assert tool_results[-1].output_ref == inner.ref
+    assert str(tool_results[-1].payload["parsed_payload"]["wrapper_ref"]).startswith("artifact:")
 
 
 def test_refresh_task_view_skips_upsert_when_semantically_unchanged(tmp_path: Path):
@@ -4330,4 +4429,147 @@ async def test_run_node_short_circuits_when_task_is_already_terminal(tmp_path: P
     assert latest_child is not None
     assert latest_child.status == "failed"
     assert latest_child.failure_reason == "root failed"
+
+
+@pytest.mark.asyncio
+async def test_task_snapshot_includes_governance_state(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        _mark_worker_online(service)
+        record = await service.create_task("governed task", session_id="web:shared")
+        service.log_service.upsert_task_governance(
+            record.task_id,
+            {
+                "enabled": True,
+                "frozen": True,
+                "review_inflight": True,
+                "history": [
+                    {
+                        "triggered_at": now_iso(),
+                        "trigger_reason": "depth+1",
+                        "trigger_snapshot": {"max_depth": 2, "total_nodes": 18},
+                        "decision": "cap_current_depth",
+                        "decision_reason": "depth runaway",
+                        "limited_depth": 2,
+                    }
+                ],
+            },
+        )
+
+        payload = service.get_task_detail_payload(record.task_id, mark_read=False)
+        assert payload is not None
+        assert payload["governance"]["frozen"] is True
+        assert payload["task"]["governance"]["review_inflight"] is True
+        assert payload["governance"]["history"][0]["decision"] == "cap_current_depth"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_governance_depth_trigger_caps_task_and_records_history(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        _mark_worker_online(service)
+        record = await service.create_task("governance trigger", session_id="web:shared", max_depth=3)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="child", prompt="child prompt", execution_policy=_execution_policy()),
+        )
+        assert child.depth == 1
+
+        refreshed_task = service.get_task(record.task_id)
+        refreshed_child = service.get_node(child.node_id)
+        assert refreshed_task is not None
+        assert refreshed_child is not None
+
+        grandchild = service.node_runner._create_execution_child(
+            task=refreshed_task,
+            parent=refreshed_child,
+            spec=SpawnChildSpec(goal="grandchild", prompt="grandchild prompt", execution_policy=_execution_policy()),
+        )
+        assert grandchild.depth == 2
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            current_task = service.get_task(record.task_id)
+            governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
+            if current_task is not None and int(current_task.max_depth or 0) == 2 and governance.get("history"):
+                break
+            await asyncio.sleep(0.05)
+
+        current_task = service.get_task(record.task_id)
+        governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
+        assert current_task is not None
+        assert int(current_task.max_depth or 0) == 2
+        assert governance.get("supervision_disabled_after_limit") is True
+        assert governance.get("frozen") is False
+        assert governance.get("review_inflight") is False
+        assert governance["history"][-1]["decision"] == "cap_current_depth"
+        assert governance["history"][-1]["limited_depth"] == 2
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_child_nodes_refuses_when_governance_limit_would_exceed_depth(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        _mark_worker_online(service)
+        record = await service.create_task("spawn refusal", session_id="web:shared", max_depth=2)
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        service.store.update_task(
+            record.task_id,
+            lambda item: item.model_copy(update={"max_depth": 0}),
+        )
+        service.log_service.upsert_task_governance(
+            record.task_id,
+            {
+                "enabled": True,
+                "frozen": False,
+                "review_inflight": False,
+                "hard_limited_depth": 0,
+                "supervision_disabled_after_limit": True,
+                "history": [],
+            },
+        )
+
+        with pytest.raises(ValueError, match="当前已达到最大深度，不允许派生子节点，请自行执行!"):
+            await service.node_runner._spawn_children(
+                task_id=record.task_id,
+                parent_node_id=root.node_id,
+                specs=[SpawnChildSpec(goal="child", prompt="prompt", execution_policy=_execution_policy())],
+                call_id="call:test",
+            )
+    finally:
+        await service.close()
 

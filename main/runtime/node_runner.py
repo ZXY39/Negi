@@ -76,6 +76,8 @@ class NodeRunner:
         self._context_enricher = context_enricher
         self.nested_node_executor = None
         self.cancel_node_subtree_executor = None
+        self.governance_child_created_observer = None
+        self.governance_spawn_refusal_supplier = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
@@ -548,6 +550,17 @@ class NodeRunner:
         parent = self._store.get_node(parent_node_id)
         if task is None or parent is None:
             raise ValueError('parent task or node missing')
+        governance_refusal = ''
+        if callable(self.governance_spawn_refusal_supplier):
+            governance_refusal = str(
+                self.governance_spawn_refusal_supplier(
+                    task_id=task.task_id,
+                    parent_depth=int(parent.depth or 0),
+                )
+                or ''
+            ).strip()
+        if governance_refusal:
+            raise ValueError(governance_refusal)
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
@@ -1637,7 +1650,13 @@ class NodeRunner:
             token_usage_by_model=[],
             metadata=metadata,
         )
-        return self._log_service.create_node(task.task_id, child)
+        created = self._log_service.create_node(task.task_id, child)
+        if callable(self.governance_child_created_observer):
+            try:
+                self.governance_child_created_observer(task_id=task.task_id, child_node=created)
+            except Exception:
+                pass
+        return created
 
     def create_acceptance_node(
         self,

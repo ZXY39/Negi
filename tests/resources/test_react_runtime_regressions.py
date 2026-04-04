@@ -485,6 +485,43 @@ async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_react_loop_externalizes_tool_messages_with_canonical_ref(tmp_path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    log_service = _FakeLogService()
+    log_service._content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+
+    try:
+        inner = log_service._content_store.maybe_externalize_text(
+            "alpha\nneedle\nomega\n",
+            runtime={"task_id": "task-1", "node_id": "node-1"},
+            display_name="inner",
+            source_kind="node_output",
+            force=True,
+        )
+
+        assert inner is not None
+
+        rendered = loop._render_tool_message_content(
+            json.dumps(inner.to_dict(), ensure_ascii=False),
+            runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
+            tool_name="content",
+        )
+
+        payload = json.loads(rendered)
+
+        assert payload["ref"] == inner.ref
+        assert payload["resolved_ref"] == inner.ref
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -> None:
     model_ref_calls: list[list[str]] = []
     current_refs = ['old-model']

@@ -939,6 +939,7 @@ function resetTaskView() {
     }
     clearTaskDetailSession();
     S.currentTask = null;
+    S.taskGovernance = null;
     S.taskSummary = null;
     S.rootNode = null;
     S.frontier = [];
@@ -974,6 +975,7 @@ function resetTaskView() {
         U.taskTreeResetRounds.classList.remove("active");
         U.taskTreeResetRounds.title = "轮次信息加载中";
     }
+    if (typeof renderTaskGovernancePanel === "function") renderTaskGovernancePanel();
     if (U.tdPromptDisclosure) U.tdPromptDisclosure.open = false;
     if (U.tdTitle) {
         U.tdTitle.textContent = "正在加载...";
@@ -1192,10 +1194,22 @@ async function openTask(taskId) {
 function handleTaskEvent(payload) {
     if (payload.type === "task.summary.patch" && payload.data?.task) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
+        if (payload.data?.task?.governance) {
+            S.taskGovernance = normalizeTaskGovernanceState(payload.data.task.governance);
+        }
         S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
         patchTaskListItem(payload.data.task);
         renderTaskDetailHeader();
+        if (typeof renderTaskGovernancePanel === "function") renderTaskGovernancePanel();
         renderTaskTokenStats();
+        return;
+    }
+    if (payload.type === "task.governance.patch") {
+        S.taskGovernance = normalizeTaskGovernanceState(payload.data?.governance || {});
+        if (S.currentTask && typeof S.currentTask === "object") {
+            S.currentTask = { ...(S.currentTask || {}), governance: S.taskGovernance };
+        }
+        if (typeof renderTaskGovernancePanel === "function") renderTaskGovernancePanel();
         return;
     }
     if (payload.type === "task.model.call") {

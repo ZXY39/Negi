@@ -85,6 +85,60 @@ async def test_node_turn_controller_enforces_strict_fifo_head_blocking() -> None
         await node_controller.close()
 
 
+@pytest.mark.asyncio
+async def test_node_turn_controller_holds_frozen_task_requests_in_separate_fifo_until_thawed() -> None:
+    model_controller = ModelKeyConcurrencyController(
+        resolve_model_limits=lambda model_ref: {"key_count": 1, "per_key_limit": 1}
+    )
+    frozen_tasks: set[str] = {"task:frozen"}
+    node_controller = NodeTurnController(
+        model_concurrency_controller=model_controller,
+        gate_supplier=lambda: True,
+        freeze_supplier=lambda task_id: str(task_id or "").strip() in frozen_tasks,
+        poll_interval_seconds=0.05,
+    )
+    model_controller.configure(on_availability_changed=node_controller.poke)
+    try:
+        head = await node_controller.acquire_turn(task_id="task:head", node_id="node:head", model_ref="model:a")
+
+        frozen_waiter = asyncio.create_task(
+            node_controller.acquire_turn(task_id="task:frozen", node_id="node:frozen-1", model_ref="model:a")
+        )
+        unfrozen_waiter = asyncio.create_task(
+            node_controller.acquire_turn(task_id="task:next", node_id="node:next-1", model_ref="model:a")
+        )
+        await asyncio.sleep(0.15)
+
+        snapshot = node_controller.snapshot()
+        assert frozen_waiter.done() is False
+        assert unfrozen_waiter.done() is False
+        assert snapshot["node_queue_running_count"] == 1
+        assert snapshot["node_queue_waiting_count"] == 2
+        assert snapshot["node_queue_frozen_count"] == 1
+
+        model_controller.release(head.initial_model_permit)
+        head.initial_model_permit = None
+        node_controller.release_turn(head)
+
+        next_lease = await asyncio.wait_for(unfrozen_waiter, timeout=1.0)
+        assert next_lease.node_id == "node:next-1"
+
+        model_controller.release(next_lease.initial_model_permit)
+        next_lease.initial_model_permit = None
+        node_controller.release_turn(next_lease)
+
+        await asyncio.sleep(0.1)
+        assert frozen_waiter.done() is False
+
+        frozen_tasks.clear()
+        node_controller.poke()
+
+        thawed = await asyncio.wait_for(frozen_waiter, timeout=1.0)
+        assert thawed.node_id == "node:frozen-1"
+    finally:
+        await node_controller.close()
+
+
 def test_worker_status_payload_exposes_tool_and_node_queue_metrics(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

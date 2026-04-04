@@ -43,6 +43,7 @@ from main.monitoring.models import (
 from main.monitoring.task_event_writer import TaskEventWriter
 from main.monitoring.task_projector import TaskProjector
 from main.protocol import build_envelope, now_iso
+from main.runtime.task_governance import GOVERNANCE_PATCH_EVENT_TYPE, normalize_task_governance_state
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 
 
@@ -345,6 +346,7 @@ class TaskLogService:
             'dispatch_queued': {'execution': 0, 'inspection': 0},
             'summary_fingerprint': '',
             'summary_last_published_at': '',
+            'governance': normalize_task_governance_state(None),
         }
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
@@ -930,7 +932,13 @@ class TaskLogService:
             parsed = json.loads(text)
         except Exception:
             return {}
-        return dict(parsed) if isinstance(parsed, dict) else {}
+        if not isinstance(parsed, dict):
+            return {}
+        payload = dict(parsed)
+        wrapper_ref = str(payload.get('wrapper_ref') or payload.get('ref') or '').strip()
+        if wrapper_ref and not str(payload.get('wrapper_ref') or '').strip():
+            payload['wrapper_ref'] = wrapper_ref
+        return payload
 
     @staticmethod
     def _coerce_elapsed_seconds(value: Any) -> float | None:
@@ -1599,6 +1607,8 @@ class TaskLogService:
                 current['dispatch_running'] = self._sanitize_dispatch_counters(payload.get('dispatch_running'))
             if 'dispatch_queued' in payload:
                 current['dispatch_queued'] = self._sanitize_dispatch_counters(payload.get('dispatch_queued'))
+            if 'governance' in payload:
+                current['governance'] = normalize_task_governance_state(payload.get('governance'))
             current['updated_at'] = now_iso()
             self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
@@ -1606,6 +1616,45 @@ class TaskLogService:
                 payload=current,
             )
             return self.read_task_runtime_meta(task.task_id) or current
+
+    def upsert_task_governance(self, task_id: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+            current = normalize_task_governance_state(runtime_meta.get('governance'))
+            next_state = normalize_task_governance_state(payload)
+            if current == next_state:
+                return current
+            runtime_meta['governance'] = next_state
+            runtime_meta['updated_at'] = now_iso()
+            self._store.upsert_task_runtime_meta(
+                task_id=task.task_id,
+                updated_at=str(runtime_meta.get('updated_at') or now_iso()),
+                payload=runtime_meta,
+            )
+            self._publish_task_governance_patch_locked(task=task, governance=next_state)
+            return next_state
+
+    def update_task_max_depth(self, task_id: str, max_depth: int) -> TaskRecord | None:
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            next_depth = max(0, int(max_depth or 0))
+            if int(task.max_depth or 0) == next_depth:
+                return task
+            updated = self._store.update_task(
+                task.task_id,
+                lambda record: record.model_copy(
+                    update={
+                        'max_depth': next_depth,
+                        'updated_at': now_iso(),
+                        'is_unread': True,
+                    }
+                ),
+            )
+            if updated is None:
+                return None
+            self._publish_task_summary_patch_locked(task=updated, previous_task=task)
+            return updated
 
     def read_task_runtime_meta(self, task_id: str) -> dict[str, Any] | None:
         task = self._store.get_task(task_id)
@@ -1620,6 +1669,7 @@ class TaskLogService:
         current.setdefault('dispatch_queued', {'execution': 0, 'inspection': 0})
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
+        current['governance'] = normalize_task_governance_state(current.get('governance'))
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
         except (TypeError, ValueError):
@@ -2324,6 +2374,19 @@ class TaskLogService:
         self._buffer_task_live_patch_locked(task=task, payload=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.live.patch', data=payload)
 
+    def _publish_task_governance_patch_locked(self, *, task: TaskRecord, governance: dict[str, Any]) -> None:
+        payload = {
+            'task_id': task.task_id,
+            'governance': normalize_task_governance_state(governance),
+        }
+        self._append_task_event(task=task, event_type=GOVERNANCE_PATCH_EVENT_TYPE, data=payload)
+        self._dispatch_live_event_locked(
+            task=task,
+            event_type=GOVERNANCE_PATCH_EVENT_TYPE,
+            data=payload,
+            dispatch_immediate=True,
+        )
+
     def _publish_task_terminal_locked(self, *, task: TaskRecord) -> None:
         payload = {'task': self._task_summary_payload(task)}
         self._append_task_event(task=task, event_type='task.terminal', data=payload)
@@ -2613,6 +2676,7 @@ class TaskLogService:
         state['dispatch_limits'] = cls._sanitize_dispatch_counters(state.get('dispatch_limits'))
         state['dispatch_running'] = cls._sanitize_dispatch_counters(state.get('dispatch_running'))
         state['dispatch_queued'] = cls._sanitize_dispatch_counters(state.get('dispatch_queued'))
+        state['governance'] = normalize_task_governance_state(state.get('governance'))
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
 

@@ -22,6 +22,71 @@ function treeNormalizeInt(value, fallback = 0) {
     return Number.isFinite(numeric) ? numeric : fallback;
 }
 
+function normalizeTaskGovernanceHistoryEntry(value = {}) {
+    return {
+        triggered_at: String(value?.triggered_at || "").trim(),
+        trigger_reason: String(value?.trigger_reason || "").trim(),
+        trigger_snapshot: {
+            max_depth: Math.max(0, treeNormalizeInt(value?.trigger_snapshot?.max_depth, 0)),
+            total_nodes: Math.max(0, treeNormalizeInt(value?.trigger_snapshot?.total_nodes, 0)),
+        },
+        decision: String(value?.decision || "allow").trim().toLowerCase() || "allow",
+        decision_reason: String(value?.decision_reason || "").trim(),
+        limited_depth: Math.max(0, treeNormalizeInt(value?.limited_depth, 0)),
+    };
+}
+
+function normalizeTaskGovernanceState(value = {}) {
+    return {
+        enabled: value?.enabled !== false,
+        frozen: !!value?.frozen,
+        review_inflight: !!value?.review_inflight,
+        depth_baseline: Math.max(1, treeNormalizeInt(value?.depth_baseline, 1)),
+        node_count_baseline: Math.max(0, treeNormalizeInt(value?.node_count_baseline, 0)),
+        hard_limited_depth: Math.max(0, treeNormalizeInt(value?.hard_limited_depth, 0)),
+        supervision_disabled_after_limit: !!value?.supervision_disabled_after_limit,
+        last_trigger_reason: String(value?.last_trigger_reason || "").trim(),
+        last_decision: String(value?.last_decision || "").trim().toLowerCase(),
+        history: (Array.isArray(value?.history) ? value.history : [])
+            .map((item) => normalizeTaskGovernanceHistoryEntry(item)),
+    };
+}
+
+function taskGovernanceDecisionLabel(decision) {
+    const normalized = String(decision || "").trim().toLowerCase();
+    if (normalized === "cap_current_depth") return "限制深度";
+    if (normalized === "allow") return "放行";
+    return "未知";
+}
+
+function taskGovernanceStatusLabel(governance = {}) {
+    if (governance?.frozen || governance?.review_inflight) return "监管中";
+    if (governance?.supervision_disabled_after_limit) return "已限深";
+    return "监管空闲";
+}
+
+function buildTaskGovernanceViewModel(governance = S.taskGovernance) {
+    const normalized = normalizeTaskGovernanceState(governance || {});
+    const items = normalized.history.map((item) => ({
+        ...item,
+        decisionLabel: taskGovernanceDecisionLabel(item.decision),
+        decisionReason: String(item.decision_reason || "").trim(),
+        triggerSummary: `触发: ${String(item.trigger_reason || "unknown")}`,
+        snapshotSummary: `深度 ${Math.max(0, treeNormalizeInt(item?.trigger_snapshot?.max_depth, 0))} · 节点 ${Math.max(0, treeNormalizeInt(item?.trigger_snapshot?.total_nodes, 0))}`,
+        limitedDepthSummary: Math.max(0, treeNormalizeInt(item?.limited_depth, 0)) > 0 ? `限制深度 ${Math.max(0, treeNormalizeInt(item?.limited_depth, 0))}` : "",
+    }));
+    const latest = items[items.length - 1] || null;
+    return {
+        normalized,
+        visible: true,
+        breathing: !!(normalized.frozen || normalized.review_inflight),
+        statusLabel: taskGovernanceStatusLabel(normalized),
+        historyCount: items.length,
+        latestDecisionLabel: latest ? latest.decisionLabel : "暂无决策",
+        items,
+    };
+}
+
 function normalizeTaskTreeSnapshotRound(value = {}) {
     return {
         round_id: String(value?.round_id || "").trim(),
@@ -510,6 +575,36 @@ function renderTaskDetailHeader({ resetPromptDisclosure = false } = {}) {
     }
     if (U.tdStatus) U.tdStatus.textContent = taskDetailStatusLabel(task);
     if (U.tdStatusPill) U.tdStatusPill.dataset.status = taskStatusKey(task);
+}
+
+function renderTaskGovernancePanel() {
+    if (!U.taskGovernancePanel || !U.taskGovernanceDetails || !U.taskGovernanceStatus || !U.taskGovernanceLastDecision || !U.taskGovernanceHistoryCount || !U.taskGovernanceHistory || !U.taskGovernanceEmpty) return;
+    const hasTask = !!String(S.currentTaskId || "").trim();
+    if (!hasTask) {
+        U.taskGovernancePanel.hidden = true;
+        U.taskGovernancePanel.classList.remove("is-breathing");
+        U.taskGovernanceDetails.open = false;
+        U.taskGovernanceHistory.innerHTML = "";
+        U.taskGovernanceEmpty.hidden = false;
+        return;
+    }
+    const view = buildTaskGovernanceViewModel(S.taskGovernance || {});
+    U.taskGovernancePanel.hidden = !view.visible;
+    U.taskGovernancePanel.classList.toggle("is-breathing", view.breathing);
+    U.taskGovernanceStatus.textContent = view.statusLabel;
+    U.taskGovernanceLastDecision.textContent = view.latestDecisionLabel;
+    U.taskGovernanceHistoryCount.textContent = `${view.historyCount} 次`;
+    U.taskGovernanceEmpty.hidden = view.items.length > 0;
+    U.taskGovernanceHistory.innerHTML = view.items.map((item) => `
+        <article class="task-governance-entry">
+            <div class="task-governance-entry-head">
+                <strong class="task-governance-entry-title">${esc(item.decisionLabel)}</strong>
+                <span class="task-governance-entry-time">${esc(item.triggered_at || "")}</span>
+            </div>
+            <div class="task-governance-entry-meta">${esc(item.triggerSummary)} · ${esc(item.snapshotSummary)}${item.limitedDepthSummary ? ` · ${esc(item.limitedDepthSummary)}` : ""}</div>
+            <div class="task-governance-entry-reason">${esc(item.decisionReason || "暂无说明")}</div>
+        </article>
+    `).join("");
 }
 
 function syncTaskTreeHeaderState(projectedRoot = null) {
@@ -1780,6 +1875,7 @@ function applyTaskPayload(payload) {
     const frontier = Array.isArray(payload.frontier) ? payload.frontier : [];
     const recentModelCalls = Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [];
     S.currentTask = payload.task;
+    S.taskGovernance = normalizeTaskGovernanceState(payload?.governance || payload?.task?.governance || {});
     S.taskSummary = payload.summary || null;
     S.rootNode = rootNode;
     S.frontier = frontier;
@@ -1791,6 +1887,7 @@ function applyTaskPayload(payload) {
     resetTaskTreeSnapshotState();
     S.treeSelectedRoundByNodeId = {};
     renderTaskDetailHeader({ resetPromptDisclosure: previousTaskId !== nextTaskId });
+    renderTaskGovernancePanel();
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
     syncTaskTreeHeaderState(null);

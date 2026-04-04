@@ -14,6 +14,7 @@ def _run_node_script(script: str) -> dict[str, object]:
         ["node", "-"],
         input=textwrap.dedent(script),
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=True,
         cwd=REPO_ROOT,
@@ -357,3 +358,59 @@ def test_format_node_detail_heading_prefixes_node_id_before_title() -> None:
     assert result["heading"] == "node:pressure:0001:root | Analyze local path `D:\\NewProjects\\G3KU` flow"
     assert result["tooltip"] == "node:pressure:0001:root | Analyze local path `D:\\NewProjects\\G3KU` flow"
     assert result["fallback"] == "node:root"
+
+
+def test_task_governance_view_model_marks_breathing_and_formats_history() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          taskGovernance: null,
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const governance = normalizeTaskGovernanceState({
+          frozen: true,
+          review_inflight: true,
+          history: [
+            {
+              triggered_at: "2026-04-04T07:00:00+08:00",
+              trigger_reason: "depth+1",
+              trigger_snapshot: { max_depth: 2, total_nodes: 18 },
+              decision: "cap_current_depth",
+              decision_reason: "depth runaway",
+              limited_depth: 2,
+            },
+            {
+              triggered_at: "2026-04-04T06:30:00+08:00",
+              trigger_reason: "node_count_double",
+              trigger_snapshot: { max_depth: 1, total_nodes: 16 },
+              decision: "allow",
+              decision_reason: "breadth only",
+            },
+          ],
+        });
+        const view = buildTaskGovernanceViewModel(governance);
+        console.log(JSON.stringify({
+          breathing: view.breathing,
+          statusLabel: view.statusLabel,
+          historyCount: view.historyCount,
+          firstDecision: view.items[0].decisionLabel,
+          secondReason: view.items[1].decisionReason,
+        }));
+        """
+    )
+
+    assert result["breathing"] is True
+    assert result["statusLabel"] == "监管中"
+    assert result["historyCount"] == 2
+    assert result["firstDecision"] == "限制深度"
+    assert result["secondReason"] == "breadth only"

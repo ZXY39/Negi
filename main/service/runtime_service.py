@@ -64,6 +64,7 @@ from main.runtime.node_runner import NodeRunner
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
+from main.runtime.task_governance import GOVERNANCE_PATCH_EVENT_TYPE, TaskGovernanceManager
 from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.event_registry import TaskEventRegistry
@@ -348,6 +349,11 @@ class MainRuntimeService:
             acceptance_max_concurrency=acceptance_max_concurrency,
             context_enricher=self._enrich_node_messages,
         )
+        self.task_governance_manager = TaskGovernanceManager(service=self)
+        self.node_runner.governance_child_created_observer = self.task_governance_manager.on_execution_child_created
+        self.node_runner.governance_spawn_refusal_supplier = self.task_governance_manager.spawn_refusal_message
+        if self.node_turn_controller is not None:
+            self.node_turn_controller.configure(freeze_supplier=self.task_governance_manager.is_task_frozen)
         self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
         self.task_actor_service = TaskActorService(
             store=self.store,
@@ -1418,7 +1424,7 @@ class MainRuntimeService:
             )
             self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
             return
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'}:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal', GOVERNANCE_PATCH_EVENT_TYPE}:
             detail_payload = build_envelope(
                 channel='task',
                 session_id=task.session_id,
@@ -1450,7 +1456,7 @@ class MainRuntimeService:
         session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
         task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip()) if normalized.get('task_id') else ''
         data = dict(normalized.get('data') or {})
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'} and task_id:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal', GOVERNANCE_PATCH_EVENT_TYPE} and task_id:
             payload = build_envelope(
                 channel='task',
                 session_id=session_id,
@@ -4211,6 +4217,8 @@ class MainRuntimeService:
             await callback_client.aclose()
         if self.tool_pressure_monitor is not None:
             await self.tool_pressure_monitor.close()
+        if getattr(self, 'task_governance_manager', None) is not None:
+            await self.task_governance_manager.close()
         if self.node_turn_controller is not None:
             await self.node_turn_controller.close()
         await self.worker_heartbeat_service.close()
@@ -4263,6 +4271,7 @@ class MainRuntimeService:
         return {
             'node_queue_running_count': int(payload.get('node_queue_running_count') or 0),
             'node_queue_waiting_count': int(payload.get('node_queue_waiting_count') or 0),
+            'node_queue_frozen_count': int(payload.get('node_queue_frozen_count') or 0),
             'node_queue_oldest_wait_ms': float(payload.get('node_queue_oldest_wait_ms') or 0.0),
         }
 
