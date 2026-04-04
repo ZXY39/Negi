@@ -68,21 +68,37 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
         return {"configurable": {"thread_id": str(session_key or "").strip()}}
 
     @staticmethod
-    def _unwrap_graph_output(graph_output: Any) -> dict[str, Any]:
+    def _checkpoint_safe_value(value: Any) -> Any:
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+        if isinstance(value, dict):
+            return {
+                str(key): CreateAgentCeoFrontDoorRunner._checkpoint_safe_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list | tuple | set):
+            return [CreateAgentCeoFrontDoorRunner._checkpoint_safe_value(item) for item in value]
+        return str(value)
+
+    @classmethod
+    def _unwrap_graph_output(cls, graph_output: Any) -> dict[str, Any]:
         interrupts = [
             CeoPendingInterrupt(
                 interrupt_id=str(getattr(item, "id", "") or ""),
-                value=getattr(item, "value", None),
+                value=cls._checkpoint_safe_value(getattr(item, "value", None)),
             )
             for item in list(getattr(graph_output, "interrupts", ()) or ())
         ]
-        values = dict(getattr(graph_output, "value", graph_output) or {})
+        values = cls._checkpoint_safe_value(dict(getattr(graph_output, "value", graph_output) or {}))
+        if not isinstance(values, dict):
+            values = {}
         if interrupts:
             raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
         return values
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._ensure_ready()
+        setattr(session, "_last_route_kind", "direct_reply")
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
         payload = initial_persistent_state(
             user_input={
@@ -103,6 +119,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
             version="v2",
         )
         values = self._unwrap_graph_output(graph_output)
+        setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         return str(values.get("final_output") or "")
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
@@ -120,4 +137,5 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorSupport):
             version="v2",
         )
         values = self._unwrap_graph_output(graph_output)
+        setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         return str(values.get("final_output") or "")

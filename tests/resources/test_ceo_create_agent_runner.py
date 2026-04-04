@@ -14,6 +14,11 @@ class _FakeGraphOutput:
         self.interrupts = tuple(interrupts)
 
 
+class _NonPrimitive:
+    def __str__(self) -> str:
+        return "non-primitive"
+
+
 def test_memory_assembly_config_exposes_create_agent_and_summarizer_defaults() -> None:
     cfg = MemoryAssemblyConfig()
 
@@ -71,7 +76,7 @@ def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None
 async def test_create_agent_runner_passes_thread_id_and_context() -> None:
     captured: dict[str, object] = {}
     readiness_calls: list[str] = []
-    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))
+    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
     progress_calls: list[object] = []
 
     async def _on_progress(*args, **kwargs):
@@ -98,6 +103,7 @@ async def test_create_agent_runner_passes_thread_id_and_context() -> None:
 
     assert output == "ok"
     assert readiness_calls == ["ready"]
+    assert session._last_route_kind == "direct_reply"
     assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
     assert getattr(captured["context"], "session_key") == "web:shared"
     assert getattr(captured["context"], "loop") is runner._loop
@@ -110,6 +116,7 @@ async def test_create_agent_runner_passes_thread_id_and_context() -> None:
 @pytest.mark.asyncio
 async def test_create_agent_runner_raises_structured_interrupt() -> None:
     readiness_calls: list[str] = []
+    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
 
     class _InterruptingAgent:
         async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
@@ -127,11 +134,12 @@ async def test_create_agent_runner_raises_structured_interrupt() -> None:
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
         await runner.run_turn(
             user_input=SimpleNamespace(content="create a task", metadata={}),
-            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+            session=session,
             on_progress=None,
         )
 
     assert readiness_calls == ["ready"]
+    assert session._last_route_kind == "direct_reply"
     assert exc_info.value.values == {"approval_request": {"kind": "frontdoor_tool_approval"}}
     assert [item.interrupt_id for item in exc_info.value.interrupts] == ["interrupt-1"]
 
@@ -140,7 +148,7 @@ async def test_create_agent_runner_raises_structured_interrupt() -> None:
 async def test_create_agent_runner_resume_uses_command_resume() -> None:
     captured: dict[str, object] = {}
     readiness_calls: list[str] = []
-    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))
+    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
     progress_calls: list[object] = []
 
     async def _on_progress(*args, **kwargs):
@@ -152,7 +160,7 @@ async def test_create_agent_runner_resume_uses_command_resume() -> None:
             captured["version"] = version
             captured["payload"] = payload
             captured["config"] = config
-            return {"messages": [], "route_kind": "direct_reply", "final_output": "approved"}
+            return {"messages": [], "route_kind": "self_execute", "final_output": "approved"}
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: readiness_calls.append("ready"))
@@ -168,17 +176,20 @@ async def test_create_agent_runner_resume_uses_command_resume() -> None:
     assert result == "approved"
     assert readiness_calls == ["ready"]
     assert isinstance(captured["payload"], Command)
+    assert getattr(captured["payload"], "resume", None) == {"decisions": [{"type": "approve"}]}
     assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
     assert getattr(captured["context"], "session_key") == "web:shared"
     assert getattr(captured["context"], "loop") is runner._loop
     assert getattr(captured["context"], "session") is session
     assert getattr(captured["context"], "on_progress") is _on_progress
+    assert session._last_route_kind == "self_execute"
     assert progress_calls == []
 
 
 @pytest.mark.asyncio
 async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
     readiness_calls: list[str] = []
+    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
 
     class _InterruptingResumeAgent:
         async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
@@ -195,14 +206,53 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
 
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
         await runner.resume_turn(
-            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+            session=session,
             resume_value={"decisions": [{"type": "approve"}]},
             on_progress=None,
         )
 
     assert readiness_calls == ["ready"]
+    assert session._last_route_kind == "task_dispatch"
     assert exc_info.value.values == {
         "approval_request": {"kind": "frontdoor_tool_approval"},
         "final_output": "ignored",
     }
     assert [item.interrupt_id for item in exc_info.value.interrupts] == ["interrupt-2"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_sanitizes_interrupt_payloads_before_raising() -> None:
+    class _InterruptingAgent:
+        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
+            _ = payload, config, context, version
+            return _FakeGraphOutput(
+                value={"approval_request": {"details": _NonPrimitive()}, "items": {_NonPrimitive()}},
+                interrupts=(
+                    SimpleNamespace(
+                        id="interrupt-1",
+                        value={"kind": "frontdoor_tool_approval", "payload": _NonPrimitive(), "extra": {_NonPrimitive()}},
+                    ),
+                ),
+            )
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
+    )
+    runner._agent = _InterruptingAgent()
+
+    with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
+        await runner.run_turn(
+            user_input=SimpleNamespace(content="create a task", metadata={}),
+            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+            on_progress=None,
+        )
+
+    assert exc_info.value.values == {
+        "approval_request": {"details": "non-primitive"},
+        "items": ["non-primitive"],
+    }
+    assert exc_info.value.interrupts[0].value == {
+        "kind": "frontdoor_tool_approval",
+        "payload": "non-primitive",
+        "extra": ["non-primitive"],
+    }
