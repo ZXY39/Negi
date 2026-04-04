@@ -53,7 +53,7 @@ async def summarize_frontdoor_history(
             summary_text=str(state.get("summary_text") or previous_summary_text or ""),
             summary_payload=dict(previous_summary_payload or {}),
             summary_version=int(state.get("summary_version") or 0),
-            summary_model_key=str(model_key or "").strip(),
+            summary_model_key=str(state.get("summary_model_key") or ""),
         )
 
     keep_count = max(1, int(keep_message_count))
@@ -65,25 +65,8 @@ async def summarize_frontdoor_history(
         "messages": prefix,
     }
     try:
-        payload = dict(await model_invoke(prompt) or {})
-        summary_text = _render_summary_text(payload)
-        summary_message = {
-            "role": "assistant",
-            "content": summary_text,
-            "metadata": {
-                "frontdoor_history_summary": True,
-                "summary_version": 2,
-                "summary_model_key": str(model_key or "").strip(),
-                "compacted_message_count": len(prefix),
-            },
-        }
-        return CeoSummaryResult(
-            messages=[summary_message, *tail],
-            summary_text=summary_text,
-            summary_payload=payload,
-            summary_version=2,
-            summary_model_key=str(model_key or "").strip(),
-        )
+        raw_payload = await model_invoke(prompt)
+        payload = dict(raw_payload or {})
     except Exception:
         compacted = compact_frontdoor_history(
             normalized_messages,
@@ -98,3 +81,21 @@ async def summarize_frontdoor_history(
             summary_version=int(state.get("summary_version") or 1),
             summary_model_key="",
         )
+    summary_text = _render_summary_text(payload)
+    summary_message = {
+        "role": "assistant",
+        "content": summary_text,
+        "metadata": {
+            "frontdoor_history_summary": True,
+            "summary_version": 2,
+            "summary_model_key": str(model_key or "").strip(),
+            "compacted_message_count": len(prefix),
+        },
+    }
+    return CeoSummaryResult(
+        messages=[summary_message, *tail],
+        summary_text=summary_text,
+        summary_payload=payload,
+        summary_version=2,
+        summary_model_key=str(model_key or "").strip(),
+    )
