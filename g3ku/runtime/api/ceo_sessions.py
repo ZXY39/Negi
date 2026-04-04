@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+from inspect import isawaitable
 from types import SimpleNamespace
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Query
 
+from g3ku.runtime.frontdoor.checkpoint_inspection import (
+    get_frontdoor_checkpoint,
+    get_frontdoor_checkpoint_history,
+)
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_ceo_session_catalog,
@@ -207,6 +212,48 @@ def _task_defaults_response(session) -> dict:
         "task_defaults": task_defaults,
         "main_runtime": depth_limits,
     }
+
+
+@router.get("/ceo/sessions/{session_id}/checkpoint")
+async def get_ceo_session_checkpoint(
+    session_id: str,
+    checkpoint_id: str | None = Query(None),
+):
+    agent, session_manager, _runtime_manager, _state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    session = _assert_known_session(session_manager, session_id)
+    item = get_frontdoor_checkpoint(
+        agent,
+        session_id=session.key,
+        checkpoint_id=checkpoint_id,
+    )
+    if isawaitable(item):
+        item = await item
+    if item is None:
+        raise HTTPException(status_code=404, detail="checkpoint_not_found")
+    return {"ok": True, "session_id": session.key, "item": item}
+
+
+@router.get("/ceo/sessions/{session_id}/checkpoint-history")
+async def get_ceo_session_checkpoint_history(
+    session_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    before_checkpoint_id: str | None = Query(None),
+):
+    agent, session_manager, _runtime_manager, _state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    session = _assert_known_session(session_manager, session_id)
+    items = get_frontdoor_checkpoint_history(
+        agent,
+        session_id=session.key,
+        limit=limit,
+        before_checkpoint_id=before_checkpoint_id,
+    )
+    if isawaitable(items):
+        items = await items
+    return {"ok": True, "session_id": session.key, "items": items}
 
 
 @router.get("/ceo/sessions")
