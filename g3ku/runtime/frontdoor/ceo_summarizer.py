@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .history_compaction import compact_frontdoor_history, frontdoor_summary_state
+from .history_compaction import (
+    compact_frontdoor_history,
+    frontdoor_summary_state,
+    partition_frontdoor_history,
+)
 
 SummaryInvoker = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -57,16 +61,27 @@ async def summarize_frontdoor_history(
         )
 
     keep_count = max(1, int(keep_message_count))
-    prefix = normalized_messages[:-keep_count]
-    tail = normalized_messages[-keep_count:]
+    preserved_prefix, compactable_messages, tail = partition_frontdoor_history(
+        normalized_messages,
+        recent_message_count=keep_count,
+        summary_trigger_message_count=max(1, int(trigger_message_count)),
+    )
+    if not compactable_messages or not tail:
+        state = frontdoor_summary_state(normalized_messages)
+        return CeoSummaryResult(
+            messages=normalized_messages,
+            summary_text=str(state.get("summary_text") or previous_summary_text or ""),
+            summary_payload=dict(previous_summary_payload or {}),
+            summary_version=int(state.get("summary_version") or 0),
+            summary_model_key=str(state.get("summary_model_key") or ""),
+        )
     prompt = {
         "previous_summary_text": str(previous_summary_text or ""),
         "previous_summary_payload": dict(previous_summary_payload or {}),
-        "messages": prefix,
+        "messages": compactable_messages,
     }
     try:
         raw_payload = await model_invoke(prompt)
-        payload = dict(raw_payload or {})
     except Exception:
         compacted = compact_frontdoor_history(
             normalized_messages,
@@ -81,6 +96,7 @@ async def summarize_frontdoor_history(
             summary_version=int(state.get("summary_version") or 1),
             summary_model_key="",
         )
+    payload = dict(raw_payload or {})
     summary_text = _render_summary_text(payload)
     summary_message = {
         "role": "assistant",
@@ -89,11 +105,11 @@ async def summarize_frontdoor_history(
             "frontdoor_history_summary": True,
             "summary_version": 2,
             "summary_model_key": str(model_key or "").strip(),
-            "compacted_message_count": len(prefix),
+            "compacted_message_count": len(compactable_messages),
         },
     }
     return CeoSummaryResult(
-        messages=[summary_message, *tail],
+        messages=[*preserved_prefix, summary_message, *tail],
         summary_text=summary_text,
         summary_payload=payload,
         summary_version=2,

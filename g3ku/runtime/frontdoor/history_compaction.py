@@ -168,19 +168,11 @@ def compact_frontdoor_history(
     if not normalized:
         return []
 
-    prefix_length = _summary_prefix_length(normalized)
-    prefix = normalized[:prefix_length]
-    history = normalized[prefix_length:]
-    trigger_count = max(1, int(summary_trigger_message_count))
-    if len(history) <= trigger_count:
-        return normalized
-
-    tail_start = _tail_start_index(history, recent_message_count=recent_message_count)
-    if tail_start <= 0:
-        return normalized
-
-    older_messages = history[:tail_start]
-    recent_tail = history[tail_start:]
+    prefix, older_messages, recent_tail = partition_frontdoor_history(
+        normalized,
+        recent_message_count=recent_message_count,
+        summary_trigger_message_count=summary_trigger_message_count,
+    )
     if not older_messages or not recent_tail:
         return normalized
 
@@ -191,9 +183,36 @@ def compact_frontdoor_history(
     ]
 
 
+def partition_frontdoor_history(
+    messages: list[dict[str, Any]] | None,
+    *,
+    recent_message_count: int,
+    summary_trigger_message_count: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized = [dict(message) for message in list(messages or []) if isinstance(message, dict)]
+    if not normalized:
+        return [], [], []
+
+    prefix_length = _summary_prefix_length(normalized)
+    prefix = normalized[:prefix_length]
+    history = normalized[prefix_length:]
+    trigger_count = max(1, int(summary_trigger_message_count))
+    if len(history) <= trigger_count:
+        return prefix, [], history
+
+    tail_start = _tail_start_index(history, recent_message_count=recent_message_count)
+    if tail_start <= 0:
+        return prefix, [], history
+
+    older_messages = history[:tail_start]
+    recent_tail = history[tail_start:]
+    return prefix, older_messages, recent_tail
+
+
 __all__ = [
     "FRONTDOOR_HISTORY_SUMMARY_MARKER",
     "compact_frontdoor_history",
     "frontdoor_summary_state",
     "is_frontdoor_history_summary_message",
+    "partition_frontdoor_history",
 ]

@@ -98,3 +98,105 @@ async def test_summarize_frontdoor_history_preserves_existing_summary_model_key_
     assert result.summary_text == "## Existing Summary [frontdoor-history-summary]"
     assert result.summary_version == 2
     assert result.summary_model_key == "existing-model"
+
+
+@pytest.mark.asyncio
+async def test_summarize_frontdoor_history_model_success_preserves_leading_prefix_messages() -> None:
+    messages = [
+        {"role": "system", "content": "system guardrail"},
+        {"role": "assistant", "content": "## Retrieved Context\nsource: CEO notes"},
+        {"role": "user", "content": "message 0"},
+        {"role": "assistant", "content": "message 1"},
+        {"role": "user", "content": "message 2"},
+        {"role": "assistant", "content": "message 3"},
+        {"role": "user", "content": "message 4"},
+        {"role": "assistant", "content": "message 5"},
+    ]
+
+    async def _fake_model(prompt: dict[str, object]) -> dict[str, object]:
+        prompt_messages = prompt["messages"]
+        assert isinstance(prompt_messages, list)
+        assert [item["content"] for item in prompt_messages] == ["message 0", "message 1", "message 2", "message 3"]
+        return {
+            "stable_preferences": ["reply in Chinese"],
+            "narrative": "Preserve the frontdoor context.",
+        }
+
+    result = await summarize_frontdoor_history(
+        messages=messages,
+        previous_summary_text="",
+        previous_summary_payload={},
+        keep_message_count=2,
+        trigger_message_count=4,
+        model_key="summary-model",
+        model_invoke=_fake_model,
+    )
+
+    assert [item["content"] for item in result.messages[:2]] == [
+        "system guardrail",
+        "## Retrieved Context\nsource: CEO notes",
+    ]
+    assert "Preserve the frontdoor context." in result.messages[2]["content"]
+    assert [item["content"] for item in result.messages[-2:]] == ["message 4", "message 5"]
+
+
+@pytest.mark.asyncio
+async def test_summarize_frontdoor_history_prefix_retention_matches_fallback_path() -> None:
+    messages = [
+        {"role": "system", "content": "system guardrail"},
+        {"role": "assistant", "content": "## Retrieved Context\nsource: CEO notes"},
+        {"role": "user", "content": "message 0"},
+        {"role": "assistant", "content": "message 1"},
+        {"role": "user", "content": "message 2"},
+        {"role": "assistant", "content": "message 3"},
+        {"role": "user", "content": "message 4"},
+        {"role": "assistant", "content": "message 5"},
+    ]
+    heuristic_messages = compact_frontdoor_history(
+        messages,
+        recent_message_count=2,
+        summary_trigger_message_count=4,
+    )
+
+    async def _boom(prompt: dict[str, object]) -> dict[str, object]:
+        _ = prompt
+        raise RuntimeError("summary model unavailable")
+
+    async def _fake_model(prompt: dict[str, object]) -> dict[str, object]:
+        _ = prompt
+        return {
+            "stable_preferences": ["reply in Chinese"],
+            "narrative": "Preserve the frontdoor context.",
+        }
+
+    success_result = await summarize_frontdoor_history(
+        messages=messages,
+        previous_summary_text="",
+        previous_summary_payload={},
+        keep_message_count=2,
+        trigger_message_count=4,
+        model_key="summary-model",
+        model_invoke=_fake_model,
+    )
+    fallback_result = await summarize_frontdoor_history(
+        messages=messages,
+        previous_summary_text="",
+        previous_summary_payload={},
+        keep_message_count=2,
+        trigger_message_count=4,
+        model_key="summary-model",
+        model_invoke=_boom,
+    )
+
+    assert [item["content"] for item in success_result.messages[:2]] == [
+        item["content"] for item in heuristic_messages[:2]
+    ]
+    assert [item["content"] for item in fallback_result.messages[:2]] == [
+        item["content"] for item in heuristic_messages[:2]
+    ]
+    assert [item["content"] for item in success_result.messages[-2:]] == [
+        item["content"] for item in heuristic_messages[-2:]
+    ]
+    assert [item["content"] for item in fallback_result.messages[-2:]] == [
+        item["content"] for item in heuristic_messages[-2:]
+    ]
