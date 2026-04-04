@@ -87,6 +87,27 @@ class _InterruptingCompiledGraph:
         )
 
 
+class _MessageTool(Tool):
+    @property
+    def name(self) -> str:
+        return "message"
+
+    @property
+    def description(self) -> str:
+        return "send message"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {"content": {"type": "string"}},
+            "required": ["content"],
+        }
+
+    async def execute(self, **kwargs):
+        return kwargs
+
+
 @pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_passes_thread_id_and_runtime_context() -> None:
     ready_calls: list[str] = []
@@ -1028,3 +1049,153 @@ async def test_invoke_summary_model_uses_explicit_model_key_and_parses_json(
     assert captured["model_key"] == "summary-model"
     assert captured["role"] is None
     assert "strict JSON" in str(captured["messages"][0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_graph_prepare_turn_real_session_path_carries_model_summary_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_langgraph_impl, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={"message": _MessageTool()},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=True,
+                frontdoor_summarizer_model_key="summary-model",
+                frontdoor_summarizer_trigger_message_count=4,
+                frontdoor_summarizer_keep_message_count=3,
+            )
+        ),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["message"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM PROMPT"},
+                {"role": "user", "content": "question one"},
+                {"role": "assistant", "content": "answer one"},
+                {"role": "user", "content": "question two"},
+                {"role": "assistant", "content": "answer two"},
+            ],
+        )
+
+    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
+        assert prompt["messages"]
+        return {
+            "stable_preferences": ["reply concisely"],
+            "stable_facts": ["fact"],
+            "open_loops": ["follow up"],
+            "recent_actions": ["summarized history"],
+            "narrative": "CEO frontdoor durable context.",
+        }
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    result = await runner._graph_prepare_turn(
+        {"user_input": SimpleNamespace(content="question three", metadata={})},
+        runtime=runtime,
+    )
+
+    assert "## CEO Durable Summary" in str(result["summary_text"])
+    assert result["summary_payload"] == {
+        "stable_preferences": ["reply concisely"],
+        "stable_facts": ["fact"],
+        "open_loops": ["follow up"],
+        "recent_actions": ["summarized history"],
+        "narrative": "CEO frontdoor durable context.",
+    }
+    assert result["summary_model_key"] == "summary-model"
+    assert "## CEO Durable Summary" in str(result["messages"][1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_graph_finalize_turn_preserves_model_summary_state_on_direct_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = SimpleNamespace(
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=True,
+                frontdoor_summarizer_model_key="summary-model",
+                frontdoor_summarizer_trigger_message_count=4,
+                frontdoor_summarizer_keep_message_count=3,
+            )
+        )
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
+        assert prompt["messages"]
+        return {
+            "stable_preferences": ["reply concisely"],
+            "stable_facts": ["fact"],
+            "open_loops": ["follow up"],
+            "recent_actions": ["finalized reply"],
+            "narrative": "CEO frontdoor durable context.",
+        }
+
+    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
+
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": [{"role": "user", "content": f"message {idx}"} for idx in range(6)],
+            "final_output": "final answer",
+            "route_kind": "direct_reply",
+            "heartbeat_internal": False,
+            "query_text": "message 5",
+            "summary_payload": {"stable_facts": ["old fact"]},
+            "summary_model_key": "summary-model",
+        }
+    )
+
+    assert "## CEO Durable Summary" in str(result["summary_text"])
+    assert result["summary_payload"] == {
+        "stable_preferences": ["reply concisely"],
+        "stable_facts": ["fact"],
+        "open_loops": ["follow up"],
+        "recent_actions": ["finalized reply"],
+        "narrative": "CEO frontdoor durable context.",
+    }
+    assert result["summary_model_key"] == "summary-model"

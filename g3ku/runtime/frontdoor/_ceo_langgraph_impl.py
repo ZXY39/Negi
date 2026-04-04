@@ -1102,7 +1102,7 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         messages = list(state.get("messages") or [])
         messages.append(assistant_message)
         messages.extend(tool_messages)
-        compacted_state = self._compacted_frontdoor_state(messages)
+        compacted_state = await self._summarize_messages(messages=messages, state=state)
         messages = list(compacted_state.get("messages") or [])
 
         used_tools = list(state.get("used_tools") or [])
@@ -1137,7 +1137,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             return {
                 "messages": messages,
                 "summary_text": str(compacted_state.get("summary_text") or ""),
+                "summary_payload": dict(compacted_state.get("summary_payload") or {}),
                 "summary_version": int(compacted_state.get("summary_version") or 0),
+                "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
                 "used_tools": used_tools,
                 "route_kind": route_kind,
                 "analysis_text": "",
@@ -1151,7 +1153,9 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         return {
             "messages": messages,
             "summary_text": str(compacted_state.get("summary_text") or ""),
+            "summary_payload": dict(compacted_state.get("summary_payload") or {}),
             "summary_version": int(compacted_state.get("summary_version") or 0),
+            "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
             "used_tools": used_tools,
             "route_kind": route_kind,
             "analysis_text": "",
@@ -1174,12 +1178,19 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
             if last_role != "assistant":
                 messages.append({"role": "assistant", "content": output})
-            compacted_state = self._compacted_frontdoor_state(messages)
-            result["messages"] = compacted_state["messages"]
+            compacted_state = await self._summarize_messages(messages=messages, state=state)
+            result["messages"] = list(compacted_state.get("messages") or [])
             result["summary_text"] = str(compacted_state.get("summary_text") or "")
+            result["summary_payload"] = dict(compacted_state.get("summary_payload") or {})
             result["summary_version"] = int(compacted_state.get("summary_version") or 0)
+            result["summary_model_key"] = str(compacted_state.get("summary_model_key") or "")
             return result
-        result.update(frontdoor_summary_state(messages))
+        compacted_state = await self._summarize_messages(messages=messages, state=state)
+        result["messages"] = list(compacted_state.get("messages") or [])
+        result["summary_text"] = str(compacted_state.get("summary_text") or "")
+        result["summary_payload"] = dict(compacted_state.get("summary_payload") or {})
+        result["summary_version"] = int(compacted_state.get("summary_version") or 0)
+        result["summary_model_key"] = str(compacted_state.get("summary_model_key") or "")
         return result
 
     async def _invoke_graph_input(self, *, graph_input, session, on_progress=None) -> dict[str, Any]:

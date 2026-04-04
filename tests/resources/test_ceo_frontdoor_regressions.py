@@ -654,3 +654,87 @@ async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summar
     assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
     assert result["summary_payload"] == {}
     assert result["summary_model_key"] == ""
+
+
+@pytest.mark.asyncio
+async def test_graph_execute_tools_preserves_model_summary_state(monkeypatch, tmp_path) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=True,
+                frontdoor_summarizer_model_key="summary-model",
+                frontdoor_summarizer_trigger_message_count=4,
+                frontdoor_summarizer_keep_message_count=3,
+            )
+        ),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
+        assert prompt["messages"]
+        return {
+            "stable_preferences": ["reply concisely"],
+            "stable_facts": ["fact"],
+            "open_loops": ["follow up"],
+            "recent_actions": ["tool executed"],
+            "narrative": "CEO frontdoor durable context.",
+        }
+
+    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    result = await runner._graph_execute_tools(
+        {
+            "messages": [{"role": "user", "content": f"message {idx}"} for idx in range(6)],
+            "tool_call_payloads": [{"id": "call-1", "name": "missing_tool", "arguments": {"value": "alpha"}}],
+            "response_payload": {"content": "tool preface"},
+            "synthetic_tool_calls_used": False,
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": None,
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "summary_payload": {"stable_facts": ["old fact"]},
+            "summary_model_key": "summary-model",
+            "tool_names": [],
+            "user_input": {"content": "follow up", "metadata": {}},
+        },
+        runtime=runtime,
+    )
+
+    assert "## CEO Durable Summary" in str(result["summary_text"])
+    assert result["summary_payload"] == {
+        "stable_preferences": ["reply concisely"],
+        "stable_facts": ["fact"],
+        "open_loops": ["follow up"],
+        "recent_actions": ["tool executed"],
+        "narrative": "CEO frontdoor durable context.",
+    }
+    assert result["summary_model_key"] == "summary-model"
