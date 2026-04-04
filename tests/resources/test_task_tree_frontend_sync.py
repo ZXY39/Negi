@@ -360,6 +360,136 @@ def test_format_node_detail_heading_prefixes_node_id_before_title() -> None:
     assert result["fallback"] == "node:root"
 
 
+def test_build_node_execution_trace_uses_summary_execution_trace_when_full_trace_missing() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:test",
+            goal: "inspect repository",
+            final_output: "done",
+          },
+          {
+            prompt: "inspect repository",
+            final_output: "done",
+            execution_trace_summary: {
+              stages: [
+                {
+                  stage_goal: "inspect repository",
+                  tool_calls: [
+                    {
+                      tool_name: "filesystem",
+                      arguments_text: "{\\"path\\": \\".\\"}",
+                      output_text: "repo listing",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+
+        console.log(JSON.stringify({
+          stageCount: trace.stages.length,
+          stageGoal: trace.stages[0]?.stage_goal || "",
+          roundCount: trace.stages[0]?.rounds?.length || 0,
+          toolName: trace.stages[0]?.rounds?.[0]?.tools?.[0]?.tool_name || "",
+          outputText: trace.stages[0]?.rounds?.[0]?.tools?.[0]?.output_text || "",
+        }));
+        """
+    )
+
+    assert result["stageCount"] == 1
+    assert result["stageGoal"] == "inspect repository"
+    assert result["roundCount"] == 1
+    assert result["toolName"] == "filesystem"
+    assert result["outputText"] == "repo listing"
+
+
+def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_duplicate_goal_field() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:test",
+            goal: "inspect repository",
+          },
+          {
+            execution_trace_summary: {
+              stages: [
+                {
+                  stage_goal: "full stage goal: locate entry, read context, organize evidence",
+                  tool_calls: [
+                    {
+                      tool_name: "filesystem",
+                      arguments_text: "{\\"path\\": \\".\\"}",
+                      output_text: "repo listing",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+        const steps = buildExecutionTraceSteps(trace, { state: "in_progress" });
+        const stageStep = steps[1];
+
+        console.log(JSON.stringify({
+          title: stageStep?.title || "",
+          containsStageGoalField: String(stageStep?.bodyHtml || "").includes("\\u9636\\u6bb5\\u76ee\\u6807"),
+          containsStatusField: String(stageStep?.bodyHtml || "").includes("\\u72b6\\u6001"),
+          containsToolOutput: String(stageStep?.bodyHtml || "").includes("repo listing"),
+        }));
+        """
+    )
+
+    assert result["title"] == "full stage goal: locate entry, read context, organize evidence"
+    assert result["containsStageGoalField"] is False
+    assert result["containsStatusField"] is True
+    assert result["containsToolOutput"] is True
+
+
 def test_task_governance_view_model_marks_breathing_and_formats_history() -> None:
     result = _run_node_script(
         """

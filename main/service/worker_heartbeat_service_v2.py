@@ -31,6 +31,9 @@ class WorkerHeartbeatServiceV2:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
+    def start_background(self) -> None:
+        self._start_thread()
+
     async def run_forever(self) -> None:
         self._start_thread()
         try:

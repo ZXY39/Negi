@@ -902,8 +902,69 @@ function buildLiveSectionStatus(items) {
     return "info";
 }
 
+function normalizeSummaryTraceToolCall(step, index = 0) {
+    return {
+        tool_call_id: String(step?.tool_call_id || `summary-tool-${index + 1}`),
+        tool_name: String(step?.tool_name || "tool"),
+        arguments_text: String(step?.arguments_text || ""),
+        output_text: String(step?.output_text || ""),
+        output_ref: String(step?.output_ref || ""),
+        started_at: String(step?.started_at || ""),
+        finished_at: String(step?.finished_at || ""),
+        elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
+        status: ["running", "success", "error"].includes(String(step?.status || ""))
+            ? String(step.status)
+            : (String(step?.output_text || "").trim() || String(step?.output_ref || "").trim() ? "success" : "info"),
+    };
+}
+
+function normalizeSummaryExecutionTrace(summary) {
+    const toInt = (value, fallback = 0) => {
+        const parsed = Number.parseInt(String(value ?? ""), 10);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const stages = (Array.isArray(summary?.stages) ? summary.stages : []).map((stage, stageIndex) => {
+        const tools = (Array.isArray(stage?.tool_calls) ? stage.tool_calls : []).map((step, toolIndex) => (
+            normalizeSummaryTraceToolCall(step, toolIndex)
+        ));
+        return {
+            stage_id: String(stage?.stage_id || `summary-stage-${stageIndex + 1}`),
+            stage_index: toInt(stage?.stage_index, stageIndex + 1),
+            mode: String(stage?.mode || "执行摘要").trim() || "执行摘要",
+            status: String(stage?.status || (tools.length ? "完成" : "进行中")).trim() || "进行中",
+            stage_goal: String(stage?.stage_goal || "").trim(),
+            stage_total_steps: toInt(stage?.tool_round_budget, 0),
+            tool_rounds_used: tools.length ? 1 : 0,
+            created_at: String(stage?.created_at || ""),
+            finished_at: String(stage?.finished_at || ""),
+            rounds: tools.length ? [{
+                round_id: "",
+                round_index: 1,
+                created_at: "",
+                budget_counted: false,
+                tools,
+            }] : [],
+        };
+    });
+    const toolSteps = stages.flatMap((stage) => (
+        Array.isArray(stage?.rounds)
+            ? stage.rounds.flatMap((round) => (Array.isArray(round?.tools) ? round.tools : []))
+            : []
+    ));
+    return {
+        tool_steps: toolSteps,
+        stages,
+    };
+}
+
 function buildNodeExecutionTrace(node, detail, liveFrame = null) {
-    const source = detail?.execution_trace && typeof detail.execution_trace === "object" ? detail.execution_trace : {};
+    const fullTrace = detail?.execution_trace && typeof detail.execution_trace === "object" ? detail.execution_trace : {};
+    const summaryTrace = normalizeSummaryExecutionTrace(
+        detail?.execution_trace_summary && typeof detail.execution_trace_summary === "object"
+            ? detail.execution_trace_summary
+            : {},
+    );
+    const source = Object.keys(fullTrace).length ? fullTrace : summaryTrace;
     const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps : [];
     const stages = (Array.isArray(source.stages) ? source.stages : []).map((stage, index) => normalizeExecutionStageTrace(stage, index));
     const initialPrompt = [source.initial_prompt, detail?.prompt, detail?.goal, node?.prompt, node?.goal, node?.input]
@@ -1084,6 +1145,13 @@ function displayTaskStageStatus(status) {
     }[String(status || "").trim()]) || String(status || "").trim() || "进行中";
 }
 
+function formatExecutionStageTitle(stage) {
+    const stageGoal = String(stage?.stage_goal || "").trim();
+    const fallbackTitle = String(stage?.mode || "自主执行").trim() || "自主执行";
+    const title = stageGoal || fallbackTitle;
+    return `${title}${stage?.created_at ? ` · ${formatCompactTime(stage.created_at)}` : ""}`;
+}
+
 function buildExecutionTraceSteps(trace, node) {
     const initialPromptStep = {
         traceKey: "initial_prompt",
@@ -1097,13 +1165,12 @@ function buildExecutionTraceSteps(trace, node) {
             initialPromptStep,
             ...trace.stages.map((stage, index) => ({
                 traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
-                title: `${stage.mode || "自主执行"}${stage.created_at ? ` · ${formatCompactTime(stage.created_at)}` : ""}`,
+                title: formatExecutionStageTitle(stage),
                 status: stageTraceStatus(stage),
                 open: index === trace.stages.length - 1,
                 bodyHtml: [
                     renderTraceMessage(`本阶段最大轮数为${stage.stage_total_steps || 0}`, "本阶段最大轮数为0"),
                     renderTraceField("状态", displayTaskStageStatus(stage.status), "进行中"),
-                    renderTraceField("阶段目标", stage.stage_goal, "暂无阶段目标"),
                     renderExecutionStageRounds(stage),
                 ].join(""),
             })),

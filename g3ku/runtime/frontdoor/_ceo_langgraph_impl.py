@@ -315,6 +315,8 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
 
     def _reviewable_tool_names(self) -> set[str]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        if not bool(getattr(assembly_cfg, "frontdoor_interrupt_approval_enabled", False)):
+            return set()
         raw_names = list(
             getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task"]) or []
         )

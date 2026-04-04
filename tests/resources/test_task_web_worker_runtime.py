@@ -1076,6 +1076,51 @@ async def test_worker_startup_replays_pending_task_summary_outbox(tmp_path: Path
     assert scheduled == ["task:pending-summary"]
 
 
+@pytest.mark.asyncio
+async def test_worker_startup_publishes_heartbeat_before_read_model_rebuild(tmp_path: Path, monkeypatch):
+    seed_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-seed",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    worker_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks-worker",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+
+    original_sync = worker_service.log_service.sync_task_read_models
+
+    def _sync_with_heartbeat_assertion(task_id: str, *args, **kwargs):
+        deadline = time.time() + 1.0
+        while time.time() < deadline and worker_service.latest_worker_status() is None:
+            time.sleep(0.01)
+        assert worker_service.latest_worker_status() is not None
+        return original_sync(task_id, *args, **kwargs)
+
+    try:
+        record, root = seed_service._build_task_record(
+            task="startup heartbeat ordering",
+            session_id="web:shared",
+            max_depth=None,
+            title=None,
+            metadata=None,
+        )
+        seed_service.log_service.initialize_task(record, root)
+        monkeypatch.setattr(worker_service.log_service, "sync_task_read_models", _sync_with_heartbeat_assertion)
+        worker_service.global_scheduler.enqueue_task = _noop_enqueue_task
+        await worker_service.startup()
+    finally:
+        await worker_service.close()
+        await seed_service.close()
+
+
 def test_web_mode_create_task_enqueues_command_without_running(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

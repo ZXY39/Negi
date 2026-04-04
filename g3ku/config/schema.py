@@ -647,6 +647,7 @@ class MemoryAssemblyConfig(Base):
     extension_tool_top_k: int = 6
     frontdoor_recent_message_count: int = Field(default=8, ge=1)
     frontdoor_summary_trigger_message_count: int = Field(default=24, ge=1)
+    frontdoor_interrupt_approval_enabled: bool = False
     frontdoor_interrupt_tool_names: list[str] = Field(
         default_factory=lambda: ["message", "create_async_task"]
     )

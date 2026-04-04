@@ -447,6 +447,7 @@ class MainRuntimeService:
             self._runtime_loop = asyncio.get_running_loop()
         if self.execution_mode == 'worker':
             self._acquire_worker_lease_or_raise()
+            self.worker_heartbeat_service.start_background()
         self.resource_registry.refresh_from_current_resources()
         self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
