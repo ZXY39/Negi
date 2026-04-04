@@ -191,15 +191,10 @@ class ExecTool(Tool):
             return (
                 f"Error: working_dir {cwd_path} is blocked. Use {temp_root} for temporary content instead of legacy tmp directories."
             )
-        if self._is_system_temp_path(cwd_path) and not self._is_within_workspace(cwd_path, temp_root):
-            return (
-                f"Error: working_dir {cwd_path} is blocked. Use {temp_root} for temporary content instead of the system temp directory."
-            )
-
         normalized = self._normalize_command(command)
         if self._mentions_legacy_temp_token(normalized) or self._command_references_any_root(command, self._legacy_temp_roots()):
             return f"Error: tmp paths are blocked. Use {temp_root} for downloads, caches, logs, and other temporary content."
-        if self._mentions_system_temp_token(normalized) or self._command_references_system_temp(command, temp_root=temp_root):
+        if self._mentions_system_temp_token(normalized):
             return f"Error: system temp paths are blocked. Use {temp_root} for downloads, caches, logs, and other temporary content."
 
         if self._matches_any(
@@ -267,19 +262,8 @@ class ExecTool(Tool):
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""
-        if not self.enable_safety_guard:
-            return None
-
         cmd = command.strip()
         lower = cmd.lower()
-
-        for pattern in self.deny_patterns:
-            if re.search(pattern, lower):
-                return "Error: Command blocked by safety guard (dangerous pattern detected)"
-
-        if self.allow_patterns:
-            if not any(re.search(p, lower) for p in self.allow_patterns):
-                return "Error: Command blocked by safety guard (not in allowlist)"
 
         if self.restrict_to_workspace:
             if "..\\" in cmd or "../" in cmd:
@@ -297,6 +281,17 @@ class ExecTool(Tool):
                     continue
                 if p.is_absolute() and not self._is_within_workspace(p, workspace_root):
                     return "Error: Command blocked by safety guard (path outside workspace)"
+
+        if not self.enable_safety_guard:
+            return None
+
+        for pattern in self.deny_patterns:
+            if re.search(pattern, lower):
+                return "Error: Command blocked by safety guard (dangerous pattern detected)"
+
+        if self.allow_patterns:
+            if not any(re.search(p, lower) for p in self.allow_patterns):
+                return "Error: Command blocked by safety guard (not in allowlist)"
 
         return None
 
@@ -468,13 +463,17 @@ class ExecTool(Tool):
                 return True
         return False
 
-    def _command_references_system_temp(self, command: str, *, temp_root: Path) -> bool:
+    def _command_references_system_temp(self, command: str, *, workspace_root: Path, temp_root: Path) -> bool:
         for raw in self._extract_absolute_paths(command):
             try:
                 path = Path(raw.strip()).expanduser().resolve()
             except Exception:
                 continue
-            if self._is_system_temp_path(path) and not self._is_within_workspace(path, temp_root):
+            if (
+                self._is_within_workspace(path, workspace_root)
+                and self._is_system_temp_path(path)
+                and not self._is_within_workspace(path, temp_root)
+            ):
                 return True
         return False
 

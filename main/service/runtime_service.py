@@ -4584,7 +4584,12 @@ class _LegacyTaskNodeDetailToolMojibakeA(Tool):
         task_id = str(kwargs.get('浠诲姟id') or '').strip()
         node_id = str(kwargs.get('鑺傜偣id') or '').strip()
         detail_level = str(kwargs.get('detail_level') or 'summary').strip()
-        return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+        try:
+            return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+        except TypeError as exc:
+            if "unexpected keyword argument 'detail_level'" not in str(exc):
+                raise
+            return self._service.node_detail(task_id, node_id)
 
 
 class _TaskNodeDetailToolMojibakeCurrent(Tool):
@@ -4618,7 +4623,12 @@ class _TaskNodeDetailToolMojibakeCurrent(Tool):
         task_id = str(kwargs.get('任务id') or '').strip()
         node_id = str(kwargs.get('节点id') or '').strip()
         detail_level = str(kwargs.get('detail_level') or 'summary').strip()
-        return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+        try:
+            return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+        except TypeError as exc:
+            if "unexpected keyword argument 'detail_level'" not in str(exc):
+                raise
+            return self._service.node_detail(task_id, node_id)
 
 
 class TaskNodeDetailTool(Tool):
@@ -4652,7 +4662,12 @@ class TaskNodeDetailTool(Tool):
         task_id = str(kwargs.get('任务id') or '').strip()
         node_id = str(kwargs.get('节点id') or '').strip()
         detail_level = str(kwargs.get('detail_level') or 'summary').strip()
-        return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+        try:
+            return self._service.node_detail(task_id, node_id, detail_level=detail_level)
+        except TypeError as exc:
+            if "unexpected keyword argument 'detail_level'" not in str(exc):
+                raise
+            return self._service.node_detail(task_id, node_id)
 
 
 class CreateAsyncTaskTool(Tool):

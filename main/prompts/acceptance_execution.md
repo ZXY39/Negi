@@ -19,9 +19,11 @@
 - 若 `execution_policy.mode="focus"`，验收目标是确认关键结果与必要验证是否已经完成；不要仅因未做边缘扩展或系统性全量操作就直接判定失败。
 - 若 `execution_policy.mode="coverage"`，仍先检查关键结果与必要验证；如任务目标明确要求补漏、扩展范围或系统性覆盖，则需据此判断是否完成。
 - 你可以使用普通工具来验证子节点或最终结果的输出。
+- 校验 `task_node_detail` 时，优先依据 summary 字段、`final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview` 判断；不要把 full node detail 当成默认入口。
 - 优先基于输出摘要、结构化结果和证据摘要判断；只有这些信息不足以完成校验时，才使用 `content.search` / `content.open` 访问 `artifact:` 引用。
+- 若 `task_node_detail` 的 summary 仍不足以支撑判断，优先打开 `execution_trace_ref` 或 `final_output_ref` 做局部核对，而不是直接请求 `detail_level="full"`。
 - 不要请求全文；除非局部片段仍不足以完成校验。
-- 如果 `prompt` 或上下文中提供了子节点输出 ref、结果载荷 ref 或其他 `artifact:` 引用，优先使用 `content.search` / `content.open` 做局部核对；不要请求全文，除非局部片段仍不足以完成校验。
+- 如果 `prompt` 或上下文中提供了子节点输出 ref、结果载荷 ref 或其他 `artifact:` 引用，优先使用 canonical `content.search` / `content.open` 做局部核对；不要请求全文，除非局部片段仍不足以完成校验；只有在调试包装内容时才切换到 raw view。
 - 当子节点输出、证据摘要或验收结论引用了具体标识符，例如函数名、类名、字段名、配置键、CLI 命令或搜索关键词时，必须核对这些标识符确实出现在所引用的文件行或重新打开的局部片段中；如果证据与引用漂移，必须按拒绝交付处理。
 - 如果 `visible_skills` 中存在与当前验收目标直接相关的 skill，必须查看并使用它们来验收，避免产出偏移实际需求。
 - 严禁泄露隐藏的思维链。

@@ -67,7 +67,9 @@ def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.1):
 
 def _python_launcher() -> str:
     if os.name == 'nt':
-        return 'py -3'
+        if shutil.which('py'):
+            return 'py -3'
+        return f'& "{Path(os.sys.executable)}"'
     return 'python3' if shutil.which('python3') else 'python'
 
 
@@ -1685,9 +1687,11 @@ def test_prepare_messages_for_model_uses_compact_content_refs(tmp_path: Path):
 
     assert prepared[0]['content']
     raw_payload = json.loads(prepared[1]['content'])
-    assert set(raw_payload.keys()) == {'type', 'summary', 'ref', 'next_actions'}
+    assert set(raw_payload.keys()) == {'type', 'summary', 'ref', 'resolved_ref', 'wrapper_ref', 'next_actions'}
     assert 'Head preview:' not in raw_payload['summary']
     assert raw_payload['ref'].startswith('artifact:')
+    assert raw_payload['resolved_ref'].startswith('artifact:')
+    assert raw_payload['wrapper_ref'] in {'', raw_payload['ref']}
     parsed = parse_content_envelope(prepared[1]['content'])
     assert parsed is not None
     assert parsed.handle is None

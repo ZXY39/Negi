@@ -24,6 +24,9 @@ permissions:
     - workspace
 settings:
   restrict_to_workspace: false
+  search_timeout_seconds: 3.0
+  search_max_files: 400
+  search_max_bytes: 10000000
   edit_validation_enabled: true
   edit_validation_timeout_seconds: 20
   edit_validation_rollback_on_failure: true
