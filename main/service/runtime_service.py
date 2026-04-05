@@ -11,29 +11,30 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 from loguru import logger
 
-from g3ku.config.live_runtime import get_runtime_config
-from g3ku.config.loader import get_config_path
-from g3ku.llm_config.runtime_resolver import resolve_chat_target
-from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
-from g3ku.web.worker_control import managed_worker_snapshot
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
+from g3ku.config.live_runtime import get_runtime_config
+from g3ku.config.loader import get_config_path
 from g3ku.content import ContentNavigationService
+from g3ku.llm_config.runtime_resolver import resolve_chat_target
+from g3ku.resources.models import ResourceKind
 from g3ku.resources.tool_settings import (
     MemoryRuntimeSettings,
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
-from g3ku.resources.models import ResourceKind
+from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
+from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
-from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
-from g3ku.runtime.context.summarizer import layered_body_payload, score_query
+from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
+from g3ku.web.worker_control import managed_worker_snapshot
 from main.governance import (
     GovernanceStore,
     MainRuntimePolicyEngine,
@@ -42,8 +43,8 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
-from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.governance.roles import to_public_allowed_roles
+from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
     NodeRecord,
@@ -59,29 +60,35 @@ from main.monitoring.query_service_v2 import TaskQueryServiceV2
 from main.protocol import build_envelope, now_iso
 from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
+from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.global_scheduler import GlobalScheduler
+from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_runner import NodeRunner
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.task_actor_service import TaskActorService
-from main.runtime.task_governance import GOVERNANCE_PATCH_EVENT_TYPE, TaskGovernanceManager, normalize_task_governance_state
-from main.runtime.debug_recorder import RuntimeDebugRecorder
+from main.runtime.task_governance import (
+    GOVERNANCE_PATCH_EVENT_TYPE,
+    TaskGovernanceManager,
+    normalize_task_governance_state,
+)
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
-from main.service.event_registry import TaskEventRegistry
 from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
     build_create_async_task_parameters,
 )
-from main.service.task_terminal_callback import (
-    build_task_terminal_payload,
-    enrich_task_terminal_payload,
-    normalize_task_terminal_payload,
-    resolve_task_terminal_callback_token,
-    resolve_task_terminal_callback_url,
+from main.service.event_registry import TaskEventRegistry
+from main.service.task_event_callback import (
+    TASK_EVENT_BATCH_CALLBACK_PATH,
+    TASK_EVENT_CALLBACK_PATH,
+    normalize_task_event_payload,
+    resolve_task_event_batch_callback_url,
+    resolve_task_event_callback_token,
+    resolve_task_event_callback_url,
 )
 from main.service.task_stall_callback import (
+    TASK_STALL_CALLBACK_PATH,
     TASK_STALL_REASON_CANCEL_REQUESTED,
     TASK_STALL_REASON_GOVERNANCE_REVIEW,
     TASK_STALL_REASON_MISSING_TASK,
@@ -93,16 +100,18 @@ from main.service.task_stall_callback import (
     resolve_task_stall_callback_token,
     resolve_task_stall_callback_url,
 )
-from main.service.task_event_callback import (
-    normalize_task_event_payload,
-    resolve_task_event_batch_callback_url,
-    resolve_task_event_callback_token,
-    resolve_task_event_callback_url,
-)
 from main.service.task_stall_notifier import (
     TaskStallNotifier,
-    stalled_minutes_since,
     stall_bucket_minutes,
+    stalled_minutes_since,
+)
+from main.service.task_terminal_callback import (
+    TASK_TERMINAL_CALLBACK_PATH,
+    build_task_terminal_payload,
+    enrich_task_terminal_payload,
+    load_task_terminal_callback_config,
+    resolve_task_terminal_callback_token,
+    resolve_task_terminal_callback_url,
 )
 from main.service.worker_heartbeat_service_v2 import WorkerHeartbeatServiceV2
 from main.storage.artifact_store import TaskArtifactStore
@@ -543,6 +552,7 @@ class MainRuntimeService:
             waiting_node_ids=[],
             publish_snapshot=False,
         )
+        self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
         self.log_service.refresh_task_view(task.task_id, mark_unread=True)
 
     @staticmethod
@@ -1459,6 +1469,73 @@ class MainRuntimeService:
             headers['x-g3ku-internal-token'] = normalized_token
         return headers
 
+    @staticmethod
+    def _replace_internal_callback_path(url: str, *, target_path: str) -> str:
+        text = str(url or '').strip()
+        if not text:
+            return ''
+        parsed = urlparse(text)
+        path = str(parsed.path or '').strip()
+        if path.endswith(TASK_TERMINAL_CALLBACK_PATH):
+            next_path = f'{path[: -len(TASK_TERMINAL_CALLBACK_PATH)]}{target_path}'
+        elif not path or path == '/':
+            next_path = target_path
+        else:
+            return ''
+        return urlunparse(parsed._replace(path=next_path))
+
+    def _internal_callback_targets(
+        self,
+        *,
+        workspace: Path,
+        callback_kind: str,
+    ) -> list[tuple[str, str]]:
+        normalized_kind = str(callback_kind or '').strip().lower()
+        if normalized_kind == 'terminal':
+            target_path = TASK_TERMINAL_CALLBACK_PATH
+            primary_url = resolve_task_terminal_callback_url(workspace=workspace)
+            primary_token = resolve_task_terminal_callback_token(workspace=workspace)
+        elif normalized_kind == 'event':
+            target_path = TASK_EVENT_CALLBACK_PATH
+            primary_url = resolve_task_event_callback_url(workspace=workspace)
+            primary_token = resolve_task_event_callback_token(workspace=workspace)
+        elif normalized_kind == 'event_batch':
+            target_path = TASK_EVENT_BATCH_CALLBACK_PATH
+            primary_url = resolve_task_event_batch_callback_url(workspace=workspace)
+            primary_token = resolve_task_event_callback_token(workspace=workspace)
+        elif normalized_kind == 'stall':
+            target_path = TASK_STALL_CALLBACK_PATH
+            primary_url = resolve_task_stall_callback_url(workspace=workspace)
+            primary_token = resolve_task_stall_callback_token(workspace=workspace)
+        else:
+            return []
+
+        candidates: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _append(url: str, token: str) -> None:
+            normalized_url = str(url or '').strip()
+            normalized_token = str(token or '').strip()
+            if not normalized_url:
+                return
+            item = (normalized_url, normalized_token)
+            if item in seen:
+                return
+            seen.add(item)
+            candidates.append(item)
+
+        _append(primary_url, primary_token)
+
+        file_config = load_task_terminal_callback_config(workspace=workspace)
+        file_terminal_url = str(file_config.get('url') or '').strip()
+        if target_path != TASK_TERMINAL_CALLBACK_PATH:
+            file_url = self._replace_internal_callback_path(file_terminal_url, target_path=target_path)
+        else:
+            file_url = file_terminal_url
+        _append(file_url, str(file_config.get('token') or '').strip())
+
+        return candidates
+
     def _get_callback_client(self) -> httpx.AsyncClient:
         client = self._callback_client
         if client is None:
@@ -1499,22 +1576,30 @@ class MainRuntimeService:
         task.add_done_callback(self._task_event_dispatch_tasks.discard)
 
     async def _deliver_task_event_callback(self, payload: dict[str, Any]) -> None:
-        callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
-        if not callback_url:
+        callback_targets = self._internal_callback_targets(workspace=Path.cwd(), callback_kind='event')
+        if not callback_targets:
             return
-        callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
-        headers = self._callback_headers(token=callback_token)
-        try:
-            await self._post_internal_callback(
-                callback_url,
-                payload=payload,
-                headers=headers,
-                timeout=1.5,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug('task event callback delivery skipped: {}', payload.get('event_type'))
+        for index, (callback_url, callback_token) in enumerate(callback_targets):
+            headers = self._callback_headers(token=callback_token)
+            try:
+                response = await self._post_internal_callback(
+                    callback_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=1.5,
+                )
+                if 200 <= int(response.status_code or 0) < 300:
+                    return
+                if int(response.status_code or 0) in {401, 403, 404} and index + 1 < len(callback_targets):
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if index + 1 < len(callback_targets):
+                    continue
+                continue
+            break
+        logger.debug('task event callback delivery skipped: {}', payload.get('event_type'))
 
     def publish_worker_status_event(
         self,
@@ -2317,8 +2402,9 @@ class MainRuntimeService:
                 bytes_total += encoded_size
             if not batch_entries:
                 return
-            callback_url = resolve_task_event_batch_callback_url(workspace=Path.cwd())
-            if not callback_url:
+            workspace = Path.cwd()
+            callback_targets = self._internal_callback_targets(workspace=workspace, callback_kind='event_batch')
+            if not callback_targets:
                 for entry in batch_entries:
                     self.store.mark_task_summary_outbox_attempt(
                         str(entry.get('task_id') or ''),
@@ -2328,33 +2414,41 @@ class MainRuntimeService:
                     )
                 attempt_index += 1
                 continue
-            headers: dict[str, str] = {}
-            callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
-            if callback_token:
-                headers['x-g3ku-internal-token'] = callback_token
-            try:
-                response = await self._post_internal_callback(
-                    callback_url,
-                    payload={'items': batch_items},
-                    headers=headers,
-                    timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
-                )
-                if 200 <= int(response.status_code or 0) < 300:
-                    for entry in batch_entries:
-                        self.store.mark_task_summary_outbox_delivered(
-                            str(entry.get('task_id') or ''),
-                            delivered_at=now_iso(),
-                            expected_version=int(entry.get('version') or 0),
-                        )
-                    self._increment_summary_stat('task_summary_batch_request_count')
-                    self._increment_summary_stat('task_summary_batch_item_count', float(len(batch_entries)))
-                    attempt_index = 0
-                    continue
-                error_text = f'task_event_batch_callback_http_{int(response.status_code or 0)}'
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                error_text = str(exc or 'task_event_batch_callback_failed').strip() or 'task_event_batch_callback_failed'
+            error_text = 'task_event_batch_callback_failed'
+            delivered = False
+            for index, (callback_url, callback_token) in enumerate(callback_targets):
+                headers = self._callback_headers(token=callback_token)
+                try:
+                    response = await self._post_internal_callback(
+                        callback_url,
+                        payload={'items': batch_items},
+                        headers=headers,
+                        timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
+                    )
+                    if 200 <= int(response.status_code or 0) < 300:
+                        for entry in batch_entries:
+                            self.store.mark_task_summary_outbox_delivered(
+                                str(entry.get('task_id') or ''),
+                                delivered_at=now_iso(),
+                                expected_version=int(entry.get('version') or 0),
+                            )
+                        self._increment_summary_stat('task_summary_batch_request_count')
+                        self._increment_summary_stat('task_summary_batch_item_count', float(len(batch_entries)))
+                        attempt_index = 0
+                        delivered = True
+                        break
+                    error_text = f'task_event_batch_callback_http_{int(response.status_code or 0)}'
+                    if int(response.status_code or 0) in {401, 403, 404} and index + 1 < len(callback_targets):
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    error_text = str(exc or 'task_event_batch_callback_failed').strip() or 'task_event_batch_callback_failed'
+                    if index + 1 < len(callback_targets):
+                        continue
+                break
+            if delivered:
+                continue
             for entry in batch_entries:
                 self.store.mark_task_summary_outbox_attempt(
                     str(entry.get('task_id') or ''),
@@ -2402,31 +2496,38 @@ class MainRuntimeService:
             if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
                 return
             payload = dict(entry.get('payload') or {})
-            callback_url = resolve_task_event_callback_url(workspace=Path.cwd())
-            if not callback_url:
+            workspace = Path.cwd()
+            callback_targets = self._internal_callback_targets(workspace=workspace, callback_kind='event')
+            if not callback_targets:
                 self.store.mark_task_worker_status_outbox_attempt(
                     worker_id,
                     attempted_at=now_iso(),
                     error_text='task_event_callback_url_unavailable',
                 )
                 return
-            callback_token = resolve_task_event_callback_token(workspace=Path.cwd())
-            headers = self._callback_headers(token=callback_token)
-            try:
-                response = await self._post_internal_callback(
-                    callback_url,
-                    payload=payload,
-                    headers=headers,
-                    timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
-                )
-                if 200 <= int(response.status_code or 0) < 300:
-                    self.store.mark_task_worker_status_outbox_delivered(worker_id, delivered_at=now_iso())
-                    return
-                error_text = f'task_event_callback_http_{int(response.status_code or 0)}'
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                error_text = str(exc or 'task_event_callback_failed').strip() or 'task_event_callback_failed'
+            error_text = 'task_event_callback_failed'
+            for index, (callback_url, callback_token) in enumerate(callback_targets):
+                headers = self._callback_headers(token=callback_token)
+                try:
+                    response = await self._post_internal_callback(
+                        callback_url,
+                        payload=payload,
+                        headers=headers,
+                        timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
+                    )
+                    if 200 <= int(response.status_code or 0) < 300:
+                        self.store.mark_task_worker_status_outbox_delivered(worker_id, delivered_at=now_iso())
+                        return
+                    error_text = f'task_event_callback_http_{int(response.status_code or 0)}'
+                    if int(response.status_code or 0) in {401, 403, 404} and index + 1 < len(callback_targets):
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    error_text = str(exc or 'task_event_callback_failed').strip() or 'task_event_callback_failed'
+                    if index + 1 < len(callback_targets):
+                        continue
+                break
             self.store.mark_task_worker_status_outbox_attempt(
                 worker_id,
                 attempted_at=now_iso(),
@@ -2495,31 +2596,38 @@ class MainRuntimeService:
             if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
                 return
             payload = dict(entry.get('payload') or {})
-            callback_url = resolve_task_stall_callback_url(workspace=Path.cwd())
-            if not callback_url:
+            workspace = Path.cwd()
+            callback_targets = self._internal_callback_targets(workspace=workspace, callback_kind='stall')
+            if not callback_targets:
                 self.store.mark_task_stall_outbox_attempt(
                     dedupe_key,
                     attempted_at=now_iso(),
                     error_text='task_stall_callback_url_unavailable',
                 )
                 return
-            callback_token = resolve_task_stall_callback_token(workspace=Path.cwd())
-            headers = self._callback_headers(token=callback_token)
-            try:
-                response = await self._post_internal_callback(
-                    callback_url,
-                    payload=payload,
-                    headers=headers,
-                    timeout=2.0,
-                )
-                if 200 <= int(response.status_code or 0) < 300:
-                    self.store.mark_task_stall_outbox_delivered(dedupe_key, delivered_at=now_iso())
-                    return
-                error_text = f'task_stall_callback_http_{int(response.status_code or 0)}'
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                error_text = str(exc or 'task_stall_callback_failed').strip() or 'task_stall_callback_failed'
+            error_text = 'task_stall_callback_failed'
+            for index, (callback_url, callback_token) in enumerate(callback_targets):
+                headers = self._callback_headers(token=callback_token)
+                try:
+                    response = await self._post_internal_callback(
+                        callback_url,
+                        payload=payload,
+                        headers=headers,
+                        timeout=2.0,
+                    )
+                    if 200 <= int(response.status_code or 0) < 300:
+                        self.store.mark_task_stall_outbox_delivered(dedupe_key, delivered_at=now_iso())
+                        return
+                    error_text = f'task_stall_callback_http_{int(response.status_code or 0)}'
+                    if int(response.status_code or 0) in {401, 403, 404} and index + 1 < len(callback_targets):
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    error_text = str(exc or 'task_stall_callback_failed').strip() or 'task_stall_callback_failed'
+                    if index + 1 < len(callback_targets):
+                        continue
+                break
             self.store.mark_task_stall_outbox_attempt(
                 dedupe_key,
                 attempted_at=now_iso(),
@@ -2565,31 +2673,38 @@ class MainRuntimeService:
             if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
                 return
             payload = dict(entry.get('payload') or {})
-            callback_url = resolve_task_terminal_callback_url(workspace=Path.cwd())
-            if not callback_url:
+            workspace = Path.cwd()
+            callback_targets = self._internal_callback_targets(workspace=workspace, callback_kind='terminal')
+            if not callback_targets:
                 self.store.mark_task_terminal_outbox_attempt(
                     dedupe_key,
                     attempted_at=now_iso(),
                     error_text='task_terminal_callback_url_unavailable',
                 )
                 return
-            callback_token = resolve_task_terminal_callback_token(workspace=Path.cwd())
-            headers = self._callback_headers(token=callback_token)
-            try:
-                response = await self._post_internal_callback(
-                    callback_url,
-                    payload=payload,
-                    headers=headers,
-                    timeout=2.0,
-                )
-                if 200 <= int(response.status_code or 0) < 300:
-                    self.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
-                    return
-                error_text = f'task_terminal_callback_http_{int(response.status_code or 0)}'
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                error_text = str(exc or 'task_terminal_callback_failed').strip() or 'task_terminal_callback_failed'
+            error_text = 'task_terminal_callback_failed'
+            for index, (callback_url, callback_token) in enumerate(callback_targets):
+                headers = self._callback_headers(token=callback_token)
+                try:
+                    response = await self._post_internal_callback(
+                        callback_url,
+                        payload=payload,
+                        headers=headers,
+                        timeout=2.0,
+                    )
+                    if 200 <= int(response.status_code or 0) < 300:
+                        self.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
+                        return
+                    error_text = f'task_terminal_callback_http_{int(response.status_code or 0)}'
+                    if int(response.status_code or 0) in {401, 403, 404} and index + 1 < len(callback_targets):
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    error_text = str(exc or 'task_terminal_callback_failed').strip() or 'task_terminal_callback_failed'
+                    if index + 1 < len(callback_targets):
+                        continue
+                break
             self.store.mark_task_terminal_outbox_attempt(
                 dedupe_key,
                 attempted_at=now_iso(),
@@ -2749,7 +2864,6 @@ class MainRuntimeService:
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
         self.node_runner._execution_max_concurrency = None
         self.node_runner._acceptance_max_concurrency = None
-        node_dispatch_limits = self._node_dispatch_concurrency_settings(config)
         self.task_actor_service.configure_node_dispatch_limits(
             execution=None,
             inspection=None,
@@ -4360,8 +4474,12 @@ class MainRuntimeService:
         if str(actor_role or '').strip().lower() != 'ceo':
             return {}
         if self._builtin_tool_cache is None:
-            manager_getter = lambda: self.tool_execution_manager
-            task_service_getter = lambda: self
+            def manager_getter():
+                return self.tool_execution_manager
+
+            def task_service_getter():
+                return self
+
             self._builtin_tool_cache = {
                 'wait_tool_execution': WaitToolExecutionTool(manager_getter),
                 'stop_tool_execution': StopToolExecutionTool(manager_getter, task_service_getter),

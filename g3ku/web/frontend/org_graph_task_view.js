@@ -978,12 +978,15 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
             : {},
     );
     const source = Object.keys(fullTrace).length ? fullTrace : summaryTrace;
+    const normalizedNodeKind = String(source.node_kind ?? detail?.node_kind ?? node?.node_kind ?? "").trim().toLowerCase();
     const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps : [];
     const stages = (Array.isArray(source.stages) ? source.stages : []).map((stage, index) => normalizeExecutionStageTrace(stage, index));
     const initialPrompt = [source.initial_prompt, detail?.prompt, detail?.goal, node?.prompt, node?.goal, node?.input]
         .map((value) => String(value ?? ""))
         .find((value) => value.trim())
         || "";
+    const finalOutput = String(source.final_output ?? detail?.final_output ?? node?.final_output ?? "");
+    const acceptanceResult = String(source.acceptance_result ?? detail?.check_result ?? node?.check_result ?? "");
     return {
         initial_prompt: initialPrompt,
         tool_steps: toolSteps.map((step) => ({
@@ -1001,8 +1004,8 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
         stages,
         live_tool_calls: normalizeLiveToolCalls(liveFrame),
         live_child_pipelines: normalizeLiveChildPipelines(liveFrame),
-        final_output: String(source.final_output ?? detail?.final_output ?? node?.final_output ?? ""),
-        acceptance_result: String(source.acceptance_result ?? detail?.check_result ?? node?.check_result ?? ""),
+        final_output: finalOutput,
+        acceptance_result: acceptanceResult || (normalizedNodeKind === "acceptance" ? finalOutput : ""),
     };
 }
 

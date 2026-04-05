@@ -535,7 +535,16 @@ class SQLiteTaskStore:
         if not normalized_ids:
             return
         placeholders = ', '.join('?' for _ in normalized_ids)
-        self._execute_write(f'DELETE FROM nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(f'DELETE FROM task_runtime_frames WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM task_model_calls WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM task_node_tool_results WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM task_node_details WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM task_node_rounds WHERE parent_node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM task_nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+
+        self._run_write(operation)
 
     def update_node(self, node_id: str, mutator) -> NodeRecord | None:
         def operation(conn: sqlite3.Connection) -> NodeRecord | None:

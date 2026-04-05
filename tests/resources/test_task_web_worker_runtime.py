@@ -18,15 +18,22 @@ from g3ku.providers.base import LLMModelAttempt, LLMResponse, ToolCallRequest
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
-from main.models import NodeFinalResult, SpawnChildResult, SpawnChildSpec, TaskRecord
-from main.models import normalize_final_acceptance_metadata
+from main.models import (
+    NodeFinalResult,
+    SpawnChildResult,
+    SpawnChildSpec,
+    TaskRecord,
+    normalize_final_acceptance_metadata,
+)
 from main.protocol import now_iso
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import MainRuntimeService
 from main.service.task_stall_callback import normalize_task_stall_payload
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_TOKEN_ENV,
+    TASK_TERMINAL_CALLBACK_URL_ENV,
     normalize_task_terminal_payload,
+    save_task_terminal_callback_config,
 )
 
 
@@ -585,7 +592,7 @@ async def test_ensure_web_runtime_services_starts_managed_worker(tmp_path: Path,
 
     await web_shell.ensure_web_runtime_services(SimpleNamespace(main_task_service=service))
 
-    assert worker_calls == [(service, 5.0)]
+    assert worker_calls == [(service, 1.0)]
     assert heartbeat.started == 1
 
 
@@ -886,6 +893,73 @@ async def test_worker_task_summary_outbox_retries_and_marks_delivered(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_worker_task_summary_outbox_falls_back_to_file_callback_config_when_env_target_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    service._schedule_task_summary_delivery = lambda _task_id=None: None
+    service._schedule_task_event_callback(
+        {
+            "event_type": "task.summary.patch",
+            "session_id": "web:shared",
+            "task_id": "task:demo-summary",
+            "data": {
+                "task": {
+                    "task_id": "task:demo-summary",
+                    "session_id": "web:shared",
+                    "title": "demo",
+                    "updated_at": now_iso(),
+                }
+            },
+        }
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_URL_ENV, "http://127.0.0.1:19999/api/internal/task-terminal")
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "stale-token")
+    save_task_terminal_callback_config(
+        workspace=tmp_path,
+        url="http://127.0.0.1:18790/api/internal/task-terminal",
+        token="fresh-token",
+    )
+    monkeypatch.setattr("main.service.runtime_service.Path.cwd", lambda: tmp_path)
+
+    attempts: list[tuple[str, str]] = []
+
+    async def _post(url: str, *, payload: dict[str, object], headers: dict[str, str], timeout: float):
+        attempts.append((str(url), str(headers.get("x-g3ku-internal-token") or "")))
+        assert float(timeout) == 2.0
+        if ":19999/" in str(url):
+            raise httpx.ConnectError("stale callback target")
+        assert str(url).endswith("/api/internal/task-event-batch")
+        assert str(headers.get("x-g3ku-internal-token") or "") == "fresh-token"
+        assert len(list((payload or {}).get("items") or [])) == 1
+        return httpx.Response(200, json={"ok": True})
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_post_internal_callback", _post)
+    monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
+
+    await service._deliver_task_summary_outbox("task:demo-summary")
+
+    entry = service.store.get_task_summary_outbox("task:demo-summary")
+    assert entry is not None
+    assert entry["delivery_state"] == "delivered"
+    assert attempts == [
+        ("http://127.0.0.1:19999/api/internal/task-event-batch", "stale-token"),
+        ("http://127.0.0.1:18790/api/internal/task-event-batch", "fresh-token"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_worker_task_summary_batch_delivery_groups_multiple_items(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -943,6 +1017,77 @@ async def test_worker_task_summary_batch_delivery_groups_multiple_items(tmp_path
     assert len(list((posted[0]["json"] or {}).get("items") or [])) == 2
     assert service.store.get_task_summary_outbox("task:one")["delivery_state"] == "delivered"
     assert service.store.get_task_summary_outbox("task:two")["delivery_state"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_worker_task_terminal_outbox_falls_back_to_file_callback_config_when_env_target_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    service._schedule_task_terminal_delivery = lambda _dedupe_key: None
+    payload = normalize_task_terminal_payload(
+        {
+            "task_id": "task:demo-terminal",
+            "session_id": "web:shared",
+            "title": "demo terminal task",
+            "status": "failed",
+            "brief_text": "acceptance failed",
+            "failure_reason": "acceptance failed",
+            "finished_at": now_iso(),
+        }
+    )
+    dedupe_key = str(payload.get("dedupe_key") or "")
+    service.store.put_task_terminal_outbox(
+        dedupe_key=dedupe_key,
+        task_id=str(payload.get("task_id") or ""),
+        session_id=str(payload.get("session_id") or ""),
+        created_at=str(payload.get("finished_at") or now_iso()),
+        payload=payload,
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_URL_ENV, "http://127.0.0.1:19999/api/internal/task-terminal")
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "stale-token")
+    save_task_terminal_callback_config(
+        workspace=tmp_path,
+        url="http://127.0.0.1:18790/api/internal/task-terminal",
+        token="fresh-token",
+    )
+    monkeypatch.setattr("main.service.runtime_service.Path.cwd", lambda: tmp_path)
+
+    attempts: list[tuple[str, str]] = []
+
+    async def _post(url: str, *, payload: dict[str, object], headers: dict[str, str], timeout: float):
+        attempts.append((str(url), str(headers.get("x-g3ku-internal-token") or "")))
+        assert float(timeout) == 2.0
+        if ":19999/" in str(url):
+            raise httpx.ConnectError("stale callback target")
+        assert str(url).endswith("/api/internal/task-terminal")
+        assert str(headers.get("x-g3ku-internal-token") or "") == "fresh-token"
+        assert str(payload.get("task_id") or "") == "task:demo-terminal"
+        return httpx.Response(200, json={"ok": True})
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_post_internal_callback", _post)
+    monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
+
+    await service._deliver_task_terminal_outbox(dedupe_key)
+
+    entry = service.store.get_task_terminal_outbox(dedupe_key)
+    assert entry is not None
+    assert entry["delivery_state"] == "delivered"
+    assert attempts == [
+        ("http://127.0.0.1:19999/api/internal/task-terminal", "stale-token"),
+        ("http://127.0.0.1:18790/api/internal/task-terminal", "fresh-token"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -3126,7 +3271,6 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
         assert default_subtree is not None
         assert first_round_subtree is not None
         default_root = default_subtree["nodes_by_id"][root.node_id]
-        first_round_root = first_round_subtree["nodes_by_id"][root.node_id]
         assert [item["round_id"] for item in default_root["rounds"]] == ["round-1", "round-2"]
         assert default_root["default_round_id"] == "round-2"
         assert second_child_id in default_subtree["nodes_by_id"]
@@ -4492,6 +4636,11 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         assert runtime_state["active_node_ids"] == [record.root_node_id]
         assert len(runtime_state["frames"]) == 1
         assert runtime_state["frames"][0]["node_id"] == record.root_node_id
+        projected_node_ids = {item.node_id for item in restarted.store.list_task_nodes(record.task_id)}
+        assert projected_node_ids == {record.root_node_id, success_child.node_id}
+        tree_snapshot = restarted.query_service.get_tree_snapshot(record.task_id)
+        assert tree_snapshot is not None
+        assert set(tree_snapshot.nodes_by_id) == {record.root_node_id, success_child.node_id}
         assert started == [record.task_id]
         assert "Recovery: 本任务遇到异常停止，已回退到稳定步骤继续。" not in restarted.view_progress(record.task_id, mark_read=False)
 

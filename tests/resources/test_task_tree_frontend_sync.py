@@ -6,7 +6,6 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -477,6 +476,51 @@ def test_build_node_execution_trace_preserves_summary_stage_budget() -> None:
     )
 
     assert result["stageTotalSteps"] == 5
+
+
+def test_build_node_execution_trace_falls_back_to_acceptance_final_output_when_check_result_missing() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:acceptance",
+            node_kind: "acceptance",
+            final_output: "## 验收裁定：拒绝交付",
+          },
+          {
+            node_kind: "acceptance",
+            check_result: "",
+            final_output: "## 验收裁定：拒绝交付",
+          },
+        );
+
+        console.log(JSON.stringify({
+          acceptanceResult: trace.acceptance_result,
+          finalOutput: trace.final_output,
+        }));
+        """
+    )
+
+    assert result["acceptanceResult"] == "## 验收裁定：拒绝交付"
+    assert result["finalOutput"] == "## 验收裁定：拒绝交付"
 
 
 def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_duplicate_goal_field() -> None:
