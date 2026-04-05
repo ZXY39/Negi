@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
+from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 
@@ -11,7 +12,7 @@ class CeoPersistentState(TypedDict, total=False):
     approval_request: dict[str, Any] | None
     approval_status: str
     query_text: str
-    messages: list[dict[str, Any]]
+    messages: Annotated[list[Any], add_messages]
     turn_overlay_text: str | None
     tool_names: list[str]
     used_tools: list[str]
@@ -79,7 +80,7 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "summary_payload": {},
         "summary_version": 0,
         "summary_model_key": "",
-        "agent_runtime": "langgraph",
+        "agent_runtime": "create_agent",
     }
 
 

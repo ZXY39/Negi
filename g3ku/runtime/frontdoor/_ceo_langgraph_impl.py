@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage, convert_to_messages
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
-from langgraph.types import Command, interrupt
+from langgraph.types import interrupt
 
 from g3ku.agent.tools.base import Tool
 from g3ku.json_schema_utils import attach_raw_parameters_schema, build_args_schema_model
@@ -29,11 +29,8 @@ from ._ceo_support import CeoFrontDoorSupport
 from .ceo_summarizer import summarize_frontdoor_history
 from .history_compaction import compact_frontdoor_history, frontdoor_summary_state
 from .state_models import (
-    CeoFrontdoorInterrupted,
-    CeoPendingInterrupt,
     CeoPersistentState,
     CeoRuntimeContext,
-    initial_persistent_state,
 )
 
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
@@ -100,7 +97,12 @@ def _build_args_schema(tool: Tool):
 
 def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
     async def _invoke(**kwargs: Any) -> Any:
-        return await executor(tool.name, kwargs)
+        filtered_kwargs = {
+            str(key): value
+            for key, value in dict(kwargs or {}).items()
+            if value is not None
+        }
+        return await executor(tool.name, filtered_kwargs)
 
     return attach_raw_parameters_schema(
         StructuredTool.from_function(
@@ -172,17 +174,12 @@ def _build_langgraph_ceo_graph(runner):
     )
 
 
-class CeoFrontDoorRunner(CeoFrontDoorSupport):
-    """Canonical LangGraph-based CEO frontdoor runner."""
+class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
+    """Shared CEO runtime operations reused by the create_agent frontdoor path."""
 
     def __init__(self, *, loop) -> None:
         super().__init__(loop=loop)
         self._compiled_graph = None
-
-    def _get_compiled_graph(self):
-        if self._compiled_graph is None:
-            self._compiled_graph = _build_langgraph_ceo_graph(self)
-        return self._compiled_graph
 
     def _build_tool_runtime_context(
         self,
@@ -1148,33 +1145,6 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
         result["summary_model_key"] = str(compacted_state.get("summary_model_key") or "")
         return result
 
-    async def _invoke_graph_input(self, *, graph_input, session, on_progress=None) -> dict[str, Any]:
-        await self._loop._ensure_checkpointer_ready()
-        graph_output = await self._get_compiled_graph().ainvoke(
-            graph_input,
-            config={"configurable": {"thread_id": session.state.session_key}},
-            context=CeoRuntimeContext(
-                loop=self._loop,
-                session=session,
-                session_key=session.state.session_key,
-                on_progress=on_progress,
-            ),
-            version="v2",
-        )
-        values = _checkpoint_safe_value(dict(getattr(graph_output, "value", graph_output) or {}))
-        if not isinstance(values, dict):
-            values = {}
-        pending_interrupts = [
-            CeoPendingInterrupt(
-                interrupt_id=str(getattr(item, "id", "") or ""),
-                value=_checkpoint_safe_value(getattr(item, "value", None)),
-            )
-            for item in list(getattr(graph_output, "interrupts", ()) or ())
-        ]
-        if pending_interrupts:
-            raise CeoFrontdoorInterrupted(interrupts=pending_interrupts, values=values)
-        return values
-
     @staticmethod
     def _graph_next_step(state: CeoGraphState) -> str:
         next_step = str(state.get("next_step") or "finalize").strip()
@@ -1182,26 +1152,5 @@ class CeoFrontDoorRunner(CeoFrontDoorSupport):
             return "finalize"
         return next_step
 
-    async def run_turn(self, *, user_input, session, on_progress=None) -> str:
-        setattr(session, "_last_route_kind", "direct_reply")
-        result = await self._invoke_graph_input(
-            graph_input=initial_persistent_state(user_input=_persistent_user_input_payload(user_input)),
-            session=session,
-            on_progress=on_progress,
-        )
-        output = str(result.get("final_output") or "").strip()
-        setattr(session, "_last_route_kind", str(result.get("route_kind") or "direct_reply"))
-        return output
 
-    async def resume_turn(self, *, session, resume_value: Any, on_progress=None) -> str:
-        result = await self._invoke_graph_input(
-            graph_input=Command(resume=resume_value),
-            session=session,
-            on_progress=on_progress,
-        )
-        output = str(result.get("final_output") or "").strip()
-        setattr(session, "_last_route_kind", str(result.get("route_kind") or "direct_reply"))
-        return output
-
-
-__all__ = ["CeoFrontDoorRunner"]
+__all__ = ["CeoFrontDoorRuntimeOps"]

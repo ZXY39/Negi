@@ -41,7 +41,7 @@ def test_initial_persistent_state_contains_summary_payload_and_runtime_marker() 
     assert state["summary_payload"] == {}
     assert state["summary_version"] == 0
     assert state["summary_model_key"] == ""
-    assert state["agent_runtime"] == "langgraph"
+    assert state["agent_runtime"] == "create_agent"
 
 
 def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None:
@@ -76,26 +76,53 @@ def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None
     assert kwargs["middleware"]
 
 
-def test_ceo_runner_selects_create_agent_impl_when_flag_enabled(monkeypatch) -> None:
-    class _Legacy:
-        def __init__(self, *, loop) -> None:
-            self.loop = loop
-
+def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:
     class _New:
         def __init__(self, *, loop) -> None:
             self.loop = loop
 
-    monkeypatch.setattr(ceo_runner, "LegacyCeoFrontDoorRunner", _Legacy)
     monkeypatch.setattr(ceo_runner, "CreateAgentCeoFrontDoorRunner", _New)
 
     loop = SimpleNamespace(
         _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(frontdoor_create_agent_enabled=True)
+            assembly=SimpleNamespace(frontdoor_create_agent_enabled=False)
         )
     )
     runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
 
     assert isinstance(runner._impl, _New)
+
+
+def test_create_agent_runner_build_prompt_context_uses_effective_turn_overlay(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_effective_turn_overlay_text", lambda state: "overlay-text")
+
+    result = runner.build_prompt_context(
+        state={"turn_overlay_text": "## Retrieved Context\n- memory", "repair_overlay_text": "repair"},
+        runtime=SimpleNamespace(),
+        tools=[],
+    )
+
+    assert result == {"system_overlay": "overlay-text"}
+
+
+def test_create_agent_runner_visible_langchain_tools_uses_prepared_state(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    captured: dict[str, object] = {}
+
+    def _fake_build_langchain_tools_for_state(*, state, runtime):
+        captured["state"] = state
+        captured["runtime"] = runtime
+        return ["tool-a"]
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", _fake_build_langchain_tools_for_state)
+    runtime = SimpleNamespace(context=SimpleNamespace(session_key="web:shared"))
+    state = {"tool_names": ["record_tool"]}
+
+    result = runner.visible_langchain_tools(state=state, runtime=runtime)
+
+    assert result == ["tool-a"]
+    assert captured == {"state": state, "runtime": runtime}
 
 
 @pytest.mark.asyncio
