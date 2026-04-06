@@ -6,6 +6,7 @@ from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import Command
 
+from g3ku.agent.tools.base import Tool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import ceo_agent_middleware, ceo_runner
@@ -23,12 +24,85 @@ class _NonPrimitive:
         return "non-primitive"
 
 
+class _DemoTool(Tool):
+    @property
+    def name(self) -> str:
+        return "demo_tool"
+
+    @property
+    def description(self) -> str:
+        return "demo tool"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        }
+
+    async def execute(self, **kwargs):
+        return kwargs
+
+
+class _CreateAsyncTaskLikeTool(Tool):
+    @property
+    def name(self) -> str:
+        return "create_async_task"
+
+    @property
+    def description(self) -> str:
+        return "create async task"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "core_requirement": {"type": "string"},
+                "execution_policy": {"type": ["object", "string"]},
+            },
+            "required": ["task", "core_requirement", "execution_policy"],
+        }
+
+    async def execute(self, **kwargs):
+        return kwargs
+
+
+class _BrokenValidationTool(Tool):
+    @property
+    def name(self) -> str:
+        return "broken_validation_tool"
+
+    @property
+    def description(self) -> str:
+        return "broken validation tool"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string"},
+            },
+            "required": ["value"],
+        }
+
+    async def execute(self, **kwargs):
+        raise AssertionError("execute should not be called when validation crashes")
+
+    def validate_params(self, params: dict[str, object]) -> list[str]:
+        _ = params
+        raise TypeError("unhashable type: 'list'")
+
+
 def test_memory_assembly_config_exposes_create_agent_and_summarizer_defaults() -> None:
     cfg = MemoryAssemblyConfig()
 
     assert cfg.frontdoor_create_agent_enabled is False
     assert cfg.frontdoor_create_agent_shadow_mode is False
-    assert cfg.frontdoor_summarizer_enabled is True
+    assert cfg.frontdoor_summarizer_enabled is False
     assert cfg.frontdoor_summarizer_model_key is None
     assert cfg.frontdoor_summarizer_trigger_message_count == 24
     assert cfg.frontdoor_summarizer_keep_message_count == 8
@@ -123,6 +197,120 @@ def test_create_agent_runner_visible_langchain_tools_uses_prepared_state(monkeyp
 
     assert result == ["tool-a"]
     assert captured == {"state": state, "runtime": runtime}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_langchain_tool_emits_tool_result_progress(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        _ = kwargs
+        progress_calls.append((str(content), event_kind, dict(event_data or {})))
+
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"demo_tool": _DemoTool()})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
+
+    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress):
+        _ = tool, arguments, runtime_context
+        await on_progress(
+            f"{tool_name} started",
+            event_kind="tool_start",
+            event_data={"tool_name": tool_name},
+        )
+        return "done", "success", "2026-04-05T11:00:00", "2026-04-05T11:00:01", 1.0
+
+    monkeypatch.setattr(runner, "_execute_tool_call", _fake_execute_tool_call)
+
+    tools = runner._build_langchain_tools_for_state(
+        state={"tool_names": ["demo_tool"]},
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    result = await tools[0].ainvoke({"value": "alpha"})
+
+    assert result["status"] == "success"
+    assert [item[1] for item in progress_calls] == ["tool_start", "tool_result"]
+    assert progress_calls[-1][0] == "done"
+    assert progress_calls[-1][2] == {"tool_name": "demo_tool"}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_langchain_tool_normalizes_create_async_task_execution_policy(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    captured: dict[str, object] = {}
+
+    async def _on_progress(*args, **kwargs):
+        _ = args, kwargs
+
+    monkeypatch.setattr(
+        runner,
+        "_registered_tools_for_state",
+        lambda state: {"create_async_task": _CreateAsyncTaskLikeTool()},
+    )
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
+
+    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress):
+        _ = tool, tool_name, runtime_context, on_progress
+        captured["arguments"] = dict(arguments or {})
+        return "created", "success", "2026-04-05T12:00:00", "2026-04-05T12:00:01", 1.0
+
+    monkeypatch.setattr(runner, "_execute_tool_call", _fake_execute_tool_call)
+
+    tools = runner._build_langchain_tools_for_state(
+        state={"tool_names": ["create_async_task"]},
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    result = await tools[0].ainvoke(
+        {
+            "task": "continue task",
+            "core_requirement": "finish the analysis",
+            "execution_policy": "focus",
+        }
+    )
+
+    assert result["status"] == "success"
+    assert captured["arguments"]["execution_policy"] == {"mode": "focus"}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_langchain_tool_degrades_validation_exception_to_tool_error(monkeypatch) -> None:
+    progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        _ = kwargs
+        progress_calls.append((str(content), event_kind, dict(event_data or {})))
+
+    tool_context = SimpleNamespace(
+        push_runtime_context=lambda context: object(),
+        pop_runtime_context=lambda token: None,
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=tool_context,
+            resource_manager=None,
+            tool_execution_manager=None,
+        )
+    )
+    monkeypatch.setattr(
+        runner,
+        "_registered_tools_for_state",
+        lambda state: {"broken_validation_tool": _BrokenValidationTool()},
+    )
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
+
+    tools = runner._build_langchain_tools_for_state(
+        state={"tool_names": ["broken_validation_tool"]},
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    result = await tools[0].ainvoke({"value": "alpha"})
+
+    assert result["status"] == "error"
+    assert "Error validating broken_validation_tool" in result["result_text"]
+    assert "unhashable type: 'list'" in result["result_text"]
+    assert [item[1] for item in progress_calls] == ["tool_error"]
 
 
 @pytest.mark.asyncio
@@ -274,6 +462,86 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_agent_runner_rejects_unverified_dispatch_text_from_model() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
+    )
+
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": "Claude Code Haha 项目分析任务已在后台成功续跑。新任务 ID: `task:fake-123`。",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "error_text": "",
+                "reasoning_content": None,
+                "thinking_blocks": None,
+            },
+            "used_tools": [],
+            "route_kind": "direct_reply",
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "finalize"
+    assert "未确认成功创建后台任务" in result["final_output"]
+    assert "task:fake-123" in result["final_output"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_postprocess_requires_persisted_task_for_dispatch_reply(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
+    )
+
+    async def _fake_summarize_messages(*, messages, state):
+        _ = state
+        return {
+            "messages": list(messages),
+            "summary_text": "",
+            "summary_payload": {},
+            "summary_version": 0,
+            "summary_model_key": "",
+        }
+
+    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
+
+    result = await runner._postprocess_completed_tool_cycle(
+        state={
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo"}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "create_async_task", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "create_async_task",
+                    "content": "创建任务成功task:fake-123",
+                },
+            ],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+        }
+    )
+
+    assert result is not None
+    assert result["jump_to"] == "end"
+    assert "未确认成功创建后台任务" in result["final_output"]
+    assert "task:fake-123" in result["final_output"]
+
+
+@pytest.mark.asyncio
 async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_from_real_request_shape(
     monkeypatch,
 ) -> None:
@@ -382,6 +650,49 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
         "overlay_text": "Use the existing CEO layered context rules.\n\n## Retrieved Context\n- memory",
         "overlay_section_count": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_create_agent_prompt_middleware_emits_analysis_progress_for_model_retry(
+    monkeypatch,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
+    attempts = {"count": 0}
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        _ = kwargs
+        progress_calls.append((str(content), event_kind, dict(event_data or {})))
+
+    middleware = ceo_agent_middleware.CeoPromptAssemblyMiddleware(runner=runner)
+
+    async def _handler(request):
+        _ = request
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError(ceo_agent_middleware.PUBLIC_PROVIDER_FAILURE_MESSAGE)
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    response = await middleware.awrap_model_call(
+        ModelRequest(
+            model=SimpleNamespace(),
+            system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+            messages=[HumanMessage(content="hello")],
+            tools=[],
+            state={"messages": [{"role": "user", "content": "hello"}]},
+            runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared", on_progress=_on_progress)),
+        ),
+        _handler,
+    )
+
+    assert isinstance(response, ExtendedModelResponse)
+    assert response.model_response.result == [AIMessage(content="ok")]
+    assert [item[1] for item in progress_calls] == ["analysis", "analysis"]
+    assert "模型" in progress_calls[0][0]
+    assert progress_calls[0][2]["phase"] == "model_call"
+    assert "重试" in progress_calls[1][0]
+    assert progress_calls[1][2]["phase"] == "provider_retry"
 
 
 @pytest.mark.asyncio

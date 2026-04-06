@@ -1227,7 +1227,7 @@ function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = 
     if (lastContent !== userContent || !sameAttachments) return normalizedInflight;
     const deduped = { ...normalizedInflight };
     delete deduped.user_message;
-    return ceoInflightTurnHasVisibleAssistantState(deduped) ? deduped : null;
+    return ceoNeedsAssistantTurn(deduped) ? deduped : null;
 }
 
 function renderCeoSessionLoadingState(sessionId, session = null) {

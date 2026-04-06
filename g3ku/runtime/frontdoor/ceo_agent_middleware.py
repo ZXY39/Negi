@@ -170,6 +170,13 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
         updated_request, update = self._prepare_request_and_update(request)
+        progress = getattr(getattr(request.runtime, "context", None), "on_progress", None)
+        await self._runner._emit_progress(
+            progress,
+            "正在请求 CEO 模型生成下一步响应...",
+            event_kind="analysis",
+            event_data={"phase": "model_call"},
+        )
         provider_retry_count = 0
         empty_response_retry_count = 0
         while True:
@@ -179,6 +186,12 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
                 if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
                     raise
                 provider_retry_count += 1
+                await self._runner._emit_progress(
+                    progress,
+                    f"模型调用失败，正在重试（第{provider_retry_count}次）...",
+                    event_kind="analysis",
+                    event_data={"phase": "provider_retry", "attempt": provider_retry_count},
+                )
                 await asyncio.sleep(float(min(10, max(1, provider_retry_count))))
                 continue
             response_message = next(
@@ -190,6 +203,12 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
             ):
                 break
             empty_response_retry_count += 1
+            await self._runner._emit_progress(
+                progress,
+                f"模型返回空响应，正在重试（第{empty_response_retry_count}次）...",
+                event_kind="analysis",
+                event_data={"phase": "empty_response_retry", "attempt": empty_response_retry_count},
+            )
             await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
         return self._wrap_response(response, update)
 
@@ -284,6 +303,7 @@ class CeoTurnLifecycleMiddleware(AgentMiddleware):
             **self._runner._replace_messages_update(list(finalized.get("messages") or [])),
             "final_output": str(finalized.get("final_output") or ""),
             "route_kind": str(finalized.get("route_kind") or "direct_reply"),
+            "verified_task_ids": list(state.get("verified_task_ids") or []),
             "summary_text": str(finalized.get("summary_text") or ""),
             "summary_payload": dict(finalized.get("summary_payload") or {}),
             "summary_version": int(finalized.get("summary_version") or 0),

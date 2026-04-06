@@ -218,9 +218,23 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "route_kind": route_kind,
             "analysis_text": "",
             "tool_call_payloads": [],
+            "verified_task_ids": [],
             "synthetic_tool_calls_used": False,
         }
         if successful_dispatch is not None and set(substantive_tool_names) == {"create_async_task"}:
+            verified_task_id = self._verified_dispatch_task_id(
+                str(successful_dispatch.get("result_text") or "")
+            )
+            if not verified_task_id:
+                result["final_output"] = self._unverified_task_dispatch_reply(
+                    task_id=self._extract_task_id(
+                        str(successful_dispatch.get("result_text") or "")
+                    )
+                )
+                result["route_kind"] = "direct_reply"
+                result["jump_to"] = "end"
+                return result
+            result["verified_task_ids"] = [verified_task_id]
             result["final_output"] = self._task_dispatch_reply(
                 result_text=str(successful_dispatch.get("result_text") or "")
             )
@@ -348,6 +362,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         values = self._unwrap_graph_output(graph_output)
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
+        setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
         return str(values.get("final_output") or "")
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
@@ -366,4 +381,5 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         values = self._unwrap_graph_output(graph_output)
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
+        setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
         return str(values.get("final_output") or "")

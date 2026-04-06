@@ -38,6 +38,7 @@ class CeoPersistentState(TypedDict, total=False):
     synthetic_tool_calls_used: bool
     analysis_text: str
     tool_call_payloads: list[dict[str, Any]]
+    verified_task_ids: list[str]
     next_step: str
     summary_text: str
     summary_payload: dict[str, Any]
@@ -76,6 +77,7 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "used_tools": [],
         "tool_names": [],
         "route_kind": "direct_reply",
+        "verified_task_ids": [],
         "summary_text": "",
         "summary_payload": {},
         "summary_version": 0,

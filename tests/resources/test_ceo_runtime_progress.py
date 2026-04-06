@@ -410,6 +410,29 @@ async def test_runtime_agent_session_merges_wait_tool_execution_back_into_origin
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_analysis_progress_updates_inflight_snapshot() -> None:
+    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session._state.is_running = True
+    session._state.status = "running"
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+    await session._handle_progress(
+        "正在请求 CEO 模型生成下一步响应...",
+        event_kind="analysis",
+    )
+
+    snapshot = session.inflight_turn_snapshot()
+    assert snapshot is not None
+    assert snapshot["assistant_text"] == "正在请求 CEO 模型生成下一步响应..."
+    assert any(event.type == "state_snapshot" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_marks_heartbeat_message_end(tmp_path: Path, monkeypatch) -> None:
     async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
         _ = force, reason

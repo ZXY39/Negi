@@ -28,7 +28,7 @@ parameters:
       type: string
       description: One-sentence distilled core requirement for the task tree.
     execution_policy:
-      type: object
+      type: [object, string]
       description: Execution policy for the task.
       properties:
         mode:

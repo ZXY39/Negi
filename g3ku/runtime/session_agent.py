@@ -60,6 +60,7 @@ class RuntimeAgentSession:
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
         self._active_turn_id: str | None = None
+        self._last_verified_task_ids: list[str] = []
         self._turn_lock = asyncio.Lock()
 
     @property
@@ -192,6 +193,17 @@ class RuntimeAgentSession:
                 }
             )
         return items
+
+    @staticmethod
+    def _normalize_verified_task_ids(values: Any) -> list[str]:
+        items = list(values) if isinstance(values, (list, tuple, set)) else [values]
+        normalized: list[str] = []
+        for raw in items:
+            task_id = str(raw or "").strip()
+            if not task_id.startswith("task:") or task_id in normalized:
+                continue
+            normalized.append(task_id)
+        return normalized
 
     def _ensure_user_turn_id(self, user_input: UserInputMessage) -> str:
         metadata = dict(user_input.metadata or {})
@@ -619,6 +631,9 @@ class RuntimeAgentSession:
             if interaction_flow:
                 assistant_payload["tool_events"] = interaction_flow
             metadata_payload = dict(assistant_metadata or {})
+            verified_task_ids = self._normalize_verified_task_ids(self._last_verified_task_ids)
+            if verified_task_ids:
+                metadata_payload["task_ids"] = verified_task_ids
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
             persisted_session.add_message("assistant", assistant_text, **assistant_payload)
@@ -859,6 +874,12 @@ class RuntimeAgentSession:
             )
             return
 
+        if kind == "analysis":
+            text = str(content or "").strip()
+            if text and self._state.latest_message != text:
+                self._state.latest_message = text
+                await self._emit_state_snapshot()
+
         channel = "analysis" if kind == "analysis" else "deep_progress" if (deep_progress or kind == "deep_progress") else "progress"
         await self._emit(
             "message_delta",
@@ -954,6 +975,7 @@ class RuntimeAgentSession:
                 self._state.last_error = None
                 self._state.pending_tool_calls.clear()
                 self._state.pending_interrupts = []
+                self._last_verified_task_ids = []
                 if persist_transcript and internal_source is None:
                     await self._persist_pending_user_message(
                         user_input=user_input,

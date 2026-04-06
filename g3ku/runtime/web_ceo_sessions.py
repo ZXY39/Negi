@@ -151,6 +151,29 @@ def _extract_task_ids_from_text(text: Any, *, limit: int = _TASK_MEMORY_MAX_IDS)
     return _normalize_task_ids(_TASK_ID_PATTERN.findall(str(text or '')), limit=limit)
 
 
+def _looks_like_task_dispatch_claim(text: Any) -> bool:
+    normalized = str(text or '').strip().lower()
+    if not normalized or 'task:' not in normalized:
+        return False
+    markers = (
+        '后台',
+        '异步任务',
+        '续跑',
+        '成功续跑',
+        '已在后台',
+        '新任务 id',
+        '任务 id',
+        '重新为您创建',
+        '创建任务',
+        're-run in background',
+        'background',
+        'async task',
+        'new task id',
+        'created task',
+    )
+    return any(marker in normalized for marker in markers)
+
+
 def normalize_task_memory(payload: Any) -> dict[str, Any]:
     source = dict(payload or {}) if isinstance(payload, dict) else {}
     return {
@@ -199,10 +222,12 @@ def _normalize_task_results(values: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -
 
 
 def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[str]:
+    role = str(message.get('role') or '').strip().lower()
     metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
     task_ids: list[str] = []
     task_ids.extend(_normalize_task_ids(metadata.get('task_ids'), limit=limit))
-    task_ids.extend(_extract_task_ids_from_text(message.get('content'), limit=limit))
+    if role != 'assistant' or not _looks_like_task_dispatch_claim(message.get('content')):
+        task_ids.extend(_extract_task_ids_from_text(message.get('content'), limit=limit))
     tool_events = message.get('tool_events') if isinstance(message.get('tool_events'), list) else []
     for item in tool_events:
         if not isinstance(item, dict):

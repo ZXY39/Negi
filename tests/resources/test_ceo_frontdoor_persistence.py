@@ -23,6 +23,7 @@ if "litellm" not in sys.modules:
 
 from g3ku.agent.tools.base import Tool
 from g3ku.config.schema import MemoryAssemblyConfig
+from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor import _ceo_langgraph_impl as ceo_langgraph_impl
 from g3ku.runtime.frontdoor import checkpoint_inspection
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
@@ -286,6 +287,38 @@ def test_ceo_frontdoor_review_tool_calls_ignores_resume_payload_tool_call_overri
 
     assert result["approval_status"] == "approved"
     assert result["tool_call_payloads"] == original_payloads
+
+
+def test_ceo_frontdoor_approval_request_disabled_by_default() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = runner._approval_request_for_tool_calls(
+        [{"name": "create_async_task", "arguments": {"task": "demo"}}]
+    )
+
+    assert result is None
+
+
+def test_ceo_frontdoor_approval_request_respects_enabled_flag() -> None:
+    loop = SimpleNamespace(
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_interrupt_approval_enabled=True,
+                frontdoor_interrupt_tool_names=["create_async_task"],
+            )
+        )
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    result = runner._approval_request_for_tool_calls(
+        [{"name": "create_async_task", "arguments": {"task": "demo"}}]
+    )
+
+    assert result == {
+        "kind": "frontdoor_tool_approval",
+        "question": "Approve the CEO frontdoor tool execution?",
+        "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
+    }
 
 
 def test_ceo_frontdoor_graph_compiles_with_checkpointer_and_store(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -576,6 +609,7 @@ def test_memory_assembly_config_exposes_frontdoor_compaction_defaults() -> None:
 
     assert config.frontdoor_recent_message_count == 8
     assert config.frontdoor_summary_trigger_message_count == 24
+    assert config.frontdoor_summarizer_enabled is False
     assert config.frontdoor_interrupt_approval_enabled is False
     assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
 
@@ -1000,6 +1034,85 @@ async def test_graph_prepare_turn_uses_model_summarizer_when_enabled(
     }
     assert result["summary_model_key"] == "summary-model"
     assert "## CEO Durable Summary" in str(result["messages"][0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_graph_prepare_turn_emits_analysis_progress_before_history_summarization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
+    loop = SimpleNamespace(
+        sessions=SessionManager(tmp_path),
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_summarizer_enabled=True,
+                frontdoor_summarizer_trigger_message_count=4,
+                frontdoor_summarizer_keep_message_count=3,
+            )
+        ),
+        tools=SimpleNamespace(get=lambda _name: None),
+        main_task_service=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        _ = kwargs
+        progress_calls.append((str(content), event_kind, dict(event_data or {})))
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": []}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return ContextAssemblyResult(
+            model_messages=[
+                {"role": "system", "content": "SYSTEM PROMPT"},
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"},
+                {"role": "assistant", "content": "four"},
+            ],
+            tool_names=[],
+            trace={},
+        )
+
+    async def _fake_summarize_messages(*, messages, state):
+        _ = state
+        return {
+            "messages": list(messages or []),
+            "summary_text": "",
+            "summary_payload": {},
+            "summary_version": 0,
+            "summary_model_key": "",
+        }
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=loop, session=session, session_key="web:shared", on_progress=_on_progress)
+    )
+
+    await runner._graph_prepare_turn(
+        {"user_input": {"content": "follow up", "metadata": {}}},
+        runtime=runtime,
+    )
+
+    assert [item[1] for item in progress_calls] == ["analysis"]
+    assert progress_calls[0][2]["phase"] == "history_compaction"
 
 
 @pytest.mark.asyncio

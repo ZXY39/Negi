@@ -79,7 +79,11 @@ class ToolRegistry:
             # StructuredTool may include optional args as `None`; legacy schema validators
             # treat these as type mismatches, so drop unset values before validation/dispatch.
             normalized = {k: v for k, v in params.items() if v is not None}
-            errors = tool.validate_params(normalized)
+            try:
+                errors = tool.validate_params(normalized)
+            except Exception as exc:
+                await self._emit_progress(f"[tool:{name}] 参数校验异常: {exc}")
+                return f"Error validating tool '{name}': {str(exc)}" + _hint
             if errors:
                 await self._emit_progress(f"[tool:{name}] 参数校验失败: {'; '.join(errors)}")
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint

@@ -360,7 +360,11 @@ class CeoFrontDoorSupport:
         runtime_context: dict[str, Any],
         on_progress,
     ) -> tuple[str, str, str, str, float | None]:
-        errors = tool.validate_params(arguments)
+        try:
+            errors = tool.validate_params(arguments)
+        except Exception as exc:
+            error_text = f"Error validating {tool_name}: {exc}"
+            return error_text, "error", "", "", None
         if errors:
             return f"Error: {'; '.join(errors)}", "error", "", "", None
 

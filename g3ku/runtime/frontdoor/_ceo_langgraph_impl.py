@@ -17,6 +17,7 @@ from g3ku.json_schema_utils import attach_raw_parameters_schema, build_args_sche
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.project_environment import current_project_environment
+from main.models import normalize_execution_policy_metadata
 from main.runtime.chat_backend import build_prompt_cache_diagnostics, build_session_prompt_cache_key
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
@@ -127,6 +128,34 @@ def _build_visible_tool_bundle(*, tools: dict[str, Tool], executor: ToolExecutor
         langchain_tools=list(langchain_tool_map.values()),
         langchain_tool_map=dict(langchain_tool_map),
     )
+
+
+def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(arguments or {})
+    if str(tool_name or "").strip() != "create_async_task":
+        return normalized
+    raw_policy = normalized.get("execution_policy")
+    policy_payload: dict[str, Any]
+    if isinstance(raw_policy, dict):
+        policy_payload = dict(raw_policy)
+    elif isinstance(raw_policy, str):
+        stripped = str(raw_policy).strip()
+        parsed: Any = None
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = None
+        if isinstance(parsed, dict):
+            policy_payload = dict(parsed)
+        elif stripped:
+            policy_payload = {"mode": stripped}
+        else:
+            policy_payload = {}
+    else:
+        policy_payload = {}
+    normalized["execution_policy"] = normalize_execution_policy_metadata(policy_payload).model_dump(mode="json")
+    return normalized
 
 
 def _build_langgraph_ceo_graph(runner):
@@ -337,6 +366,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _reviewable_tool_names(self) -> set[str]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        if not bool(getattr(assembly_cfg, "frontdoor_interrupt_approval_enabled", False)):
+            return set()
         raw_names = list(
             getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task"]) or []
         )
@@ -397,12 +428,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "finished_at": "",
                     "elapsed_seconds": None,
                 }
+            normalized_arguments = _normalize_frontdoor_tool_arguments(tool_name, arguments)
             result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call(
                 tool=tool,
                 tool_name=tool_name,
-                arguments=arguments,
+                arguments=normalized_arguments,
                 runtime_context=runtime_context,
                 on_progress=on_progress,
+            )
+            await self._emit_progress(
+                on_progress,
+                result_text,
+                event_kind="tool_result" if status == "success" else "tool_error",
+                event_data={"tool_name": tool_name},
             )
             return {
                 "result_text": result_text,
@@ -503,6 +541,70 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def _extract_task_id(text: str) -> str:
         match = _TASK_ID_PATTERN.search(str(text or ""))
         return str(match.group(0) if match else "").strip()
+
+    @staticmethod
+    def _normalize_task_ids(values: Any) -> list[str]:
+        items = list(values) if isinstance(values, (list, tuple, set)) else [values]
+        normalized: list[str] = []
+        for raw in items:
+            task_id = str(raw or "").strip()
+            if not task_id.startswith("task:") or task_id in normalized:
+                continue
+            normalized.append(task_id)
+        return normalized
+
+    @staticmethod
+    def _looks_like_task_dispatch_claim(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized or "task:" not in normalized:
+            return False
+        markers = (
+            "后台",
+            "异步任务",
+            "续跑",
+            "成功续跑",
+            "已在后台",
+            "新任务 id",
+            "任务 id",
+            "重新为您创建",
+            "创建任务",
+            "re-run in background",
+            "background",
+            "async task",
+            "new task id",
+            "created task",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _task_id_exists(self, task_id: str) -> bool:
+        normalized = str(task_id or "").strip()
+        if not normalized:
+            return False
+        service = getattr(self._loop, "main_task_service", None)
+        getter = getattr(service, "get_task", None) if service is not None else None
+        if not callable(getter):
+            return False
+        try:
+            return getter(normalized) is not None
+        except Exception:
+            return False
+
+    def _verified_task_ids_from_text(self, text: str) -> list[str]:
+        return [
+            task_id
+            for task_id in self._normalize_task_ids(_TASK_ID_PATTERN.findall(str(text or "")))
+            if self._task_id_exists(task_id)
+        ]
+
+    def _verified_dispatch_task_id(self, text: str) -> str:
+        if not self._looks_like_task_dispatch_claim(text):
+            return ""
+        task_ids = self._verified_task_ids_from_text(text)
+        return task_ids[0] if task_ids else ""
+
+    def _unverified_task_dispatch_reply(self, *, task_id: str = "") -> str:
+        detail = f"：`{task_id}`" if str(task_id or "").strip() else ""
+        return f"未确认成功创建后台任务{detail}。当前回合没有可验证的真实任务派发结果。"
 
     def _task_dispatch_reply(self, *, result_text: str) -> str:
         text = str(result_text or "").strip()
@@ -686,6 +788,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
         if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
             messages.append({"role": "user", "content": self._model_content(user_content)})
+        summarizer_enabled, _model_key, summarizer_trigger_count, _keep_count = self._summarizer_settings()
+        if summarizer_enabled and len(messages) > summarizer_trigger_count:
+            await self._emit_progress(
+                getattr(getattr(runtime, "context", None), "on_progress", None),
+                "正在压缩较长会话历史以减少前门上下文负担...",
+                event_kind="analysis",
+                event_data={"phase": "history_compaction"},
+            )
         compacted_state = await self._summarize_messages(messages=messages, state=state)
         messages = list(compacted_state.get("messages") or [])
 
@@ -723,6 +833,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_names": list(tool_names),
             "used_tools": [],
             "route_kind": "direct_reply",
+            "verified_task_ids": [],
             "repair_overlay_text": None,
             "xml_repair_attempt_count": 0,
             "xml_repair_excerpt": "",
@@ -919,6 +1030,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         text = self._content_text(response_view.content)
         if text.strip():
+            if self._looks_like_task_dispatch_claim(text):
+                return {
+                    "final_output": self._unverified_task_dispatch_reply(
+                        task_id=self._extract_task_id(text)
+                    ),
+                    "route_kind": "direct_reply",
+                    "verified_task_ids": [],
+                    "next_step": "finalize",
+                }
             return {
                 "final_output": text.strip(),
                 "route_kind": self._route_kind_for_turn(used_tools=used_tools, default=current_route_kind),
@@ -1086,6 +1206,29 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             None,
         )
         if successful_dispatch is not None and set(substantive_tool_names) == {"create_async_task"}:
+            verified_task_id = self._verified_dispatch_task_id(
+                str(successful_dispatch.get("result_text") or "")
+            )
+            if not verified_task_id:
+                return {
+                    "messages": messages,
+                    "summary_text": str(compacted_state.get("summary_text") or ""),
+                    "summary_payload": dict(compacted_state.get("summary_payload") or {}),
+                    "summary_version": int(compacted_state.get("summary_version") or 0),
+                    "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
+                    "used_tools": used_tools,
+                    "route_kind": "direct_reply",
+                    "analysis_text": "",
+                    "tool_call_payloads": [],
+                    "verified_task_ids": [],
+                    "synthetic_tool_calls_used": False,
+                    "final_output": self._unverified_task_dispatch_reply(
+                        task_id=self._extract_task_id(
+                            str(successful_dispatch.get("result_text") or "")
+                        )
+                    ),
+                    "next_step": "finalize",
+                }
             return {
                 "messages": messages,
                 "summary_text": str(compacted_state.get("summary_text") or ""),
@@ -1096,6 +1239,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "route_kind": route_kind,
                 "analysis_text": "",
                 "tool_call_payloads": [],
+                "verified_task_ids": [verified_task_id],
                 "synthetic_tool_calls_used": False,
                 "final_output": self._task_dispatch_reply(
                     result_text=str(successful_dispatch.get("result_text") or "")
@@ -1112,6 +1256,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "route_kind": route_kind,
             "analysis_text": "",
             "tool_call_payloads": [],
+            "verified_task_ids": [],
             "synthetic_tool_calls_used": False,
             "next_step": "call_model",
         }

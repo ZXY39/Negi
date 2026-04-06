@@ -104,7 +104,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, S };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, dedupeInflightUserMessageAgainstMessages, S };`,
         context
     );
     vm.runInContext(
@@ -169,4 +169,19 @@ test("paused inflight snapshot does not fall back to processing placeholder", ()
     assert.notEqual(turn.textEl.textContent, PROCESSING_LABEL);
     assert.equal(turn.textEl.classList.contains("pending"), false);
     assert.equal(turn.flowEl.hidden, false);
+});
+
+test("deduped running inflight snapshot is preserved so the assistant placeholder can render", () => {
+    const { dedupeInflightUserMessageAgainstMessages } = loadApp();
+
+    const deduped = dedupeInflightUserMessageAgainstMessages(
+        [{ role: "user", content: "继续完成Claude Code Haha那个任务" }],
+        {
+            status: "running",
+            user_message: { content: "继续完成Claude Code Haha那个任务" },
+        }
+    );
+
+    assert.equal(deduped?.status, "running");
+    assert.equal("user_message" in (deduped || {}), false);
 });

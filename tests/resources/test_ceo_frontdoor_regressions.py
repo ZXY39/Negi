@@ -659,6 +659,9 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     async def _noop_ready() -> None:
         return None
 
+    async def _noop_startup() -> None:
+        return None
+
     backend = _BackendRecorder(
         [
             LLMResponse(
@@ -683,7 +686,10 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
         sessions=SessionManager(tmp_path),
         _checkpointer=None,
         _store=None,
-        main_task_service=None,
+        main_task_service=SimpleNamespace(
+            startup=_noop_startup,
+            get_task=lambda task_id: SimpleNamespace(task_id=task_id)
+        ),
         tools=_FakeToolRegistry([_ContinuationTaskTool()]),
         max_iterations=8,
         resource_manager=None,

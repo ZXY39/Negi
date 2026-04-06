@@ -55,16 +55,32 @@ class Tool(ABC):
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         """Validate tool parameters against JSON schema. Returns error list (empty if valid)."""
         schema = self.parameters or {}
-        if schema.get("type", "object") != "object":
+        root_types = self._normalized_types(schema.get("type", "object"))
+        if "object" not in root_types:
             raise ValueError(f"Schema must be object type, got {schema.get('type')!r}")
         return self._validate(params, {**schema, "type": "object"}, "")
 
-    def _validate(self, val: Any, schema: dict[str, Any], path: str) -> list[str]:
-        t, label = schema.get("type"), path or "parameter"
+    @staticmethod
+    def _normalized_types(value: Any) -> list[str]:
+        if isinstance(value, str):
+            normalized = str(value).strip()
+            return [normalized] if normalized else []
+        if isinstance(value, list):
+            normalized: list[str] = []
+            for item in value:
+                text = str(item or "").strip()
+                if not text or text in normalized:
+                    continue
+                normalized.append(text)
+            return normalized
+        return []
+
+    def _validate_single_type(self, val: Any, schema: dict[str, Any], path: str, t: str) -> list[str]:
+        label = path or "parameter"
         if t in self._TYPE_MAP and not isinstance(val, self._TYPE_MAP[t]):
             return [f"{label} should be {t}"]
 
-        errors = []
+        errors: list[str] = []
         if "enum" in schema and val not in schema["enum"]:
             errors.append(f"{label} must be one of {schema['enum']}")
         if t in ("integer", "number"):
@@ -91,6 +107,31 @@ class Tool(ABC):
                     self._validate(item, schema["items"], f"{path}[{i}]" if path else f"[{i}]")
                 )
         return errors
+
+    def _validate(self, val: Any, schema: dict[str, Any], path: str) -> list[str]:
+        types = self._normalized_types(schema.get("type"))
+        if not types:
+            return []
+        if "null" in types and val is None:
+            return []
+
+        concrete_types = [item for item in types if item != "null"]
+        if not concrete_types:
+            return []
+
+        matching_types = [
+            item for item in concrete_types if item in self._TYPE_MAP and isinstance(val, self._TYPE_MAP[item])
+        ]
+        candidate_types = matching_types or concrete_types
+        union_errors: list[str] = []
+        for item in candidate_types:
+            errors = self._validate_single_type(val, {**schema, "type": item}, path, item)
+            if not errors:
+                return []
+            for error in errors:
+                if error not in union_errors:
+                    union_errors.append(error)
+        return union_errors
 
     def to_schema(self) -> dict[str, Any]:
         """Convert tool to OpenAI function schema format."""
