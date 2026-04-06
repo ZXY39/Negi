@@ -136,44 +136,39 @@ def _compact_summary_text(summary: str) -> str:
 _ARTIFACT_REF_PATTERN = re.compile(r"artifact:artifact:[A-Za-z0-9_-]+")
 
 
+def _inline_tool_payload_fits_limits(payload: Any) -> bool:
+    serialized = _stringify(payload)
+    return (
+        len(serialized) <= INLINE_OPEN_RESULT_CHAR_LIMIT
+        and _line_count(serialized) <= INLINE_OPEN_RESULT_LINE_LIMIT
+    )
+
+
+def _top_level_ref(payload: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        text = str(payload.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _extract_origin_ref(value: Any) -> str:
     envelope = parse_content_envelope(value)
     if envelope is not None and str(envelope.ref or "").strip():
         return str(envelope.ref or "").strip()
 
-    payload: Any = value
-    if isinstance(value, str):
-        text = value.strip()
-        if text.startswith("{") or text.startswith("["):
-            try:
-                payload = json.loads(text)
-            except Exception:
-                payload = value
-
-    refs: list[str] = []
-
-    def _visit(item: Any) -> None:
-        if isinstance(item, dict):
-            ref = str(item.get("ref") or "").strip()
-            if ref.startswith("artifact:artifact:"):
-                refs.append(ref)
-            handle = item.get("handle")
-            if isinstance(handle, dict):
-                handle_ref = str(handle.get("ref") or "").strip()
-                if handle_ref.startswith("artifact:artifact:"):
-                    refs.append(handle_ref)
-            for nested in item.values():
-                _visit(nested)
-            return
-        if isinstance(item, list):
-            for nested in item:
-                _visit(nested)
-            return
-        if isinstance(item, str):
-            refs.extend(_ARTIFACT_REF_PATTERN.findall(item))
-
-    _visit(payload)
-    return refs[0] if refs else ""
+    payload = _parsed_json_payload(value)
+    if not isinstance(payload, dict):
+        return ""
+    top_level = _top_level_ref(payload, "requested_ref", "resolved_ref", "ref", "origin_ref")
+    if top_level:
+        return top_level
+    handle = payload.get("handle")
+    if isinstance(handle, dict):
+        handle_ref = _top_level_ref(handle, "requested_ref", "resolved_ref", "ref", "origin_ref")
+        if handle_ref:
+            return handle_ref
+    return ""
 
 
 def _parsed_json_payload(value: Any) -> dict[str, Any] | None:
@@ -247,28 +242,47 @@ def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str)
     return True
 
 
+def _should_keep_inline_spawn_child_tool_result(payload: dict[str, Any]) -> bool:
+    children = payload.get("children")
+    if not isinstance(children, list) or not all(isinstance(item, dict) for item in children):
+        return False
+    return _inline_tool_payload_fits_limits(payload)
+
+
+def _should_keep_inline_search_tool_result(payload: dict[str, Any]) -> bool:
+    if payload.get("ok") is not True:
+        return False
+    hits = payload.get("hits")
+    if not isinstance(hits, list):
+        return False
+    if payload.get("count") in {None, ""}:
+        return False
+    if "query" not in payload or "overflow" not in payload or "requires_refine" not in payload or "cap" not in payload:
+        return False
+    if any(not isinstance(item, dict) for item in hits):
+        return False
+    if any("line" not in item or "preview" not in item for item in hits):
+        return False
+    return _inline_tool_payload_fits_limits(payload)
+
+
 def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
     if normalized in _ALWAYS_INLINE_TOOL_RESULT_SOURCES:
         return True
     if _should_keep_inline_direct_load_tool_result(value, source_kind=source_kind):
         return True
-    if normalized not in {"tool_result:content", "tool_result:filesystem"}:
-        return False
     payload = _parsed_json_payload(value)
     if not isinstance(payload, dict):
         return False
+    if normalized == "tool_result:spawn_child_nodes":
+        return _should_keep_inline_spawn_child_tool_result(payload)
+    if normalized not in {"tool_result:content", "tool_result:filesystem"}:
+        return False
     excerpt = str(payload.get("excerpt") or "").strip()
-    if not excerpt:
-        return False
-    if payload.get("start_line") in {None, ""} or payload.get("end_line") in {None, ""}:
-        return False
-    serialized = _stringify(payload)
-    return (
-        len(serialized) <= INLINE_OPEN_RESULT_CHAR_LIMIT
-        and _line_count(serialized) <= INLINE_OPEN_RESULT_LINE_LIMIT
-        and _line_count(excerpt) <= MAX_OPEN_LINES
-    )
+    if excerpt and payload.get("start_line") not in {None, ""} and payload.get("end_line") not in {None, ""}:
+        return _inline_tool_payload_fits_limits(payload) and _line_count(excerpt) <= MAX_OPEN_LINES
+    return _should_keep_inline_search_tool_result(payload)
 
 
 def _looks_like_react_node_payload(value: Any, *, runtime: dict[str, Any] | None = None) -> bool:

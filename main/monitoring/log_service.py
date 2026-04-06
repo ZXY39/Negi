@@ -463,7 +463,7 @@ class TaskLogService:
                     next_order_index += 1
                     order_by_call_id[tool_call_id] = order_index
 
-                arguments = dict(getattr(call, 'arguments', {}) or {})
+                arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
                 arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else ''
                 content = tool_message.get('content')
                 preview_text, output_ref = content_summary_and_ref(content)
@@ -496,6 +496,38 @@ class TaskLogService:
                 persisted.append(record)
 
             return persisted
+
+    @staticmethod
+    def _normalize_tool_call_arguments(arguments: Any) -> dict[str, Any]:
+        if isinstance(arguments, dict):
+            source = arguments
+        elif isinstance(arguments, str):
+            text = str(arguments or '').strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return {}
+            if not isinstance(parsed, dict):
+                return {}
+            source = parsed
+        elif arguments is None:
+            return {}
+        else:
+            try:
+                parsed = dict(arguments)
+            except Exception:
+                return {}
+            if not isinstance(parsed, dict):
+                return {}
+            source = parsed
+        normalized: dict[str, Any] = {}
+        for key, value in source.items():
+            key_text = str(key or '').strip()
+            if key_text:
+                normalized[key_text] = value
+        return normalized
 
     def append_node_output(
         self,
@@ -2099,6 +2131,7 @@ class TaskLogService:
         tool_file_changes = normalize_tool_file_changes((node.metadata or {}).get('tool_file_changes'))
         execution_trace = self._projection_execution_trace(node)
         execution_trace_summary = self._execution_trace_summary(execution_trace)
+        latest_spawn_round_id, direct_child_results = self._latest_direct_child_results_payload(node)
         spawn_review_rounds = self._spawn_review_rounds_payload(node)
         execution_trace_ref = str(preserved_execution_trace_ref or '').strip()
         if externalize_execution_trace:
@@ -2139,6 +2172,8 @@ class TaskLogService:
                 'updated_at': str(node.updated_at or ''),
                 'execution_trace_summary': execution_trace_summary,
                 'execution_trace_ref': execution_trace_ref,
+                'latest_spawn_round_id': latest_spawn_round_id,
+                'direct_child_results': direct_child_results,
                 'spawn_review_rounds': spawn_review_rounds,
                 'tool_file_changes': [item.model_dump(mode='json') for item in list(tool_file_changes or [])],
                 'token_usage': node.token_usage.model_dump(mode='json'),
@@ -2303,6 +2338,46 @@ class TaskLogService:
                 }
             )
         return rounds
+
+    @staticmethod
+    def _latest_direct_child_results_payload(node: NodeRecord) -> tuple[str, list[dict[str, Any]]]:
+        operations = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return '', []
+        latest_round_id = ''
+        latest_entries: list[dict[str, Any]] = []
+        for index, (round_id, operation) in enumerate(operations.items(), start=1):
+            if not isinstance(operation, dict):
+                continue
+            latest_round_id = str(round_id or '').strip() or f'round:{index}'
+            latest_entries = [dict(item) for item in list(operation.get('entries') or []) if isinstance(item, dict)]
+        if not latest_entries:
+            return latest_round_id, []
+        results: list[dict[str, Any]] = []
+        for item in latest_entries:
+            result = dict(item.get('result') or {}) if isinstance(item.get('result'), dict) else {}
+            failure_info = dict(result.get('failure_info') or {}) if isinstance(result.get('failure_info'), dict) else {}
+            results.append(
+                {
+                    'index': int(item.get('index') or 0),
+                    'goal': str(item.get('goal') or ''),
+                    'status': str(item.get('status') or ''),
+                    'started_at': str(item.get('started_at') or ''),
+                    'finished_at': str(item.get('finished_at') or ''),
+                    'requires_acceptance': bool(item.get('requires_acceptance')),
+                    'child_node_id': str(item.get('child_node_id') or ''),
+                    'acceptance_node_id': str(item.get('acceptance_node_id') or ''),
+                    'check_status': str(item.get('check_status') or ''),
+                    'review_decision': str(item.get('review_decision') or ''),
+                    'blocked_reason': str(item.get('blocked_reason') or ''),
+                    'blocked_suggestion': str(item.get('blocked_suggestion') or ''),
+                    'check_result': str(result.get('check_result') or ''),
+                    'node_output_summary': str(result.get('node_output_summary') or result.get('node_output') or item.get('synthetic_result_summary') or ''),
+                    'node_output_ref': str(result.get('node_output_ref') or ''),
+                    'failure_info': failure_info,
+                }
+            )
+        return latest_round_id, results
 
     @staticmethod
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:

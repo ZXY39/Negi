@@ -1911,6 +1911,71 @@ def test_content_navigation_search_uses_canonical_ref_for_wrapped_content(tmp_pa
     store.close()
 
 
+def test_content_navigation_keeps_small_spawn_child_results_inline(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    payload = {
+        "children": [
+            {
+                "goal": "child goal",
+                "check_result": "未检验",
+                "node_output": "summary " + ("x" * 1400),
+                "node_output_summary": "summary " + ("x" * 1400),
+                "node_output_ref": "artifact:artifact:child-output",
+            }
+        ]
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={"task_id": "task:test", "node_id": "node:spawn"},
+        display_name="spawn-child-results",
+        source_kind="tool_result:spawn_child_nodes",
+        compact=True,
+    )
+    assert parse_content_envelope(rendered) is None
+    assert json.loads(rendered) == payload
+    store.close()
+
+
+def test_content_navigation_keeps_small_search_results_inline(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    payload = {
+        "ok": True,
+        "ref": "artifact:artifact:search-wrapper",
+        "requested_ref": "artifact:artifact:search-wrapper",
+        "resolved_ref": "artifact:artifact:search-target",
+        "wrapper_ref": "artifact:artifact:search-wrapper",
+        "wrapper_depth": 1,
+        "query": "needle",
+        "hits": [
+            {
+                "line": 1,
+                "preview": "needle " + ("y" * 1500),
+            }
+        ],
+        "count": 1,
+        "overflow": False,
+        "requires_refine": False,
+        "cap": 20,
+        "overflow_lower_bound": None,
+        "message": "",
+        "suggestions": [],
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={"task_id": "task:test", "node_id": "node:search"},
+        display_name="search-results",
+        source_kind="tool_result:content",
+        compact=True,
+    )
+    assert parse_content_envelope(rendered) is None
+    assert json.loads(rendered) == payload
+    store.close()
+
+
 def test_content_navigation_open_raw_view_reads_wrapper_json(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)

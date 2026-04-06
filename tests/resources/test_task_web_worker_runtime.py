@@ -2148,6 +2148,54 @@ def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_pat
     assert tool_results[-1].output_ref == inner.ref
 
 
+def test_tool_result_batch_tolerates_non_mapping_tool_arguments(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    service.log_service.record_tool_result_batch(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        response_tool_calls=[
+            ToolCallRequest(
+                id="call:filesystem",
+                name="filesystem",
+                arguments=["oops"],
+            )
+        ],
+        results=[
+            {
+                "tool_message": {
+                    "tool_call_id": "call:filesystem",
+                    "name": "filesystem",
+                    "content": '{"ok":true}',
+                    "status": "success",
+                },
+                "live_state": {
+                    "tool_call_id": "call:filesystem",
+                    "tool_name": "filesystem",
+                    "status": "success",
+                },
+            }
+        ],
+    )
+
+    tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
+
+    assert tool_results[-1].tool_call_id == "call:filesystem"
+    assert tool_results[-1].arguments_text == ""
+
+
 def test_refresh_task_view_skips_upsert_when_semantically_unchanged(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -5295,6 +5343,66 @@ async def test_task_snapshot_excludes_governance_and_node_detail_includes_spawn_
         assert len(node_payload["item"]["spawn_review_rounds"]) == 1
         assert node_payload["item"]["spawn_review_rounds"][0]["round_id"] == "detail-review"
         assert node_payload["item"]["spawn_review_rounds"][0]["blocked_specs"][0]["reason"] == "信息价值不足"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_node_detail_includes_latest_direct_child_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    backend = _SpawnReviewToolCallChatBackend(
+        arguments={"allowed_indexes": [0, 1], "blocked_specs": []}
+    )
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node.goal} done",
+                    answer=f"{node.goal} done\n" + ("z" * 1400),
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[
+                SpawnChildSpec(goal="child 1", prompt="prompt 1", execution_policy=_execution_policy()),
+                SpawnChildSpec(goal="child 2", prompt="prompt 2", execution_policy=_execution_policy()),
+            ],
+            call_id="detail-child-results",
+        )
+
+        node_payload = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="summary")
+        assert node_payload is not None
+        assert node_payload["item"]["latest_spawn_round_id"] == "detail-child-results"
+        direct_child_results = list(node_payload["item"]["direct_child_results"])
+        assert [item["goal"] for item in direct_child_results] == ["child 1", "child 2"]
+        assert all(str(item["child_node_id"] or "").startswith("node:") for item in direct_child_results)
+        assert all(item["check_result"] == SKIPPED_CHECK_RESULT for item in direct_child_results)
+        assert all(str(item["node_output_summary"] or "").strip() for item in direct_child_results)
+        assert all(str(item["node_output_ref"] or "").startswith("artifact:") for item in direct_child_results)
     finally:
         await service.close()
 

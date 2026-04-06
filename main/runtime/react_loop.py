@@ -43,6 +43,7 @@ _STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
+_READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
 _STAGE_ONLY_TRANSITION_LIMIT = 5
@@ -123,6 +124,7 @@ class ReActToolLoop:
         xml_repair_excerpt = ''
         xml_repair_tool_names: list[str] = []
         xml_repair_last_issue = ''
+        read_only_repeat_violation_counts: dict[str, int] = {}
         while limit is None or attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
@@ -357,17 +359,35 @@ class ReActToolLoop:
                     last_invalid_final_submission_reason = ''
                     last_invalid_stage_submission_reason = ''
                 control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response_tool_calls)
-                disallowed_current_task_progress_calls = self._disallowed_current_task_progress_calls(
+                read_only_repeat_violations = self._read_only_repeat_violations(
                     response_tool_calls=response_tool_calls,
                     task_id=task.task_id,
                     node_kind=node.node_kind,
+                    message_history=message_history,
+                    prior_violation_counts=read_only_repeat_violation_counts,
                 )
-                if disallowed_current_task_progress_calls:
-                    latest_spawn_ref = self._latest_spawn_child_nodes_ref(message_history)
-                    repair_text = self._current_task_progress_repair_message(
-                        task_id=task.task_id,
-                        node_kind=node.node_kind,
-                        latest_spawn_ref=latest_spawn_ref,
+                if read_only_repeat_violations:
+                    repair_messages: list[str] = []
+                    threshold_violation: dict[str, Any] | None = None
+                    for violation in read_only_repeat_violations:
+                        signature = str(violation.get('signature') or '').strip()
+                        if not signature:
+                            continue
+                        next_count = int(read_only_repeat_violation_counts.get(signature, 0) or 0) + 1
+                        read_only_repeat_violation_counts[signature] = next_count
+                        repair_text = str(violation.get('repair_text') or '').strip()
+                        if repair_text and repair_text not in repair_messages:
+                            repair_messages.append(repair_text)
+                        if next_count >= _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT and threshold_violation is None:
+                            threshold_violation = {
+                                **violation,
+                                'count': next_count,
+                            }
+                    combined_repair_text = '\n\n'.join(repair_messages).strip()
+                    error_content = (
+                        f'Error: {combined_repair_text}'
+                        if combined_repair_text
+                        else 'Error: repeated read-only retrieval call requires repair'
                     )
                     message_history = self._record_rejected_tool_turn(
                         task=task,
@@ -376,9 +396,15 @@ class ReActToolLoop:
                         response_tool_calls=response_tool_calls,
                         message_history=message_history,
                         runtime_context=runtime_context,
-                        error_content=f'Error: {repair_text}',
+                        error_content=error_content,
                     )
-                    repair_overlay_text = repair_text
+                    if threshold_violation is not None:
+                        return self._read_only_repeat_failure(
+                            signature=str(threshold_violation.get('signature') or '').strip(),
+                            count=int(threshold_violation.get('count') or 0),
+                            repair_text=str(threshold_violation.get('repair_text') or '').strip(),
+                        )
+                    repair_overlay_text = combined_repair_text
                     continue
                 if final_result_mixed_turn:
                     message_history = self._record_rejected_tool_turn(
@@ -1650,6 +1676,23 @@ class ReActToolLoop:
         )
 
     @classmethod
+    def _read_only_repeat_failure(cls, *, signature: str, count: int, repair_text: str) -> NodeFinalResult:
+        normalized_signature = str(signature or '').strip() or '<unknown>'
+        guidance = str(repair_text or '').strip() or 'reuse the existing read-only result or change the query/window before retrying'
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='read-only repair guidance guard triggered',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=(
+                f'Ignored read-only repair guidance {int(count or 0)} times for the same call signature: '
+                f'{normalized_signature}. Latest repair guidance: {guidance}'
+            ),
+        )
+
+    @classmethod
     def _stage_only_transition_failure(cls, *, count: int, stage_goal: str) -> NodeFinalResult:
         goal = str(stage_goal or '').strip()
         suffix = f' Latest stage goal: {goal}.' if goal else ''
@@ -2069,27 +2112,78 @@ class ReActToolLoop:
         return prepared_history
 
     @classmethod
-    def _disallowed_current_task_progress_calls(
+    def _read_only_repeat_violations(
         cls,
         *,
         response_tool_calls: list[Any],
         task_id: str,
         node_kind: str,
-    ) -> list[Any]:
+        message_history: list[dict[str, Any]],
+        prior_violation_counts: dict[str, int],
+    ) -> list[dict[str, Any]]:
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return []
-        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
+        normalized_kind = str(node_kind or '').strip().lower()
+        if normalized_kind not in _STAGE_BUDGET_NODE_KINDS:
             return []
-        blocked_calls: list[Any] = []
+        latest_messages_by_signature = cls._latest_tool_messages_by_signature(message_history)
+        latest_spawn_ref = cls._latest_spawn_child_nodes_ref(message_history)
+        violations: list[dict[str, Any]] = []
         for call in list(response_tool_calls or []):
-            if str(getattr(call, 'name', '') or '').strip() != 'task_progress':
-                continue
+            tool_name = str(getattr(call, 'name', '') or '').strip()
             arguments = cls._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
-            requested_task_id = str(arguments.get('任务id') or arguments.get('task_id') or '').strip()
-            if requested_task_id == normalized_task_id:
-                blocked_calls.append(call)
-        return blocked_calls
+            if not cls._is_soft_reject_read_only_call(tool_name=tool_name, arguments=arguments):
+                continue
+            signature = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+            if cls._is_current_task_progress_call(
+                tool_name=tool_name,
+                arguments=arguments,
+                task_id=normalized_task_id,
+            ):
+                violations.append(
+                    {
+                        'signature': signature,
+                        'repair_text': cls._current_task_progress_repair_message(
+                            task_id=normalized_task_id,
+                            node_kind=normalized_kind,
+                            latest_spawn_ref=latest_spawn_ref,
+                        ),
+                    }
+                )
+                continue
+            if signature in prior_violation_counts or signature in latest_messages_by_signature:
+                latest_tool_message = latest_messages_by_signature.get(signature)
+                violations.append(
+                    {
+                        'signature': signature,
+                        'repair_text': cls._read_only_repeat_repair_message(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            latest_tool_message=latest_tool_message,
+                        ),
+                    }
+                )
+        return violations
+
+    @staticmethod
+    def _is_soft_reject_read_only_call(*, tool_name: str, arguments: dict[str, Any]) -> bool:
+        normalized_tool = str(tool_name or '').strip()
+        if normalized_tool in {'task_progress', 'task_node_detail'}:
+            return True
+        action = str(arguments.get('action') or '').strip().lower()
+        if normalized_tool == 'content':
+            return action in {'open', 'search', 'describe'}
+        if normalized_tool == 'filesystem':
+            return action in {'open', 'search', 'list', 'describe'}
+        return False
+
+    @staticmethod
+    def _is_current_task_progress_call(*, tool_name: str, arguments: dict[str, Any], task_id: str) -> bool:
+        if str(tool_name or '').strip() != 'task_progress':
+            return False
+        requested_task_id = str(arguments.get('任务id') or arguments.get('task_id') or '').strip()
+        return bool(requested_task_id) and requested_task_id == str(task_id or '').strip()
 
     @classmethod
     def _latest_spawn_child_nodes_ref(cls, messages: list[dict[str, Any]]) -> str:
@@ -2118,6 +2212,42 @@ class ReActToolLoop:
             return {}
         return dict(parsed) if isinstance(parsed, dict) else {}
 
+    @classmethod
+    def _latest_tool_messages_by_signature(cls, messages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        call_signatures: dict[str, str] = {}
+        latest_messages: dict[str, dict[str, Any]] = {}
+        for message in list(messages or []):
+            role = str((message or {}).get('role') or '').strip().lower()
+            if role == 'assistant':
+                for tool_call in list((message or {}).get('tool_calls') or []):
+                    call_id = extract_call_id((tool_call or {}).get('id'))
+                    if not call_id:
+                        continue
+                    function_payload = (tool_call or {}).get('function') if isinstance((tool_call or {}).get('function'), dict) else {}
+                    tool_name = str(function_payload.get('name') or (tool_call or {}).get('name') or '').strip()
+                    arguments = cls._normalize_tool_call_arguments(
+                        function_payload.get('arguments') if function_payload else (tool_call or {}).get('arguments')
+                    )
+                    if not cls._is_soft_reject_read_only_call(tool_name=tool_name, arguments=arguments):
+                        continue
+                    call_signatures[call_id] = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+                continue
+            if role != 'tool':
+                continue
+            call_id = extract_call_id((message or {}).get('tool_call_id'))
+            signature = call_signatures.get(call_id)
+            if signature:
+                candidate = dict(message or {})
+                existing = latest_messages.get(signature)
+                candidate_payload = cls._tool_message_json_payload(candidate)
+                existing_payload = cls._tool_message_json_payload(existing or {})
+                candidate_ref = str(candidate_payload.get('ref') or candidate_payload.get('resolved_ref') or '').strip()
+                existing_ref = str(existing_payload.get('ref') or existing_payload.get('resolved_ref') or '').strip()
+                if existing is not None and existing_ref and not candidate_ref:
+                    continue
+                latest_messages[signature] = candidate
+        return latest_messages
+
     @staticmethod
     def _current_task_progress_repair_message(*, task_id: str, node_kind: str, latest_spawn_ref: str) -> str:
         node_label = '验收节点' if str(node_kind or '').strip().lower() == 'acceptance' else '执行节点'
@@ -2136,6 +2266,51 @@ class ReActToolLoop:
             f'{base} 请回看最近的 `spawn_child_nodes` 输出、已有 `artifact:` 引用和失败分支的 `failure_info`，'
             '优先用 `content.open` / `content.search` 做局部核对，再决定吸收结果、重派失败分支，或推进下一阶段。'
         )
+
+    @classmethod
+    def _read_only_repeat_repair_message(
+        cls,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        latest_tool_message: dict[str, Any] | None,
+    ) -> str:
+        latest_payload = cls._tool_message_json_payload(latest_tool_message or {})
+        latest_ref = str(latest_payload.get('ref') or latest_payload.get('resolved_ref') or '').strip()
+        target_ref = str(arguments.get('ref') or arguments.get('path') or '').strip()
+        base = '不要重复调用完全相同的只读/检索工具。'
+        normalized_tool = str(tool_name or '').strip()
+        if normalized_tool == 'content':
+            action = str(arguments.get('action') or '').strip().lower()
+            detail = (
+                f'你刚刚已经对同一内容执行了 `content.{action or "open"}`。'
+                '先基于已有结果继续分析；若信息不足，请改用不同的 `start_line` / `end_line`、不同的 `query`，或直接进入汇总/下一阶段。'
+            )
+        elif normalized_tool == 'filesystem':
+            action = str(arguments.get('action') or '').strip().lower()
+            detail = (
+                f'你刚刚已经对同一路径执行了 `filesystem.{action or "open"}`。'
+                '先基于已有结果推进；若信息不足，请改用更具体的路径、不同的行号窗口、不同的 `query`，或直接进入汇总。'
+            )
+        elif normalized_tool == 'task_node_detail':
+            detail = (
+                '你刚刚已经请求过同一份节点详情。请先消费已有的 `summary`、`final_output_ref`、`check_result_ref`、'
+                '`execution_trace_ref` 或相关 `artifact`，若仍不足，再改用不同节点或不同 detail 需求。'
+            )
+        else:
+            detail = (
+                '请先消费已有任务树、节点摘要和 `artifact` 结果；如果仍然不足，请改查不同对象，而不是重复原样查询。'
+            )
+        if latest_ref and target_ref:
+            return (
+                f'{base} {detail} 最近同签名结果可复用的 ref：`{latest_ref}`。'
+                f' 当前重复命中的目标：`{target_ref}`。'
+            )
+        if latest_ref:
+            return f'{base} {detail} 最近同签名结果可复用的 ref：`{latest_ref}`。'
+        if target_ref:
+            return f'{base} {detail} 当前重复命中的目标：`{target_ref}`。'
+        return f'{base} {detail}'
 
     def _node_has_meaningful_tool_results(self, *, task_id: str, node_id: str) -> bool:
         store = getattr(self._log_service, '_store', None)

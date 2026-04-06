@@ -1806,7 +1806,7 @@ async def test_submit_next_stage_does_not_trip_repeated_action_breaker(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_current_task_progress_after_spawn_is_soft_rejected_with_repair_guidance(tmp_path: Path):
+async def test_current_task_progress_after_spawn_fails_after_three_ignored_repair_guidances(tmp_path: Path):
     class _Backend:
         def __init__(self) -> None:
             self._turn = 0
@@ -1894,25 +1894,7 @@ async def test_current_task_progress_after_spawn_is_soft_rejected_with_repair_gu
                     usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
                 )
 
-            text = self._messages_text(kwargs)
-            assert '不得对当前正在执行的 `task_id` 调用 `task_progress`' in text
-            assert 'artifact:artifact:test-spawn' in text
-            return LLMResponse(
-                content='',
-                tool_calls=[
-                    _final_result_call(
-                        status='failed',
-                        delivery_status='blocked',
-                        summary='intentional stop',
-                        answer='',
-                        evidence=[],
-                        remaining_work=['stop after repair guidance'],
-                        blocking_reason='intentional stop',
-                    )
-                ],
-                finish_reason='tool_calls',
-                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
-            )
+            raise AssertionError(f'unexpected extra turn: {self._turn}')
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
@@ -1961,7 +1943,9 @@ async def test_current_task_progress_after_spawn_is_soft_rejected_with_repair_gu
         assert task is not None
         assert task.status == 'failed'
         assert 'repeated tool call detected: task_progress' not in str(task.failure_reason or '')
-        assert 'intentional stop' in str(task.failure_reason or '')
+        assert 'read-only repair guidance' in str(task.failure_reason or '')
+        assert 'task_progress' in str(task.failure_reason or '')
+        assert 'artifact:artifact:test-spawn' in str(task.failure_reason or '')
 
         detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
@@ -1969,5 +1953,293 @@ async def test_current_task_progress_after_spawn_is_soft_rejected_with_repair_gu
         assert len(stages) == 1
         round_tools = [item['tool_name'] for item in stages[0]['rounds'][0]['tools']]
         assert round_tools == ['spawn_child_nodes']
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_content_open_fails_after_three_ignored_repair_guidances(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self._turn = 0
+
+        @staticmethod
+        def _messages_text(kwargs: dict[str, object]) -> str:
+            messages = list(kwargs.get('messages') or [])
+            return '\n'.join(
+                content
+                for item in messages
+                if isinstance(item, dict)
+                for content in [item.get('content')]
+                if isinstance(content, str) and content.strip()
+            )
+
+        async def chat(self, **kwargs):
+            self._turn += 1
+            if self._turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:stage',
+                            name='submit_next_stage',
+                            arguments={
+                                'stage_goal': '验证重复 content.open 会先软拒绝，再在第三次违规时失败',
+                                'tool_round_budget': 5,
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 2:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:content:first',
+                            name='content',
+                            arguments={
+                                'action': 'open',
+                                'path': r'D:\repo\cli.tsx',
+                                'start_line': 240,
+                                'end_line': 303,
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn in {3, 4, 5}:
+                if self._turn > 3:
+                    text = self._messages_text(kwargs)
+                    assert '不要重复调用完全相同的只读/检索工具' in text
+                    assert 'artifact:artifact:test-content' in text
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id=f'call:content:repeat:{self._turn}',
+                            name='content',
+                            arguments={
+                                'action': 'open',
+                                'path': r'D:\repo\cli.tsx',
+                                'start_line': 240,
+                                'end_line': 303,
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            raise AssertionError(f'unexpected extra turn: {self._turn}')
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+
+    def _build_tools(task, node):
+        async def _submit_stage(stage_goal, tool_round_budget, completed_stage_summary='', key_refs=None):
+            return await service.node_runner._submit_next_stage(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                stage_goal=stage_goal,
+                tool_round_budget=tool_round_budget,
+                completed_stage_summary=completed_stage_summary,
+                key_refs=list(key_refs or []),
+            )
+
+        return {
+            'submit_next_stage': SubmitNextStageTool(_submit_stage),
+            'submit_final_result': SubmitFinalResultTool(service.node_runner._submit_final_result, node_kind=node.node_kind),
+            'content': _StaticTool(
+                'content',
+                json.dumps(
+                    {
+                        'ref': 'artifact:artifact:test-content',
+                        'resolved_ref': r'path:D:\repo\cli.tsx',
+                        'summary': 'Use content.search/open with ref=artifact:artifact:test-content',
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        }
+
+    service.node_runner._build_tools = _build_tools
+    try:
+        record = await service.create_task('repeated content repair regression', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert task.status == 'failed'
+        assert 'repeated tool call detected: content' not in str(task.failure_reason or '')
+        assert 'read-only repair guidance' in str(task.failure_reason or '')
+        assert 'content' in str(task.failure_reason or '')
+        assert r'D:\repo\cli.tsx' in str(task.failure_reason or '')
+        assert 'artifact:artifact:test-content' in str(task.failure_reason or '')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self._turn = 0
+
+        @staticmethod
+        def _messages_text(kwargs: dict[str, object]) -> str:
+            messages = list(kwargs.get('messages') or [])
+            return '\n'.join(
+                content
+                for item in messages
+                if isinstance(item, dict)
+                for content in [item.get('content')]
+                if isinstance(content, str) and content.strip()
+            )
+
+        async def chat(self, **kwargs):
+            self._turn += 1
+            if self._turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:stage',
+                            name='submit_next_stage',
+                            arguments={
+                                'stage_goal': '验证不同只读签名分开计数，不会合并触发失败',
+                                'tool_round_budget': 8,
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 2:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:a:first',
+                            name='content',
+                            arguments={'action': 'open', 'path': r'D:\repo\cli.tsx', 'start_line': 1, 'end_line': 100},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 3:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:a:repeat',
+                            name='content',
+                            arguments={'action': 'open', 'path': r'D:\repo\cli.tsx', 'start_line': 1, 'end_line': 100},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 4:
+                text = self._messages_text(kwargs)
+                assert '不要重复调用完全相同的只读/检索工具' in text
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:b:first',
+                            name='content',
+                            arguments={'action': 'open', 'path': r'D:\repo\cli.tsx', 'start_line': 101, 'end_line': 200},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 5:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:b:repeat',
+                            name='content',
+                            arguments={'action': 'open', 'path': r'D:\repo\cli.tsx', 'start_line': 101, 'end_line': 200},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 6:
+                text = self._messages_text(kwargs)
+                assert '不要重复调用完全相同的只读/检索工具' in text
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        _final_result_call(
+                            status='failed',
+                            delivery_status='blocked',
+                            summary='intentional stop',
+                            answer='',
+                            evidence=[],
+                            remaining_work=['stop after verifying separate counts'],
+                            blocking_reason='intentional stop',
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            raise AssertionError(f'unexpected extra turn: {self._turn}')
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+
+    def _build_tools(task, node):
+        async def _submit_stage(stage_goal, tool_round_budget, completed_stage_summary='', key_refs=None):
+            return await service.node_runner._submit_next_stage(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                stage_goal=stage_goal,
+                tool_round_budget=tool_round_budget,
+                completed_stage_summary=completed_stage_summary,
+                key_refs=list(key_refs or []),
+            )
+
+        return {
+            'submit_next_stage': SubmitNextStageTool(_submit_stage),
+            'submit_final_result': SubmitFinalResultTool(service.node_runner._submit_final_result, node_kind=node.node_kind),
+            'content': _StaticTool(
+                'content',
+                json.dumps(
+                    {
+                        'ref': 'artifact:artifact:test-content',
+                        'resolved_ref': r'path:D:\repo\cli.tsx',
+                        'summary': 'Use content.search/open with ref=artifact:artifact:test-content',
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        }
+
+    service.node_runner._build_tools = _build_tools
+    try:
+        record = await service.create_task('read-only signature counting regression', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert task.status == 'failed'
+        assert 'intentional stop' in str(task.failure_reason or '')
+        assert 'read-only repair guidance' not in str(task.failure_reason or '')
     finally:
         await service.close()

@@ -398,9 +398,15 @@ class ApiClient {
         });
     }
 
-    static async getTaskNodeDetail(taskId, nodeId) {
+    static async getTaskNodeDetail(taskId, nodeId, { detailLevel = "summary" } = {}) {
+        const normalizedDetailLevel = String(detailLevel || "summary").trim().toLowerCase() === "full"
+            ? "full"
+            : "summary";
         const data = await this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}`, {
-            requestKey: `tasks:node:${taskId}:${nodeId}`,
+            params: {
+                detail_level: normalizedDetailLevel,
+            },
+            requestKey: `tasks:node:${taskId}:${nodeId}:${normalizedDetailLevel}`,
         });
         return data.item || null;
     }

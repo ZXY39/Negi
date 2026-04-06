@@ -300,6 +300,12 @@ class TaskQueryService:
             execution_trace=execution_trace,
             execution_trace_summary=execution_trace_summary,
             execution_trace_ref=execution_trace_ref,
+            latest_spawn_round_id=str(payload.get('latest_spawn_round_id') or ''),
+            direct_child_results=[
+                dict(item)
+                for item in list(payload.get('direct_child_results') or [])
+                if isinstance(item, dict)
+            ],
             spawn_review_rounds=[
                 dict(item)
                 for item in list(payload.get('spawn_review_rounds') or [])

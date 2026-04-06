@@ -153,11 +153,13 @@ def test_execution_and_acceptance_prompts_forbid_self_task_progress_polling(monk
     assert 'spawn_child_nodes' in execution_prompt
     assert 'content.search' in execution_prompt
     assert 'content.open' in execution_prompt
+    assert '不要重复调用完全相同的只读/检索工具' in execution_prompt
 
     assert '当前正在执行的 `task_id`' in acceptance_prompt
     assert '不得对当前正在执行的 `task_id` 调用 `task_progress`' in acceptance_prompt
     assert 'content.search' in acceptance_prompt
     assert 'content.open' in acceptance_prompt
+    assert '不要重复调用完全相同的只读/检索工具' in acceptance_prompt
 
 
 def test_node_execution_prompt_mentions_spawn_interception_guidance(monkeypatch) -> None:

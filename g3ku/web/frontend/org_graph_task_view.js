@@ -1991,6 +1991,7 @@ function executionTraceSummaryHasRoundBoundaries(summary) {
 
 function taskNodeDetailNeedsRefresh(detail) {
     if (!detail || typeof detail !== "object") return true;
+    if (String(detail?.detail_level || "").trim().toLowerCase() !== "full") return true;
     const summary = detail.execution_trace_summary;
     if (!summary || typeof summary !== "object") return false;
     const stages = Array.isArray(summary.stages) ? summary.stages : [];
@@ -2010,7 +2011,7 @@ async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
     S.taskNodeBusy = true;
     const request = (async () => {
         try {
-            const detail = await ApiClient.getTaskNodeDetail(taskId, key);
+            const detail = await ApiClient.getTaskNodeDetail(taskId, key, { detailLevel: "full" });
             if (!detail) return null;
             if (String(S.currentTaskId || "").trim() !== taskId) return null;
             S.taskNodeDetails = { ...S.taskNodeDetails, [key]: detail };

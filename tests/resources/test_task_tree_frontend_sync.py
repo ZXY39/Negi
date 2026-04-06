@@ -1193,6 +1193,116 @@ def test_ensure_task_node_detail_refetches_stale_flattened_summary_cache() -> No
     assert result["cachedStageGoal"] == "fresh rounded stage"
 
 
+def test_api_client_get_task_node_detail_requests_full_payload_with_distinct_cache_key() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.window.location = { origin: "http://localhost" };
+        global.fetch = () => {
+          throw new Error("fetch should not be called in this test");
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        vm.runInThisContext(code);
+
+        let captured = null;
+        ApiClient._request = async (method, path, options = {}) => {
+          captured = {
+            method,
+            path,
+            params: options.params || {},
+            requestKey: options.requestKey || "",
+          };
+          return {
+            item: {
+              node_id: "node:1",
+              detail_level: String(options?.params?.detail_level || "summary"),
+            },
+          };
+        };
+
+        ApiClient.getTaskNodeDetail("task:test", "node:1", { detailLevel: "full" }).then((item) => {
+          console.log(JSON.stringify({
+            detailLevel: item?.detail_level || "",
+            params: captured?.params || {},
+            requestKey: captured?.requestKey || "",
+          }));
+        });
+        """
+    )
+
+    assert result["detailLevel"] == "full"
+    assert result["params"]["detail_level"] == "full"
+    assert result["requestKey"] == "tasks:node:task:test:node:1:full"
+
+
+def test_ensure_task_node_detail_upgrades_summary_cache_to_full_detail() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        let fetchCount = 0;
+        let requestedDetailLevel = "";
+        const cachedDetail = {
+          node_id: "node:1",
+          detail_level: "summary",
+          final_output: "summary output only",
+          check_result: "summary acceptance only",
+          execution_trace_summary: {
+            stages: [],
+          },
+        };
+        const fullDetail = {
+          node_id: "node:1",
+          detail_level: "full",
+          final_output: "full deliverable\\nline 2",
+          check_result: "full acceptance\\nline 2",
+          execution_trace: {
+            final_output: "full deliverable\\nline 2",
+            acceptance_result: "full acceptance\\nline 2",
+            stages: [],
+          },
+        };
+        global.S = {
+          currentTaskId: "task:test",
+          taskNodeDetails: { "node:1": cachedDetail },
+          taskNodeDetailRequests: {},
+          currentNodeDetail: cachedDetail,
+        };
+        global.U = {};
+        global.ApiClient = {
+          getTaskNodeDetail: async (_taskId, _nodeId, options = {}) => {
+            fetchCount += 1;
+            requestedDetailLevel = String(options?.detailLevel || "");
+            return fullDetail;
+          },
+        };
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        ensureTaskNodeDetail("node:1").then((detail) => {
+          console.log(JSON.stringify({
+            fetchCount,
+            requestedDetailLevel,
+            detailLevel: detail?.detail_level || "",
+            finalOutput: detail?.final_output || "",
+            cachedDetailLevel: S.taskNodeDetails["node:1"]?.detail_level || "",
+          }));
+        });
+        """
+    )
+
+    assert result["fetchCount"] == 1
+    assert result["requestedDetailLevel"] == "full"
+    assert result["detailLevel"] == "full"
+    assert result["finalOutput"] == "full deliverable\nline 2"
+    assert result["cachedDetailLevel"] == "full"
+
+
 def test_task_detail_html_does_not_render_governance_panel() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
 
