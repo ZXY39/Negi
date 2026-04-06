@@ -1803,3 +1803,171 @@ async def test_submit_next_stage_does_not_trip_repeated_action_breaker(tmp_path:
         assert 'intentional stop' in str(task.failure_reason or '')
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_current_task_progress_after_spawn_is_soft_rejected_with_repair_guidance(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self._turn = 0
+
+        @staticmethod
+        def _messages_text(kwargs: dict[str, object]) -> str:
+            messages = list(kwargs.get('messages') or [])
+            parts: list[str] = []
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get('content')
+                if isinstance(content, str) and content.strip():
+                    parts.append(content)
+            return '\n'.join(parts)
+
+        async def chat(self, **kwargs):
+            self._turn += 1
+            if self._turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:stage',
+                            name='submit_next_stage',
+                            arguments={
+                                'stage_goal': '验证 spawn_child_nodes 后不允许对当前任务自轮询 task_progress',
+                                'tool_round_budget': 4,
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+
+            if self._turn == 2:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:spawn',
+                            name='spawn_child_nodes',
+                            arguments={
+                                'children': [
+                                    {
+                                        'goal': 'dummy child',
+                                        'prompt': 'dummy prompt',
+                                        'execution_policy': {'mode': 'focus'},
+                                    }
+                                ]
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+
+            if self._turn in {3, 4, 5}:
+                if self._turn > 3:
+                    text = self._messages_text(kwargs)
+                    assert '不得对当前正在执行的 `task_id` 调用 `task_progress`' in text
+                    assert 'artifact:artifact:test-spawn' in text
+                task_id = ''
+                for item in list(kwargs.get('messages') or []):
+                    if not isinstance(item, dict) or item.get('role') != 'user':
+                        continue
+                    content = item.get('content')
+                    if not isinstance(content, str) or '"task_id"' not in content:
+                        continue
+                    try:
+                        task_id = str(json.loads(content).get('task_id') or '').strip()
+                    except Exception:
+                        continue
+                assert task_id
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id=f'call:progress:{self._turn}',
+                            name='task_progress',
+                            arguments={'任务id': task_id},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+
+            text = self._messages_text(kwargs)
+            assert '不得对当前正在执行的 `task_id` 调用 `task_progress`' in text
+            assert 'artifact:artifact:test-spawn' in text
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    _final_result_call(
+                        status='failed',
+                        delivery_status='blocked',
+                        summary='intentional stop',
+                        answer='',
+                        evidence=[],
+                        remaining_work=['stop after repair guidance'],
+                        blocking_reason='intentional stop',
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+            )
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+
+    def _build_tools(task, node):
+        async def _submit_stage(stage_goal, tool_round_budget, completed_stage_summary='', key_refs=None):
+            return await service.node_runner._submit_next_stage(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                stage_goal=stage_goal,
+                tool_round_budget=tool_round_budget,
+                completed_stage_summary=completed_stage_summary,
+                key_refs=list(key_refs or []),
+            )
+
+        return {
+            'submit_next_stage': SubmitNextStageTool(_submit_stage),
+            'submit_final_result': SubmitFinalResultTool(service.node_runner._submit_final_result, node_kind=node.node_kind),
+            'spawn_child_nodes': _StaticTool(
+                'spawn_child_nodes',
+                json.dumps(
+                    {
+                        'ref': 'artifact:artifact:test-spawn',
+                        'summary': 'Use content.open/search with ref=artifact:artifact:test-spawn',
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+            'task_progress': _StaticTool(
+                'task_progress',
+                json.dumps({'task_status': 'in_progress'}, ensure_ascii=False),
+            ),
+        }
+
+    service.node_runner._build_tools = _build_tools
+    try:
+        record = await service.create_task('self task_progress repair regression', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert task.status == 'failed'
+        assert 'repeated tool call detected: task_progress' not in str(task.failure_reason or '')
+        assert 'intentional stop' in str(task.failure_reason or '')
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
+        assert detail is not None
+        stages = detail['item']['execution_trace']['stages']
+        assert len(stages) == 1
+        round_tools = [item['tool_name'] for item in stages[0]['rounds'][0]['tools']]
+        assert round_tools == ['spawn_child_nodes']
+    finally:
+        await service.close()

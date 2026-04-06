@@ -20,6 +20,8 @@
 - 汇总子节点时，优先使用 `final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview`；不要为了“看起来更完整”而反复请求 full `task_node_detail`。
 - `task_node_detail` 默认返回 lightweight summary；只有 summary 信息不足以支撑当前判断、且你确实需要补充关键证据时，才请求 `detail_level="full"`。
 - 对 `artifact:` 引用，默认使用 canonical `content.search` / `content.open` 做局部核对；只有在明确需要调试包装内容、确认 wrapper 行为或排查 canonical 视图无法解释的问题时，才使用 raw view。
+- `task_progress` 只用于查询其他异步任务，或用户/上游明确要求你核对的任务状态；**不得对当前正在执行的 `task_id` 调用 `task_progress`** 来等待子节点、轮询当前任务树或汇总派生结果。
+- 如果刚调用过 `spawn_child_nodes`，优先基于它返回的 `ref`、`children[*].node_output_summary`、`check_result`、`failure_info.summary`、`failure_info.remaining_work` 推进；需要核对局部内容时，先用 `content.search` / `content.open` 打开返回的 `ref`，不要改用 `task_progress` 轮询当前任务。
 - 你必须按阶段推进当前执行节点。
 - 推进采用第一性原理，避免无边界反复检索。
 - `execution_policy` 适用于信息收集、内容编写、工具执行、代码处理等各种任务，而不只是一类特定任务。
@@ -60,6 +62,8 @@
 - 若子节点只需要最高价值、最必要、与分支目标直接相关的动作，用 `focus`；若子节点明确需要补漏、扩展范围或系统性覆盖，用 `coverage`。
 
 ### 3.3 处理 `spawn_child_nodes` 的返回结果
+
+`spawn_child_nodes` 返回后，先消费它返回的顶层 `ref` 或各 child 的 `node_output_ref` / `node_output_summary`，必要时用 `content.search` / `content.open` 做局部核对；不要把 `task_progress(current task_id)` 当作等待子节点或汇总结果的手段。
 
 当 `spawn_child_nodes` 返回的某个 child 含有 `failure_info` 时，必须先判断该分支是否虽然失败，但已实质满足分支 goal。判断时至少同时参考以下信息：
 - `node_output_summary`

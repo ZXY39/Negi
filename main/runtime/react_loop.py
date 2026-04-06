@@ -357,8 +357,31 @@ class ReActToolLoop:
                     last_invalid_final_submission_reason = ''
                     last_invalid_stage_submission_reason = ''
                 control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response_tool_calls)
+                disallowed_current_task_progress_calls = self._disallowed_current_task_progress_calls(
+                    response_tool_calls=response_tool_calls,
+                    task_id=task.task_id,
+                    node_kind=node.node_kind,
+                )
+                if disallowed_current_task_progress_calls:
+                    latest_spawn_ref = self._latest_spawn_child_nodes_ref(message_history)
+                    repair_text = self._current_task_progress_repair_message(
+                        task_id=task.task_id,
+                        node_kind=node.node_kind,
+                        latest_spawn_ref=latest_spawn_ref,
+                    )
+                    message_history = self._record_rejected_tool_turn(
+                        task=task,
+                        node=node,
+                        response=response,
+                        response_tool_calls=response_tool_calls,
+                        message_history=message_history,
+                        runtime_context=runtime_context,
+                        error_content=f'Error: {repair_text}',
+                    )
+                    repair_overlay_text = repair_text
+                    continue
                 if final_result_mixed_turn:
-                    message_history = self._record_exclusive_tool_turn_error(
+                    message_history = self._record_rejected_tool_turn(
                         task=task,
                         node=node,
                         response=response,
@@ -1956,7 +1979,7 @@ class ReActToolLoop:
             return None, prepared_history, violations, ''
         return result, prepared_history, [], ''
 
-    def _record_exclusive_tool_turn_error(
+    def _record_rejected_tool_turn(
         self,
         *,
         task,
@@ -2044,6 +2067,75 @@ class ReActToolLoop:
             publish_snapshot=True,
         )
         return prepared_history
+
+    @classmethod
+    def _disallowed_current_task_progress_calls(
+        cls,
+        *,
+        response_tool_calls: list[Any],
+        task_id: str,
+        node_kind: str,
+    ) -> list[Any]:
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return []
+        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
+            return []
+        blocked_calls: list[Any] = []
+        for call in list(response_tool_calls or []):
+            if str(getattr(call, 'name', '') or '').strip() != 'task_progress':
+                continue
+            arguments = cls._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
+            requested_task_id = str(arguments.get('任务id') or arguments.get('task_id') or '').strip()
+            if requested_task_id == normalized_task_id:
+                blocked_calls.append(call)
+        return blocked_calls
+
+    @classmethod
+    def _latest_spawn_child_nodes_ref(cls, messages: list[dict[str, Any]]) -> str:
+        for message in reversed(list(messages or [])):
+            if str((message or {}).get('role') or '').strip().lower() != 'tool':
+                continue
+            if str((message or {}).get('name') or '').strip() != _STAGE_SPAWN_TOOL_NAME:
+                continue
+            payload = cls._tool_message_json_payload(message)
+            ref = str(payload.get('ref') or payload.get('resolved_ref') or '').strip()
+            if ref:
+                return ref
+        return ''
+
+    @staticmethod
+    def _tool_message_json_payload(message: dict[str, Any]) -> dict[str, Any]:
+        content = (message or {}).get('content')
+        if isinstance(content, dict):
+            return dict(content)
+        text = str(content or '').strip()
+        if not text or not text.startswith('{'):
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _current_task_progress_repair_message(*, task_id: str, node_kind: str, latest_spawn_ref: str) -> str:
+        node_label = '验收节点' if str(node_kind or '').strip().lower() == 'acceptance' else '执行节点'
+        base = (
+            f'{node_label}不得对当前正在执行的 `task_id` 调用 `task_progress`。'
+            '不要用它等待子节点、轮询当前任务树或汇总当前节点自己的派生结果。'
+        )
+        if latest_spawn_ref:
+            return (
+                f'{base} 最近一次 `spawn_child_nodes` 返回的 ref 是 `{latest_spawn_ref}`；'
+                '请先用 `content.open` / `content.search` 查看该 ref，'
+                '再基于 `node_output_summary`、`check_result`、`failure_info.summary`、'
+                '`failure_info.remaining_work` 判断应直接吸收结果，还是只对失败分支再次 `spawn_child_nodes`。'
+            )
+        return (
+            f'{base} 请回看最近的 `spawn_child_nodes` 输出、已有 `artifact:` 引用和失败分支的 `failure_info`，'
+            '优先用 `content.open` / `content.search` 做局部核对，再决定吸收结果、重派失败分支，或推进下一阶段。'
+        )
 
     def _node_has_meaningful_tool_results(self, *, task_id: str, node_id: str) -> bool:
         store = getattr(self._log_service, '_store', None)
