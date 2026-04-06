@@ -81,6 +81,7 @@ _NON_SUBSTANTIVE_EXECUTION_PROGRESS_TOOLS = {
     FINAL_RESULT_TOOL_NAME,
     *CONTROL_STAGE_TOOL_NAMES,
 }
+_LATEST_SPAWN_STAGE_KEY_REF_NOTE = '最近一次 spawn_child_nodes 返回结果'
 
 class TaskLogService:
     def __init__(
@@ -1144,6 +1145,42 @@ class TaskLogService:
             )
         return refs
 
+    def _latest_spawn_stage_key_ref_locked(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        active_stage: ExecutionStageRecord | None,
+    ) -> ExecutionStageKeyRef | None:
+        if active_stage is None:
+            return None
+        spawn_call_ids: list[str] = []
+        for round_record in list(active_stage.rounds or []):
+            tool_names = [str(item or '').strip() for item in list(round_record.tool_names or [])]
+            tool_call_ids = [str(item or '').strip() for item in list(round_record.tool_call_ids or [])]
+            for index, tool_name in enumerate(tool_names):
+                if tool_name != 'spawn_child_nodes':
+                    continue
+                tool_call_id = tool_call_ids[index] if index < len(tool_call_ids) else ''
+                if tool_call_id:
+                    spawn_call_ids.append(tool_call_id)
+        if not spawn_call_ids:
+            return None
+        records_by_call_id = {
+            str(item.tool_call_id or '').strip(): item
+            for item in list(self._store.list_task_node_tool_results(task_id, node_id) or [])
+            if str(item.tool_call_id or '').strip()
+        }
+        for tool_call_id in reversed(spawn_call_ids):
+            record = records_by_call_id.get(tool_call_id)
+            output_ref = str(getattr(record, 'output_ref', '') or '').strip() if record is not None else ''
+            if output_ref:
+                return ExecutionStageKeyRef(
+                    ref=output_ref,
+                    note=_LATEST_SPAWN_STAGE_KEY_REF_NOTE,
+                )
+        return None
+
     def _externalize_completed_stage_batches_locked(
         self,
         *,
@@ -1332,6 +1369,16 @@ class TaskLogService:
                     'do not call submit_next_stage again before using a non-control tool '
                     'or spawn_child_nodes in this stage'
                 )
+            latest_spawn_key_ref = self._latest_spawn_stage_key_ref_locked(
+                task_id=task_id,
+                node_id=node_id,
+                active_stage=active,
+            )
+            if (
+                latest_spawn_key_ref is not None
+                and not any(str(item.ref or '').strip() == str(latest_spawn_key_ref.ref or '').strip() for item in normalized_key_refs)
+            ):
+                normalized_key_refs = [*normalized_key_refs, latest_spawn_key_ref]
             now = now_iso()
             stages: list[ExecutionStageRecord] = []
             for stage in list(state.stages or []):

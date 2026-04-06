@@ -1088,6 +1088,77 @@ async def test_submit_next_stage_allows_switch_after_spawn_only_progress(tmp_pat
         await service.close()
 
 
+@pytest.mark.asyncio
+async def test_submit_next_stage_appends_latest_spawn_result_ref_to_completed_stage_key_refs(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        first = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='first stage: spawn children',
+            tool_round_budget=3,
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:spawn-ref', 'name': 'spawn_child_nodes', 'arguments': {'children': []}}],
+            created_at=now_iso(),
+        )
+        service.log_service.record_tool_result_batch(
+            task_id=record.task_id,
+            node_id=record.root_node_id,
+            response_tool_calls=[
+                ToolCallRequest(
+                    id='call:spawn-ref',
+                    name='spawn_child_nodes',
+                    arguments={'children': []},
+                )
+            ],
+            results=[
+                _tool_result_payload(
+                    call_id='call:spawn-ref',
+                    tool_name='spawn_child_nodes',
+                    content=json.dumps(
+                        {
+                            'summary': 'spawn child results',
+                            'ref': 'artifact:artifact:spawn-wrapper',
+                            'resolved_ref': 'artifact:artifact:spawn-canonical',
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            ],
+        )
+        second = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='second stage: synthesize child outputs',
+            tool_round_budget=4,
+            completed_stage_summary='spawn round finished',
+            key_refs=[{'ref': 'artifact:artifact:user-supplied', 'note': 'manual note'}],
+        )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
+        assert detail is not None
+        stages = detail['item']['execution_trace']['stages']
+        assert [stage['stage_id'] for stage in stages] == [first['stage_id'], second['stage_id']]
+        assert stages[0]['key_refs'] == [
+            {'ref': 'artifact:artifact:user-supplied', 'note': 'manual note'},
+            {'ref': 'artifact:artifact:spawn-canonical', 'note': '最近一次 spawn_child_nodes 返回结果'},
+        ]
+        assert stages[1]['key_refs'] == []
+    finally:
+        await service.close()
+
+
 def test_execution_stage_overlay_warns_before_zero_progress_stage_switch() -> None:
     overlay = build_execution_stage_overlay(
         node_kind='execution',

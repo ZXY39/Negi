@@ -43,6 +43,7 @@ _STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
+_UNCOMPACTED_COMPLETED_STAGE_WINDOWS = 1
 _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
@@ -3003,12 +3004,35 @@ class ReActToolLoop:
         return prefix, remainder
 
     @staticmethod
-    def _completed_stage_blocks(stage_state: Any) -> list[dict[str, Any]]:
+    def _retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[str]:
+        active_stage_id = str(getattr(stage_state, 'active_stage_id', '') or '').strip()
+        if not active_stage_id or keep_latest <= 0:
+            return set()
+        completed = []
+        for stage in list(getattr(stage_state, 'stages', []) or []):
+            stage_id = str(getattr(stage, 'stage_id', '') or '').strip()
+            if not stage_id or stage_id == active_stage_id:
+                continue
+            completed.append((int(getattr(stage, 'stage_index', 0) or 0), stage_id))
+        completed.sort()
+        return {
+            stage_id
+            for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]
+        }
+
+    @staticmethod
+    def _completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None = None) -> list[dict[str, Any]]:
         externalized: list[dict[str, Any]] = []
         compacted: list[dict[str, Any]] = []
         active_stage_id = str(getattr(stage_state, 'active_stage_id', '') or '').strip()
+        skipped = {
+            str(item or '').strip()
+            for item in list(skip_stage_ids or set())
+            if str(item or '').strip()
+        }
         for stage in list(getattr(stage_state, 'stages', []) or []):
-            if str(getattr(stage, 'stage_id', '') or '').strip() == active_stage_id:
+            stage_id = str(getattr(stage, 'stage_id', '') or '').strip()
+            if stage_id == active_stage_id or stage_id in skipped:
                 continue
             if str(getattr(stage, 'stage_kind', 'normal') or 'normal').strip() == 'compression':
                 payload = {
@@ -3049,10 +3073,9 @@ class ReActToolLoop:
         return [*externalized, *compacted]
 
     @staticmethod
-    def _current_stage_active_window(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _current_stage_active_window(messages: list[dict[str, Any]], *, keep_completed_stages: int = 0) -> list[dict[str, Any]]:
         message_list = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
-        stage_boundary = 0
-        latest_success_boundary = -1
+        successful_stage_boundaries: list[int] = []
         pending_stage_call_ids: dict[str, int] = {}
         for index, message in enumerate(message_list):
             role = str(message.get('role') or '').strip().lower()
@@ -3072,11 +3095,13 @@ class ReActToolLoop:
                 and str(message.get('name') or '').strip() == STAGE_TOOL_NAME
                 and not str(message.get('content') or '').strip().startswith('Error:')
             ):
-                latest_success_boundary = pending_stage_call_ids[tool_call_id]
-                stage_boundary = latest_success_boundary
+                successful_stage_boundaries.append(pending_stage_call_ids[tool_call_id])
                 pending_stage_call_ids.clear()
-        if latest_success_boundary < 0:
+        if not successful_stage_boundaries:
             return message_list
+        keep_completed = max(0, int(keep_completed_stages or 0))
+        boundary_index = max(0, len(successful_stage_boundaries) - 1 - keep_completed)
+        stage_boundary = successful_stage_boundaries[boundary_index]
         return [dict(item) for item in message_list[stage_boundary:]]
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3084,9 +3109,23 @@ class ReActToolLoop:
         stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
         if not list(getattr(stage_state, 'stages', []) or []):
             return [*prefix, *remainder]
-        completed_blocks = self._completed_stage_blocks(stage_state)
+        retained_completed_stage_ids = self._retained_completed_stage_ids(
+            stage_state,
+            keep_latest=_UNCOMPACTED_COMPLETED_STAGE_WINDOWS,
+        )
+        completed_blocks = self._completed_stage_blocks(
+            stage_state,
+            skip_stage_ids=retained_completed_stage_ids,
+        )
         active_stage_id = str(getattr(stage_state, 'active_stage_id', '') or '').strip()
-        active_window = self._current_stage_active_window(remainder) if active_stage_id else list(remainder)
+        active_window = (
+            self._current_stage_active_window(
+                remainder,
+                keep_completed_stages=len(retained_completed_stage_ids),
+            )
+            if active_stage_id
+            else list(remainder)
+        )
         return [*prefix, *completed_blocks, *active_window]
 
     @staticmethod

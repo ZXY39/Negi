@@ -268,35 +268,10 @@ def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_windo
 
     prepared = loop._prepare_messages(original, runtime_context={"task_id": "task-1", "node_id": "node-1"})
 
-    assert prepared[0] == original[0]
-    assert prepared[1] == original[1]
-    compact_blocks = [item for item in prepared if str(item.get("content") or "").startswith("[G3KU_STAGE_COMPACT_V1]")]
-    assert len(compact_blocks) == 1
-    compact_payload = json.loads(str(compact_blocks[0]["content"]).split("\n", 1)[1])
-    assert compact_payload["completed_stage_summary"] == "finished stage one"
-    assert compact_payload["key_refs"] == [{"ref": "artifact:artifact:stage-one", "note": "stage one evidence summary"}]
+    assert prepared == original
     rendered_contents = [str(item.get("content") or "") for item in prepared]
-    assert "stage one raw detail" not in rendered_contents
-    assert "archived stage history excerpt" not in rendered_contents
-    assert any(
-        any(
-            str(((tool_call or {}).get("function") or {}).get("name") or (tool_call or {}).get("name") or "").strip() == "submit_next_stage"
-            and str((tool_call or {}).get("id") or "").strip() == "call-stage-2"
-            for tool_call in list(item.get("tool_calls") or [])
-        )
-        for item in prepared
-        if str(item.get("role") or "").strip().lower() == "assistant"
-    )
-    assert any(
-        str(item.get("role") or "").strip().lower() == "tool"
-        and str(item.get("tool_call_id") or "").strip() == "call-stage-2"
-        for item in prepared
-    )
-    assert not any(
-        str(item.get("role") or "").strip().lower() == "tool"
-        and str(item.get("tool_call_id") or "").strip() == "call-stage-1"
-        for item in prepared
-    )
+    assert "stage one raw detail" in rendered_contents
+    assert "archived stage history excerpt" in rendered_contents
     assert "current stage assistant detail" in rendered_contents
     assert "current stage tool output" in rendered_contents
 
