@@ -160,6 +160,7 @@ class TaskNodeDetail(Model):
     execution_trace: dict[str, Any] = Field(default_factory=dict)
     execution_trace_summary: dict[str, Any] = Field(default_factory=dict)
     execution_trace_ref: str = ''
+    spawn_review_rounds: list[dict[str, Any]] = Field(default_factory=list)
     artifacts_preview: list[dict[str, Any]] = Field(default_factory=list)
     artifact_count: int = 0
     tool_file_changes: list[NodeToolFileChange] = Field(default_factory=list)

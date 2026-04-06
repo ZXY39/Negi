@@ -478,6 +478,132 @@ def test_build_node_execution_trace_preserves_summary_stage_budget() -> None:
     assert result["stageTotalSteps"] == 5
 
 
+def test_build_node_execution_trace_preserves_summary_round_boundaries() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:test",
+            goal: "inspect repository",
+          },
+          {
+            execution_trace_summary: {
+              stages: [
+                {
+                  stage_goal: "inspect repository",
+                  tool_round_budget: 4,
+                  tool_rounds_used: 2,
+                  rounds: [
+                    {
+                      round_id: "round-1",
+                      round_index: 1,
+                      budget_counted: true,
+                      tools: [
+                        {
+                          tool_name: "filesystem",
+                          arguments_text: "{\\"path\\": \\".\\"}",
+                          output_text: "repo listing",
+                          status: "success",
+                        },
+                      ],
+                    },
+                    {
+                      round_id: "round-2",
+                      round_index: 2,
+                      budget_counted: true,
+                      tools: [
+                        {
+                          tool_name: "content",
+                          arguments_text: "{\\"ref\\": \\"artifact:1\\"}",
+                          output_text: "file contents",
+                          status: "success",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+
+        console.log(JSON.stringify({
+          roundCount: trace.stages[0]?.rounds?.length || 0,
+          firstTool: trace.stages[0]?.rounds?.[0]?.tools?.[0]?.tool_name || "",
+          secondTool: trace.stages[0]?.rounds?.[1]?.tools?.[0]?.tool_name || "",
+          roundsUsed: trace.stages[0]?.tool_rounds_used ?? null,
+        }));
+        """
+    )
+
+    assert result["roundCount"] == 2
+    assert result["firstTool"] == "filesystem"
+    assert result["secondTool"] == "content"
+    assert result["roundsUsed"] == 2
+
+
+def test_build_node_execution_trace_prefers_detail_final_output_when_full_trace_output_is_blank() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:test",
+            final_output: "",
+          },
+          {
+            final_output: "Externalized final-output:node:test ref=artifact:artifact:123",
+            execution_trace: {
+              final_output: "",
+              stages: [],
+            },
+          },
+        );
+
+        console.log(JSON.stringify({
+          finalOutput: trace.final_output,
+        }));
+        """
+    )
+
+    assert result["finalOutput"] == "Externalized final-output:node:test ref=artifact:artifact:123"
+
+
 def test_build_node_execution_trace_falls_back_to_acceptance_final_output_when_check_result_missing() -> None:
     result = _run_node_script(
         """
@@ -992,74 +1118,224 @@ def test_load_selected_node_latest_context_preserves_detail_and_context_scroll()
     assert result["payloadLength"] > 0
 
 
-def test_task_governance_view_model_marks_breathing_and_formats_history() -> None:
+def test_ensure_task_node_detail_refetches_stale_flattened_summary_cache() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
         const vm = require("vm");
         global.window = global;
-        global.S = {
-          taskGovernance: null,
+        let fetchCount = 0;
+        const staleDetail = {
+          node_id: "node:1",
+          execution_trace_summary: {
+            stages: [
+              {
+                stage_goal: "stale flattened stage",
+                tool_calls: [
+                  { tool_name: "filesystem", arguments_text: "{}", output_text: "old" },
+                ],
+              },
+            ],
+          },
         };
+        const freshDetail = {
+          node_id: "node:1",
+          execution_trace_summary: {
+            stages: [
+              {
+                stage_goal: "fresh rounded stage",
+                rounds: [
+                  {
+                    round_id: "round:1",
+                    round_index: 1,
+                    tools: [
+                      { tool_name: "filesystem", arguments_text: "{}", output_text: "new" },
+                    ],
+                  },
+                ],
+                tool_calls: [
+                  { tool_name: "filesystem", arguments_text: "{}", output_text: "new" },
+                ],
+              },
+            ],
+          },
+        };
+        global.S = {
+          currentTaskId: "task:test",
+          taskNodeDetails: { "node:1": staleDetail },
+          taskNodeDetailRequests: {},
+          currentNodeDetail: staleDetail,
+        };
+        global.U = {};
+        global.ApiClient = {
+          getTaskNodeDetail: async () => {
+            fetchCount += 1;
+            return freshDetail;
+          },
+        };
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        ensureTaskNodeDetail("node:1").then((detail) => {
+          console.log(JSON.stringify({
+            fetchCount,
+            roundCount: detail?.execution_trace_summary?.stages?.[0]?.rounds?.length || 0,
+            cachedStageGoal: S.taskNodeDetails["node:1"]?.execution_trace_summary?.stages?.[0]?.stage_goal || "",
+          }));
+        });
+        """
+    )
+
+    assert result["fetchCount"] == 1
+    assert result["roundCount"] == 1
+    assert result["cachedStageGoal"] == "fresh rounded stage"
+
+
+def test_task_detail_html_does_not_render_governance_panel() -> None:
+    html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+
+    assert "task-governance-panel" not in html
+    assert "task-tree-floating-governance" not in html
+
+
+def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
         global.U = {};
         global.ApiClient = {};
         global.showToast = () => {};
         global.isAbortLike = () => false;
         global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
         const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
         vm.runInThisContext(code);
 
-        const governance = normalizeTaskGovernanceState({
-          frozen: true,
-          review_inflight: true,
-          history: [
-            {
-              triggered_at: "2026-04-04T07:00:00+08:00",
-              trigger_reason: "depth+1",
-              trigger_snapshot: { max_depth: 2, total_nodes: 18 },
-              decision: "cap_current_depth",
-              decision_reason: "depth runaway",
-              limited_depth: 2,
-            },
-            {
-              triggered_at: "2026-04-04T06:30:00+08:00",
-              trigger_reason: "node_count_double",
-              trigger_snapshot: { max_depth: 1, total_nodes: 16 },
-              decision: "allow",
-              decision_reason: "breadth only",
-            },
-          ],
+        const steps = buildSpawnReviewTraceSteps([
+          {
+            round_id: "call:spawn-1",
+            reviewed_at: "2026-04-06T12:00:00+08:00",
+            requested_specs: [
+              { goal: "blocked branch", prompt: "blocked prompt", execution_policy: { mode: "focus" } },
+              { goal: "allowed branch", prompt: "allowed prompt", execution_policy: { mode: "coverage" } },
+            ],
+            allowed_indexes: [1],
+            blocked_specs: [
+              {
+                index: 0,
+                reason: "拆分过细，偏离当前父节点目标",
+                suggestion: "请由父节点直接执行，或收缩为更聚焦的单一派生",
+              },
+            ],
+            entries: [
+              {
+                index: 0,
+                goal: "blocked branch",
+                review_decision: "blocked",
+                blocked_reason: "拆分过细，偏离当前父节点目标",
+                blocked_suggestion: "请由父节点直接执行，或收缩为更聚焦的单一派生",
+                synthetic_result_summary: "派生已被拦截：拆分过细，偏离当前父节点目标",
+              },
+              {
+                index: 1,
+                goal: "allowed branch",
+                review_decision: "allowed",
+                child_node_id: "node:child-1",
+              },
+            ],
+          },
+        ]);
+        const html = renderTraceStep({
+          ...steps[0],
+          open: false,
         });
-        const view = buildTaskGovernanceViewModel(governance);
         console.log(JSON.stringify({
-          breathing: view.breathing,
-          statusLabel: view.statusLabel,
-          historyCount: view.historyCount,
-          firstDecision: view.items[0].decisionLabel,
-          secondReason: view.items[1].decisionReason,
+          count: steps.length,
+          title: steps[0]?.title || "",
+          body: steps[0]?.bodyHtml || "",
+          showStatus: steps[0]?.showStatus ?? null,
+          hasStatusBadge: html.includes("interaction-step-status"),
         }));
         """
     )
 
-    assert result["breathing"] is True
-    assert result["statusLabel"] == "监管中"
-    assert result["historyCount"] == 2
-    assert result["firstDecision"] == "限制深度"
-    assert result["secondReason"] == "breadth only"
+    assert result["count"] == 1
+    assert "派生记录" in result["title"]
+    assert "blocked branch" in result["body"]
+    assert "allowed branch" in result["body"]
+    assert "拆分过细，偏离当前父节点目标" in result["body"]
+    assert "请由父节点直接执行" in result["body"]
 
 
-def test_task_governance_history_region_is_scrollable() -> None:
-    css_text = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
-    match = re.search(
-        r"\.task-governance-history\s*\{(?P<body>[^}]+)\}",
-        css_text,
-        flags=re.MULTILINE,
+    assert result["showStatus"] is False
+    assert result["hasStatusBadge"] is False
+
+
+def test_build_execution_trace_steps_excludes_spawn_review_rounds() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const steps = buildExecutionTraceSteps({
+          initial_prompt: "root prompt",
+          tool_steps: [],
+          stages: [
+            {
+              stage_id: "stage:1",
+              stage_index: 1,
+              mode: "自主执行",
+              status: "完成",
+              stage_goal: "阶段目标",
+              rounds: [],
+            },
+          ],
+        }, {
+          spawn_review_rounds: [
+            {
+              round_id: "call:spawn-1",
+              reviewed_at: "2026-04-06T12:00:00+08:00",
+              entries: [],
+            },
+          ],
+        });
+        console.log(JSON.stringify({
+          count: steps.length,
+          titles: steps.map((item) => item?.title || ""),
+        }));
+        """
     )
 
-    assert match is not None
-    block = match.group("body")
-    assert "max-height:" in block
-    assert "overflow-y: auto;" in block
+    assert result["count"] == 2
+    assert result["titles"][0] == "初始提示词"
+    assert "派生记录" not in "\n".join(result["titles"])
 
 
 def test_render_execution_stage_rounds_use_horizontal_strip_and_full_width_panel() -> None:

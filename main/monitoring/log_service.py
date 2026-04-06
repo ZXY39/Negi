@@ -44,7 +44,6 @@ from main.monitoring.models import (
 from main.monitoring.task_event_writer import TaskEventWriter
 from main.monitoring.task_projector import TaskProjector
 from main.protocol import build_envelope, now_iso
-from main.runtime.task_governance import GOVERNANCE_PATCH_EVENT_TYPE, normalize_task_governance_state
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 
 
@@ -363,7 +362,6 @@ class TaskLogService:
             'dispatch_queued': {'execution': 0, 'inspection': 0},
             'summary_fingerprint': '',
             'summary_last_published_at': '',
-            'governance': normalize_task_governance_state(None),
         }
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
@@ -1626,8 +1624,6 @@ class TaskLogService:
                 current['dispatch_running'] = self._sanitize_dispatch_counters(payload.get('dispatch_running'))
             if 'dispatch_queued' in payload:
                 current['dispatch_queued'] = self._sanitize_dispatch_counters(payload.get('dispatch_queued'))
-            if 'governance' in payload:
-                current['governance'] = normalize_task_governance_state(payload.get('governance'))
             current['updated_at'] = now_iso()
             self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
@@ -1635,24 +1631,6 @@ class TaskLogService:
                 payload=current,
             )
             return self.read_task_runtime_meta(task.task_id) or current
-
-    def upsert_task_governance(self, task_id: str, payload: dict[str, Any] | None) -> dict[str, Any]:
-        with self._task_lock(task_id):
-            task = self._require_task(task_id)
-            runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
-            current = normalize_task_governance_state(runtime_meta.get('governance'))
-            next_state = normalize_task_governance_state(payload)
-            if current == next_state:
-                return current
-            runtime_meta['governance'] = next_state
-            runtime_meta['updated_at'] = now_iso()
-            self._store.upsert_task_runtime_meta(
-                task_id=task.task_id,
-                updated_at=str(runtime_meta.get('updated_at') or now_iso()),
-                payload=runtime_meta,
-            )
-            self._publish_task_governance_patch_locked(task=task, governance=next_state)
-            return next_state
 
     def update_task_max_depth(self, task_id: str, max_depth: int) -> TaskRecord | None:
         with self._task_lock(task_id):
@@ -1688,7 +1666,6 @@ class TaskLogService:
         current.setdefault('dispatch_queued', {'execution': 0, 'inspection': 0})
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
-        current['governance'] = normalize_task_governance_state(current.get('governance'))
         current['task_temp_dir'] = self._normalize_task_temp_dir(current.get('task_temp_dir'))
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
@@ -2122,6 +2099,7 @@ class TaskLogService:
         tool_file_changes = normalize_tool_file_changes((node.metadata or {}).get('tool_file_changes'))
         execution_trace = self._projection_execution_trace(node)
         execution_trace_summary = self._execution_trace_summary(execution_trace)
+        spawn_review_rounds = self._spawn_review_rounds_payload(node)
         execution_trace_ref = str(preserved_execution_trace_ref or '').strip()
         if externalize_execution_trace:
             execution_trace_ref = self._externalize_execution_trace(node, execution_trace)
@@ -2161,6 +2139,7 @@ class TaskLogService:
                 'updated_at': str(node.updated_at or ''),
                 'execution_trace_summary': execution_trace_summary,
                 'execution_trace_ref': execution_trace_ref,
+                'spawn_review_rounds': spawn_review_rounds,
                 'tool_file_changes': [item.model_dump(mode='json') for item in list(tool_file_changes or [])],
                 'token_usage': node.token_usage.model_dump(mode='json'),
                 'token_usage_by_model': [item.model_dump(mode='json') for item in list(node.token_usage_by_model or [])],
@@ -2201,13 +2180,25 @@ class TaskLogService:
             if not isinstance(stage, dict):
                 continue
             tool_calls: list[dict[str, str]] = []
+            rounds_payload: list[dict[str, Any]] = []
             for round_item in list(stage.get('rounds') or []):
                 if not isinstance(round_item, dict):
                     continue
+                compact_tools: list[dict[str, str]] = []
                 for step in list(round_item.get('tools') or []):
                     compact_step = TaskLogService._compact_execution_trace_tool_call(step)
                     if compact_step is not None:
                         tool_calls.append(compact_step)
+                        compact_tools.append(compact_step)
+                rounds_payload.append(
+                    {
+                        'round_id': str(round_item.get('round_id') or ''),
+                        'round_index': int(round_item.get('round_index') or 0),
+                        'created_at': str(round_item.get('created_at') or ''),
+                        'budget_counted': bool(round_item.get('budget_counted')),
+                        'tools': compact_tools,
+                    }
+                )
             stages_payload.append(
                 {
                     'stage_id': str(stage.get('stage_id') or ''),
@@ -2219,6 +2210,7 @@ class TaskLogService:
                     'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
                     'created_at': str(stage.get('created_at') or ''),
                     'finished_at': str(stage.get('finished_at') or ''),
+                    'rounds': rounds_payload,
                     'tool_calls': tool_calls,
                 }
             )
@@ -2230,8 +2222,87 @@ class TaskLogService:
             if compact_step is not None:
                 fallback_tool_calls.append(compact_step)
         if fallback_tool_calls:
-            return {'stages': [{'stage_goal': '', 'tool_calls': fallback_tool_calls}]}
+            return {
+                'stages': [{
+                    'stage_goal': '',
+                    'rounds': [{
+                        'round_id': '',
+                        'round_index': 1,
+                        'created_at': '',
+                        'budget_counted': False,
+                        'tools': fallback_tool_calls,
+                    }],
+                    'tool_calls': fallback_tool_calls,
+                }]
+            }
         return {'stages': []}
+
+    @staticmethod
+    def _spawn_review_rounds_payload(node: NodeRecord) -> list[dict[str, Any]]:
+        operations = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return []
+        rounds: list[dict[str, Any]] = []
+        for index, (round_id, operation) in enumerate(operations.items(), start=1):
+            if not isinstance(operation, dict):
+                continue
+            review = dict(operation.get('spawn_review') or {}) if isinstance(operation.get('spawn_review'), dict) else {}
+            entries = [dict(item) for item in list(operation.get('entries') or []) if isinstance(item, dict)]
+            has_review_data = bool(review) or any(
+                str(item.get('review_decision') or '').strip()
+                or str(item.get('blocked_reason') or '').strip()
+                or str(item.get('blocked_suggestion') or '').strip()
+                or str(item.get('synthetic_result_summary') or '').strip()
+                for item in entries
+            )
+            if not has_review_data:
+                continue
+            rounds.append(
+                {
+                    'round_id': str(round_id or '').strip() or f'round:{index}',
+                    'round_index': index,
+                    'reviewed_at': str(
+                        review.get('reviewed_at')
+                        or operation.get('created_at')
+                        or next((item.get('started_at') for item in entries if str(item.get('started_at') or '').strip()), '')
+                        or str(node.updated_at or '')
+                    ),
+                    'requested_specs': [
+                        dict(item)
+                        for item in list(review.get('requested_specs') or operation.get('specs') or [])
+                        if isinstance(item, dict)
+                    ],
+                    'allowed_indexes': [
+                        int(item)
+                        for item in list(review.get('allowed_indexes') or [])
+                        if isinstance(item, int) or (isinstance(item, str) and str(item).strip().isdigit())
+                    ],
+                    'blocked_specs': [
+                        {
+                            'index': int(item.get('index') or 0),
+                            'reason': str(item.get('reason') or ''),
+                            'suggestion': str(item.get('suggestion') or ''),
+                        }
+                        for item in list(review.get('blocked_specs') or [])
+                        if isinstance(item, dict)
+                    ],
+                    'error_text': str(review.get('error_text') or ''),
+                    'entries': [
+                        {
+                            'index': int(item.get('index') or 0),
+                            'goal': str(item.get('goal') or ''),
+                            'review_decision': str(item.get('review_decision') or ''),
+                            'blocked_reason': str(item.get('blocked_reason') or ''),
+                            'blocked_suggestion': str(item.get('blocked_suggestion') or ''),
+                            'synthetic_result_summary': str(item.get('synthetic_result_summary') or ''),
+                            'child_node_id': str(item.get('child_node_id') or ''),
+                            'acceptance_node_id': str(item.get('acceptance_node_id') or ''),
+                        }
+                        for item in entries
+                    ],
+                }
+            )
+        return rounds
 
     @staticmethod
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:
@@ -2258,16 +2329,20 @@ class TaskLogService:
             if not isinstance(operation, dict):
                 continue
             entries = [item for item in list(operation.get('entries') or []) if isinstance(item, dict)]
-            child_node_ids = [
-                str(item.get('child_node_id') or '').strip()
-                for item in entries
+            materialized_entries = [
+                item for item in entries
                 if str(item.get('child_node_id') or '').strip()
             ]
-            total_children = max(len(child_node_ids), len(entries))
-            completed_children = sum(1 for item in entries if str(item.get('status') or '').strip().lower() == 'success')
-            failed_children = sum(1 for item in entries if str(item.get('status') or '').strip().lower() == 'error')
+            child_node_ids = [
+                str(item.get('child_node_id') or '').strip()
+                for item in materialized_entries
+                if str(item.get('child_node_id') or '').strip()
+            ]
+            total_children = len(child_node_ids)
+            completed_children = sum(1 for item in materialized_entries if str(item.get('status') or '').strip().lower() == 'success')
+            failed_children = sum(1 for item in materialized_entries if str(item.get('status') or '').strip().lower() == 'error')
             running_children = sum(
-                1 for item in entries if str(item.get('status') or '').strip().lower() in {'queued', 'running'}
+                1 for item in materialized_entries if str(item.get('status') or '').strip().lower() in {'queued', 'running'}
             )
             records.append(
                 TaskProjectionRoundRecord(
@@ -2532,19 +2607,6 @@ class TaskLogService:
         }
         self._buffer_task_live_patch_locked(task=task, payload=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.live.patch', data=payload)
-
-    def _publish_task_governance_patch_locked(self, *, task: TaskRecord, governance: dict[str, Any]) -> None:
-        payload = {
-            'task_id': task.task_id,
-            'governance': normalize_task_governance_state(governance),
-        }
-        self._append_task_event(task=task, event_type=GOVERNANCE_PATCH_EVENT_TYPE, data=payload)
-        self._dispatch_live_event_locked(
-            task=task,
-            event_type=GOVERNANCE_PATCH_EVENT_TYPE,
-            data=payload,
-            dispatch_immediate=True,
-        )
 
     def _publish_task_terminal_locked(self, *, task: TaskRecord) -> None:
         payload = {'task': self._task_summary_payload(task)}
@@ -2835,7 +2897,6 @@ class TaskLogService:
         state['dispatch_limits'] = cls._sanitize_dispatch_counters(state.get('dispatch_limits'))
         state['dispatch_running'] = cls._sanitize_dispatch_counters(state.get('dispatch_running'))
         state['dispatch_queued'] = cls._sanitize_dispatch_counters(state.get('dispatch_queued'))
-        state['governance'] = normalize_task_governance_state(state.get('governance'))
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
 

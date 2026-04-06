@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +39,48 @@ from main.service.task_terminal_callback import (
 class _DummyChatBackend:
     async def chat(self, **kwargs):
         raise AssertionError(f"chat backend should not be called in this test: {kwargs!r}")
+
+
+class _SpawnReviewToolCallChatBackend:
+    def __init__(self, *, arguments: dict[str, object]) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._arguments = dict(arguments)
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call:spawn-review",
+                    name="review_spawn_candidates",
+                    arguments=dict(self._arguments),
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+
+
+class _SpawnReviewRetryChatBackend:
+    def __init__(self, *, responses: list[LLMResponse]) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._responses = list(responses)
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if not self._responses:
+            raise AssertionError("spawn review retry backend exhausted")
+        return self._responses.pop(0)
+
+
+class _SpawnReviewExceptionChatBackend:
+    def __init__(self, *, message: str) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._message = str(message or "spawn review failed")
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        raise RuntimeError(self._message)
 
 
 def _build_app() -> FastAPI:
@@ -151,6 +192,25 @@ def _publish_task_live_patch(service: MainRuntimeService, task_id: str) -> None:
 
 async def _noop_enqueue_task(_task_id: str) -> None:
     return None
+
+
+def _install_allow_all_spawn_review(service: MainRuntimeService, monkeypatch: pytest.MonkeyPatch | None = None) -> None:
+    async def _allow_all_review(*, task, parent, specs, cache_key):
+        return {
+            "reviewed_at": now_iso(),
+            "requested_specs": [
+                service.node_runner._spawn_review_requested_spec_payload(index=index, spec=spec)
+                for index, spec in enumerate(specs)
+            ],
+            "allowed_indexes": list(range(len(list(specs or [])))),
+            "blocked_specs": [],
+            "error_text": "",
+        }
+
+    if monkeypatch is not None:
+        monkeypatch.setattr(service.node_runner, "_review_spawn_batch", _allow_all_review)
+        return
+    service.node_runner._review_spawn_batch = _allow_all_review  # type: ignore[method-assign]
 
 
 def _record_enqueue_calls(target: list[str]):
@@ -2622,6 +2682,7 @@ async def test_spawn_children_allows_execution_policy_mode_divergence(tmp_path: 
         execution_mode="embedded",
     )
     service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service, monkeypatch)
 
     try:
         record = await service.create_task(
@@ -2693,6 +2754,7 @@ async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
     try:
         record = await _create_web_task(service)
         task = service.get_task(record.task_id)
@@ -2771,6 +2833,7 @@ async def test_spawn_children_materializes_batch_children_before_pipeline_comple
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
 
     try:
         record = await _create_web_task(service)
@@ -2838,6 +2901,7 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
     try:
         record = await _create_web_task(service)
         root = service.get_node(record.root_node_id)
@@ -2908,6 +2972,7 @@ async def test_spawn_children_surfaces_runtime_failure_info_for_pipeline_excepti
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
     try:
         record = await _create_web_task(service)
         root = service.get_node(record.root_node_id)
@@ -2948,6 +3013,7 @@ async def test_spawn_children_isolates_cancelled_child_without_failing_whole_rou
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
     try:
         record = await _create_web_task(service)
         root = service.get_node(record.root_node_id)
@@ -3008,6 +3074,7 @@ async def test_spawn_children_empty_runtime_exception_includes_exception_class_n
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
     try:
         record = await _create_web_task(service)
         root = service.get_node(record.root_node_id)
@@ -3045,6 +3112,7 @@ async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_termi
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
     try:
         record = await _create_web_task(service)
         task = service.get_task(record.task_id)
@@ -3197,6 +3265,7 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
     try:
         record = await _create_web_task(service)
         root = service.get_node(record.root_node_id)
@@ -3291,6 +3360,7 @@ async def test_duplicate_successful_spawn_reuses_completed_operation_without_new
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
+    _install_allow_all_spawn_review(service, monkeypatch)
     try:
         record = await _create_web_task(service)
         root = service.get_node(record.root_node_id)
@@ -3548,6 +3618,72 @@ def test_get_node_detail_payload_rebuilds_missing_execution_trace_ref_on_demand(
     detail_after = service.store.get_task_node_detail(record.root_node_id)
     assert detail_after is not None
     assert detail_after.execution_trace_ref.startswith("artifact:")
+
+
+def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace_summary_with_rounds(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    service.log_service.submit_next_stage(
+        record.task_id,
+        record.root_node_id,
+        stage_goal="inspect repository structure",
+        tool_round_budget=2,
+    )
+    service.log_service.record_execution_stage_round(
+        record.task_id,
+        record.root_node_id,
+        tool_calls=[{"id": "call:1", "name": "filesystem", "arguments": {"action": "list", "path": str(tmp_path)}}],
+        created_at=now_iso(),
+    )
+    service.log_service.sync_node_read_model(record.task_id, record.root_node_id, externalize_execution_trace=True)
+    detail_before = service.store.get_task_node_detail(record.root_node_id)
+
+    assert detail_before is not None
+    assert detail_before.execution_trace_ref.startswith("artifact:")
+
+    legacy_summary = {
+        "stages": [
+            {
+                "stage_goal": "inspect repository structure",
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call:1",
+                        "tool_name": "filesystem",
+                        "arguments_text": '{"action":"list","path":"legacy"}',
+                        "output_text": "legacy listing",
+                        "status": "success",
+                    }
+                ],
+            }
+        ]
+    }
+    service.store.upsert_task_node_detail(
+        detail_before.model_copy(
+            update={
+                "payload": {
+                    **dict(detail_before.payload or {}),
+                    "execution_trace_summary": legacy_summary,
+                },
+            }
+        )
+    )
+
+    payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert payload is not None
+    summary = payload["item"]["execution_trace_summary"]
+    assert summary["stages"][0]["rounds"][0]["tools"][0]["tool_name"] == "filesystem"
+    assert summary["stages"][0]["tool_calls"][0]["tool_name"] == "filesystem"
 
 
 def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inline_text(tmp_path: Path):
@@ -4533,6 +4669,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         execution_mode="embedded",
     )
     service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service)
 
     try:
         record = await service.create_task("recover me", session_id="web:shared")
@@ -4610,6 +4747,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
     )
     started: list[str] = []
     restarted.global_scheduler.enqueue_task = _record_enqueue_calls(started)
+    _install_allow_all_spawn_review(restarted)
 
     try:
         await restarted.startup()
@@ -4830,9 +4968,21 @@ async def test_run_node_short_circuits_when_task_is_already_terminal(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_spawn_child_nodes_refusal_includes_governance_limit_reason(tmp_path: Path):
+async def test_spawn_children_prefilters_specs_and_preserves_result_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    backend = _SpawnReviewToolCallChatBackend(
+        arguments={
+            "allowed_indexes": [1],
+            "blocked_specs": [
+                {
+                    "index": 0,
+                    "reason": "拆分过细，偏离当前父节点目标",
+                    "suggestion": "请由父节点直接执行，或收缩为更聚焦的单一派生",
+                }
+            ],
+        }
+    )
     service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
+        chat_backend=backend,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4840,45 +4990,311 @@ async def test_spawn_child_nodes_refusal_includes_governance_limit_reason(tmp_pa
         execution_mode="web",
     )
     try:
-        _mark_worker_online(service)
-        record = await service.create_task("spawn refusal reason", session_id="web:shared", max_depth=2)
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node.goal} done",
+                    answer=f"{node.goal} done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[
+                SpawnChildSpec(goal="blocked branch", prompt="blocked prompt", execution_policy=_execution_policy()),
+                SpawnChildSpec(goal="allowed branch", prompt="allowed prompt", execution_policy=_execution_policy("coverage")),
+            ],
+            call_id="spawn-review-batch",
+        )
+
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        spawn_operation = dict((root_after.metadata or {}).get("spawn_operations") or {}).get("spawn-review-batch") or {}
+        entries = list(spawn_operation.get("entries") or [])
+        spawn_review = dict(spawn_operation.get("spawn_review") or {})
+
+        assert [item.goal for item in results] == ["blocked branch", "allowed branch"]
+        assert results[0].failure_info is None
+        assert results[0].check_result == "派生已被拦截"
+        assert "拆分过细" in results[0].node_output
+        assert "请由父节点直接执行" in results[0].node_output
+        assert results[1].node_output == "allowed branch done"
+        assert len(service.store.list_children(root.node_id)) == 1
+        assert len(entries) == 2
+        assert entries[0]["review_decision"] == "blocked"
+        assert entries[0]["blocked_reason"] == "拆分过细，偏离当前父节点目标"
+        assert entries[0]["blocked_suggestion"] == "请由父节点直接执行，或收缩为更聚焦的单一派生"
+        assert entries[1]["review_decision"] == "allowed"
+        assert spawn_review["allowed_indexes"] == [1]
+        assert spawn_review["blocked_specs"][0]["index"] == 0
+        assert backend.calls
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    backend = _SpawnReviewToolCallChatBackend(
+        arguments={"allowed_indexes": [0], "blocked_specs": []}
+    )
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("spawn review path tree", session_id="web:shared", max_depth=3)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        parent = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="parent branch", prompt="parent prompt", execution_policy=_execution_policy()),
+        )
+        existing_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=parent,
+            spec=SpawnChildSpec(goal="existing child", prompt="existing child prompt", execution_policy=_execution_policy()),
+        )
+        service.log_service.submit_next_stage(record.task_id, root.node_id, stage_goal="root stage goal", tool_round_budget=1)
+        service.log_service.submit_next_stage(record.task_id, parent.node_id, stage_goal="parent stage goal", tool_round_budget=1)
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node.goal} done",
+                    answer=f"{node.goal} done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=parent.node_id,
+            specs=[SpawnChildSpec(goal="new child", prompt="new child prompt", execution_policy=_execution_policy())],
+            call_id="path-tree-review",
+        )
+
+        assert backend.calls
+        call = backend.calls[-1]
+        payload = json.loads(str(call["messages"][1]["content"]))
+        assert payload["parent_node_id"] == parent.node_id
+        assert payload["spawn_request"]["requested_specs"][0]["goal"] == "new child"
+        assert "root stage goal" in payload["path_tree_text"]
+        assert "parent stage goal" in payload["path_tree_text"]
+        assert root.node_id in payload["path_tree_text"]
+        assert parent.node_id in payload["path_tree_text"]
+        assert existing_child.node_id not in payload["path_tree_text"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_review_retries_invalid_output_and_defaults_to_block_on_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    retry_backend = _SpawnReviewRetryChatBackend(
+        responses=[
+            LLMResponse(content="not-json", finish_reason="stop"),
+            LLMResponse(
+                content=json.dumps({"allowed_indexes": [0], "blocked_specs": []}),
+                finish_reason="stop",
+            ),
+        ]
+    )
+    service = MainRuntimeService(
+        chat_backend=retry_backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("spawn review retry", session_id="web:shared")
         root = service.get_node(record.root_node_id)
         assert root is not None
 
-        service.store.update_task(
-            record.task_id,
-            lambda item: item.model_copy(update={"max_depth": 0}),
-        )
-        service.log_service.upsert_task_governance(
-            record.task_id,
-            {
-                "enabled": True,
-                "frozen": False,
-                "review_inflight": False,
-                "hard_limited_depth": 0,
-                "supervision_disabled_after_limit": True,
-                "history": [
-                    {
-                        "triggered_at": now_iso(),
-                        "trigger_reason": "depth+1",
-                        "trigger_snapshot": {"max_depth": 1, "total_nodes": 3},
-                        "decision": "cap_current_depth",
-                        "decision_reason": "检查结论：当前子节点拆分已经偏离主目标，继续派生属于节外生枝。",
-                        "limited_depth": 1,
-                        "evidence": [],
-                    }
-                ],
-            },
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node.goal} done",
+                    answer=f"{node.goal} done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="retry child", prompt="retry prompt", execution_policy=_execution_policy())],
+            call_id="retry-review",
         )
 
-        expected_message = "[派生被拦截，接下来不允许再派生任何子节点，请自行执行!拦截原因：（检查结论：当前子节点拆分已经偏离主目标，继续派生属于节外生枝。）]"
-        with pytest.raises(ValueError, match=re.escape(expected_message)):
-            await service.node_runner._spawn_children(
-                task_id=record.task_id,
-                parent_node_id=root.node_id,
-                specs=[SpawnChildSpec(goal="child", prompt="prompt", execution_policy=_execution_policy())],
-                call_id="call:reason",
+        assert len(results) == 1
+        assert results[0].node_output == "retry child done"
+        assert len(retry_backend.calls) == 2
+        assert retry_backend.calls[0].get("tool_choice") is None
+        second_messages = list(retry_backend.calls[1].get("messages") or [])
+        assert second_messages[-1]["role"] == "user"
+        assert "上一轮检验派生回复无效" in str(second_messages[-1]["content"] or "")
+    finally:
+        await service.close()
+
+    exception_backend = _SpawnReviewExceptionChatBackend(message="inspection chain unavailable")
+    exception_service = MainRuntimeService(
+        chat_backend=exception_backend,
+        store_path=tmp_path / "runtime-2.sqlite3",
+        files_base_dir=tmp_path / "tasks-2",
+        artifact_dir=tmp_path / "artifacts-2",
+        governance_store_path=tmp_path / "governance-2.sqlite3",
+        execution_mode="embedded",
+    )
+    exception_service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await exception_service.create_task("spawn review exception", session_id="web:shared")
+        root = exception_service.get_node(record.root_node_id)
+        assert root is not None
+
+        async def _unexpected_run_node(*args, **kwargs):
+            raise AssertionError("run_node should not be called when spawn review blocks all specs")
+
+        monkeypatch.setattr(exception_service.node_runner, "run_node", _unexpected_run_node)
+
+        results = await exception_service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="blocked by exception", prompt="blocked prompt", execution_policy=_execution_policy())],
+            call_id="exception-review",
+        )
+
+        root_after = exception_service.get_node(root.node_id)
+        assert root_after is not None
+        spawn_operation = dict((root_after.metadata or {}).get("spawn_operations") or {}).get("exception-review") or {}
+        spawn_review = dict(spawn_operation.get("spawn_review") or {})
+
+        assert len(results) == 1
+        assert results[0].failure_info is None
+        assert "RuntimeError: inspection chain unavailable" in results[0].node_output
+        assert len(exception_service.store.list_children(root.node_id)) == 0
+        assert "RuntimeError: inspection chain unavailable" in spawn_review["error_text"]
+    finally:
+        await exception_service.close()
+
+
+@pytest.mark.asyncio
+async def test_task_snapshot_excludes_governance_and_node_detail_includes_spawn_review_rounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    backend = _SpawnReviewToolCallChatBackend(
+        arguments={
+            "allowed_indexes": [1],
+            "blocked_specs": [
+                {
+                    "index": 0,
+                    "reason": "信息价值不足",
+                    "suggestion": "请由父节点直接执行",
+                }
+            ],
+        }
+    )
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node.goal} done",
+                    answer=f"{node.goal} done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
             )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[
+                SpawnChildSpec(goal="blocked detail", prompt="blocked prompt", execution_policy=_execution_policy()),
+                SpawnChildSpec(goal="allowed detail", prompt="allowed prompt", execution_policy=_execution_policy()),
+            ],
+            call_id="detail-review",
+        )
+
+        task_payload = service.get_task_detail_payload(record.task_id, mark_read=False)
+        node_payload = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="summary")
+
+        assert task_payload is not None
+        assert node_payload is not None
+        assert "governance" not in task_payload
+        assert "governance" not in task_payload["task"]
+        assert "spawn_review_rounds" in node_payload["item"]
+        assert len(node_payload["item"]["spawn_review_rounds"]) == 1
+        assert node_payload["item"]["spawn_review_rounds"][0]["round_id"] == "detail-review"
+        assert node_payload["item"]["spawn_review_rounds"][0]["blocked_specs"][0]["reason"] == "信息价值不足"
     finally:
         await service.close()
 

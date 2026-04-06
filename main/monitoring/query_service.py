@@ -172,8 +172,6 @@ class TaskQueryService:
             task = self._store.get_task(task_id) or task
         live_state = self._projection_live_state(task.task_id)
         root_node = self.get_node_detail(task.task_id, task.root_node_id)
-        runtime_meta = self._log_service.read_task_runtime_meta(task.task_id) or {}
-        governance = dict(runtime_meta.get('governance') or {})
         runtime_summary = live_state.model_dump(mode='json') if live_state is not None else {
             'active_node_ids': [],
             'runnable_node_ids': [],
@@ -199,7 +197,7 @@ class TaskQueryService:
             for item in self._projection_token_usage_by_model(task.task_id)
         ]
         payload = {
-            'task': {**task.model_dump(mode='json'), 'governance': governance},
+            'task': task.model_dump(mode='json'),
             'summary': {
                 'task_id': task.task_id,
                 'status': task.status,
@@ -208,7 +206,6 @@ class TaskQueryService:
                 'token_usage_by_model': token_usage_by_model,
                 **counts,
             },
-            'governance': governance,
             'runtime_summary': runtime_summary,
             'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
             'frontier': frontier,
@@ -260,8 +257,14 @@ class TaskQueryService:
             )
             if not execution_trace_summary:
                 execution_trace_summary = self._execution_trace_summary(execution_trace)
-        elif not execution_trace_summary and runtime_node is not None:
-            execution_trace_summary = self._execution_trace_summary(self._execution_trace(runtime_node))
+        elif not execution_trace_summary or not self._execution_trace_summary_has_rounds(execution_trace_summary):
+            execution_trace = self._resolve_execution_trace(
+                detail_record=detail_record,
+                runtime_node=runtime_node,
+                payload=payload,
+            )
+            if execution_trace:
+                execution_trace_summary = self._execution_trace_summary(execution_trace)
         detail = TaskNodeDetail(
             node_id=str(payload.get('node_id') or detail_record.node_id),
             task_id=str(payload.get('task_id') or detail_record.task_id),
@@ -297,6 +300,11 @@ class TaskQueryService:
             execution_trace=execution_trace,
             execution_trace_summary=execution_trace_summary,
             execution_trace_ref=execution_trace_ref,
+            spawn_review_rounds=[
+                dict(item)
+                for item in list(payload.get('spawn_review_rounds') or [])
+                if isinstance(item, dict)
+            ],
             tool_file_changes=normalize_tool_file_changes(payload.get('tool_file_changes')),
             token_usage=TokenUsageSummary.model_validate(payload.get('token_usage') or {}),
             token_usage_by_model=[
@@ -449,13 +457,25 @@ class TaskQueryService:
             if not isinstance(stage, dict):
                 continue
             tool_calls: list[dict[str, str]] = []
+            rounds_payload: list[dict[str, Any]] = []
             for round_item in list(stage.get('rounds') or []):
                 if not isinstance(round_item, dict):
                     continue
+                compact_tools: list[dict[str, str]] = []
                 for step in list(round_item.get('tools') or []):
                     compact_step = TaskQueryService._compact_execution_trace_tool_call(step)
                     if compact_step is not None:
                         tool_calls.append(compact_step)
+                        compact_tools.append(compact_step)
+                rounds_payload.append(
+                    {
+                        'round_id': str(round_item.get('round_id') or ''),
+                        'round_index': int(round_item.get('round_index') or 0),
+                        'created_at': str(round_item.get('created_at') or ''),
+                        'budget_counted': bool(round_item.get('budget_counted')),
+                        'tools': compact_tools,
+                    }
+                )
             stages_payload.append(
                 {
                     'stage_id': str(stage.get('stage_id') or ''),
@@ -467,6 +487,7 @@ class TaskQueryService:
                     'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
                     'created_at': str(stage.get('created_at') or ''),
                     'finished_at': str(stage.get('finished_at') or ''),
+                    'rounds': rounds_payload,
                     'tool_calls': tool_calls,
                 }
             )
@@ -478,8 +499,31 @@ class TaskQueryService:
             if compact_step is not None:
                 fallback_tool_calls.append(compact_step)
         if fallback_tool_calls:
-            return {'stages': [{'stage_goal': '', 'tool_calls': fallback_tool_calls}]}
+            return {
+                'stages': [{
+                    'stage_goal': '',
+                    'rounds': [{
+                        'round_id': '',
+                        'round_index': 1,
+                        'created_at': '',
+                        'budget_counted': False,
+                        'tools': fallback_tool_calls,
+                    }],
+                    'tool_calls': fallback_tool_calls,
+                }]
+            }
         return {'stages': []}
+
+    @staticmethod
+    def _execution_trace_summary_has_rounds(summary: dict[str, Any] | None) -> bool:
+        payload = summary if isinstance(summary, dict) else {}
+        for stage in list(payload.get('stages') or []):
+            if not isinstance(stage, dict):
+                continue
+            rounds = stage.get('rounds')
+            if isinstance(rounds, list) and rounds:
+                return True
+        return False
 
     @staticmethod
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:

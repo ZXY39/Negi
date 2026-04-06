@@ -158,3 +158,20 @@ def test_execution_and_acceptance_prompts_forbid_self_task_progress_polling(monk
     assert '不得对当前正在执行的 `task_id` 调用 `task_progress`' in acceptance_prompt
     assert 'content.search' in acceptance_prompt
     assert 'content.open' in acceptance_prompt
+
+
+def test_node_execution_prompt_mentions_spawn_interception_guidance(monkeypatch) -> None:
+    monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
+    runner = NodeRunner(
+        store=None,
+        log_service=None,
+        react_loop=None,
+        tool_provider=None,
+        execution_model_refs=['execution_model'],
+        acceptance_model_refs=['acceptance_model'],
+    )
+
+    prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='execution'))
+
+    assert '不合理的派生将被拦截' in prompt
+    assert '被拦截时需要参考被拦截的原因和建议' in prompt

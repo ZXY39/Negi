@@ -21,7 +21,6 @@ from g3ku.runtime.web_ceo_sessions import (
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
 from main.service.task_stall_callback import (
-    TASK_STALL_REASON_GOVERNANCE_REVIEW,
     TASK_STALL_REASON_SUSPECTED_STALL,
     TASK_STALL_REASON_USER_PAUSED,
     TASK_STALL_REASON_WORKER_UNAVAILABLE,
@@ -624,11 +623,6 @@ class WebSessionHeartbeatService:
                     lines.append(f"- Task {title} ({task_id}) is waiting for the worker to come back")
                     lines.append("  Reason: worker_unavailable")
                     lines.append("  Do not treat this as a task logic stall yet. Wait for worker recovery or restart.")
-                    continue
-                if stall_reason == TASK_STALL_REASON_GOVERNANCE_REVIEW:
-                    lines.append(f"- Task {title} ({task_id}) is under governance review")
-                    lines.append("  Reason: governance_review")
-                    lines.append("  Do not treat this as a task logic stall yet. Wait for governance review to finish.")
                     continue
                 lines.append(f"- Task {title} ({task_id}) may be stalled")
                 lines.append(f"  Reason: {stall_reason or TASK_STALL_REASON_SUSPECTED_STALL}")

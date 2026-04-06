@@ -109,7 +109,6 @@ const S = {
     currentTaskId: null,
     tasks: [],
     currentTask: null,
-    taskGovernance: null,
     taskSummary: null,
     rootNode: null,
     frontier: [],
@@ -307,13 +306,6 @@ const U = {
     tdStatusPill: document.getElementById("td-status-pill"),
     tdStatus: document.getElementById("td-status"),
     tdActiveCount: document.getElementById("td-active-count"),
-    taskGovernancePanel: document.getElementById("task-governance-panel"),
-    taskGovernanceDetails: document.getElementById("task-governance-details"),
-    taskGovernanceStatus: document.getElementById("task-governance-status"),
-    taskGovernanceLastDecision: document.getElementById("task-governance-last-decision"),
-    taskGovernanceHistoryCount: document.getElementById("task-governance-history-count"),
-    taskGovernanceHistory: document.getElementById("task-governance-history"),
-    taskGovernanceEmpty: document.getElementById("task-governance-empty"),
     taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
     tree: document.getElementById("org-tree-container"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
@@ -334,9 +326,11 @@ const U = {
     adStatus: document.getElementById("ad-status"),
     adRoundSummary: document.getElementById("ad-round-summary"),
     adFlow: document.getElementById("ad-input"),
+    adSpawnReviews: document.getElementById("ad-spawn-reviews"),
     adOutput: document.getElementById("ad-output"),
     adAcceptance: document.getElementById("ad-check"),
     adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
+    adSpawnReviewsHeading: document.getElementById("ad-spawn-reviews")?.closest(".agent-detail-section")?.querySelector("h4"),
     adOutputHeading: document.getElementById("ad-output")?.closest(".agent-detail-section")?.querySelector("h4"),
     adAcceptanceHeading: document.getElementById("ad-check")?.closest(".agent-detail-section")?.querySelector("h4"),
     artifactHeading: document.getElementById("artifact-list")?.closest(".agent-detail-section")?.querySelector("h4"),
@@ -1261,21 +1255,25 @@ function normalizeTaskDetailViewState(value) {
         const numericValue = Number(input);
         return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : 0;
     };
-    const traceItems = Array.isArray(value.traceItems)
-        ? value.traceItems.map((item, index) => ({
+    const normalizeTraceItems = (items) => (Array.isArray(items)
+        ? items.map((item, index) => ({
             index: Number.isInteger(item?.index) && item.index >= 0 ? item.index : index,
             key: String(item?.key || "").trim(),
             title: String(item?.title || "").trim(),
             open: !!item?.open,
             activeToolKey: String(item?.activeToolKey || "").trim(),
         }))
-        : [];
+        : []);
+    const traceItems = normalizeTraceItems(value.traceItems);
+    const spawnReviewItems = normalizeTraceItems(value.spawnReviewItems);
     return {
         detailScrollTop: normalizeScrollTop(value.detailScrollTop),
         traceScrollTop: normalizeScrollTop(value.traceScrollTop),
+        spawnReviewScrollTop: normalizeScrollTop(value.spawnReviewScrollTop),
         artifactListScrollTop: normalizeScrollTop(value.artifactListScrollTop),
         artifactContentScrollTop: normalizeScrollTop(value.artifactContentScrollTop),
         traceItems,
+        spawnReviewItems,
     };
 }
 
@@ -1376,8 +1374,8 @@ function readTaskDetailSessionSnapshot() {
     };
 }
 
-function captureTaskDetailViewState() {
-    const traceList = U.adFlow?.querySelector(".task-trace-list");
+function captureTraceSectionViewState(host) {
+    const traceList = host?.querySelector?.(".task-trace-list");
     const traceItems = traceList instanceof HTMLElement
         ? Array.from(traceList.querySelectorAll(".task-trace-step")).map((step, index) => ({
             index,
@@ -1388,11 +1386,22 @@ function captureTaskDetailViewState() {
         }))
         : [];
     return {
+        scrollTop: traceList instanceof HTMLElement ? traceList.scrollTop : 0,
+        items: traceItems,
+    };
+}
+
+function captureTaskDetailViewState() {
+    const traceState = captureTraceSectionViewState(U.adFlow);
+    const spawnReviewState = captureTraceSectionViewState(U.adSpawnReviews);
+    return {
         detailScrollTop: U.detail instanceof HTMLElement ? U.detail.scrollTop : 0,
-        traceScrollTop: traceList instanceof HTMLElement ? traceList.scrollTop : 0,
+        traceScrollTop: traceState.scrollTop,
+        spawnReviewScrollTop: spawnReviewState.scrollTop,
         artifactListScrollTop: U.artifactList instanceof HTMLElement ? U.artifactList.scrollTop : 0,
         artifactContentScrollTop: U.artifactContent instanceof HTMLElement ? U.artifactContent.scrollTop : 0,
-        traceItems,
+        traceItems: traceState.items,
+        spawnReviewItems: spawnReviewState.items,
     };
 }
 
@@ -1428,22 +1437,28 @@ function restoreTaskDetailViewState(
         detail = true,
         trace = true,
         traceItems = true,
+        spawnReviews = true,
+        spawnReviewItems = true,
         artifactList = true,
         artifactContent = true,
     } = {},
 ) {
     if (!state || typeof state !== "object") return;
     const getTraceList = () => U.adFlow?.querySelector(".task-trace-list");
+    const getSpawnReviewList = () => U.adSpawnReviews?.querySelector(".task-trace-list");
     const getArtifactList = () => U.artifactList;
     const getArtifactContent = () => U.artifactContent;
     const applyScrollPositions = () => {
         const traceList = getTraceList();
+        const spawnReviewList = getSpawnReviewList();
         if (detail) setElementScrollTop(U.detail, state.detailScrollTop);
         if (trace) setElementScrollTop(traceList, state.traceScrollTop);
+        if (spawnReviews) setElementScrollTop(spawnReviewList, state.spawnReviewScrollTop);
         if (artifactList) setElementScrollTop(getArtifactList(), state.artifactListScrollTop);
         if (artifactContent) setElementScrollTop(getArtifactContent(), state.artifactContentScrollTop);
     };
     if (trace && traceItems) applyTaskTraceItemViewState(getTraceList(), state.traceItems);
+    if (spawnReviews && spawnReviewItems) applyTaskTraceItemViewState(getSpawnReviewList(), state.spawnReviewItems);
     applyScrollPositions();
     window.requestAnimationFrame(() => {
         applyScrollPositions();
@@ -1462,6 +1477,11 @@ function renderTaskSectionHeading(heading, { icon, label, count = 0 } = {}) {
 
 function renderFlowHeading(count = 0) {
     renderTaskSectionHeading(U.adFlowHeading, { icon: "workflow", label: "执行流程", count });
+    icons();
+}
+
+function renderSpawnReviewHeading(count = 0) {
+    renderTaskSectionHeading(U.adSpawnReviewsHeading, { icon: "git-branch", label: "派生记录", count });
     icons();
 }
 
@@ -3490,6 +3510,7 @@ function resourceDeleteErrorText(error) {
 
 function configureTaskDetailSections() {
     renderFlowHeading(0);
+    renderSpawnReviewHeading(0);
     renderArtifactHeading(0);
     if (U.adOutputHeading) U.adOutputHeading.innerHTML = '<i data-lucide="arrow-up-from-line"></i> 最终输出';
     if (U.adOutput) U.adOutput.classList.add("task-trace-output");
@@ -3497,6 +3518,10 @@ function configureTaskDetailSections() {
     if (U.adFlow) {
         U.adFlow.classList.remove("code-block");
         U.adFlow.classList.add("task-trace-host");
+    }
+    if (U.adSpawnReviews) {
+        U.adSpawnReviews.classList.remove("code-block");
+        U.adSpawnReviews.classList.add("task-trace-host");
     }
     if (U.adAcceptance) U.adAcceptance.classList.add("task-trace-acceptance");
     if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、最终输出、验收结果和工件。";

@@ -22,74 +22,6 @@ function treeNormalizeInt(value, fallback = 0) {
     return Number.isFinite(numeric) ? numeric : fallback;
 }
 
-function normalizeTaskGovernanceHistoryEntry(value = {}) {
-    return {
-        triggered_at: String(value?.triggered_at || "").trim(),
-        trigger_reason: String(value?.trigger_reason || "").trim(),
-        trigger_snapshot: {
-            max_depth: Math.max(0, treeNormalizeInt(value?.trigger_snapshot?.max_depth, 0)),
-            total_nodes: Math.max(0, treeNormalizeInt(value?.trigger_snapshot?.total_nodes, 0)),
-        },
-        decision: String(value?.decision || "allow").trim().toLowerCase() || "allow",
-        decision_reason: String(value?.decision_reason || "").trim(),
-        limited_depth: Math.max(0, treeNormalizeInt(value?.limited_depth, 0)),
-        evidence: (Array.isArray(value?.evidence) ? value.evidence : [])
-            .map((item) => String(item || "").trim())
-            .filter(Boolean),
-    };
-}
-
-function normalizeTaskGovernanceState(value = {}) {
-    return {
-        enabled: value?.enabled !== false,
-        frozen: !!value?.frozen,
-        review_inflight: !!value?.review_inflight,
-        depth_baseline: Math.max(1, treeNormalizeInt(value?.depth_baseline, 1)),
-        node_count_baseline: Math.max(0, treeNormalizeInt(value?.node_count_baseline, 0)),
-        hard_limited_depth: Math.max(0, treeNormalizeInt(value?.hard_limited_depth, 0)),
-        supervision_disabled_after_limit: !!value?.supervision_disabled_after_limit,
-        last_trigger_reason: String(value?.last_trigger_reason || "").trim(),
-        last_decision: String(value?.last_decision || "").trim().toLowerCase(),
-        history: (Array.isArray(value?.history) ? value.history : [])
-            .map((item) => normalizeTaskGovernanceHistoryEntry(item)),
-    };
-}
-
-function taskGovernanceDecisionLabel(decision) {
-    const normalized = String(decision || "").trim().toLowerCase();
-    if (normalized === "cap_current_depth") return "限制深度";
-    if (normalized === "allow") return "放行";
-    return "未知";
-}
-
-function taskGovernanceStatusLabel(governance = {}) {
-    if (governance?.frozen || governance?.review_inflight) return "监管中";
-    if (governance?.supervision_disabled_after_limit) return "已限深";
-    return "监管空闲";
-}
-
-function buildTaskGovernanceViewModel(governance = S.taskGovernance) {
-    const normalized = normalizeTaskGovernanceState(governance || {});
-    const items = normalized.history.map((item) => ({
-        ...item,
-        decisionLabel: taskGovernanceDecisionLabel(item.decision),
-        decisionReason: String(item.decision_reason || "").trim(),
-        triggerSummary: `触发: ${String(item.trigger_reason || "unknown")}`,
-        snapshotSummary: `深度 ${Math.max(0, treeNormalizeInt(item?.trigger_snapshot?.max_depth, 0))} · 节点 ${Math.max(0, treeNormalizeInt(item?.trigger_snapshot?.total_nodes, 0))}`,
-        limitedDepthSummary: Math.max(0, treeNormalizeInt(item?.limited_depth, 0)) > 0 ? `限制深度 ${Math.max(0, treeNormalizeInt(item?.limited_depth, 0))}` : "",
-    }));
-    const latest = items[items.length - 1] || null;
-    return {
-        normalized,
-        visible: true,
-        breathing: !!(normalized.frozen || normalized.review_inflight),
-        statusLabel: taskGovernanceStatusLabel(normalized),
-        historyCount: items.length,
-        latestDecisionLabel: latest ? latest.decisionLabel : "暂无决策",
-        items,
-    };
-}
-
 function normalizeTaskTreeSnapshotRound(value = {}) {
     return {
         round_id: String(value?.round_id || "").trim(),
@@ -580,37 +512,6 @@ function renderTaskDetailHeader({ resetPromptDisclosure = false } = {}) {
     if (U.tdStatusPill) U.tdStatusPill.dataset.status = taskStatusKey(task);
 }
 
-function renderTaskGovernancePanel() {
-    if (!U.taskGovernancePanel || !U.taskGovernanceDetails || !U.taskGovernanceStatus || !U.taskGovernanceLastDecision || !U.taskGovernanceHistoryCount || !U.taskGovernanceHistory || !U.taskGovernanceEmpty) return;
-    const hasTask = !!String(S.currentTaskId || "").trim();
-    if (!hasTask) {
-        U.taskGovernancePanel.hidden = true;
-        U.taskGovernancePanel.classList.remove("is-breathing");
-        U.taskGovernanceDetails.open = false;
-        U.taskGovernanceHistory.innerHTML = "";
-        U.taskGovernanceEmpty.hidden = false;
-        return;
-    }
-    const view = buildTaskGovernanceViewModel(S.taskGovernance || {});
-    U.taskGovernancePanel.hidden = !view.visible;
-    U.taskGovernancePanel.classList.toggle("is-breathing", view.breathing);
-    U.taskGovernanceStatus.textContent = view.statusLabel;
-    U.taskGovernanceLastDecision.textContent = view.latestDecisionLabel;
-    U.taskGovernanceHistoryCount.textContent = `${view.historyCount} 次`;
-    U.taskGovernanceEmpty.hidden = view.items.length > 0;
-    U.taskGovernanceHistory.innerHTML = view.items.map((item) => `
-        <article class="task-governance-entry">
-            <div class="task-governance-entry-head">
-                <strong class="task-governance-entry-title">${esc(item.decisionLabel)}</strong>
-                <span class="task-governance-entry-time">${esc(item.triggered_at || "")}</span>
-            </div>
-            <div class="task-governance-entry-meta">${esc(item.triggerSummary)} · ${esc(item.snapshotSummary)}${item.limitedDepthSummary ? ` · ${esc(item.limitedDepthSummary)}` : ""}</div>
-            <div class="task-governance-entry-reason">${esc(item.decisionReason || "暂无说明")}</div>
-            ${Array.isArray(item.evidence) && item.evidence.length ? `<ul class="task-governance-evidence">${item.evidence.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>` : ""}
-        </article>
-    `).join("");
-}
-
 function syncTaskTreeHeaderState(projectedRoot = null) {
     const hasManual = hasManualTreeRoundSelections();
     const activeNodeCount = projectedRoot ? treeNormalizeInt(projectedRoot?.activeNodeCount, 0) : 0;
@@ -937,9 +838,18 @@ function normalizeSummaryExecutionTrace(summary) {
         return Number.isFinite(parsed) ? parsed : fallback;
     };
     const stages = (Array.isArray(summary?.stages) ? summary.stages : []).map((stage, stageIndex) => {
-        const tools = (Array.isArray(stage?.tool_calls) ? stage.tool_calls : []).map((step, toolIndex) => (
+        const fallbackTools = (Array.isArray(stage?.tool_calls) ? stage.tool_calls : []).map((step, toolIndex) => (
             normalizeSummaryTraceToolCall(step, toolIndex)
         ));
+        const rounds = (Array.isArray(stage?.rounds) ? stage.rounds : []).map((round, roundIndex) => ({
+            round_id: String(round?.round_id || ""),
+            round_index: toInt(round?.round_index, roundIndex + 1),
+            created_at: String(round?.created_at || ""),
+            budget_counted: !!round?.budget_counted,
+            tools: (Array.isArray(round?.tools) ? round.tools : []).map((step, toolIndex) => (
+                normalizeSummaryTraceToolCall(step, toolIndex)
+            )),
+        }));
         return {
             stage_id: String(stage?.stage_id || `summary-stage-${stageIndex + 1}`),
             stage_index: toInt(stage?.stage_index, stageIndex + 1),
@@ -947,16 +857,16 @@ function normalizeSummaryExecutionTrace(summary) {
             status: String(stage?.status || (String(stage?.finished_at || "").trim() ? "完成" : "进行中")).trim() || "进行中",
             stage_goal: String(stage?.stage_goal || "").trim(),
             stage_total_steps: toInt(stage?.tool_round_budget, 0),
-            tool_rounds_used: tools.length ? 1 : 0,
+            tool_rounds_used: toInt(stage?.tool_rounds_used, rounds.length || (fallbackTools.length ? 1 : 0)),
             created_at: String(stage?.created_at || ""),
             finished_at: String(stage?.finished_at || ""),
-            rounds: tools.length ? [{
+            rounds: rounds.length ? rounds : (fallbackTools.length ? [{
                 round_id: "",
                 round_index: 1,
                 created_at: "",
                 budget_counted: false,
-                tools,
-            }] : [],
+                tools: fallbackTools,
+            }] : []),
         };
     });
     const toolSteps = stages.flatMap((stage) => (
@@ -970,6 +880,13 @@ function normalizeSummaryExecutionTrace(summary) {
     };
 }
 
+function firstNonEmptyTraceText(...values) {
+    return values
+        .map((value) => String(value ?? ""))
+        .find((value) => value.trim())
+        || "";
+}
+
 function buildNodeExecutionTrace(node, detail, liveFrame = null) {
     const fullTrace = detail?.execution_trace && typeof detail.execution_trace === "object" ? detail.execution_trace : {};
     const summaryTrace = normalizeSummaryExecutionTrace(
@@ -981,12 +898,25 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
     const normalizedNodeKind = String(source.node_kind ?? detail?.node_kind ?? node?.node_kind ?? "").trim().toLowerCase();
     const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps : [];
     const stages = (Array.isArray(source.stages) ? source.stages : []).map((stage, index) => normalizeExecutionStageTrace(stage, index));
-    const initialPrompt = [source.initial_prompt, detail?.prompt, detail?.goal, node?.prompt, node?.goal, node?.input]
-        .map((value) => String(value ?? ""))
-        .find((value) => value.trim())
-        || "";
-    const finalOutput = String(source.final_output ?? detail?.final_output ?? node?.final_output ?? "");
-    const acceptanceResult = String(source.acceptance_result ?? detail?.check_result ?? node?.check_result ?? "");
+    const initialPrompt = firstNonEmptyTraceText(
+        source.initial_prompt,
+        detail?.prompt,
+        detail?.goal,
+        node?.prompt,
+        node?.goal,
+        node?.input,
+    );
+    const finalOutput = firstNonEmptyTraceText(
+        source.final_output,
+        detail?.final_output,
+        detail?.final_output_preview,
+        node?.final_output,
+    );
+    const acceptanceResult = firstNonEmptyTraceText(
+        source.acceptance_result,
+        detail?.check_result,
+        node?.check_result,
+    );
     return {
         initial_prompt: initialPrompt,
         tool_steps: toolSteps.map((step) => ({
@@ -1071,10 +1001,15 @@ function nodeFinalTraceStatus(node) {
     return "success";
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, extraClass = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "" }) {
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
+    const sideParts = [];
+    if (showRuntime) sideParts.push('<span class="task-trace-runtime" hidden></span>');
+    if (showStatus) {
+        sideParts.push(`<span class="interaction-step-status">${esc(String(statusLabel || "").trim() || traceStatusLabel(status))}</span>`);
+    }
     return `
         <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
@@ -1082,8 +1017,7 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
                     <span class="interaction-step-title">${esc(title)}</span>
                 </span>
                 <span class="interaction-step-side">
-                    ${showRuntime ? '<span class="task-trace-runtime" hidden></span>' : ''}
-                    <span class="interaction-step-status">${esc(String(statusLabel || "").trim() || traceStatusLabel(status))}</span>
+                    ${sideParts.join("")}
                 </span>
             </summary>
             <div class="task-trace-body">${bodyHtml}</div>
@@ -1307,6 +1241,142 @@ function buildExecutionTraceSteps(trace, node) {
     ];
 }
 
+function spawnReviewRoundStatus(round = {}) {
+    const allowedIndexes = Array.isArray(round?.allowed_indexes) ? round.allowed_indexes : [];
+    const blockedSpecs = Array.isArray(round?.blocked_specs) ? round.blocked_specs : [];
+    if (blockedSpecs.length && !allowedIndexes.length) return "error";
+    if (allowedIndexes.length && !blockedSpecs.length) return "success";
+    if (allowedIndexes.length || blockedSpecs.length) return "info";
+    return "info";
+}
+
+function summarizeRequestedSpawnSpecs(specs = []) {
+    const lines = (Array.isArray(specs) ? specs : []).map((spec, index) => {
+        const goal = String(spec?.goal || "").trim() || `spec ${index + 1}`;
+        const mode = String(spec?.execution_policy?.mode || "").trim() || "focus";
+        return `#${index + 1} ${goal} [${mode}]`;
+    });
+    return lines.join("\n");
+}
+
+function summarizeAllowedSpawnEntries(entries = []) {
+    const lines = (Array.isArray(entries) ? entries : [])
+        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "allowed")
+        .map((entry, index) => {
+            const goal = String(entry?.goal || "").trim() || `allowed ${index + 1}`;
+            const childNodeId = String(entry?.child_node_id || "").trim();
+            return childNodeId ? `${goal} -> ${childNodeId}` : goal;
+        });
+    return lines.join("\n");
+}
+
+function summarizeBlockedSpawnEntries(entries = []) {
+    const lines = (Array.isArray(entries) ? entries : [])
+        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "blocked")
+        .map((entry, index) => {
+            const goal = String(entry?.goal || "").trim() || `blocked ${index + 1}`;
+            const reason = String(entry?.blocked_reason || "").trim() || "暂无拦截原因";
+            return `${goal}: ${reason}`;
+        });
+    return lines.join("\n");
+}
+
+function summarizeBlockedSpawnSuggestions(entries = []) {
+    const lines = (Array.isArray(entries) ? entries : [])
+        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "blocked")
+        .map((entry, index) => {
+            const goal = String(entry?.goal || "").trim() || `blocked ${index + 1}`;
+            const suggestion = String(entry?.blocked_suggestion || "").trim() || "暂无操作建议";
+            return `${goal}: ${suggestion}`;
+        });
+    return lines.join("\n");
+}
+
+function summarizeSyntheticSpawnResults(entries = []) {
+    const lines = (Array.isArray(entries) ? entries : [])
+        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "blocked")
+        .map((entry, index) => {
+            const goal = String(entry?.goal || "").trim() || `blocked ${index + 1}`;
+            const summary = String(entry?.synthetic_result_summary || "").trim() || "暂无合成返回摘要";
+            return `${goal}: ${summary}`;
+        });
+    return lines.join("\n");
+}
+
+function buildSpawnReviewTraceSteps(rounds = []) {
+    return (Array.isArray(rounds) ? rounds : []).map((round, index) => {
+        const reviewedAt = String(round?.reviewed_at || "").trim();
+        const formattedReviewedAt = reviewedAt
+            ? (typeof formatCompactTime === "function" ? formatCompactTime(reviewedAt) : reviewedAt)
+            : "";
+        const titleSuffix = formattedReviewedAt ? ` · ${formattedReviewedAt}` : ` · 第${index + 1}轮`;
+        return {
+            traceKey: `spawn-review:${String(round?.round_id || index).trim() || index}`,
+            title: `派生记录${titleSuffix}`,
+            status: spawnReviewRoundStatus(round),
+            showStatus: false,
+            open: false,
+            bodyHtml: [
+                renderTraceField("原始请求", summarizeRequestedSpawnSpecs(round?.requested_specs), "本轮无原始派生请求"),
+                renderTraceField("放行结果", summarizeAllowedSpawnEntries(round?.entries), "本轮无放行派生"),
+                renderTraceField("被拦截原因", summarizeBlockedSpawnEntries(round?.entries), "本轮无被拦截项"),
+                renderTraceField("操作建议", summarizeBlockedSpawnSuggestions(round?.entries), "本轮无额外建议"),
+                renderTraceField("返回摘要", summarizeSyntheticSpawnResults(round?.entries), "本轮无合成返回摘要"),
+            ].join(""),
+        };
+    });
+}
+
+function renderSpawnReviewTrace(node, { viewState = null } = {}) {
+    if (!U.adSpawnReviews) return false;
+    const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
+    const preservedScrollTop = Number(effectiveViewState?.spawnReviewScrollTop || 0);
+    const rounds = Array.isArray(node?.spawn_review_rounds) ? node.spawn_review_rounds : [];
+    const stepDescriptors = buildSpawnReviewTraceSteps(rounds);
+    const steps = stepDescriptors.map((step, index) => renderTraceStep({
+        ...step,
+        open: resolveTraceStepOpenState(
+            step,
+            {
+                traceItems: Array.isArray(effectiveViewState?.spawnReviewItems) ? effectiveViewState.spawnReviewItems : [],
+            },
+            index,
+        ),
+    }));
+    let traceList = U.adSpawnReviews.querySelector(".task-trace-list");
+    if (!(traceList instanceof HTMLElement)) {
+        traceList = document.createElement("div");
+        traceList.className = "task-trace-list";
+        U.adSpawnReviews.innerHTML = "";
+        U.adSpawnReviews.appendChild(traceList);
+    }
+    const renderSignature = buildTraceRenderSignature(stepDescriptors);
+    const renderNodeId = String(node?.node_id || "").trim();
+    const shouldReplace = traceList.dataset.renderSignature !== renderSignature
+        || traceList.dataset.renderNodeId !== renderNodeId;
+    if (shouldReplace) {
+        traceList.innerHTML = steps.length
+            ? steps.join("")
+            : '<div class="empty-state task-trace-empty">当前节点暂无派生记录。</div>';
+        traceList.dataset.renderSignature = renderSignature;
+        traceList.dataset.renderNodeId = renderNodeId;
+    }
+    renderSpawnReviewHeading(stepDescriptors.length);
+    if (shouldReplace) {
+        const restoreScroll = () => {
+            const currentTraceList = U.adSpawnReviews?.querySelector(".task-trace-list");
+            if (!(currentTraceList instanceof HTMLElement)) return;
+            setElementScrollTop(currentTraceList, preservedScrollTop);
+        };
+        restoreScroll();
+        window.requestAnimationFrame(() => {
+            restoreScroll();
+            window.requestAnimationFrame(restoreScroll);
+        });
+    }
+    return shouldReplace;
+}
+
 function toPixels(value) {
     const parsed = Number.parseFloat(String(value || ""));
     return Number.isFinite(parsed) ? parsed : 0;
@@ -1360,11 +1430,16 @@ function traceStepSummaryHeight(step) {
 
 function refreshTaskDetailScrollRegions() {
     const traceList = U.adFlow?.querySelector(".task-trace-list");
+    const spawnReviewList = U.adSpawnReviews?.querySelector(".task-trace-list");
     const preservedDetailScrollTop = U.detail instanceof HTMLElement ? U.detail.scrollTop : null;
     const preservedTraceScrollTop = traceList instanceof HTMLElement ? traceList.scrollTop : null;
+    const preservedSpawnReviewScrollTop = spawnReviewList instanceof HTMLElement ? spawnReviewList.scrollTop : null;
     const preservedArtifactListScrollTop = U.artifactList instanceof HTMLElement ? U.artifactList.scrollTop : null;
     if (traceList instanceof HTMLElement) {
         setScrollViewportLimit(traceList, ".task-trace-step", 10, traceStepSummaryHeight, true);
+    }
+    if (spawnReviewList instanceof HTMLElement) {
+        setScrollViewportLimit(spawnReviewList, ".task-trace-step", 6, traceStepSummaryHeight, true);
     }
     if (U.artifactList instanceof HTMLElement) {
         setScrollViewportLimit(U.artifactList, ".artifact-item", 5);
@@ -1372,6 +1447,7 @@ function refreshTaskDetailScrollRegions() {
     const restoreScrollPositions = () => {
         if (preservedDetailScrollTop !== null) setElementScrollTop(U.detail, preservedDetailScrollTop);
         if (preservedTraceScrollTop !== null) setElementScrollTop(traceList, preservedTraceScrollTop);
+        if (preservedSpawnReviewScrollTop !== null) setElementScrollTop(spawnReviewList, preservedSpawnReviewScrollTop);
         if (preservedArtifactListScrollTop !== null) setElementScrollTop(U.artifactList, preservedArtifactListScrollTop);
     };
     restoreScrollPositions();
@@ -1894,7 +1970,9 @@ function showTaskNodeLoadingState(node) {
     U.adStatus.dataset.status = node?.visual_state || node?.state || node?.status || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node?.roundSummary || "");
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
+    if (U.adSpawnReviews) U.adSpawnReviews.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
     renderFlowHeading(0);
+    renderSpawnReviewHeading(0);
     renderFinalOutput("Loading node output...");
     renderAcceptanceResult("Loading acceptance result...");
     if (U.nodeContextDisclosure) U.nodeContextDisclosure.open = false;
@@ -1906,11 +1984,28 @@ function showTaskNodeLoadingState(node) {
     refreshTaskDetailScrollRegions();
 }
 
+function executionTraceSummaryHasRoundBoundaries(summary) {
+    const stages = Array.isArray(summary?.stages) ? summary.stages : [];
+    return stages.some((stage) => Array.isArray(stage?.rounds) && stage.rounds.length > 0);
+}
+
+function taskNodeDetailNeedsRefresh(detail) {
+    if (!detail || typeof detail !== "object") return true;
+    const summary = detail.execution_trace_summary;
+    if (!summary || typeof summary !== "object") return false;
+    const stages = Array.isArray(summary.stages) ? summary.stages : [];
+    if (!stages.length) return false;
+    const hasToolCalls = stages.some((stage) => Array.isArray(stage?.tool_calls) && stage.tool_calls.length > 0);
+    if (!hasToolCalls) return false;
+    return !executionTraceSummaryHasRoundBoundaries(summary);
+}
+
 async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
     const key = String(nodeId || "").trim();
     const taskId = String(S.currentTaskId || "").trim();
     if (!taskId || !key) return null;
-    if (!force && S.taskNodeDetails[key]) return S.taskNodeDetails[key];
+    const cachedDetail = S.taskNodeDetails[key];
+    if (!force && cachedDetail && !taskNodeDetailNeedsRefresh(cachedDetail)) return cachedDetail;
     if (!force && S.taskNodeDetailRequests[key]) return S.taskNodeDetailRequests[key];
     S.taskNodeBusy = true;
     const request = (async () => {
@@ -2031,6 +2126,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     U.adStatus.dataset.status = mergedNode.visual_state || mergedNode.state || mergedNode.status || node.visual_state || node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
     const traceChanged = !!renderExecutionTrace(mergedNode, { viewState });
+    const spawnReviewChanged = !!renderSpawnReviewTrace(mergedNode, { viewState });
     const outputChanged = !!renderFinalOutput(mergedNode.executionTrace?.final_output || "");
     const acceptanceChanged = !!renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
     U.feedTitle.textContent = formatNodeDetailHeading(mergedNode);
@@ -2046,7 +2142,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
             void loadSelectedNodeLatestContext({ force: true });
         }
     }
-    if (!hadVisibleCurrentDetail || traceChanged || outputChanged || acceptanceChanged) {
+    if (!hadVisibleCurrentDetail || traceChanged || spawnReviewChanged || outputChanged || acceptanceChanged) {
         restoreTaskDetailViewState(viewState);
         stashTaskDetailViewState({ nodeId, viewState });
     } else {
@@ -2070,7 +2166,6 @@ function applyTaskPayload(payload) {
     const frontier = Array.isArray(payload.frontier) ? payload.frontier : [];
     const recentModelCalls = Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [];
     S.currentTask = payload.task;
-    S.taskGovernance = normalizeTaskGovernanceState(payload?.governance || payload?.task?.governance || {});
     S.taskSummary = payload.summary || null;
     S.rootNode = rootNode;
     S.frontier = frontier;
@@ -2082,7 +2177,6 @@ function applyTaskPayload(payload) {
     resetTaskTreeSnapshotState();
     S.treeSelectedRoundByNodeId = {};
     renderTaskDetailHeader({ resetPromptDisclosure: previousTaskId !== nextTaskId });
-    renderTaskGovernancePanel();
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
     syncTaskTreeHeaderState(null);

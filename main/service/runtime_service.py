@@ -68,11 +68,6 @@ from main.runtime.node_runner import NodeRunner
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
-from main.runtime.task_governance import (
-    GOVERNANCE_PATCH_EVENT_TYPE,
-    TaskGovernanceManager,
-    normalize_task_governance_state,
-)
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
@@ -90,7 +85,6 @@ from main.service.task_event_callback import (
 from main.service.task_stall_callback import (
     TASK_STALL_CALLBACK_PATH,
     TASK_STALL_REASON_CANCEL_REQUESTED,
-    TASK_STALL_REASON_GOVERNANCE_REVIEW,
     TASK_STALL_REASON_MISSING_TASK,
     TASK_STALL_REASON_NOT_IN_PROGRESS,
     TASK_STALL_REASON_SUSPECTED_STALL,
@@ -364,11 +358,6 @@ class MainRuntimeService:
             context_enricher=self._enrich_node_messages,
             workspace_root_getter=lambda: self._workspace_root(),
         )
-        self.task_governance_manager = TaskGovernanceManager(service=self)
-        self.node_runner.governance_child_created_observer = self.task_governance_manager.on_execution_child_created
-        self.node_runner.governance_spawn_refusal_supplier = self.task_governance_manager.spawn_refusal_message
-        if self.node_turn_controller is not None:
-            self.node_turn_controller.configure(freeze_supplier=self.task_governance_manager.is_task_frozen)
         self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
         self.task_actor_service = TaskActorService(
             store=self.store,
@@ -1761,7 +1750,7 @@ class MainRuntimeService:
             )
             self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
             return
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal', GOVERNANCE_PATCH_EVENT_TYPE}:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'}:
             detail_payload = build_envelope(
                 channel='task',
                 session_id=task.session_id,
@@ -1793,7 +1782,7 @@ class MainRuntimeService:
         session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
         task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip()) if normalized.get('task_id') else ''
         data = dict(normalized.get('data') or {})
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal', GOVERNANCE_PATCH_EVENT_TYPE} and task_id:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'} and task_id:
             payload = build_envelope(
                 channel='task',
                 session_id=session_id,
@@ -2065,11 +2054,6 @@ class MainRuntimeService:
             return TASK_STALL_REASON_USER_PAUSED
         if bool(current_runtime_state.get('paused')) or bool(current_runtime_state.get('pause_requested')):
             return TASK_STALL_REASON_USER_PAUSED
-        governance_state = normalize_task_governance_state(
-            (self.log_service.read_task_runtime_meta(task.task_id) or {}).get('governance')
-        )
-        if bool(governance_state.get('review_inflight')) or bool(governance_state.get('frozen')):
-            return TASK_STALL_REASON_GOVERNANCE_REVIEW
         if bool(getattr(task, 'cancel_requested', False)):
             return TASK_STALL_REASON_CANCEL_REQUESTED
         if bool(current_runtime_state.get('cancel_requested')):
@@ -4658,8 +4642,6 @@ class MainRuntimeService:
             await callback_client.aclose()
         if self.tool_pressure_monitor is not None:
             await self.tool_pressure_monitor.close()
-        if getattr(self, 'task_governance_manager', None) is not None:
-            await self.task_governance_manager.close()
         if self.node_turn_controller is not None:
             await self.node_turn_controller.close()
         await self.worker_heartbeat_service.close()

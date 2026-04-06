@@ -32,6 +32,12 @@ from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SU
 SKIPPED_CHECK_RESULT = '未检验'
 _RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
 _SUPERSEDED_SPAWN_REASON_PREFIX = 'superseded by newer spawn round'
+_SPAWN_REVIEW_TOOL_NAME = 'review_spawn_candidates'
+_SPAWN_REVIEW_BLOCKED_CHECK_RESULT = '派生已被拦截'
+_SPAWN_REVIEW_DEFAULT_BLOCK_REASON = '检验派生未批准该候选派生。'
+_SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION = '请在当前父节点内自行执行，或收缩为更聚焦的单一派生。'
+_SPAWN_REVIEW_RETRY_DELAY_SECONDS = 0.1
+_SPAWN_REVIEW_REPAIR_PREFIX = '上一轮检验派生回复无效。'
 
 
 _UNSET = object()
@@ -587,17 +593,6 @@ class NodeRunner:
         parent = self._store.get_node(parent_node_id)
         if task is None or parent is None:
             raise ValueError('parent task or node missing')
-        governance_refusal = ''
-        if callable(self.governance_spawn_refusal_supplier):
-            governance_refusal = str(
-                self.governance_spawn_refusal_supplier(
-                    task_id=task.task_id,
-                    parent_depth=int(parent.depth or 0),
-                )
-                or ''
-            ).strip()
-        if governance_refusal:
-            raise ValueError(governance_refusal)
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
@@ -637,16 +632,33 @@ class NodeRunner:
         cached_payload['completed'] = False
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
 
-        await self._admit_spawn_batch(
+        spawn_review = await self._review_spawn_batch(
+            task=task,
+            parent=parent,
+            specs=specs,
+            cache_key=cache_key,
+        )
+        allowed_indexes = self._apply_spawn_review_results(
             task_id=task.task_id,
             parent_node_id=parent.node_id,
             cache_key=cache_key,
-            spec_count=len(specs),
+            cached_payload=cached_payload,
+            specs=specs,
+            spawn_review=spawn_review,
         )
+
+        if allowed_indexes:
+            await self._admit_spawn_batch(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                spec_count=len(allowed_indexes),
+            )
         self._materialize_spawn_batch_children(
             task=task,
             parent=parent,
             specs=specs,
+            allowed_indexes=allowed_indexes,
             cache_key=cache_key,
             cached_payload=cached_payload,
         )
@@ -713,6 +725,450 @@ class NodeRunner:
         cached_payload['completed'] = True
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
         return list(results)
+
+    async def _review_spawn_batch(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        cache_key: str,
+    ) -> dict[str, Any]:
+        if not specs:
+            return {
+                'reviewed_at': _now(),
+                'requested_specs': [],
+                'allowed_indexes': [],
+                'blocked_specs': [],
+                'error_text': '',
+            }
+        backend = getattr(self._react_loop, '_chat_backend', None)
+        if backend is None or not callable(getattr(backend, 'chat', None)):
+            return self._default_spawn_review_result(
+                specs=specs,
+                reason='RuntimeError: spawn review model chain is unavailable',
+            )
+        messages = self._spawn_review_messages(
+            task=task,
+            parent=parent,
+            specs=specs,
+            cache_key=cache_key,
+        )
+        tools = [self._spawn_review_tool_schema()]
+        model_refs = list(self._acceptance_model_refs or self._execution_model_refs)
+        if not model_refs:
+            return self._default_spawn_review_result(
+                specs=specs,
+                reason='RuntimeError: spawn review inspection model chain is empty',
+            )
+        invalid_response_count = 0
+        while True:
+            request_messages = (
+                [
+                    *messages,
+                    {'role': 'user', 'content': self._spawn_review_repair_message(attempt_count=invalid_response_count)},
+                ]
+                if invalid_response_count > 0
+                else list(messages)
+            )
+            try:
+                response = await backend.chat(
+                    messages=request_messages,
+                    tools=tools,
+                    model_refs=model_refs,
+                )
+            except Exception as exc:
+                return self._default_spawn_review_result(
+                    specs=specs,
+                    reason=describe_exception(exc),
+                )
+            parsed = self._parse_spawn_review_response(response, spec_count=len(specs))
+            if parsed is not None:
+                return {
+                    'reviewed_at': _now(),
+                    'requested_specs': [self._spawn_review_requested_spec_payload(index=index, spec=spec) for index, spec in enumerate(specs)],
+                    **parsed,
+                }
+            invalid_response_count += 1
+            await asyncio.sleep(_SPAWN_REVIEW_RETRY_DELAY_SECONDS)
+
+    @staticmethod
+    def _spawn_review_tool_schema() -> dict[str, Any]:
+        return {
+            'type': 'function',
+            'function': {
+                'name': _SPAWN_REVIEW_TOOL_NAME,
+                'description': '审查本次 spawn_child_nodes 请求，决定允许原样放行哪些 specs，并给出被拦截项的原因与建议。',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {
+                        'allowed_indexes': {
+                            'type': 'array',
+                            'items': {'type': 'integer'},
+                            'description': '允许原样放行的原始 spec 索引列表。',
+                        },
+                        'blocked_specs': {
+                            'type': 'array',
+                            'description': '被拦截的原始 spec 列表，每项都必须对应原始索引。',
+                            'items': {
+                                'type': 'object',
+                                'properties': {
+                                    'index': {'type': 'integer'},
+                                    'reason': {'type': 'string'},
+                                    'suggestion': {'type': 'string'},
+                                },
+                                'required': ['index', 'reason', 'suggestion'],
+                                'additionalProperties': False,
+                            },
+                        },
+                    },
+                    'required': ['allowed_indexes', 'blocked_specs'],
+                    'additionalProperties': False,
+                },
+            },
+        }
+
+    def _spawn_review_messages(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        cache_key: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {'role': 'system', 'content': load_prompt('spawn_child_review.md').strip()},
+            {
+                'role': 'user',
+                'content': json.dumps(
+                    self._spawn_review_context(
+                        task=task,
+                        parent=parent,
+                        specs=specs,
+                        cache_key=cache_key,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            },
+        ]
+
+    def _spawn_review_context(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        cache_key: str,
+    ) -> dict[str, Any]:
+        root = self._store.get_node(task.root_node_id)
+        return {
+            'task_id': str(task.task_id or ''),
+            'parent_node_id': str(parent.node_id or ''),
+            'parent_goal': str(parent.goal or ''),
+            'task_title': str(getattr(task, 'title', '') or ''),
+            'user_request': str(getattr(task, 'user_request', '') or ''),
+            'core_requirement': self._resolve_core_requirement(task),
+            'root_prompt': str(getattr(root, 'prompt', '') or ''),
+            'path_tree_text': self._spawn_review_path_tree_text(task_id=task.task_id, parent=parent),
+            'spawn_request': {
+                'call_id': str(cache_key or ''),
+                'requested_specs': [
+                    self._spawn_review_requested_spec_payload(index=index, spec=spec)
+                    for index, spec in enumerate(specs)
+                ],
+            },
+        }
+
+    def _spawn_review_path_tree_text(self, *, task_id: str, parent: NodeRecord) -> str:
+        path_nodes: list[NodeRecord] = []
+        seen: set[str] = set()
+        current: NodeRecord | None = parent
+        while current is not None:
+            node_id = str(current.node_id or '').strip()
+            if not node_id or node_id in seen:
+                break
+            seen.add(node_id)
+            path_nodes.append(current)
+            parent_id = str(current.parent_node_id or '').strip()
+            current = self._store.get_node(parent_id) if parent_id else None
+        path_nodes.reverse()
+        lines: list[str] = []
+        for depth, node in enumerate(path_nodes):
+            stage_goal = self._spawn_review_stage_goal(task_id=task_id, node=node)
+            lines.append(f'{"  " * depth}- ({node.node_id},{node.status},{stage_goal})')
+        return '\n'.join(lines) if lines else '(empty path)'
+
+    def _spawn_review_stage_goal(self, *, task_id: str, node: NodeRecord) -> str:
+        frame = self._log_service.read_runtime_frame(task_id, node.node_id) or {}
+        stage_goal = str(frame.get('stage_goal') or '').strip()
+        if stage_goal:
+            return stage_goal
+        snapshot = self._log_service.execution_stage_prompt_payload(task_id, node.node_id)
+        active_stage = snapshot.get('active_stage') if isinstance(snapshot, dict) else None
+        if isinstance(active_stage, dict):
+            stage_goal = str(active_stage.get('stage_goal') or '').strip()
+            if stage_goal:
+                return stage_goal
+        return '无阶段目标'
+
+    @staticmethod
+    def _spawn_review_requested_spec_payload(*, index: int, spec: SpawnChildSpec) -> dict[str, Any]:
+        return {
+            'index': int(index),
+            'goal': str(spec.goal or ''),
+            'prompt': str(spec.prompt or ''),
+            'execution_policy': normalize_execution_policy_metadata(spec.execution_policy.model_dump(mode='json')).model_dump(mode='json'),
+            'acceptance_prompt': str(spec.acceptance_prompt or ''),
+            'requires_acceptance': bool(
+                spec.requires_acceptance if spec.requires_acceptance is not None else bool(str(spec.acceptance_prompt or '').strip())
+            ),
+        }
+
+    @classmethod
+    def _parse_spawn_review_response(cls, response: Any, *, spec_count: int) -> dict[str, Any] | None:
+        tool_calls = list(getattr(response, 'tool_calls', []) or [])
+        for call in tool_calls:
+            name = ''
+            arguments: Any = None
+            if isinstance(call, dict):
+                name = str(call.get('name') or '').strip()
+                arguments = call.get('arguments')
+            else:
+                name = str(getattr(call, 'name', '') or '').strip()
+                arguments = getattr(call, 'arguments', None)
+            if name != _SPAWN_REVIEW_TOOL_NAME:
+                continue
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except Exception:
+                    return None
+            if not isinstance(arguments, dict):
+                return None
+            return cls._normalize_spawn_review_arguments(arguments, spec_count=spec_count)
+        return cls._parse_spawn_review_content(getattr(response, 'content', None), spec_count=spec_count)
+
+    @classmethod
+    def _parse_spawn_review_content(cls, content: Any, *, spec_count: int) -> dict[str, Any] | None:
+        text = str(content or '').strip()
+        if not text:
+            return None
+        for candidate in cls._extract_json_object_candidates(text):
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            normalized = cls._normalize_spawn_review_arguments(payload, spec_count=spec_count)
+            if normalized is not None:
+                return normalized
+        return None
+
+    @staticmethod
+    def _extract_json_object_candidates(content: Any) -> list[str]:
+        text = str(content or '')
+        candidates: list[str] = []
+        start_index: int | None = None
+        depth = 0
+        in_string = False
+        escape = False
+        for index, char in enumerate(text):
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == '\\':
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == '{':
+                if depth == 0:
+                    start_index = index
+                depth += 1
+                continue
+            if char == '}' and depth > 0:
+                depth -= 1
+                if depth == 0 and start_index is not None:
+                    candidates.append(text[start_index : index + 1])
+                    start_index = None
+        candidates.reverse()
+        return candidates
+
+    @staticmethod
+    def _spawn_review_repair_message(*, attempt_count: int) -> str:
+        return (
+            f'{_SPAWN_REVIEW_REPAIR_PREFIX} '
+            f'当前为第 {max(1, int(attempt_count) + 1)} 次修复尝试。'
+            '不要输出解释性普通文本。'
+            f'优先通过工具调用 `{_SPAWN_REVIEW_TOOL_NAME}` 返回；'
+            '如果当前模型不支持工具调用，则只输出一个合法 JSON 对象，'
+            '且必须严格包含 `allowed_indexes` 和 `blocked_specs` 两个字段。'
+        )
+
+    @classmethod
+    def _normalize_spawn_review_arguments(cls, payload: dict[str, Any], *, spec_count: int) -> dict[str, Any] | None:
+        raw_allowed = payload.get('allowed_indexes')
+        raw_blocked = payload.get('blocked_specs')
+        if not isinstance(raw_allowed, list) or not isinstance(raw_blocked, list):
+            return None
+        allowed_indexes: list[int] = []
+        seen_allowed: set[int] = set()
+        for item in raw_allowed:
+            try:
+                index = int(item)
+            except (TypeError, ValueError):
+                return None
+            if index < 0 or index >= spec_count or index in seen_allowed:
+                continue
+            seen_allowed.add(index)
+            allowed_indexes.append(index)
+        blocked_by_index: dict[int, dict[str, Any]] = {}
+        for item in raw_blocked:
+            if not isinstance(item, dict):
+                return None
+            try:
+                index = int(item.get('index'))
+            except (TypeError, ValueError):
+                return None
+            if index < 0 or index >= spec_count or index in seen_allowed:
+                continue
+            blocked_by_index[index] = {
+                'index': index,
+                'reason': str(item.get('reason') or '').strip(),
+                'suggestion': str(item.get('suggestion') or '').strip(),
+            }
+        blocked_specs: list[dict[str, Any]] = []
+        for index in range(spec_count):
+            if index in seen_allowed:
+                continue
+            blocked_payload = blocked_by_index.get(index) or {
+                'index': index,
+                'reason': _SPAWN_REVIEW_DEFAULT_BLOCK_REASON,
+                'suggestion': _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION,
+            }
+            blocked_specs.append(
+                {
+                    'index': index,
+                    'reason': str(blocked_payload.get('reason') or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON,
+                    'suggestion': str(blocked_payload.get('suggestion') or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION,
+                }
+            )
+        return {
+            'allowed_indexes': allowed_indexes,
+            'blocked_specs': blocked_specs,
+            'error_text': '',
+        }
+
+    def _default_spawn_review_result(self, *, specs: list[SpawnChildSpec], reason: str) -> dict[str, Any]:
+        normalized_reason = str(reason or 'RuntimeError: spawn review failed').strip() or 'RuntimeError: spawn review failed'
+        return {
+            'reviewed_at': _now(),
+            'requested_specs': [self._spawn_review_requested_spec_payload(index=index, spec=spec) for index, spec in enumerate(specs)],
+            'allowed_indexes': [],
+            'blocked_specs': [
+                {
+                    'index': index,
+                    'reason': normalized_reason,
+                    'suggestion': _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION,
+                }
+                for index, _spec in enumerate(specs)
+            ],
+            'error_text': normalized_reason,
+        }
+
+    def _apply_spawn_review_results(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        cached_payload: dict[str, Any],
+        specs: list[SpawnChildSpec],
+        spawn_review: dict[str, Any],
+    ) -> list[int]:
+        allowed_indexes = [
+            int(item)
+            for item in list(spawn_review.get('allowed_indexes') or [])
+            if 0 <= int(item) < len(specs)
+        ]
+        allowed_set = set(allowed_indexes)
+        blocked_by_index = {
+            int(item.get('index') or 0): dict(item)
+            for item in list(spawn_review.get('blocked_specs') or [])
+            if isinstance(item, dict)
+        }
+        for index, spec in enumerate(list(specs or [])):
+            if index in allowed_set:
+                self._update_spawn_entry(
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                    review_decision='allowed',
+                    blocked_reason='',
+                    blocked_suggestion='',
+                    synthetic_result_summary='',
+                )
+                continue
+            blocked_payload = blocked_by_index.get(index) or {
+                'reason': _SPAWN_REVIEW_DEFAULT_BLOCK_REASON,
+                'suggestion': _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION,
+            }
+            result = self._spawn_review_blocked_result(
+                spec,
+                reason=str(blocked_payload.get('reason') or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON,
+                suggestion=str(blocked_payload.get('suggestion') or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION,
+            )
+            self._update_spawn_entry(
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                status='success',
+                started_at=str(spawn_review.get('reviewed_at') or _now()),
+                finished_at=str(spawn_review.get('reviewed_at') or _now()),
+                check_status='skipped',
+                review_decision='blocked',
+                blocked_reason=str(blocked_payload.get('reason') or '').strip(),
+                blocked_suggestion=str(blocked_payload.get('suggestion') or '').strip(),
+                synthetic_result_summary=str(result.node_output_summary or ''),
+                result=result.model_dump(mode='json', exclude_none=True),
+            )
+        cached_payload['spawn_review'] = {
+            'round_id': str(cache_key or ''),
+            'reviewed_at': str(spawn_review.get('reviewed_at') or _now()),
+            'requested_specs': [dict(item) for item in list(spawn_review.get('requested_specs') or []) if isinstance(item, dict)],
+            'allowed_indexes': list(allowed_indexes),
+            'blocked_specs': [dict(item) for item in list(spawn_review.get('blocked_specs') or []) if isinstance(item, dict)],
+            'error_text': str(spawn_review.get('error_text') or '').strip(),
+        }
+        self._save_spawn_cache(task_id, parent_node_id, cache_key, cached_payload)
+        return allowed_indexes
+
+    @staticmethod
+    def _spawn_review_blocked_text(*, reason: str, suggestion: str) -> str:
+        normalized_reason = str(reason or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON
+        normalized_suggestion = str(suggestion or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION
+        return f'拦截原因：{normalized_reason}\n操作建议：{normalized_suggestion}'
+
+    @classmethod
+    def _spawn_review_blocked_result(cls, spec: SpawnChildSpec, *, reason: str, suggestion: str) -> SpawnChildResult:
+        output_text = cls._spawn_review_blocked_text(reason=reason, suggestion=suggestion)
+        return SpawnChildResult(
+            goal=spec.goal,
+            check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
+            node_output=output_text,
+            node_output_summary=output_text,
+            node_output_ref='',
+            failure_info=None,
+        )
 
     @staticmethod
     def _normalize_optional_limit(value: int | None | object, *, default: int | None) -> int | None:
@@ -1272,6 +1728,9 @@ class NodeRunner:
         if check_status not in {'', 'pending', 'running', 'skipped', 'passed', 'failed'}:
             check_status = ''
         result = payload.get('result')
+        review_decision = str(payload.get('review_decision') or '').strip().lower()
+        if review_decision not in {'', 'allowed', 'blocked'}:
+            review_decision = ''
         return {
             'index': index,
             'goal': spec.goal,
@@ -1284,6 +1743,10 @@ class NodeRunner:
             'child_node_id': str(payload.get('child_node_id') or ''),
             'acceptance_node_id': str(payload.get('acceptance_node_id') or ''),
             'check_status': check_status,
+            'review_decision': review_decision,
+            'blocked_reason': str(payload.get('blocked_reason') or ''),
+            'blocked_suggestion': str(payload.get('blocked_suggestion') or ''),
+            'synthetic_result_summary': str(payload.get('synthetic_result_summary') or ''),
             'result': copy.deepcopy(result) if isinstance(result, dict) else {},
         }
 
@@ -1435,6 +1898,7 @@ class NodeRunner:
         task,
         parent: NodeRecord,
         specs: list[SpawnChildSpec],
+        allowed_indexes: list[int],
         cache_key: str,
         cached_payload: dict[str, Any],
     ) -> None:
@@ -1446,9 +1910,12 @@ class NodeRunner:
         if stop_reason:
             return
         entries = list(cached_payload.get('entries') or [])
+        allowed_set = {int(item) for item in list(allowed_indexes or [])}
         for index, spec in enumerate(list(specs or [])):
             if index >= len(entries):
                 break
+            if index not in allowed_set:
+                continue
             entry = dict(entries[index] or {})
             child_id = str(entry.get('child_node_id') or '').strip()
             if child_id:

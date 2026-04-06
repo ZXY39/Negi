@@ -18,7 +18,6 @@ _ALLOWED_TASK_EVENT_TYPES = {
     "task.token.patch",
     "task.node.patch",
     "task.live.patch",
-    "task.governance.patch",
     "task.model.call",
     "task.terminal",
     "task.worker.status",
@@ -98,7 +97,7 @@ def normalize_task_event_payload(payload: dict[str, Any] | None) -> dict[str, An
             "data": {"task": task_payload},
         }
 
-    if event_type in {"task.node.patch", "task.live.patch", "task.model.call", "task.terminal", "task.governance.patch"}:
+    if event_type in {"task.node.patch", "task.live.patch", "task.model.call", "task.terminal"}:
         if not task_id:
             return {}
         if not session_id:
