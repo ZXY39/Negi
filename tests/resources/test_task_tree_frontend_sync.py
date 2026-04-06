@@ -906,18 +906,21 @@ def test_render_execution_stage_rounds_show_completed_round_and_tool_result_labe
             },
           ],
         });
-        const labels = [...html.matchAll(/interaction-step-status\">([^<]+)</g)].map((match) => match[1]);
-        const classes = [...html.matchAll(/task-trace-step\\s+([^\"\\s]+)/g)].map((match) => match[1]);
+        const labels = [...html.matchAll(/task-trace-round-chip-status\">([^<]+)</g)].map((match) => match[1]);
+        const classes = [...html.matchAll(/task-trace-round-chip\\s+([^\"\\s]+)/g)].map((match) => match[1]);
+        const roundClasses = [...html.matchAll(/task-trace-step\\s+([^\"\\s]+)/g)].map((match) => match[1]);
 
         console.log(JSON.stringify({
           labels,
           classes,
+          roundClasses,
         }));
         """
     )
 
-    assert result["labels"][:3] == ["完成", "成功", "失败"]
-    assert result["classes"][:3] == ["success", "success", "error"]
+    assert result["roundClasses"][:1] == ["success"]
+    assert result["labels"][:2] == ["成功", "失败"]
+    assert result["classes"][:2] == ["success", "error"]
 
 
 def test_load_selected_node_latest_context_preserves_detail_and_context_scroll() -> None:
@@ -1057,3 +1060,98 @@ def test_task_governance_history_region_is_scrollable() -> None:
     block = match.group("body")
     assert "max-height:" in block
     assert "overflow-y: auto;" in block
+
+
+def test_render_execution_stage_rounds_use_horizontal_strip_and_full_width_panel() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const html = renderExecutionStageRounds({
+          stage_id: "stage:test",
+          mode: "鑷富鎵ц",
+          rounds: [
+            {
+              round_id: "round:1",
+              round_index: 1,
+              tools: [
+                {
+                  tool_name: "filesystem",
+                  status: "success",
+                  arguments_text: "{\\"path\\": \\".\\"}",
+                  output_text: "repo listing",
+                },
+                {
+                  tool_name: "web_fetch",
+                  status: "success",
+                  arguments_text: "{\\"url\\": \\"https://example.com\\"}",
+                  output_text: "fetch result",
+                },
+              ],
+            },
+          ],
+        });
+
+        console.log(JSON.stringify({
+          hasStripContainer: html.includes("task-trace-round-strip"),
+          chipCount: (html.match(/class=\\"task-trace-round-chip\\s/g) || []).length,
+          hasDetailPanel: html.includes("task-trace-round-panel"),
+          hasFilesystemTitle: html.includes("工具 · filesystem"),
+          hasWebFetchTitle: html.includes("工具 · web_fetch"),
+        }));
+        """
+    )
+
+    assert result["hasStripContainer"] is True
+    assert result["chipCount"] == 2
+    assert result["hasDetailPanel"] is True
+    assert result["hasFilesystemTitle"] is True
+    assert result["hasWebFetchTitle"] is True
+
+
+def test_execution_trace_round_strip_uses_horizontal_scroller() -> None:
+    css_text = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    match = re.search(
+        r"\.task-trace-round-strip\s*\{(?P<body>[^}]+)\}",
+        css_text,
+        flags=re.MULTILINE,
+    )
+
+    assert match is not None
+    block = match.group("body")
+    assert "display: flex;" in block
+    assert "flex-wrap: nowrap;" in block
+    assert "overflow-x: auto;" in block
+
+
+def test_execution_trace_round_panel_is_full_width_block() -> None:
+    css_text = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    match = re.search(
+        r"\.task-trace-round-panel\s*\{(?P<body>[^}]+)\}",
+        css_text,
+        flags=re.MULTILINE,
+    )
+
+    assert match is not None
+    block = match.group("body")
+    assert "width: 100%;" in block
+    assert "display: grid;" in block

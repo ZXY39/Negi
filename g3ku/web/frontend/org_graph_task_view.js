@@ -1071,9 +1071,12 @@ function nodeFinalTraceStatus(node) {
     return "success";
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, extraClass = "" }) {
+    const classes = ["interaction-step", "task-trace-step", esc(status)];
+    const normalizedExtraClass = String(extraClass || "").trim();
+    if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
     return `
-        <details class="interaction-step task-trace-step ${esc(status)}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
+        <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
                 <span class="interaction-step-lead">
                     <span class="interaction-step-title">${esc(title)}</span>
@@ -1114,6 +1117,101 @@ function renderTraceMessage(value, emptyText = "暂无内容") {
     `;
 }
 
+function buildExecutionRoundToolKey(round, step, toolIndex) {
+    const roundKey = String(round?.round_id || round?.round_index || "round").trim() || "round";
+    const stepKey = String(step?.tool_call_id || toolIndex).trim() || String(toolIndex);
+    return `${roundKey}:tool:${stepKey}`;
+}
+
+function renderExecutionRoundToolChip(round, step, toolIndex) {
+    const toolKey = buildExecutionRoundToolKey(round, step, toolIndex);
+    const status = String(step?.status || "info").trim() || "info";
+    return `
+        <button
+            type="button"
+            class="task-trace-round-chip ${esc(status)}"
+            data-tool-key="${esc(toolKey)}"
+            aria-pressed="false"
+        >
+            <span class="task-trace-round-chip-title">${esc(`工具 · ${step?.tool_name || "tool"}`)}</span>
+            <span class="task-trace-round-chip-status">${esc(traceStatusLabel(status))}</span>
+        </button>
+    `;
+}
+
+function renderExecutionRoundToolPanel(round, step, toolIndex) {
+    const toolKey = buildExecutionRoundToolKey(round, step, toolIndex);
+    return `
+        <section class="task-trace-round-panel" data-tool-key="${esc(toolKey)}" hidden>
+            <div class="task-trace-round-panel-title">${esc(`工具 · ${step?.tool_name || "tool"}`)}</div>
+            ${[
+                renderTraceField("参数", step?.arguments_text, "无参数"),
+                renderTraceField(
+                    "工具输出",
+                    step?.output_text,
+                    String(step?.status || "") === "running" ? "等待工具输出..." : "暂无工具输出",
+                    { decodeEscapes: true },
+                ),
+            ].join("")}
+        </section>
+    `;
+}
+
+function renderExecutionRoundToolStrip(round, tools) {
+    const toolList = Array.isArray(tools) ? tools : [];
+    if (!toolList.length) {
+        return renderTraceField("工具", "", "本轮暂无工具记录");
+    }
+    return `
+        <div class="task-trace-round-tools" data-active-tool-key="">
+            <div class="task-trace-round-strip">
+                ${toolList.map((step, toolIndex) => renderExecutionRoundToolChip(round, step, toolIndex)).join("")}
+            </div>
+            <div class="task-trace-round-panels">
+                <div class="task-trace-round-panel-placeholder">点击上方工具卡片查看该调用的参数和输出。</div>
+                ${toolList.map((step, toolIndex) => renderExecutionRoundToolPanel(round, step, toolIndex)).join("")}
+            </div>
+        </div>
+    `;
+}
+
+function setTraceRoundActiveTool(roundHost, nextToolKey = "") {
+    if (!(roundHost instanceof HTMLElement)) return;
+    const normalizedToolKey = String(nextToolKey || "").trim();
+    roundHost.dataset.activeToolKey = normalizedToolKey;
+    const chips = Array.from(roundHost.querySelectorAll(".task-trace-round-chip"));
+    const panels = Array.from(roundHost.querySelectorAll(".task-trace-round-panel"));
+    const placeholder = roundHost.querySelector(".task-trace-round-panel-placeholder");
+    chips.forEach((chip) => {
+        const isActive = normalizedToolKey && String(chip.dataset.toolKey || "").trim() === normalizedToolKey;
+        chip.classList.toggle("is-active", !!isActive);
+        chip.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+    panels.forEach((panel) => {
+        const isActive = normalizedToolKey && String(panel.dataset.toolKey || "").trim() === normalizedToolKey;
+        panel.hidden = !isActive;
+        panel.classList.toggle("is-active", !!isActive);
+    });
+    if (placeholder instanceof HTMLElement) {
+        placeholder.hidden = !!normalizedToolKey;
+    }
+}
+
+function bindTraceRoundToolStrips(traceList) {
+    if (!(traceList instanceof HTMLElement) || traceList.dataset.roundToolBindings === "true") return;
+    traceList.dataset.roundToolBindings = "true";
+    traceList.addEventListener("click", (event) => {
+        const chip = event.target instanceof Element ? event.target.closest(".task-trace-round-chip") : null;
+        if (!(chip instanceof HTMLElement) || !traceList.contains(chip)) return;
+        const roundHost = chip.closest(".task-trace-round-tools");
+        if (!(roundHost instanceof HTMLElement)) return;
+        const toolKey = String(chip.dataset.toolKey || "").trim();
+        const currentToolKey = String(roundHost.dataset.activeToolKey || "").trim();
+        setTraceRoundActiveTool(roundHost, currentToolKey === toolKey ? "" : toolKey);
+        if (typeof scheduleTaskDetailSessionPersist === "function") scheduleTaskDetailSessionPersist();
+    });
+}
+
 function resolveExecutionStageRoundLabel(stage, round) {
     const tools = Array.isArray(round?.tools) ? round.tools : [];
     const hasSpawnChildren = tools.some((step) => String(step?.tool_name || "").trim() === "spawn_child_nodes");
@@ -1131,23 +1229,7 @@ function renderExecutionStageRounds(stage) {
     return rounds.map((round, index) => {
         const tools = Array.isArray(round.tools) ? round.tools : [];
         const title = resolveExecutionStageRoundLabel(stage, round);
-        const toolDetails = tools.length
-            ? tools.map((step, toolIndex) => renderTraceStep({
-                traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}:tool:${step.tool_call_id || toolIndex}`,
-                title: `工具 · ${step.tool_name || "tool"}`,
-                status: step.status || "info",
-                open: false,
-                bodyHtml: [
-                    renderTraceField("参数", step.arguments_text, "无参数"),
-                    renderTraceField(
-                        "工具输出",
-                        step.output_text,
-                        step.status === "running" ? "等待工具输出..." : "暂无工具输出",
-                        { decodeEscapes: true },
-                    ),
-                ].join(""),
-            })).join("")
-            : renderTraceField("工具", "", "本轮暂无工具记录");
+        const toolDetails = renderExecutionRoundToolStrip(round, tools);
         return renderTraceStep({
             traceKey: `stage:${stage.stage_id || stage.stage_index}:round:${round.round_id || round.round_index}`,
             title: `${title}${round.created_at ? ` · ${formatCompactTime(round.created_at)}` : ""}`,
@@ -1435,6 +1517,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         const runtimeEl = item.querySelector(".task-trace-runtime");
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     });
+    bindTraceRoundToolStrips(traceList);
     refreshTaskDetailScrollRegions();
     if (effectiveViewState && shouldReplace) {
         const restoreTraceScroll = () => {

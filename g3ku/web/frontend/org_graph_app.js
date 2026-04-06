@@ -1267,6 +1267,7 @@ function normalizeTaskDetailViewState(value) {
             key: String(item?.key || "").trim(),
             title: String(item?.title || "").trim(),
             open: !!item?.open,
+            activeToolKey: String(item?.activeToolKey || "").trim(),
         }))
         : [];
     return {
@@ -1383,6 +1384,7 @@ function captureTaskDetailViewState() {
             key: String(step.dataset.traceKey || "").trim(),
             title: String(step.querySelector(".interaction-step-title")?.textContent || "").trim(),
             open: !!step.open,
+            activeToolKey: String(step.querySelector(".task-trace-round-chip.is-active")?.dataset.toolKey || "").trim(),
         }))
         : [];
     return {
@@ -1405,10 +1407,18 @@ function applyTaskTraceItemViewState(traceList, traceItems) {
     Array.from(traceList.querySelectorAll(".task-trace-step")).forEach((step, index) => {
         const traceKey = String(step.dataset.traceKey || "").trim();
         const title = String(step.querySelector(".interaction-step-title")?.textContent || "").trim();
-        const nextOpen = keyState.has(traceKey)
-            ? keyState.get(traceKey)
-            : (titleState.has(title) ? titleState.get(title) : traceItems[index]?.open);
+        const traceState = keyState.has(traceKey)
+            ? traceItems.find((item) => item?.key === traceKey)
+            : (titleState.has(title) ? traceItems.find((item) => item?.title === title) : traceItems[index]);
+        const nextOpen = typeof traceState?.open === "boolean"
+            ? traceState.open
+            : undefined;
         if (typeof nextOpen === "boolean") step.open = nextOpen;
+        const activeToolKey = String(traceState?.activeToolKey || "").trim();
+        if (typeof setTraceRoundActiveTool === "function") {
+            const roundHost = step.querySelector(".task-trace-round-tools");
+            if (roundHost instanceof HTMLElement) setTraceRoundActiveTool(roundHost, activeToolKey);
+        }
     });
 }
 
