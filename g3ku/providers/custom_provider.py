@@ -33,7 +33,8 @@ class CustomProvider(LLMProvider):
                    reasoning_effort: str | None = None,
                    tool_choice: str | dict[str, Any] | None = None,
                    parallel_tool_calls: bool | None = None,
-                   prompt_cache_key: str | None = None) -> LLMResponse:
+                   prompt_cache_key: str | None = None,
+                   request_timeout_seconds: float | None = None) -> LLMResponse:
         del prompt_cache_key
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
@@ -47,6 +48,8 @@ class CustomProvider(LLMProvider):
             kwargs["extra_headers"] = dict(self.extra_headers)
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
+        if request_timeout_seconds is not None:
+            kwargs["timeout"] = float(request_timeout_seconds)
         if tools:
             kwargs.update(tools=tools, tool_choice=tool_choice if tool_choice is not None else "auto")
             if parallel_tool_calls is not None:

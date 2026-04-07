@@ -45,6 +45,7 @@ class ResponsesProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -107,7 +108,8 @@ class ResponsesProvider(LLMProvider):
         )
 
         try:
-            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            client_timeout = float(request_timeout_seconds) if request_timeout_seconds is not None else 60.0
+            async with httpx.AsyncClient(timeout=client_timeout, verify=False) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as response:
                     if response.status_code != 200:
                         text = await response.aread()

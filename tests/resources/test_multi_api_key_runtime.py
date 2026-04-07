@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -87,6 +88,30 @@ class _RetryableChainThenSuccessProvider:
         if self.call_count >= self.succeed_on_call:
             return LLMResponse(content="ok", finish_reason="stop")
         raise RuntimeError("HTTP 502: upstream request failed")
+
+
+class _HangingChainProvider:
+    def __init__(self, model_key: str, calls: list[str], timeouts: list[float | None]) -> None:
+        self.model_key = model_key
+        self.calls = calls
+        self.timeouts = timeouts
+
+    async def chat(self, **kwargs):
+        self.calls.append(self.model_key)
+        self.timeouts.append(kwargs.get("request_timeout_seconds"))
+        await asyncio.Event().wait()
+
+
+class _TimeoutAwareSuccessProvider:
+    def __init__(self, model_key: str, calls: list[str], timeouts: list[float | None]) -> None:
+        self.model_key = model_key
+        self.calls = calls
+        self.timeouts = timeouts
+
+    async def chat(self, **kwargs):
+        self.calls.append(self.model_key)
+        self.timeouts.append(kwargs.get("request_timeout_seconds"))
+        return LLMResponse(content="ok", finish_reason="stop")
 
 
 def _target(*, provider, retry_count: int, api_key_count: int, api_key_indexes: list[int] | None = None) -> ProviderTarget:
@@ -330,3 +355,84 @@ async def test_config_chat_backend_fails_after_retryable_chain_round_limit(monke
         )
 
     assert calls == ["primary", "secondary", "primary", "secondary"]
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_falls_back_after_attempt_timeout(monkeypatch) -> None:
+    calls: list[str] = []
+    primary_timeouts: list[float | None] = []
+    secondary_timeouts: list[float | None] = []
+    providers = {
+        "primary": _HangingChainProvider("primary", calls, primary_timeouts),
+        "secondary": _TimeoutAwareSuccessProvider("secondary", calls, secondary_timeouts),
+    }
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network", "429", "5xx"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    backend._model_attempt_timeout_seconds = 0.01
+
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary", "secondary"],
+    )
+
+    assert response.content == "ok"
+    assert calls == ["primary", "secondary"]
+    assert primary_timeouts == [0.01]
+    assert secondary_timeouts == [0.01]
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_falls_back_after_attempt_timeout(monkeypatch) -> None:
+    calls: list[str] = []
+    primary_timeouts: list[float | None] = []
+    secondary_timeouts: list[float | None] = []
+    providers = {
+        "primary": _HangingChainProvider("primary", calls, primary_timeouts),
+        "secondary": _TimeoutAwareSuccessProvider("secondary", calls, secondary_timeouts),
+    }
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network", "429", "5xx"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
+
+    provider = fallback_module.FallbackProvider(
+        config=SimpleNamespace(),
+        model_chain=["primary", "secondary"],
+        default_model_ref="primary",
+    )
+
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        model="primary",
+        request_timeout_seconds=0.01,
+    )
+
+    assert response.content == "ok"
+    assert calls == ["primary", "secondary"]
+    assert primary_timeouts == [0.01]
+    assert secondary_timeouts == [0.01]

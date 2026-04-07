@@ -12,6 +12,8 @@ from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config
 from g3ku.providers.custom_provider import CustomProvider
 from g3ku.providers.fallback import FallbackProvider
 from g3ku.providers.base import LLMResponse
+from g3ku.providers.litellm_provider import LiteLLMProvider
+from g3ku.providers.openai_codex_provider import OpenAICodexProvider
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.responses_provider import ResponsesProvider
 
@@ -194,6 +196,146 @@ async def test_responses_provider_refuses_empty_bearer_header(monkeypatch) -> No
 
     with pytest.raises(ValueError, match="empty Authorization header"):
         await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_forwards_request_timeout_to_openai_sdk(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="ok", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage={},
+            )
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+
+    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="demo",
+        request_timeout_seconds=12.5,
+    )
+
+    assert response.content == "ok"
+    assert captured["timeout"] == 12.5
+
+
+@pytest.mark.asyncio
+async def test_responses_provider_uses_request_timeout_for_http_client(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return SimpleNamespace(status_code=200)
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            _ = args, kwargs
+            return _FakeStream()
+
+    async def _fake_consume_sse(response):
+        _ = response
+        return "ok", [], "stop", {}
+
+    monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)
+
+    provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="demo",
+        request_timeout_seconds=7.5,
+    )
+
+    assert response.content == "ok"
+    assert captured["timeout"] == 7.5
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_forwards_request_timeout(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="ok", tool_calls=[]),
+                    finish_reason="stop",
+                )
+            ],
+            usage={},
+        )
+
+    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
+
+    provider = LiteLLMProvider(
+        api_key="test-key",
+        api_base="https://example.com/v1",
+        default_model="openai/gpt-4.1",
+        provider_name="openai",
+    )
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="openai/gpt-4.1",
+        request_timeout_seconds=9.5,
+    )
+
+    assert response.content == "ok"
+    assert captured["timeout"] == 9.5
+
+
+@pytest.mark.asyncio
+async def test_openai_codex_provider_forwards_request_timeout(monkeypatch) -> None:
+    captured: list[float | None] = []
+
+    async def _fake_request_codex(url, headers, body, verify, timeout):
+        _ = url, headers, body, verify
+        captured.append(timeout)
+        return "ok", [], "stop", {}
+
+    monkeypatch.setattr(
+        "g3ku.providers.openai_codex_provider.get_codex_token",
+        lambda: SimpleNamespace(account_id="acct", access="token"),
+    )
+    monkeypatch.setattr("g3ku.providers.openai_codex_provider._request_codex", _fake_request_codex)
+
+    provider = OpenAICodexProvider(default_model="openai_codex/gpt-5.1-codex")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="openai_codex/gpt-5.1-codex",
+        request_timeout_seconds=11.0,
+    )
+
+    assert response.content == "ok"
+    assert captured == [11.0]
 
 
 def test_build_openai_headers_omits_empty_authorization() -> None:

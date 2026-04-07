@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from loguru import logger
@@ -12,6 +13,7 @@ from g3ku.utils.api_keys import APIKeyConfigurationError, iter_api_key_retry_slo
 
 PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting the configured fallback chain."
 RETRYABLE_MODEL_CHAIN_MAX_ROUNDS = 10
+DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 30.0
 _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "sqlite",
     "database",
@@ -40,6 +42,70 @@ class ModelProviderExhaustedError(RuntimeError):
         super().__init__(PUBLIC_PROVIDER_FAILURE_MESSAGE)
         self.raw_message = str(raw_message or "")
         self.retryable = bool(retryable)
+
+
+class ModelAttemptTimeoutError(TimeoutError):
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float,
+        model_ref: str,
+        provider_id: str,
+        provider_model: str,
+        key_index: int | None = None,
+    ) -> None:
+        self.timeout_seconds = float(timeout_seconds)
+        self.model_ref = str(model_ref or "").strip()
+        self.provider_id = str(provider_id or "").strip()
+        self.provider_model = str(provider_model or "").strip()
+        self.key_index = None if key_index is None else max(0, int(key_index))
+        details: list[str] = []
+        if self.model_ref:
+            details.append(f"model_ref={self.model_ref}")
+        if self.provider_id:
+            details.append(f"provider_id={self.provider_id}")
+        if self.provider_model:
+            details.append(f"provider_model={self.provider_model}")
+        if self.key_index is not None:
+            details.append(f"key_index={self.key_index}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        super().__init__(f"model attempt timeout after {self.timeout_seconds:.3f}s{suffix}")
+
+
+def normalize_request_timeout_seconds(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        return None
+    if normalized <= 0:
+        return None
+    return normalized
+
+
+async def wait_for_model_attempt(
+    awaitable,
+    *,
+    timeout_seconds: float | None,
+    model_ref: str,
+    provider_id: str,
+    provider_model: str,
+    key_index: int | None = None,
+):
+    normalized_timeout = normalize_request_timeout_seconds(timeout_seconds)
+    if normalized_timeout is None:
+        return await awaitable
+    try:
+        return await asyncio.wait_for(awaitable, timeout=normalized_timeout)
+    except asyncio.TimeoutError as exc:
+        raise ModelAttemptTimeoutError(
+            timeout_seconds=normalized_timeout,
+            model_ref=model_ref,
+            provider_id=provider_id,
+            provider_model=provider_model,
+            key_index=key_index,
+        ) from exc
 
 
 def exception_chain_text(exc: Exception) -> str:
@@ -210,6 +276,7 @@ class FallbackProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
+        request_timeout_seconds: float | None = DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
     ) -> LLMResponse:
         from g3ku.providers.provider_factory import build_provider_from_model_key
 
@@ -284,11 +351,12 @@ class FallbackProvider(LLMProvider):
 
                 for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count, key_indexes=api_key_indexes):
                     target = base_target
+                    selected_key_index = int(slot.key_index)
                     try:
                         target = base_target if slot.attempt_number == 1 else build_provider_from_model_key(
                             self._config,
                             model_key,
-                            api_key_index=slot.key_index,
+                            api_key_index=selected_key_index,
                         )
                         provider_kwargs: dict[str, Any] = {
                             "messages": messages,
@@ -297,6 +365,7 @@ class FallbackProvider(LLMProvider):
                             "tool_choice": tool_choice,
                             "parallel_tool_calls": parallel_tool_calls,
                             "prompt_cache_key": prompt_cache_key,
+                            "request_timeout_seconds": request_timeout_seconds,
                         }
                         if effective_max_tokens is not None:
                             provider_kwargs["max_tokens"] = effective_max_tokens
@@ -304,8 +373,15 @@ class FallbackProvider(LLMProvider):
                             provider_kwargs["temperature"] = effective_temperature
                         if effective_reasoning:
                             provider_kwargs["reasoning_effort"] = effective_reasoning
-                        response = await target.provider.chat(
-                            **provider_kwargs,
+                        response = await wait_for_model_attempt(
+                            target.provider.chat(
+                                **provider_kwargs,
+                            ),
+                            timeout_seconds=request_timeout_seconds,
+                            model_ref=str(getattr(target, "provider_ref", model_key) or model_key),
+                            provider_id=str(getattr(target, "provider_id", "") or ""),
+                            provider_model=str(getattr(target, "model_id", "") or ""),
+                            key_index=selected_key_index,
                         )
                     except Exception as exc:
                         last_error = round_last_error = exc

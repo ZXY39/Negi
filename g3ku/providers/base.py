@@ -145,6 +145,7 @@ class LLMProvider(ABC):
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -158,6 +159,9 @@ class LLMProvider(ABC):
             tool_choice: Optional tool-choice policy (e.g. "auto", "required", or explicit tool).
             parallel_tool_calls: Optional provider hint to enable/disable parallel tool execution.
             prompt_cache_key: Optional stable prompt-cache key for providers that support it.
+            request_timeout_seconds: Optional per-request network timeout. When provided,
+                providers should pass it down to their transport/SDK instead of waiting on
+                library defaults.
 
         Returns:
             LLMResponse with content and/or tool calls.

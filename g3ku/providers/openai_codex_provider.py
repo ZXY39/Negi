@@ -44,6 +44,7 @@ class OpenAICodexProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -84,12 +85,24 @@ class OpenAICodexProvider(LLMProvider):
 
         try:
             try:
-                content, tool_calls, finish_reason, usage = await _request_codex(url, headers, body, verify=True)
+                content, tool_calls, finish_reason, usage = await _request_codex(
+                    url,
+                    headers,
+                    body,
+                    verify=True,
+                    timeout=request_timeout_seconds,
+                )
             except Exception as e:
                 if "CERTIFICATE_VERIFY_FAILED" not in str(e):
                     raise
                 logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
-                content, tool_calls, finish_reason, usage = await _request_codex(url, headers, body, verify=False)
+                content, tool_calls, finish_reason, usage = await _request_codex(
+                    url,
+                    headers,
+                    body,
+                    verify=False,
+                    timeout=request_timeout_seconds,
+                )
             return LLMResponse(
                 content=content,
                 tool_calls=tool_calls,
@@ -136,8 +149,10 @@ async def _request_codex(
     headers: dict[str, str],
     body: dict[str, Any],
     verify: bool,
+    timeout: float | None,
 ) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
-    async with httpx.AsyncClient(timeout=60.0, verify=verify) as client:
+    client_timeout = float(timeout) if timeout is not None else 60.0
+    async with httpx.AsyncClient(timeout=client_timeout, verify=verify) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
             if response.status_code != 200:
                 text = await response.aread()

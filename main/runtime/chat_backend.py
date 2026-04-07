@@ -8,8 +8,10 @@ from g3ku.config.schema import Config
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
+    DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
     RETRYABLE_MODEL_CHAIN_MAX_ROUNDS,
     exhausted_model_chain_error,
+    normalize_request_timeout_seconds,
     normalized_retry_count,
     response_requires_api_key_rotation,
     response_requires_retry,
@@ -18,6 +20,7 @@ from g3ku.providers.fallback import (
     should_rotate_api_key_error,
     should_fallback_model_error,
     should_retry_model_chain_error,
+    wait_for_model_attempt,
 )
 from g3ku.utils.api_keys import iter_api_key_retry_slots
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
@@ -232,6 +235,10 @@ def _resolve_model_request_parameters(
 class ConfigChatBackend:
     def __init__(self, config: Config):
         self._config = config
+        self._model_attempt_timeout_seconds: float | None = DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
+
+    def _normalized_model_attempt_timeout_seconds(self) -> float | None:
+        return normalize_request_timeout_seconds(getattr(self, "_model_attempt_timeout_seconds", None))
 
     async def chat(
         self,
@@ -302,6 +309,7 @@ class ConfigChatBackend:
                                 ref,
                                 api_key_index=selected_api_key_index,
                             )
+                            attempt_timeout_seconds = self._normalized_model_attempt_timeout_seconds()
                             if use_held_turn_permit and held_turn_lease is not None:
                                 permit_lease = held_turn_lease.initial_model_permit
                                 held_turn_lease.initial_model_permit = None
@@ -310,23 +318,32 @@ class ConfigChatBackend:
                                     model_ref=target.provider_ref,
                                     key_index=selected_api_key_index,
                                 )
-                            response = await target.provider.chat(
+                            provider_kwargs = {
                                 **{
-                                    **{
-                                        'messages': request_messages,
-                                        'tools': tools,
-                                        'model': target.model_id,
-                                        'tool_choice': tool_choice if tool_choice is not None else 'auto',
-                                        'parallel_tool_calls': parallel_tool_calls,
-                                        'prompt_cache_key': stable_prompt_cache_key,
-                                    },
-                                    **_resolve_model_request_parameters(
-                                        target,
-                                        max_tokens=max_tokens,
-                                        temperature=temperature,
-                                        reasoning_effort=reasoning_effort,
-                                    ),
+                                    'messages': request_messages,
+                                    'tools': tools,
+                                    'model': target.model_id,
+                                    'tool_choice': tool_choice if tool_choice is not None else 'auto',
+                                    'parallel_tool_calls': parallel_tool_calls,
+                                    'prompt_cache_key': stable_prompt_cache_key,
+                                    'request_timeout_seconds': attempt_timeout_seconds,
                                 },
+                                **_resolve_model_request_parameters(
+                                    target,
+                                    max_tokens=max_tokens,
+                                    temperature=temperature,
+                                    reasoning_effort=reasoning_effort,
+                                ),
+                            }
+                            response = await wait_for_model_attempt(
+                                target.provider.chat(
+                                    **provider_kwargs,
+                                ),
+                                timeout_seconds=attempt_timeout_seconds,
+                                model_ref=str(getattr(target, "provider_ref", ref) or ref),
+                                provider_id=str(getattr(target, "provider_id", "") or ""),
+                                provider_model=str(getattr(target, "model_id", "") or ""),
+                                key_index=selected_api_key_index,
                             )
                         except Exception as exc:
                             last_error = round_last_error = exc

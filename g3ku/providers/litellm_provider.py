@@ -196,6 +196,7 @@ class LiteLLMProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -228,6 +229,8 @@ class LiteLLMProvider(LLMProvider):
             kwargs["max_tokens"] = max(1, int(max_tokens))
         if temperature is not None:
             kwargs["temperature"] = float(temperature)
+        if request_timeout_seconds is not None:
+            kwargs["timeout"] = float(request_timeout_seconds)
 
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
