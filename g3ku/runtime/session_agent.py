@@ -1093,6 +1093,19 @@ class RuntimeAgentSession:
 
     async def _pause_for_frontdoor_interrupt(self, exc: CeoFrontdoorInterrupted) -> RunResult:
         serialized_interrupts = self._serialize_pending_interrupts(exc.interrupts)
+        interrupt_values = dict(exc.values or {}) if isinstance(exc.values, dict) else {}
+        frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
+        compression_state = interrupt_values.get("compression_state")
+        self._frontdoor_stage_state = (
+            dict(frontdoor_stage_state)
+            if isinstance(frontdoor_stage_state, dict)
+            else {}
+        )
+        self._compression_state = (
+            dict(compression_state)
+            if isinstance(compression_state, dict)
+            else {}
+        )
         self._state.is_running = False
         self._state.paused = True
         self._state.status = "paused"
@@ -1106,7 +1119,7 @@ class RuntimeAgentSession:
                 **(self._build_execution_context_snapshot(allow_manual_pause=True, status_override="paused") or {}),
                 "source": "approval",
                 "interrupts": serialized_interrupts,
-                "graph_state": dict(exc.values or {}),
+                "graph_state": interrupt_values,
             }
         )
         await self._emit("frontdoor_interrupt", interrupts=serialized_interrupts)

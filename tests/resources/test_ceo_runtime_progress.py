@@ -581,7 +581,23 @@ async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_st
                         value={"kind": "frontdoor_tool_approval", "tool_calls": [{"name": "create_async_task"}]},
                     )
                 ],
-                values={"tool_call_payloads": [{"name": "create_async_task"}]},
+                values={
+                    "tool_call_payloads": [{"name": "create_async_task"}],
+                    "frontdoor_stage_state": {
+                        "active_stage_id": "frontdoor-stage-1",
+                        "transition_required": False,
+                        "stages": [
+                            {
+                                "stage_id": "frontdoor-stage-1",
+                                "stage_index": 1,
+                                "stage_goal": "inspect repository",
+                                "status": "active",
+                                "rounds": [{"round_index": 1, "tools": [{"tool_name": "filesystem"}]}],
+                            }
+                        ],
+                    },
+                    "compression_state": {"status": "running", "text": "上下文压缩中", "source": "user"},
+                },
             )
 
     async def _cancel_session_tasks(session_key: str) -> int:
@@ -616,6 +632,12 @@ async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_st
     ]
     paused = session.paused_execution_context_snapshot()
     assert paused["interrupts"][0]["id"] == "interrupt-1"
+    assert paused["execution_trace_summary"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert paused["compression"]["status"] == "running"
+    inflight = session.inflight_turn_snapshot()
+    assert inflight is not None
+    assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert inflight["compression"]["text"] == "上下文压缩中"
 
 
 @pytest.mark.asyncio
