@@ -810,6 +810,8 @@ function normalizeSummaryTraceToolCall(step, index = 0) {
         running: "running",
         success: "success",
         error: "error",
+        warning: "warning",
+        interrupted: "interrupted",
     }[rawStatus] || "");
     const outputText = String(step?.output_text || "");
     const outputRef = String(step?.output_ref || "");
@@ -829,6 +831,11 @@ function normalizeSummaryTraceToolCall(step, index = 0) {
             : ((outputText.trim() || outputRef.trim())
                 ? "success"
                 : (startedAt ? "running" : "info"))),
+        recovery_decision: String(step?.recovery_decision || ""),
+        related_tool_call_ids: Array.isArray(step?.related_tool_call_ids) ? step.related_tool_call_ids.map((item) => String(item || "")) : [],
+        attempted_tools: Array.isArray(step?.attempted_tools) ? step.attempted_tools.map((item) => String(item || "")) : [],
+        evidence: Array.isArray(step?.evidence) ? step.evidence.filter((item) => item && typeof item === "object") : [],
+        lost_result_summary: String(step?.lost_result_summary || ""),
     };
 }
 
@@ -927,9 +934,14 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
             started_at: String(step?.started_at || ""),
             finished_at: String(step?.finished_at || ""),
             elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
-            status: ["running", "success", "error"].includes(String(step?.status || ""))
+            status: ["running", "success", "error", "warning", "interrupted"].includes(String(step?.status || ""))
                 ? String(step.status)
                 : "info",
+            recovery_decision: String(step?.recovery_decision || ""),
+            related_tool_call_ids: Array.isArray(step?.related_tool_call_ids) ? step.related_tool_call_ids.map((item) => String(item || "")) : [],
+            attempted_tools: Array.isArray(step?.attempted_tools) ? step.attempted_tools.map((item) => String(item || "")) : [],
+            evidence: Array.isArray(step?.evidence) ? step.evidence.filter((item) => item && typeof item === "object") : [],
+            lost_result_summary: String(step?.lost_result_summary || ""),
         })),
         stages,
         live_tool_calls: normalizeLiveToolCalls(liveFrame),
@@ -964,9 +976,14 @@ function normalizeExecutionStageTrace(stage, index = 0) {
                 started_at: String(step?.started_at || ""),
                 finished_at: String(step?.finished_at || ""),
                 elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
-                status: ["running", "success", "error"].includes(String(step?.status || ""))
+                status: ["running", "success", "error", "warning", "interrupted"].includes(String(step?.status || ""))
                     ? String(step.status)
                     : "info",
+                recovery_decision: String(step?.recovery_decision || ""),
+                related_tool_call_ids: Array.isArray(step?.related_tool_call_ids) ? step.related_tool_call_ids.map((item) => String(item || "")) : [],
+                attempted_tools: Array.isArray(step?.attempted_tools) ? step.attempted_tools.map((item) => String(item || "")) : [],
+                evidence: Array.isArray(step?.evidence) ? step.evidence.filter((item) => item && typeof item === "object") : [],
+                lost_result_summary: String(step?.lost_result_summary || ""),
             })),
         })),
     };
@@ -989,6 +1006,9 @@ function stageTraceStatus(stage) {
 function roundTraceStatus(round) {
     const tools = Array.isArray(round?.tools) ? round.tools : [];
     if (!tools.length) return "info";
+    if (tools.some((item) => ["warning", "interrupted"].includes(String(item?.status || "")))) {
+        return "warning";
+    }
     if (tools.some((item) => String(item?.status || "") === "running" || String(item?.status || "") === "queued")) {
         return "running";
     }
@@ -1075,6 +1095,17 @@ function renderExecutionRoundToolChip(round, step, toolIndex) {
 
 function renderExecutionRoundToolPanel(round, step, toolIndex) {
     const toolKey = buildExecutionRoundToolKey(round, step, toolIndex);
+    const evidenceSummary = (Array.isArray(step?.evidence) ? step.evidence : [])
+        .map((item) => [String(item?.kind || "").trim(), String(item?.path || item?.ref || "").trim(), String(item?.note || "").trim()].filter(Boolean).join(" | "))
+        .filter(Boolean)
+        .join("\n");
+    const recoveryFields = String(step?.tool_name || "") === "recovery_check"
+        ? [
+            renderTraceField("恢复检查结论", step?.recovery_decision, "暂无恢复检查结论"),
+            renderTraceField("之前尝试执行了", (Array.isArray(step?.attempted_tools) ? step.attempted_tools : []).join(", "), "暂无尝试记录"),
+            renderTraceField("证据摘要", evidenceSummary || step?.lost_result_summary, "暂无恢复证据"),
+        ].join("")
+        : "";
     return `
         <section class="task-trace-round-panel" data-tool-key="${esc(toolKey)}" hidden>
             <div class="task-trace-round-panel-title">${esc(`工具 · ${step?.tool_name || "tool"}`)}</div>
@@ -1086,6 +1117,7 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
                     String(step?.status || "") === "running" ? "等待工具输出..." : "暂无工具输出",
                     { decodeEscapes: true },
                 ),
+                recoveryFields,
             ].join("")}
         </section>
     `;
@@ -1292,17 +1324,6 @@ function summarizeBlockedSpawnSuggestions(entries = []) {
     return lines.join("\n");
 }
 
-function summarizeSyntheticSpawnResults(entries = []) {
-    const lines = (Array.isArray(entries) ? entries : [])
-        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "blocked")
-        .map((entry, index) => {
-            const goal = String(entry?.goal || "").trim() || `blocked ${index + 1}`;
-            const summary = String(entry?.synthetic_result_summary || "").trim() || "暂无合成返回摘要";
-            return `${goal}: ${summary}`;
-        });
-    return lines.join("\n");
-}
-
 function buildSpawnReviewTraceSteps(rounds = []) {
     return (Array.isArray(rounds) ? rounds : []).map((round, index) => {
         const reviewedAt = String(round?.reviewed_at || "").trim();
@@ -1321,7 +1342,6 @@ function buildSpawnReviewTraceSteps(rounds = []) {
                 renderTraceField("放行结果", summarizeAllowedSpawnEntries(round?.entries), "本轮无放行派生"),
                 renderTraceField("被拦截原因", summarizeBlockedSpawnEntries(round?.entries), "本轮无被拦截项"),
                 renderTraceField("操作建议", summarizeBlockedSpawnSuggestions(round?.entries), "本轮无额外建议"),
-                renderTraceField("返回摘要", summarizeSyntheticSpawnResults(round?.entries), "本轮无合成返回摘要"),
             ].join(""),
         };
     });
@@ -1507,6 +1527,8 @@ function traceStatusLabel(status) {
         running: "进行中",
         success: "成功",
         error: "失败",
+        warning: "需处理",
+        interrupted: "已中断",
     }[String(status || "")] || "信息");
 }
 

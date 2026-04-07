@@ -80,6 +80,22 @@ def build_execution_trace(
                     or ''
                 ),
             }
+            if isinstance(payload, dict):
+                step['recovery_decision'] = str(payload.get('recovery_decision') or '').strip()
+                step['related_tool_call_ids'] = [
+                    str(item or '').strip()
+                    for item in list(payload.get('related_tool_call_ids') or [])
+                    if str(item or '').strip()
+                ]
+                step['attempted_tools'] = [
+                    str(item or '').strip()
+                    for item in list(payload.get('attempted_tools') or [])
+                    if str(item or '').strip()
+                ]
+                step['evidence'] = [
+                    dict(item) for item in list(payload.get('evidence') or []) if isinstance(item, dict)
+                ]
+                step['lost_result_summary'] = str(payload.get('lost_result_summary') or '').strip()
             step['elapsed_seconds'] = _resolve_tool_elapsed_seconds(
                 raw_elapsed=record.elapsed_seconds if record is not None else live_state.get('elapsed_seconds'),
                 started_at=str(step.get('started_at') or entry.created_at or ''),
@@ -96,9 +112,14 @@ def build_execution_trace(
     stage_state = normalize_execution_stage_metadata((node.metadata or {}).get('execution_stages') if isinstance(node.metadata, dict) else {})
     stages: list[dict[str, Any]] = []
     for stage in list(stage_state.stages or []):
+        stage_tool_calls: list[dict[str, Any]] = []
         rounds: list[dict[str, Any]] = []
         for round_item in list(stage.rounds or []):
-            round_tools: list[dict[str, Any]] = []
+            round_tools: list[dict[str, Any]] = _synthetic_round_tools(
+                tool_results=tool_results,
+                round_id=str(round_item.round_id or ''),
+            )
+            stage_tool_calls.extend(round_tools)
             tool_names = list(round_item.tool_names or [])
             for index, call_id in enumerate(list(round_item.tool_call_ids or [])):
                 step = copy.deepcopy(step_by_call_id.get(str(call_id or '').strip()) or {})
@@ -126,6 +147,7 @@ def build_execution_trace(
                         ),
                     }
                 round_tools.append(step)
+                stage_tool_calls.append(step)
             rounds.append(
                 {
                     'round_id': str(round_item.round_id or ''),
@@ -154,6 +176,7 @@ def build_execution_trace(
                 'created_at': str(stage.created_at or ''),
                 'finished_at': str(stage.finished_at or ''),
                 'rounds': rounds,
+                'tool_calls': stage_tool_calls,
             }
         )
 
@@ -289,13 +312,6 @@ def _tool_step_status(
     recorded_status: str = '',
     live_status: str = '',
 ) -> str:
-    normalized_live_status = str(live_status or '').strip().lower()
-    if normalized_live_status in {'queued', 'running'}:
-        return 'running'
-    if normalized_live_status == 'success':
-        return 'success'
-    if normalized_live_status == 'error':
-        return 'error'
     normalized_recorded_status = str(recorded_status or '').strip().lower()
     if normalized_recorded_status in {'queued', 'running'}:
         return 'running'
@@ -303,6 +319,21 @@ def _tool_step_status(
         return 'success'
     if normalized_recorded_status == 'error':
         return 'error'
+    if normalized_recorded_status == 'warning':
+        return 'warning'
+    if normalized_recorded_status == 'interrupted':
+        return 'interrupted'
+    normalized_live_status = str(live_status or '').strip().lower()
+    if normalized_live_status in {'queued', 'running'}:
+        return 'running'
+    if normalized_live_status == 'success':
+        return 'success'
+    if normalized_live_status == 'error':
+        return 'error'
+    if normalized_live_status == 'warning':
+        return 'warning'
+    if normalized_live_status == 'interrupted':
+        return 'interrupted'
     payload_status = str((payload or {}).get('status') or '').strip().lower()
     if payload_status == 'background_running':
         return 'running'
@@ -319,3 +350,60 @@ def _tool_step_status(
     if str(node_status or '').strip().lower() == 'in_progress':
         return 'running'
     return 'success'
+
+
+def _synthetic_round_tools(
+    *,
+    tool_results: list[TaskProjectionToolResultRecord] | None,
+    round_id: str,
+) -> list[dict[str, Any]]:
+    normalized_round_id = str(round_id or '').strip()
+    if not normalized_round_id:
+        return []
+    synthetic_steps: list[dict[str, Any]] = []
+    for record in list(tool_results or []):
+        payload = dict(getattr(record, 'payload', {}) or {})
+        parsed_payload = dict(payload.get('parsed_payload') or {}) if isinstance(payload.get('parsed_payload'), dict) else {}
+        if str(parsed_payload.get('kind') or '').strip() != 'recovery_check':
+            continue
+        if str(parsed_payload.get('round_id') or '').strip() != normalized_round_id:
+            continue
+        synthetic_steps.append(
+            {
+                'tool_call_id': str(record.tool_call_id or '').strip(),
+                'tool_name': str(record.tool_name or 'tool'),
+                'arguments_text': str(record.arguments_text or ''),
+                'output_text': str(record.output_preview_text or ''),
+                'output_ref': _execution_trace_output_ref(record),
+                'status': _tool_step_status(
+                    str(record.output_preview_text or ''),
+                    'in_progress',
+                    payload=parsed_payload,
+                    recorded_status=str(record.status or ''),
+                    live_status='',
+                ),
+                'started_at': str(record.started_at or ''),
+                'finished_at': str(record.finished_at or ''),
+                'elapsed_seconds': _resolve_tool_elapsed_seconds(
+                    raw_elapsed=record.elapsed_seconds,
+                    started_at=str(record.started_at or ''),
+                    finished_at=str(record.finished_at or ''),
+                    is_running=str(record.status or '').strip().lower() == 'running',
+                ),
+                'recovery_decision': str(parsed_payload.get('recovery_decision') or '').strip(),
+                'related_tool_call_ids': [
+                    str(item or '').strip()
+                    for item in list(parsed_payload.get('related_tool_call_ids') or [])
+                    if str(item or '').strip()
+                ],
+                'attempted_tools': [
+                    str(item or '').strip()
+                    for item in list(parsed_payload.get('attempted_tools') or [])
+                    if str(item or '').strip()
+                ],
+                'evidence': [dict(item) for item in list(parsed_payload.get('evidence') or []) if isinstance(item, dict)],
+                'lost_result_summary': str(parsed_payload.get('lost_result_summary') or '').strip(),
+            }
+        )
+    synthetic_steps.sort(key=lambda item: str(item.get('tool_call_id') or ''))
+    return synthetic_steps

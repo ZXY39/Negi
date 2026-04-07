@@ -1171,6 +1171,30 @@ class NodeRunner:
         )
 
     @staticmethod
+    def _spawn_review_blocked_text(*, reason: str, suggestion: str) -> str:
+        normalized_reason = str(reason or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON
+        normalized_suggestion = str(suggestion or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION
+        return f'派生已被拦截。原因：{normalized_reason}。建议：{normalized_suggestion}'
+
+    @staticmethod
+    def _spawn_review_blocked_summary(*, reason: str) -> str:
+        normalized_reason = str(reason or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON
+        return f'派生拦截：{normalized_reason}'
+
+    @classmethod
+    def _spawn_review_blocked_result(cls, spec: SpawnChildSpec, *, reason: str, suggestion: str) -> SpawnChildResult:
+        output_text = cls._spawn_review_blocked_text(reason=reason, suggestion=suggestion)
+        summary_text = cls._spawn_review_blocked_summary(reason=reason)
+        return SpawnChildResult(
+            goal=spec.goal,
+            check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
+            node_output=output_text,
+            node_output_summary=summary_text,
+            node_output_ref='',
+            failure_info=None,
+        )
+
+    @staticmethod
     def _normalize_optional_limit(value: int | None | object, *, default: int | None) -> int | None:
         if value is _UNSET:
             value = default

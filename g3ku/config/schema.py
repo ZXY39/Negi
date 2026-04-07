@@ -448,7 +448,7 @@ class NodeParallelismConfig(Base):
     adaptive_machine_cpu_safe_percent: float = 55.0
     adaptive_machine_cpu_critical_percent: float = 95.0
     adaptive_machine_memory_warn_percent: float = 88.0
-    adaptive_machine_memory_safe_percent: float = 75.0
+    adaptive_machine_memory_safe_percent: float = 95.0
     adaptive_machine_memory_critical_percent: float = 94.0
     adaptive_machine_disk_busy_warn_percent: float = 70.0
     adaptive_machine_disk_busy_safe_percent: float = 35.0

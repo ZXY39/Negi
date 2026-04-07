@@ -492,21 +492,7 @@ class MainRuntimeService:
             self.log_service.mark_task_failed(task.task_id, reason='missing root node during recovery')
             return
 
-        nodes = list(self.store.list_nodes(task.task_id) or [])
-        discard_ids = self._recovery_discard_node_ids(task.root_node_id, nodes)
-        if discard_ids:
-            self.store.delete_nodes(sorted(discard_ids))
-
-        for node in list(self.store.list_nodes(task.task_id) or []):
-            if node.node_id == task.root_node_id:
-                continue
-            self._sanitize_recovered_node(node)
-
-        root = self.store.get_node(task.root_node_id) or root
         root_status = str(root.status or '').strip().lower()
-        if root_status != 'success':
-            root = self._reset_root_for_recovery(root)
-            self.store.upsert_node(root)
 
         self.store.update_task(
             task.task_id,
@@ -533,12 +519,22 @@ class MainRuntimeService:
             last_visible_output_at=self._stall_now_iso(),
             last_stall_notice_bucket_minutes=0,
         )
+        runtime_state = self.log_service.read_runtime_state(task.task_id) or {}
+        frames = [dict(item) for item in list(runtime_state.get('frames') or []) if isinstance(item, dict)]
+        active_node_ids = [str(item) for item in list(runtime_state.get('active_node_ids') or []) if str(item or '').strip()]
+        runnable_node_ids = [str(item) for item in list(runtime_state.get('runnable_node_ids') or []) if str(item or '').strip()]
+        waiting_node_ids = [str(item) for item in list(runtime_state.get('waiting_node_ids') or []) if str(item or '').strip()]
+        if not frames:
+            frames = [self.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')]
+            active_node_ids = [root.node_id]
+            runnable_node_ids = [root.node_id]
+            waiting_node_ids = []
         self.log_service.replace_runtime_frames(
             task.task_id,
-            frames=[self.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')],
-            active_node_ids=[root.node_id],
-            runnable_node_ids=[root.node_id],
-            waiting_node_ids=[],
+            frames=frames,
+            active_node_ids=active_node_ids,
+            runnable_node_ids=runnable_node_ids,
+            waiting_node_ids=waiting_node_ids,
             publish_snapshot=False,
         )
         self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
@@ -2776,7 +2772,7 @@ class MainRuntimeService:
             'machine_cpu_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_safe_percent', 55.0) or 55.0)),
             'machine_cpu_critical_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_critical_percent', 95.0) or 95.0)),
             'machine_memory_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_warn_percent', 88.0) or 88.0)),
-            'machine_memory_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_safe_percent', 75.0) or 75.0)),
+            'machine_memory_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_safe_percent', 95.0) or 95.0)),
             'machine_memory_critical_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_critical_percent', 94.0) or 94.0)),
             'machine_disk_busy_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_warn_percent', 70.0) or 70.0)),
             'machine_disk_busy_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_safe_percent', 35.0) or 35.0)),
@@ -4335,7 +4331,7 @@ class MainRuntimeService:
         return {'stages': []}
 
     @staticmethod
-    def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:
+    def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
         if not isinstance(step, dict):
             return None
         tool_name = str(step.get('tool_name') or '').strip() or 'tool'
@@ -4343,10 +4339,28 @@ class MainRuntimeService:
         output_text = str(step.get('output_text') or '')
         output_ref = str(step.get('output_ref') or '')
         return {
+            'tool_call_id': str(step.get('tool_call_id') or '').strip(),
             'tool_name': tool_name,
             'arguments_text': arguments_text,
             'output_text': output_text,
             'output_ref': output_ref,
+            'status': str(step.get('status') or '').strip(),
+            'started_at': str(step.get('started_at') or ''),
+            'finished_at': str(step.get('finished_at') or ''),
+            'elapsed_seconds': step.get('elapsed_seconds'),
+            'recovery_decision': str(step.get('recovery_decision') or '').strip(),
+            'related_tool_call_ids': [
+                str(item or '').strip()
+                for item in list(step.get('related_tool_call_ids') or [])
+                if str(item or '').strip()
+            ],
+            'attempted_tools': [
+                str(item or '').strip()
+                for item in list(step.get('attempted_tools') or [])
+                if str(item or '').strip()
+            ],
+            'evidence': [dict(item) for item in list(step.get('evidence') or []) if isinstance(item, dict)],
+            'lost_result_summary': str(step.get('lost_result_summary') or '').strip(),
         }
 
     @staticmethod

@@ -35,6 +35,7 @@ class _FakeLogService:
     def __init__(self) -> None:
         self._store = _FakeTaskStore()
         self._content_store = None
+        self._frames: dict[tuple[str, str], dict[str, object]] = {}
 
     def set_pause_state(self, task_id: str, pause_requested: bool, is_paused: bool) -> None:
         _ = task_id, pause_requested, is_paused
@@ -42,21 +43,26 @@ class _FakeLogService:
     def update_node_input(self, *args, **kwargs) -> None:
         _ = args, kwargs
 
-    def upsert_frame(self, *args, **kwargs) -> None:
-        _ = args, kwargs
+    def upsert_frame(self, task_id: str, payload: dict[str, object], publish_snapshot: bool = True) -> None:
+        _ = publish_snapshot
+        node_id = str((payload or {}).get("node_id") or "").strip()
+        self._frames[(str(task_id), node_id)] = dict(payload or {})
 
     def append_node_output(self, *args, **kwargs) -> None:
         _ = args, kwargs
 
-    def update_frame(self, *args, **kwargs) -> None:
-        _ = args, kwargs
+    def update_frame(self, task_id: str, node_id: str, mutate, publish_snapshot: bool = True) -> None:
+        _ = publish_snapshot
+        key = (str(task_id), str(node_id))
+        current = dict(self._frames.get(key) or {})
+        self._frames[key] = dict(mutate(current) or {})
 
-    def remove_frame(self, *args, **kwargs) -> None:
-        _ = args, kwargs
+    def remove_frame(self, task_id: str, node_id: str, publish_snapshot: bool = True) -> None:
+        _ = publish_snapshot
+        self._frames.pop((str(task_id), str(node_id)), None)
 
-    def read_runtime_frame(self, *args, **kwargs):
-        _ = args, kwargs
-        return None
+    def read_runtime_frame(self, task_id: str, node_id: str):
+        return dict(self._frames.get((str(task_id), str(node_id))) or {})
 
 
 def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalResultTool:
@@ -1455,6 +1461,124 @@ async def test_react_loop_auto_wraps_plain_text_final_result_with_tool_evidence(
 
 
 @pytest.mark.asyncio
+async def test_react_loop_normalizes_sparse_success_final_result_payload_after_tool_usage() -> None:
+    executed: list[int] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:count',
+                            name='count_tool',
+                            arguments={'count': 1},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:sparse-final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-sparse-final'),
+        node=SimpleNamespace(node_id='node-sparse-final', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-sparse-final","goal":"demo"}'},
+        ],
+        tools={
+            'count_tool': _CountTool(executed),
+            'submit_final_result': _submit_final_result_tool(),
+        },
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-sparse-final', 'node_id': 'node-sparse-final'},
+        max_iterations=3,
+    )
+
+    assert executed == [1]
+    assert result.status == 'success'
+    assert result.answer == 'done'
+    assert result.remaining_work == []
+    assert result.blocking_reason == ''
+    assert result.evidence
+
+
+@pytest.mark.asyncio
+async def test_react_loop_infers_evidence_kind_for_submit_final_result_payload() -> None:
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:evidence-kind-final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                            'evidence': [
+                                {
+                                    'ref': 'artifact:artifact:demo-ref',
+                                    'note': 'artifact evidence without explicit kind',
+                                }
+                            ],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-evidence-kind-final'),
+        node=SimpleNamespace(node_id='node-evidence-kind-final', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-evidence-kind-final","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-evidence-kind-final', 'node_id': 'node-evidence-kind-final'},
+        max_iterations=2,
+    )
+
+    assert result.status == 'success'
+    assert len(result.evidence) == 1
+    assert result.evidence[0].kind == 'artifact'
+    assert result.evidence[0].ref == 'artifact:artifact:demo-ref'
+
+
+@pytest.mark.asyncio
 async def test_react_loop_recovers_raw_final_result_json_after_protocol_repair() -> None:
     requests: list[dict[str, object]] = []
 
@@ -1501,6 +1625,88 @@ async def test_react_loop_recovers_raw_final_result_json_after_protocol_repair()
         'type': 'function',
         'function': {'name': 'submit_final_result'},
     }
+
+
+@pytest.mark.asyncio
+async def test_react_loop_restores_invalid_final_submission_count_from_runtime_frame() -> None:
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:invalid-final',
+                            name='submit_final_result',
+                            arguments={
+                                'status': 'failed',
+                                'delivery_status': 'final',
+                                'summary': 'still invalid',
+                                'answer': '',
+                                'evidence': [],
+                                'remaining_work': [],
+                                'blocking_reason': '',
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:valid-final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'failed',
+                            'delivery_status': 'blocked',
+                            'summary': 'done',
+                            'answer': '',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': 'done',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    backend = _Backend()
+    log_service = _FakeLogService()
+    log_service.upsert_frame(
+        'task-persisted-invalid-final',
+        {
+            'node_id': 'node-persisted-invalid-final',
+            'phase': 'before_model',
+            'invalid_final_submission_count': 4,
+            'last_invalid_final_submission_reason': 'persisted invalid final result',
+            'last_contract_violations': ['execution failed result requires delivery_status=blocked'],
+        },
+    )
+    loop = ReActToolLoop(chat_backend=backend, log_service=log_service, max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-persisted-invalid-final'),
+        node=SimpleNamespace(node_id='node-persisted-invalid-final', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-persisted-invalid-final","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-persisted-invalid-final', 'node_id': 'node-persisted-invalid-final'},
+        max_iterations=3,
+    )
+
+    assert result.status == 'failed'
+    assert 'Invalid final result submission detected 5 consecutive times' in result.blocking_reason
+    assert backend.turn == 1
 
 
 @pytest.mark.asyncio

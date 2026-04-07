@@ -167,6 +167,17 @@ def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:
     assert isinstance(runner._impl, _New)
 
 
+def test_ceo_runner_invalidate_runtime_bindings_clears_cached_agent_and_graph() -> None:
+    runner = ceo_runner.CeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._impl._agent = object()
+    runner._impl._compiled_graph = object()
+
+    runner.invalidate_runtime_bindings()
+
+    assert runner._impl._agent is None
+    assert runner._impl._compiled_graph is None
+
+
 def test_create_agent_runner_build_prompt_context_uses_effective_turn_overlay(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     monkeypatch.setattr(runner, "_effective_turn_overlay_text", lambda state: "overlay-text")

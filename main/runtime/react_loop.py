@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections import deque
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,8 +17,9 @@ from g3ku.providers.base import ToolCallRequest
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.errors import TaskPausedError, describe_exception
-from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, normalize_execution_stage_metadata
+from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_stable_prompt_cache_key
+from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from main.runtime.stage_budget import (
     FINAL_RESULT_TOOL_NAME,
@@ -48,6 +50,7 @@ _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
 _STAGE_ONLY_TRANSITION_LIMIT = 5
+_DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS = 120.0
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -95,6 +98,8 @@ class ReActToolLoop:
         self._parallel_tool_calls_enabled = bool(parallel_tool_calls_enabled)
         self._max_parallel_tool_calls = self._normalize_optional_limit(max_parallel_tool_calls, default=10)
         self._node_turn_controller = None
+        self._recovery_check_engine = RecoveryCheckEngine(workspace_root=Path.cwd())
+        self._model_response_timeout_seconds: float | None = _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS
 
     async def run(
         self,
@@ -126,6 +131,23 @@ class ReActToolLoop:
         xml_repair_tool_names: list[str] = []
         xml_repair_last_issue = ''
         read_only_repeat_violation_counts: dict[str, int] = {}
+        persisted_frame = self._runtime_frame(task.task_id, node.node_id)
+        if isinstance(persisted_frame, dict):
+            try:
+                invalid_final_submission_count = max(
+                    0,
+                    int(persisted_frame.get('invalid_final_submission_count') or 0),
+                )
+            except (TypeError, ValueError):
+                invalid_final_submission_count = 0
+            last_invalid_final_submission_reason = str(
+                persisted_frame.get('last_invalid_final_submission_reason') or ''
+            ).strip()
+            last_contract_violations = [
+                str(item or '').strip()
+                for item in list(persisted_frame.get('last_contract_violations') or [])
+                if str(item or '').strip()
+            ]
         while limit is None or attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
@@ -136,6 +158,14 @@ class ReActToolLoop:
                 tools=tools,
                 runtime_context=runtime_context,
             )
+            if resumed_history is None:
+                resumed_history = await self._resume_waiting_children_turn_if_needed(
+                    task=task,
+                    node=node,
+                    message_history=message_history,
+                    tools=tools,
+                    runtime_context=runtime_context,
+                )
             if resumed_history is not None:
                 message_history = resumed_history
                 attempts = max(0, attempts - 1)
@@ -214,7 +244,7 @@ class ReActToolLoop:
                 while True:
                     self._check_pause_or_cancel(task.task_id)
                     try:
-                        response = await self._chat_with_optional_extensions(
+                        chat_coro = self._chat_with_optional_extensions(
                             messages=request_messages,
                             tools=tool_schemas or None,
                             model_refs=current_model_refs,
@@ -229,6 +259,23 @@ class ReActToolLoop:
                             node_turn_lease=node_turn_lease,
                             model_concurrency_controller=getattr(self, '_model_concurrency_controller', None),
                         )
+                        timeout_seconds = self._normalized_model_response_timeout_seconds()
+                        if timeout_seconds is not None:
+                            response = await asyncio.wait_for(chat_coro, timeout=timeout_seconds)
+                        else:
+                            response = await chat_coro
+                    except asyncio.TimeoutError:
+                        timeout_message = self._model_response_timeout_message()
+                        self._log_service.update_frame(
+                            task.task_id,
+                            node.node_id,
+                            lambda frame: {
+                                **frame,
+                                'last_error': timeout_message,
+                            },
+                            publish_snapshot=True,
+                        )
+                        raise RuntimeError(timeout_message)
                     except Exception as exc:
                         if not self._is_provider_chain_exhausted_error(exc):
                             raise
@@ -359,6 +406,10 @@ class ReActToolLoop:
                     stage_only_transition_streak = 0
                     last_invalid_final_submission_reason = ''
                     last_invalid_stage_submission_reason = ''
+                    self._clear_invalid_final_submission_state(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                    )
                 control_only_turn = all(call.name in self._CONTROL_TOOL_NAMES for call in response_tool_calls)
                 read_only_repeat_violations = self._read_only_repeat_violations(
                     response_tool_calls=response_tool_calls,
@@ -453,6 +504,13 @@ class ReActToolLoop:
                         reason_parts.append(protocol_error)
                     last_contract_violations = list(contract_violations or [])
                     last_invalid_final_submission_reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
+                    self._persist_invalid_final_submission_state(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        count=invalid_final_submission_count,
+                        reason=last_invalid_final_submission_reason,
+                        violations=last_contract_violations,
+                    )
                     if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
                         return self._invalid_final_submission_failure(
                             reason=last_invalid_final_submission_reason,
@@ -468,6 +526,7 @@ class ReActToolLoop:
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
                     if call.name not in self._CONTROL_TOOL_NAMES and call.name not in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
                         breaker.register(signature)
+                active_round_payload = None
                 if self._should_record_execution_stage_round(
                     node_kind=node.node_kind,
                     stage_gate=stage_gate,
@@ -476,7 +535,7 @@ class ReActToolLoop:
                     created_at = ''
                     if updated_node is not None and list(getattr(updated_node, 'output', []) or []):
                         created_at = str(updated_node.output[-1].created_at or '')
-                    self._log_service.record_execution_stage_round(
+                    active_round_payload = self._log_service.record_execution_stage_round(
                         task.task_id,
                         node.node_id,
                         tool_calls=tool_calls,
@@ -501,6 +560,13 @@ class ReActToolLoop:
                         'phase': 'waiting_tool_results',
                         'messages': model_messages,
                         'pending_tool_calls': tool_calls,
+                        'active_round_id': str((active_round_payload or {}).get('round_id') or ''),
+                        'active_round_tool_call_ids': [
+                            str(item.get('id') or '').strip()
+                            for item in tool_calls
+                            if str(item.get('id') or '').strip()
+                        ],
+                        'active_round_started_at': str((active_round_payload or {}).get('created_at') or now_iso()),
                         'tool_calls': live_tool_calls,
                         **self._execution_stage_frame_payload(
                             node_kind=node.node_kind,
@@ -571,6 +637,9 @@ class ReActToolLoop:
                         'phase': 'waiting_tool_results',
                         'messages': prepared_history,
                         'pending_tool_calls': [],
+                        'active_round_id': '',
+                        'active_round_tool_call_ids': [],
+                        'active_round_started_at': '',
                         'tool_calls': [item['live_state'] for item in results],
                         **self._execution_stage_frame_payload(
                             node_kind=node.node_kind,
@@ -718,6 +787,13 @@ class ReActToolLoop:
                     reason_parts.append(protocol_error)
                 last_contract_violations = list(contract_violations or [])
                 last_invalid_final_submission_reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
+                self._persist_invalid_final_submission_state(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    count=invalid_final_submission_count,
+                    reason=last_invalid_final_submission_reason,
+                    violations=last_contract_violations,
+                )
                 if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
                     return self._invalid_final_submission_failure(
                         reason=last_invalid_final_submission_reason,
@@ -734,6 +810,13 @@ class ReActToolLoop:
             last_contract_violations = []
             last_invalid_final_submission_reason = (
                 f'final result must be submitted via {FINAL_RESULT_TOOL_NAME}'
+            )
+            self._persist_invalid_final_submission_state(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                count=invalid_final_submission_count,
+                reason=last_invalid_final_submission_reason,
+                violations=last_contract_violations,
             )
             if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
                 return self._invalid_final_submission_failure(
@@ -784,25 +867,89 @@ class ReActToolLoop:
             for item in pending_tool_calls
         ]
         allowed_content_refs = self._collect_content_refs(message_history)
+        round_id = str(frame.get('active_round_id') or '').strip()
         replay_calls: list[Any] = []
         ordered_results: list[dict[str, Any] | None] = []
         result_indexes_by_call_id: dict[str, list[int]] = {}
+        inspected_items: list[dict[str, Any]] = []
 
         for index, item in enumerate(pending_tool_calls):
             call_id = str(item.get('id') or '').strip()
-            tool_name = str(item.get('name') or '').strip()
+            tool_name = str(item.get('name') or '').strip() or 'tool'
+            arguments = self._normalize_tool_call_arguments(item.get('arguments'))
             live_state = dict(live_tool_map.get(call_id) or {})
-            result_content = str(live_state.get('result_content') or '').strip()
-            status = str(live_state.get('status') or '').strip().lower()
-            if status in {'success', 'error'} and result_content:
+            inspection = self._recovery_check_engine.inspect_tool_call(
+                tool_name=tool_name,
+                arguments=arguments,
+                runtime_context=runtime_context,
+            )
+            decision = inspection.decision
+            if decision == RecoveryCheckDecision.RERUN_SAFE and tool_name not in tools:
+                decision = RecoveryCheckDecision.MODEL_DECIDE
+            inspected_item = {
+                'call': dict(item),
+                'tool_name': tool_name,
+                'decision': decision,
+                'expected_tool_status': (
+                    inspection.expected_tool_status
+                    if decision != RecoveryCheckDecision.MODEL_DECIDE
+                    else 'interrupted'
+                ),
+                'lost_result_summary': str(inspection.lost_result_summary or '').strip(),
+                'evidence': [dict(evidence) for evidence in list(inspection.evidence or []) if isinstance(evidence, dict)],
+                'live_state': live_state,
+            }
+            inspected_items.append(inspected_item)
+            if decision == RecoveryCheckDecision.VERIFIED_DONE:
+                self._record_recovery_resolution_tool_result(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    round_id=round_id,
+                    item=inspected_item,
+                )
+                synthetic_live_state = self._resume_live_tool_state(
+                    live_state,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    status='success',
+                )
+                synthetic_live_state['finished_at'] = now_iso()
                 ordered_results.append(
                     {
-                        'live_state': self._resume_live_tool_state(live_state, call_id=call_id, tool_name=tool_name),
+                        'live_state': synthetic_live_state,
                         'tool_message': self._resume_tool_message(
-                            live_state,
+                            synthetic_live_state,
                             call_id=call_id,
                             tool_name=tool_name,
-                            content=result_content,
+                            content=self._recovery_checked_tool_content(inspected_item),
+                            status='success',
+                        ),
+                    }
+                )
+                continue
+            if decision == RecoveryCheckDecision.MODEL_DECIDE:
+                self._record_recovery_resolution_tool_result(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    round_id=round_id,
+                    item=inspected_item,
+                )
+                synthetic_live_state = self._resume_live_tool_state(
+                    live_state,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    status='interrupted',
+                )
+                synthetic_live_state['finished_at'] = now_iso()
+                ordered_results.append(
+                    {
+                        'live_state': synthetic_live_state,
+                        'tool_message': self._resume_tool_message(
+                            synthetic_live_state,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            content=self._recovery_checked_tool_content(inspected_item),
+                            status='interrupted',
                         ),
                     }
                 )
@@ -813,9 +960,18 @@ class ReActToolLoop:
                 SimpleNamespace(
                     id=call_id,
                     name=tool_name,
-                    arguments=self._normalize_tool_call_arguments(item.get('arguments')),
+                    arguments=arguments,
                 )
             )
+
+        overall_decision = self._recovery_check_overall_decision(inspected_items)
+        self._record_recovery_check_tool_result(
+            task_id=task.task_id,
+            node_id=node.node_id,
+            round_id=round_id,
+            overall_decision=overall_decision,
+            inspected_items=inspected_items,
+        )
 
         if replay_calls:
             replay_results = await self._execute_tool_calls(
@@ -830,6 +986,14 @@ class ReActToolLoop:
                 },
                 prior_overflow_signatures=self._overflowed_search_signatures(message_history),
             )
+            record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
+            if callable(record_tool_results):
+                record_tool_results(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    response_tool_calls=replay_calls,
+                    results=replay_results,
+                )
             for result in replay_results:
                 tool_message = dict(result.get('tool_message') or {})
                 call_id = str(tool_message.get('tool_call_id') or '').strip()
@@ -859,22 +1023,6 @@ class ReActToolLoop:
             }
 
         resumed_history = list(message_history)
-        record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
-        if callable(record_tool_results):
-            replay_source_calls = [
-                SimpleNamespace(
-                    id=str(item.get('id') or ''),
-                    name=str(item.get('name') or ''),
-                    arguments=self._normalize_tool_call_arguments(item.get('arguments')),
-                )
-                for item in pending_tool_calls
-            ]
-            record_tool_results(
-                task_id=task.task_id,
-                node_id=node.node_id,
-                response_tool_calls=replay_source_calls,
-                results=[item for item in ordered_results if isinstance(item, dict)],
-            )
         resumed_history.append(
             {
                 'role': 'assistant',
@@ -900,10 +1048,128 @@ class ReActToolLoop:
                 **current,
                 'depth': node.depth,
                 'node_kind': node.node_kind,
-                'phase': 'waiting_tool_results',
+                'phase': 'before_model',
                 'messages': prepared_history,
                 'pending_tool_calls': [],
+                'active_round_id': '',
+                'active_round_tool_call_ids': [],
+                'active_round_started_at': '',
                 'tool_calls': [dict(item.get('live_state') or {}) for item in ordered_results if isinstance(item, dict)],
+                **self._execution_stage_frame_payload(
+                    node_kind=node.node_kind,
+                    stage_gate=self._execution_stage_gate(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        node_kind=node.node_kind,
+                    ),
+                ),
+                'last_error': '',
+            },
+            publish_snapshot=True,
+        )
+        return prepared_history
+
+    async def _resume_waiting_children_turn_if_needed(
+        self,
+        *,
+        task,
+        node,
+        message_history: list[dict[str, Any]],
+        tools: dict[str, Tool],
+        runtime_context: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        frame = self._runtime_frame(task.task_id, node.node_id)
+        if not isinstance(frame, dict):
+            return None
+        if str(frame.get('phase') or '').strip() != 'waiting_children':
+            return None
+        if list(frame.get('pending_tool_calls') or []):
+            return None
+
+        replay_calls = self._recover_waiting_children_tool_calls(node=node)
+        if not replay_calls:
+            return None
+
+        pending_tool_calls = [
+            {
+                'id': str(getattr(call, 'id', '') or ''),
+                'name': str(getattr(call, 'name', '') or ''),
+                'arguments': self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+            }
+            for call in replay_calls
+        ]
+        assistant_content = self._pending_tool_turn_content(node=node, pending_tool_calls=pending_tool_calls)
+        if not str(assistant_content or '').strip():
+            assistant_content = 'Resuming interrupted spawn_child_nodes round after waiting_children recovery.'
+        assistant_tool_calls = [
+            {
+                'id': str(call.id or ''),
+                'type': 'function',
+                'function': {
+                    'name': str(call.name or ''),
+                    'arguments': json.dumps(self._normalize_tool_call_arguments(getattr(call, 'arguments', {})), ensure_ascii=False),
+                },
+            }
+            for call in replay_calls
+        ]
+        allowed_content_refs = self._collect_content_refs(message_history)
+        replay_results = await self._execute_tool_calls(
+            task=task,
+            node=node,
+            response_tool_calls=replay_calls,
+            tools=tools,
+            allowed_content_refs=allowed_content_refs,
+            runtime_context={
+                **runtime_context,
+                'stage_turn_granted': True,
+            },
+            prior_overflow_signatures=self._overflowed_search_signatures(message_history),
+        )
+        record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
+        if callable(record_tool_results):
+            record_tool_results(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                response_tool_calls=replay_calls,
+                results=replay_results,
+            )
+
+        resumed_history = list(message_history)
+        resumed_history.append(
+            {
+                'role': 'assistant',
+                'content': assistant_content,
+                'tool_calls': assistant_tool_calls,
+            }
+        )
+        tool_messages = self._dedupe_tool_messages(
+            [dict(item.get('tool_message') or {}) for item in replay_results if isinstance(item, dict)],
+            existing_messages=resumed_history,
+        )
+        resumed_history.extend(tool_messages)
+        prepared_history = self._prepare_messages(resumed_history, runtime_context=runtime_context)
+        self._log_service.update_node_input(
+            task.task_id,
+            node.node_id,
+            json.dumps(prepared_history, ensure_ascii=False, indent=2),
+        )
+        self._log_service.update_frame(
+            task.task_id,
+            node.node_id,
+            lambda current: {
+                **current,
+                'depth': node.depth,
+                'node_kind': node.node_kind,
+                'phase': 'before_model',
+                'messages': prepared_history,
+                'pending_tool_calls': [],
+                'active_round_id': '',
+                'active_round_tool_call_ids': [],
+                'active_round_started_at': '',
+                'tool_calls': [dict(item.get('live_state') or {}) for item in replay_results if isinstance(item, dict)],
+                'child_pipelines': [],
+                'pending_child_specs': [],
+                'partial_child_results': [],
                 **self._execution_stage_frame_payload(
                     node_kind=node.node_kind,
                     stage_gate=self._execution_stage_gate(
@@ -921,6 +1187,72 @@ class ReActToolLoop:
     def _runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         frame = self._log_service.read_runtime_frame(task_id, node_id)
         return dict(frame or {}) if frame is not None else None
+
+    def _persist_invalid_final_submission_state(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        count: int,
+        reason: str,
+        violations: list[str],
+    ) -> None:
+        self._log_service.update_frame(
+            task_id,
+            node_id,
+            lambda current: {
+                **current,
+                'invalid_final_submission_count': max(0, int(count or 0)),
+                'last_invalid_final_submission_reason': str(reason or '').strip(),
+                'last_contract_violations': [
+                    str(item or '').strip()
+                    for item in list(violations or [])
+                    if str(item or '').strip()
+                ],
+            },
+            publish_snapshot=True,
+        )
+
+    def _clear_invalid_final_submission_state(self, *, task_id: str, node_id: str) -> None:
+        self._log_service.update_frame(
+            task_id,
+            node_id,
+            lambda current: {
+                **current,
+                'invalid_final_submission_count': 0,
+                'last_invalid_final_submission_reason': '',
+                'last_contract_violations': [],
+            },
+            publish_snapshot=True,
+        )
+
+    @staticmethod
+    def _recover_waiting_children_tool_calls(*, node) -> list[Any]:
+        metadata = dict(getattr(node, 'metadata', {}) or {})
+        spawn_operations = dict(metadata.get('spawn_operations') or {})
+        replay_calls: list[Any] = []
+        for cache_key, payload in spawn_operations.items():
+            if not isinstance(payload, dict) or bool(payload.get('completed')):
+                continue
+            specs: list[dict[str, Any]] = []
+            for item in list(payload.get('specs') or []):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    normalized = SpawnChildSpec.model_validate(item).model_dump(mode='json', exclude_none=True)
+                except Exception:
+                    continue
+                specs.append(dict(normalized))
+            if not specs:
+                continue
+            replay_calls.append(
+                SimpleNamespace(
+                    id=str(cache_key or '').strip(),
+                    name=_STAGE_SPAWN_TOOL_NAME,
+                    arguments={'children': specs},
+                )
+            )
+        return replay_calls
 
     def _pending_tool_turn_content(self, *, node, pending_tool_calls: list[dict[str, Any]]) -> str:
         pending_ids = [str(item.get('id') or '').strip() for item in list(pending_tool_calls or []) if str(item.get('id') or '').strip()]
@@ -993,6 +1325,127 @@ class ReActToolLoop:
             'status': message_status,
             'ephemeral': bool(payload.get('ephemeral')),
         }
+
+    @staticmethod
+    def _recovery_check_tool_call_id(round_id: str, pending_tool_calls: list[dict[str, Any]]) -> str:
+        normalized_round_id = str(round_id or '').strip()
+        if normalized_round_id:
+            return f'recovery_check:{normalized_round_id}'
+        first_call_id = str(((pending_tool_calls or [{}])[0]).get('id') or '').strip()
+        return f'recovery_check:{first_call_id or "pending"}'
+
+    @staticmethod
+    def _recovery_check_overall_decision(items: list[dict[str, Any]]) -> RecoveryCheckDecision:
+        decisions = [item.get('decision') for item in list(items or [])]
+        if any(decision == RecoveryCheckDecision.MODEL_DECIDE for decision in decisions):
+            return RecoveryCheckDecision.MODEL_DECIDE
+        if any(decision == RecoveryCheckDecision.RERUN_SAFE for decision in decisions):
+            return RecoveryCheckDecision.RERUN_SAFE
+        return RecoveryCheckDecision.VERIFIED_DONE
+
+    @staticmethod
+    def _recovery_check_summary_text(items: list[dict[str, Any]]) -> str:
+        lines = ['Recovery check executed before resuming interrupted tool round.']
+        for item in list(items or []):
+            tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
+            decision = str(item.get('decision') or '').strip() or RecoveryCheckDecision.MODEL_DECIDE
+            summary = str(item.get('lost_result_summary') or '').strip()
+            lines.append(f'- {tool_name}: {decision}{f" | {summary}" if summary else ""}')
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _recovery_checked_tool_content(item: dict[str, Any]) -> str:
+        tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
+        summary = str(item.get('lost_result_summary') or '').strip()
+        decision = item.get('decision')
+        if decision == RecoveryCheckDecision.VERIFIED_DONE:
+            return f'Recovery check confirmed that the previous {tool_name} attempt already completed. {summary}'.strip()
+        if decision == RecoveryCheckDecision.RERUN_SAFE:
+            return f'Recovery check marked the previous {tool_name} attempt as safe to rerun. {summary}'.strip()
+        return (
+            f'Recovery check: the previous {tool_name} attempt may have already produced side effects, '
+            f'but its result was lost during shutdown. {summary}'
+        ).strip()
+
+    def _record_recovery_check_tool_result(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        round_id: str,
+        overall_decision: RecoveryCheckDecision,
+        inspected_items: list[dict[str, Any]],
+    ) -> None:
+        recorder = getattr(self._log_service, 'upsert_synthetic_tool_result', None)
+        if not callable(recorder):
+            return
+        recorder(
+            task_id=task_id,
+            node_id=node_id,
+            tool_call_id=self._recovery_check_tool_call_id(round_id, [dict(item.get('call') or {}) for item in inspected_items]),
+            tool_name='recovery_check',
+            status='warning' if overall_decision == RecoveryCheckDecision.MODEL_DECIDE else 'success',
+            output_text=self._recovery_check_summary_text(inspected_items),
+            payload={
+                'kind': 'recovery_check',
+                'round_id': str(round_id or '').strip(),
+                'recovery_decision': str(overall_decision),
+                'related_tool_call_ids': [
+                    str((item.get('call') or {}).get('id') or '').strip()
+                    for item in list(inspected_items or [])
+                    if str((item.get('call') or {}).get('id') or '').strip()
+                ],
+                'attempted_tools': [
+                    str(item.get('tool_name') or '').strip()
+                    for item in list(inspected_items or [])
+                    if str(item.get('tool_name') or '').strip()
+                ],
+                'evidence': [
+                    evidence
+                    for item in list(inspected_items or [])
+                    for evidence in list(item.get('evidence') or [])
+                    if isinstance(evidence, dict)
+                ],
+                'lost_result_summary': self._recovery_check_summary_text(inspected_items),
+            },
+        )
+
+    def _record_recovery_resolution_tool_result(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        round_id: str,
+        item: dict[str, Any],
+    ) -> None:
+        recorder = getattr(self._log_service, 'upsert_synthetic_tool_result', None)
+        if not callable(recorder):
+            return
+        call = dict(item.get('call') or {})
+        call_id = str(call.get('id') or '').strip()
+        if not call_id:
+            return
+        arguments = self._normalize_tool_call_arguments(call.get('arguments'))
+        recorder(
+            task_id=task_id,
+            node_id=node_id,
+            tool_call_id=call_id,
+            tool_name=str(item.get('tool_name') or call.get('name') or 'tool'),
+            status=str(item.get('expected_tool_status') or ''),
+            arguments_text=json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else '',
+            started_at=str(dict(item.get('live_state') or {}).get('started_at') or ''),
+            finished_at=now_iso(),
+            output_text=self._recovery_checked_tool_content(item),
+            payload={
+                'kind': 'recovery_resolution',
+                'round_id': str(round_id or '').strip(),
+                'recovery_decision': str(item.get('decision') or ''),
+                'related_tool_call_ids': [call_id],
+                'attempted_tools': [str(item.get('tool_name') or call.get('name') or 'tool')],
+                'evidence': [evidence for evidence in list(item.get('evidence') or []) if isinstance(evidence, dict)],
+                'lost_result_summary': str(item.get('lost_result_summary') or ''),
+            },
+        )
 
     def _execution_stage_gate(self, *, task_id: str, node_id: str, node_kind: str) -> dict[str, Any]:
         if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
@@ -1231,6 +1684,24 @@ class ReActToolLoop:
         if limit is None:
             return max(1, item_count)
         return max(1, int(limit) if int(limit) > 0 else 1)
+
+    def _normalized_model_response_timeout_seconds(self) -> float | None:
+        value = getattr(self, '_model_response_timeout_seconds', None)
+        if value in {None, ''}:
+            return None
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return None
+        if normalized <= 0:
+            return None
+        return normalized
+
+    def _model_response_timeout_message(self) -> str:
+        timeout_seconds = self._normalized_model_response_timeout_seconds()
+        if timeout_seconds is None:
+            return 'model request timeout'
+        return f'model request timeout after {timeout_seconds:.3f}s'
 
     def _update_tool_live_state(
         self,
@@ -1833,10 +2304,15 @@ class ReActToolLoop:
         runtime_context: dict[str, Any],
         assistant_content: Any,
     ) -> tuple[NodeFinalResult | None, list[dict[str, Any]], list[str], str]:
+        raw_tool_arguments = self._normalize_tool_call_arguments(getattr(tool_call, 'arguments', {}))
         tool_payload = {
             'id': str(getattr(tool_call, 'id', '') or ''),
             'name': str(getattr(tool_call, 'name', '') or ''),
-            'arguments': self._normalize_tool_call_arguments(getattr(tool_call, 'arguments', {})),
+            'arguments': self._normalize_final_result_payload(
+                raw_payload=raw_tool_arguments,
+                message_history=message_history,
+                response_content=assistant_content,
+            ),
         }
         assistant_tool_calls = [
             {
@@ -2010,6 +2486,11 @@ class ReActToolLoop:
         raw_payload = raw_result if isinstance(raw_result, dict) else None
         if raw_payload is None:
             return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} must return an object payload'
+        raw_payload = self._normalize_final_result_payload(
+            raw_payload=raw_payload,
+            message_history=message_history,
+            response_content=assistant_content,
+        )
         result = self._coerce_final_result_payload(raw_payload)
         if result is None:
             return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} returned an invalid payload'
@@ -2752,6 +3233,69 @@ class ReActToolLoop:
             key in payload
             for key in ('delivery_status', 'summary', 'answer', 'evidence', 'remaining_work', 'blocking_reason')
         )
+
+    @classmethod
+    def _normalize_final_result_payload(
+        cls,
+        *,
+        raw_payload: dict[str, Any],
+        message_history: list[dict[str, Any]],
+        response_content: Any,
+    ) -> dict[str, Any]:
+        payload = dict(raw_payload or {})
+        status = str(payload.get('status') or '').strip().lower()
+
+        payload.setdefault('answer', '')
+        payload.setdefault('remaining_work', [])
+        payload.setdefault('blocking_reason', '')
+        raw_evidence = payload.get('evidence')
+        if not isinstance(raw_evidence, list):
+            raw_evidence = []
+        payload['evidence'] = [
+            cls._normalize_final_result_evidence_item(item)
+            if isinstance(item, dict)
+            else item
+            for item in list(raw_evidence or [])
+        ]
+
+        if status == 'success':
+            payload['remaining_work'] = []
+            payload['blocking_reason'] = ''
+            if not list(payload.get('evidence') or []):
+                payload['evidence'] = cls._auto_wrapped_final_result_evidence(
+                    message_history=message_history,
+                    response_content=str(response_content or ''),
+                )
+        elif status == 'failed':
+            remaining_work = payload.get('remaining_work')
+            if not isinstance(remaining_work, list):
+                payload['remaining_work'] = []
+            delivery_status = str(payload.get('delivery_status') or '').strip().lower()
+            if delivery_status == 'blocked' and not str(payload.get('blocking_reason') or '').strip():
+                payload['blocking_reason'] = str(payload.get('summary') or payload.get('answer') or '').strip()
+
+        return payload
+
+    @staticmethod
+    def _normalize_final_result_evidence_item(item: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(item or {})
+        kind = str(payload.get('kind') or '').strip().lower()
+        if kind in {'file', 'artifact', 'url'}:
+            payload['kind'] = kind
+            return payload
+
+        ref = str(payload.get('ref') or '').strip()
+        path = str(payload.get('path') or '').strip()
+        inferred = ''
+        if ref.startswith('artifact:'):
+            inferred = 'artifact'
+        elif ref.startswith('http://') or ref.startswith('https://') or path.startswith('http://') or path.startswith('https://'):
+            inferred = 'url'
+        elif ref.startswith('path:') or path:
+            inferred = 'file'
+        if inferred:
+            payload['kind'] = inferred
+        return payload
 
     @staticmethod
     def _parse_final_result(content: str) -> tuple[NodeFinalResult, dict[str, Any]] | None:

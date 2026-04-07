@@ -598,3 +598,29 @@ def test_sync_internal_tool_runtimes_keeps_memory_manager_when_runtime_has_no_ra
         assert loop._store_enabled is False
     finally:
         manager.close()
+
+
+def test_reset_memory_runtime_invalidates_frontdoor_cached_bindings() -> None:
+    invalidations: list[str] = []
+
+    class _Runner:
+        def invalidate_runtime_bindings(self) -> None:
+            invalidations.append("invalidated")
+
+    loop = SimpleNamespace(
+        commit_service=None,
+        memory_manager=None,
+        multi_agent_runner=_Runner(),
+        _memory_runtime_settings=object(),
+        _store=object(),
+        _store_enabled=True,
+        _checkpointer_enabled=True,
+        _checkpointer_backend='sqlite',
+        _checkpointer_path='checkpoints.sqlite3',
+        _checkpointer=object(),
+        _checkpointer_cm=object(),
+    )
+
+    RuntimeBootstrapBridge(loop)._reset_memory_runtime()
+
+    assert invalidations == ["invalidated"]

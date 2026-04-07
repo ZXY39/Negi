@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import g3ku.shells.web as web_shell
+from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, ToolCallRequest
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
@@ -81,6 +82,28 @@ class _SpawnReviewExceptionChatBackend:
     async def chat(self, **kwargs):
         self.calls.append(dict(kwargs))
         raise RuntimeError(self._message)
+
+
+class _StaticTool(Tool):
+    def __init__(self, name: str, result: str = "ok") -> None:
+        self._name = name
+        self._result = result
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"{self._name} tool"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs):
+        _ = kwargs
+        return self._result
 
 
 def _build_app() -> FastAPI:
@@ -218,6 +241,54 @@ def _record_enqueue_calls(target: list[str]):
         target.append(str(task_id))
 
     return _enqueue
+
+
+def _create_pending_tool_round(
+    service: MainRuntimeService,
+    *,
+    task_id: str,
+    node_id: str,
+    tool_calls: list[dict[str, object]],
+    live_tool_calls: list[dict[str, object]] | None = None,
+    content: str = "assistant tool turn",
+) -> dict[str, object]:
+    service.log_service.submit_next_stage(
+        task_id,
+        node_id,
+        stage_goal="recovery test stage",
+        tool_round_budget=1,
+    )
+    round_payload = service.log_service.record_execution_stage_round(
+        task_id,
+        node_id,
+        tool_calls=tool_calls,
+        created_at=now_iso(),
+    )
+    assert round_payload is not None
+    service.log_service.append_node_output(
+        task_id,
+        node_id,
+        content=content,
+        tool_calls=tool_calls,
+    )
+    service.log_service.update_frame(
+        task_id,
+        node_id,
+        lambda frame: {
+            **frame,
+            "node_id": node_id,
+            "phase": "waiting_tool_results",
+            "pending_tool_calls": [dict(item) for item in tool_calls],
+            "tool_calls": [dict(item) for item in list(live_tool_calls or [])],
+            "active_round_id": str(round_payload.get("round_id") or ""),
+            "active_round_tool_call_ids": [
+                str(item.get("id") or "") for item in tool_calls if str(item.get("id") or "").strip()
+            ],
+            "active_round_started_at": str(round_payload.get("created_at") or now_iso()),
+        },
+        publish_snapshot=False,
+    )
+    return round_payload
 
 
 def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp_path: Path, monkeypatch):
@@ -1583,6 +1654,7 @@ def test_worker_status_payload_preserves_easing_state_and_zero_target_limit(tmp_
 def test_adaptive_tool_budget_settings_default_safe_window_is_three() -> None:
     settings = MainRuntimeService._adaptive_tool_budget_settings(None)
     assert settings["safe_consecutive_samples"] == 3
+    assert settings["machine_memory_safe_percent"] == 95.0
 
 
 def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
@@ -4809,24 +4881,33 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         assert recovered_task.metadata.get("recovery_notice") == "本任务遇到异常停止，已回退到稳定步骤继续。"
         assert recovered_root is not None
         assert recovered_root.status == "in_progress"
-        assert recovered_root.output == []
-        assert recovered_root.final_output == ""
-        assert recovered_root.failure_reason == ""
+        assert recovered_root.output
         assert preserved_child is not None
         assert preserved_child.status == "success"
-        assert restarted.get_node(in_progress_child.node_id) is None
-        assert restarted.get_node(nested_success.node_id) is None
+        preserved_in_progress_child = restarted.get_node(in_progress_child.node_id)
+        preserved_nested_success = restarted.get_node(nested_success.node_id)
+        assert preserved_in_progress_child is not None
+        assert preserved_in_progress_child.status == "in_progress"
+        assert preserved_nested_success is not None
+        assert preserved_nested_success.status == "success"
 
         runtime_state = restarted.log_service.read_runtime_state(record.task_id)
         assert runtime_state is not None
-        assert runtime_state["active_node_ids"] == [record.root_node_id]
-        assert len(runtime_state["frames"]) == 1
-        assert runtime_state["frames"][0]["node_id"] == record.root_node_id
         projected_node_ids = {item.node_id for item in restarted.store.list_task_nodes(record.task_id)}
-        assert projected_node_ids == {record.root_node_id, success_child.node_id}
+        assert projected_node_ids == {
+            record.root_node_id,
+            success_child.node_id,
+            in_progress_child.node_id,
+            nested_success.node_id,
+        }
         tree_snapshot = restarted.query_service.get_tree_snapshot(record.task_id)
         assert tree_snapshot is not None
-        assert set(tree_snapshot.nodes_by_id) == {record.root_node_id, success_child.node_id}
+        assert set(tree_snapshot.nodes_by_id) == {
+            record.root_node_id,
+            success_child.node_id,
+            in_progress_child.node_id,
+            nested_success.node_id,
+        }
         assert started == [record.task_id]
         assert "Recovery: 本任务遇到异常停止，已回退到稳定步骤继续。" not in restarted.view_progress(record.task_id, mark_read=False)
 
@@ -4848,6 +4929,281 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
         assert "child done" in results[0].node_output
     finally:
         await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_waiting_children_turn_replays_incomplete_spawn_operation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service, monkeypatch)
+
+    try:
+        record = await service.create_task("recover waiting children", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="child goal",
+            prompt="child prompt",
+            execution_policy=_execution_policy(),
+        )
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+        )
+
+        service.log_service.append_node_output(
+            record.task_id,
+            root.node_id,
+            content="spawning child before shutdown",
+            tool_calls=[
+                {
+                    "id": "call:spawn-round",
+                    "name": "spawn_child_nodes",
+                    "arguments": {
+                        "children": [spec.model_dump(mode="json")],
+                    },
+                }
+            ],
+        )
+
+        def _mutate(metadata: dict[str, object]) -> dict[str, object]:
+            metadata["spawn_operations"] = {
+                "call:spawn-round": {
+                    "specs": [spec.model_dump(mode="json")],
+                    "entries": [
+                        {
+                            "index": 0,
+                            "goal": "child goal",
+                            "prompt": "child prompt",
+                            "requires_acceptance": False,
+                            "acceptance_prompt": "",
+                            "status": "running",
+                            "started_at": now_iso(),
+                            "finished_at": "",
+                            "child_node_id": child.node_id,
+                            "acceptance_node_id": "",
+                            "check_status": "skipped",
+                            "result": {},
+                        }
+                    ],
+                    "results": [],
+                    "completed": False,
+                }
+            }
+            return metadata
+
+        service.log_service.update_node_metadata(root.node_id, _mutate)
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[root.node_id],
+            runnable_node_ids=[root.node_id],
+            waiting_node_ids=[root.node_id],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=root.node_id,
+                        depth=root.depth,
+                        node_kind=root.node_kind,
+                        phase="waiting_children",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                }
+            ],
+            publish_snapshot=False,
+        )
+        root = service.get_node(root.node_id)
+        assert root is not None
+
+        async def _finish_child(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="child done",
+                    answer="child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "_run_nested_node", _finish_child)
+
+        history = await service.node_runner._react_loop._resume_waiting_children_turn_if_needed(
+            task=task,
+            node=root,
+            message_history=[],
+            tools=service.node_runner._build_tools(task=task, node=root),
+            runtime_context={"task_id": record.task_id, "node_id": root.node_id, "node_kind": root.node_kind},
+        )
+
+        assert history is not None
+
+        root_after = service.get_node(root.node_id)
+        child_after = service.get_node(child.node_id)
+        assert root_after is not None
+        assert child_after is not None
+
+        spawn_operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        operation = dict(spawn_operations.get("call:spawn-round") or {})
+        entries = list(operation.get("entries") or [])
+
+        assert operation.get("completed") is True
+        assert entries[0]["status"] == "success"
+        assert entries[0]["result"]["node_output"] == "child done"
+        assert child_after.status == "success"
+
+        tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
+        assert any(item.tool_name == "spawn_child_nodes" and item.status == "success" for item in tool_results)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_pending_tool_turn_uses_recovery_check_for_verified_done_write(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service)
+
+    try:
+        record = await service.create_task("recover write", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        target = tmp_path / "write-target.txt"
+        target.write_text("expected body", encoding="utf-8")
+
+        round_payload = _create_pending_tool_round(
+            service,
+            task_id=record.task_id,
+            node_id=root.node_id,
+            tool_calls=[
+                {
+                    "id": "call:write",
+                    "name": "filesystem",
+                    "arguments": {
+                        "action": "write",
+                        "path": str(target),
+                        "content": "expected body",
+                    },
+                }
+            ],
+            live_tool_calls=[{"tool_call_id": "call:write", "tool_name": "filesystem", "status": "running"}],
+            content="write pending before shutdown",
+        )
+
+        history = await service.node_runner._react_loop._resume_pending_tool_turn_if_needed(
+            task=task,
+            node=root,
+            message_history=[],
+            tools={},
+            runtime_context={"task_temp_dir": str(tmp_path)},
+        )
+
+        assert history is not None
+        tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
+        result_statuses = {item.tool_call_id: item.status for item in tool_results}
+        assert result_statuses["call:write"] == "success"
+        assert any(item.tool_name == "recovery_check" for item in tool_results)
+
+        detail = service.get_node_detail_payload(record.task_id, root.node_id)
+        assert detail is not None
+        round_tools = detail["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+        assert [item["tool_name"] for item in round_tools] == ["recovery_check", "filesystem"]
+        recovery_step = round_tools[0]
+        assert recovery_step["status"] == "success"
+        assert recovery_step["tool_call_id"] == f"recovery_check:{round_payload['round_id']}"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_pending_tool_turn_marks_exec_round_for_model_decide_when_side_effect_uncertain(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service)
+
+    try:
+        record = await service.create_task("recover exec", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        _create_pending_tool_round(
+            service,
+            task_id=record.task_id,
+            node_id=root.node_id,
+            tool_calls=[
+                {
+                    "id": "call:exec",
+                    "name": "exec",
+                    "arguments": {"command": "git apply patch.diff"},
+                }
+            ],
+            live_tool_calls=[{"tool_call_id": "call:exec", "tool_name": "exec", "status": "running"}],
+            content="exec pending before shutdown",
+        )
+
+        history = await service.node_runner._react_loop._resume_pending_tool_turn_if_needed(
+            task=task,
+            node=root,
+            message_history=[],
+            tools={"exec": _StaticTool("exec", result="should not run")},
+            runtime_context={"task_temp_dir": str(tmp_path)},
+        )
+
+        assert history is not None
+        tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
+        result_statuses = {item.tool_call_id: item.status for item in tool_results}
+        assert result_statuses["call:exec"] == "interrupted"
+        assert any(item.tool_name == "recovery_check" for item in tool_results)
+
+        detail = service.get_node_detail_payload(record.task_id, root.node_id)
+        assert detail is not None
+        round_tools = detail["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+        assert [item["tool_name"] for item in round_tools] == ["recovery_check", "exec"]
+        assert round_tools[0]["status"] == "warning"
+        assert round_tools[1]["status"] == "interrupted"
+    finally:
+        await service.close()
 
 
 def test_terminal_task_clears_runtime_frames_and_rejects_late_runtime_updates(tmp_path: Path):
@@ -5083,12 +5439,15 @@ async def test_spawn_children_prefilters_specs_and_preserves_result_order(tmp_pa
         assert results[0].check_result == "派生已被拦截"
         assert "拆分过细" in results[0].node_output
         assert "请由父节点直接执行" in results[0].node_output
+        assert results[0].node_output_summary == "派生拦截：拆分过细，偏离当前父节点目标"
+        assert "请由父节点直接执行" not in results[0].node_output_summary
         assert results[1].node_output == "allowed branch done"
         assert len(service.store.list_children(root.node_id)) == 1
         assert len(entries) == 2
         assert entries[0]["review_decision"] == "blocked"
         assert entries[0]["blocked_reason"] == "拆分过细，偏离当前父节点目标"
         assert entries[0]["blocked_suggestion"] == "请由父节点直接执行，或收缩为更聚焦的单一派生"
+        assert entries[0]["synthetic_result_summary"] == "派生拦截：拆分过细，偏离当前父节点目标"
         assert entries[1]["review_decision"] == "allowed"
         assert spawn_review["allowed_indexes"] == [1]
         assert spawn_review["blocked_specs"][0]["index"] == 0

@@ -221,6 +221,11 @@ class RuntimeBootstrapBridge:
         self._loop._checkpointer = None
         self._loop._checkpointer_cm = None
 
+        runner = getattr(self._loop, 'multi_agent_runner', None)
+        invalidate = getattr(runner, 'invalidate_runtime_bindings', None)
+        if callable(invalidate):
+            invalidate()
+
     def _close_value(self, value) -> None:
         close = getattr(value, 'close', None)
         if close is None:

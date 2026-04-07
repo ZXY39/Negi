@@ -7,6 +7,10 @@ class CeoFrontDoorRunner:
     def __init__(self, *, loop) -> None:
         self._impl = CreateAgentCeoFrontDoorRunner(loop=loop)
 
+    def invalidate_runtime_bindings(self) -> None:
+        setattr(self._impl, "_agent", None)
+        setattr(self._impl, "_compiled_graph", None)
+
     def __getattr__(self, name: str):
         return getattr(self._impl, name)
 

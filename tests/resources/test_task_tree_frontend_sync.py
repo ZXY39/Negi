@@ -1047,6 +1047,119 @@ def test_render_execution_stage_rounds_show_completed_round_and_tool_result_labe
     assert result["roundClasses"][:1] == ["success"]
     assert result["labels"][:2] == ["成功", "失败"]
     assert result["classes"][:2] == ["success", "error"]
+def test_execution_trace_round_status_supports_warning_and_interrupted() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        console.log(JSON.stringify({
+          warningLabel: traceStatusLabel("warning"),
+          interruptedLabel: traceStatusLabel("interrupted"),
+          roundStatus: roundTraceStatus({
+            tools: [
+              { tool_name: "recovery_check", status: "warning" },
+              { tool_name: "exec", status: "interrupted" },
+            ],
+          }),
+        }));
+        """
+    )
+
+    assert result["warningLabel"] == "需处理"
+    assert result["interruptedLabel"] == "已中断"
+    assert result["roundStatus"] == "warning"
+
+
+def test_render_execution_stage_rounds_show_recovery_check_panel_fields() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const html = renderExecutionStageRounds({
+          stage_id: "stage:test",
+          mode: "自主执行",
+          rounds: [
+            {
+              round_id: "round:1",
+              round_index: 1,
+              tools: [
+                {
+                  tool_call_id: "recovery_check:round:1",
+                  tool_name: "recovery_check",
+                  status: "warning",
+                  output_text: "Recovery check executed before resuming interrupted tool round.",
+                  recovery_decision: "model_decide",
+                  attempted_tools: ["exec"],
+                  lost_result_summary: "The previous exec attempt may have already produced side effects.",
+                  evidence: [
+                    { kind: "file", path: "D:/tmp/demo.txt", note: "file still exists" },
+                  ],
+                },
+                {
+                  tool_call_id: "call:exec",
+                  tool_name: "exec",
+                  status: "interrupted",
+                  arguments_text: "{\\"command\\": \\"git apply patch.diff\\"}",
+                  output_text: "Recovery check: the previous exec attempt may have already produced side effects.",
+                },
+              ],
+            },
+          ],
+        });
+
+        console.log(JSON.stringify({
+          hasWarningChip: html.includes('task-trace-round-chip warning'),
+          hasInterruptedChip: html.includes('task-trace-round-chip interrupted'),
+          hasRecoveryDecision: html.includes("恢复检查结论"),
+          hasAttemptedTools: html.includes("之前尝试执行了"),
+          hasEvidence: html.includes("证据摘要"),
+        }));
+        """
+    )
+
+    assert result["hasWarningChip"] is True
+    assert result["hasInterruptedChip"] is True
+    assert result["hasRecoveryDecision"] is True
+    assert result["hasAttemptedTools"] is True
+    assert result["hasEvidence"] is True
 
 
 def test_load_selected_node_latest_context_preserves_detail_and_context_scroll() -> None:
@@ -1386,6 +1499,9 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
     assert "请由父节点直接执行" in result["body"]
 
 
+    assert "杩斿洖鎽樿" not in result["body"]
+    assert "娲剧敓宸茶鎷︽埅锛氭媶鍒嗚繃缁嗭紝鍋忕褰撳墠鐖惰妭鐐圭洰鏍?" not in result["body"]
+    assert result["body"].count('class="task-trace-label"') == 4
     assert result["showStatus"] is False
     assert result["hasStatusBadge"] is False
 

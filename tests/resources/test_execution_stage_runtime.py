@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -1697,6 +1698,36 @@ async def test_invalid_submit_final_result_fails_after_five_attempts(tmp_path: P
         assert task.status == 'failed'
         assert 'Invalid final result submission detected 5 consecutive times' in str(task.failure_reason or '')
         assert 'execution failed result requires delivery_status=blocked' in str(task.failure_reason or '')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_model_request_timeout_marks_task_failed(tmp_path: Path):
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            await asyncio.Event().wait()
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service._react_loop._model_response_timeout_seconds = 0.01
+    try:
+        record = await service.create_task("timeout model request", session_id="web:shared")
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+        assert task.status == "failed"
+        assert root.status == "failed"
+        assert "model request timeout after" in str(task.failure_reason or "")
     finally:
         await service.close()
 

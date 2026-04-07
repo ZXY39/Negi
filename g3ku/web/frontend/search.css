@@ -1984,6 +1984,11 @@ textarea {
     background: var(--status-failed-text);
 }
 
+.interaction-step.warning::before,
+.interaction-step.interrupted::before {
+    background: var(--status-pending-text);
+}
+
 .interaction-step-header {
     display: flex;
     align-items: center;
@@ -2330,6 +2335,12 @@ textarea {
 .task-trace-round-chip.error .task-trace-round-chip-status {
     background: var(--status-failed-bg);
     color: var(--status-failed-text);
+}
+
+.task-trace-round-chip.warning .task-trace-round-chip-status,
+.task-trace-round-chip.interrupted .task-trace-round-chip-status {
+    background: var(--status-pending-bg);
+    color: var(--status-pending-text);
 }
 
 .task-trace-round-panels {

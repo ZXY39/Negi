@@ -271,6 +271,9 @@ class TaskLogService:
             'stage_status': '',
             'stage_goal': '',
             'stage_total_steps': 0,
+            'active_round_id': '',
+            'active_round_tool_call_ids': [],
+            'active_round_started_at': '',
             'messages': [],
             'pending_tool_calls': [],
             'pending_child_specs': [],
@@ -497,6 +500,57 @@ class TaskLogService:
                 persisted.append(record)
 
             return persisted
+
+    def upsert_synthetic_tool_result(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        status: str,
+        output_text: str = '',
+        output_ref: str = '',
+        arguments_text: str = '',
+        started_at: str = '',
+        finished_at: str = '',
+        elapsed_seconds: float | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> TaskProjectionToolResultRecord | None:
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            node = self._store.get_node(node_id)
+            if task is None or node is None:
+                return None
+            if str(node.task_id or '').strip() != str(task_id or '').strip():
+                return None
+            existing_records = list(self._store.list_task_node_tool_results(task_id, node_id) or [])
+            order_by_call_id = {
+                str(item.tool_call_id or '').strip(): int(item.order_index or 0)
+                for item in existing_records
+                if str(item.tool_call_id or '').strip()
+            }
+            order_index = order_by_call_id.get(str(tool_call_id or '').strip())
+            if not order_index:
+                order_index = max([int(item.order_index or 0) for item in existing_records], default=0) + 1
+            record = TaskProjectionToolResultRecord(
+                task_id=task_id,
+                node_id=node_id,
+                tool_call_id=str(tool_call_id or '').strip(),
+                order_index=int(order_index or 0),
+                tool_name=str(tool_name or '').strip() or 'tool',
+                arguments_text=str(arguments_text or ''),
+                status=str(status or '').strip(),
+                started_at=str(started_at or ''),
+                finished_at=str(finished_at or ''),
+                elapsed_seconds=self._coerce_elapsed_seconds(elapsed_seconds),
+                output_preview_text=str(output_text or ''),
+                output_ref=str(output_ref or ''),
+                ephemeral=False,
+                payload={'parsed_payload': dict(payload or {})},
+            )
+            self._store.upsert_task_node_tool_result(record)
+            return record
 
     @staticmethod
     def _normalize_tool_call_arguments(arguments: Any) -> dict[str, Any]:
@@ -2399,7 +2453,7 @@ class TaskLogService:
             latest_round_id = str(round_id or '').strip() or f'round:{index}'
             latest_entries = [dict(item) for item in list(operation.get('entries') or []) if isinstance(item, dict)]
         if not latest_entries:
-            return latest_round_id, []
+            return '', []
         results: list[dict[str, Any]] = []
         for item in latest_entries:
             result = dict(item.get('result') or {}) if isinstance(item.get('result'), dict) else {}
@@ -2427,7 +2481,7 @@ class TaskLogService:
         return latest_round_id, results
 
     @staticmethod
-    def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:
+    def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
         if not isinstance(step, dict):
             return None
         return {
@@ -2440,6 +2494,19 @@ class TaskLogService:
             'started_at': str(step.get('started_at') or ''),
             'finished_at': str(step.get('finished_at') or ''),
             'elapsed_seconds': step.get('elapsed_seconds'),
+            'recovery_decision': str(step.get('recovery_decision') or '').strip(),
+            'related_tool_call_ids': [
+                str(item or '').strip()
+                for item in list(step.get('related_tool_call_ids') or [])
+                if str(item or '').strip()
+            ],
+            'attempted_tools': [
+                str(item or '').strip()
+                for item in list(step.get('attempted_tools') or [])
+                if str(item or '').strip()
+            ],
+            'evidence': [dict(item) for item in list(step.get('evidence') or []) if isinstance(item, dict)],
+            'lost_result_summary': str(step.get('lost_result_summary') or '').strip(),
         }
 
     def _task_projection_round_records(self, node: NodeRecord) -> list[TaskProjectionRoundRecord]:
@@ -2538,6 +2605,13 @@ class TaskLogService:
                 'stage_status': str(next_frame.get('stage_status') or ''),
                 'stage_goal': str(next_frame.get('stage_goal') or ''),
                 'stage_total_steps': int(next_frame.get('stage_total_steps') or 0),
+                'active_round_id': str(next_frame.get('active_round_id') or ''),
+                'active_round_tool_call_ids': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('active_round_tool_call_ids') or [])
+                    if str(item or '').strip()
+                ],
+                'active_round_started_at': str(next_frame.get('active_round_started_at') or ''),
                 'pending_tool_calls': [dict(item) for item in list(next_frame.get('pending_tool_calls') or []) if isinstance(item, dict)],
                 'pending_child_specs': [dict(item) for item in list(next_frame.get('pending_child_specs') or []) if isinstance(item, dict)],
                 'partial_child_results': [dict(item) for item in list(next_frame.get('partial_child_results') or []) if isinstance(item, dict)],
@@ -2587,6 +2661,13 @@ class TaskLogService:
             'stage_status': str(payload.get('stage_status') or ''),
             'stage_goal': str(payload.get('stage_goal') or ''),
             'stage_total_steps': int(payload.get('stage_total_steps') or 0),
+            'active_round_id': str(payload.get('active_round_id') or ''),
+            'active_round_tool_call_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('active_round_tool_call_ids') or [])
+                if str(item or '').strip()
+            ],
+            'active_round_started_at': str(payload.get('active_round_started_at') or ''),
             'messages': messages,
             'pending_tool_calls': [dict(item) for item in list(payload.get('pending_tool_calls') or []) if isinstance(item, dict)],
             'pending_child_specs': [dict(item) for item in list(payload.get('pending_child_specs') or []) if isinstance(item, dict)],
@@ -3042,6 +3123,13 @@ class TaskLogService:
             'stage_status': str(payload.get('stage_status') or ''),
             'stage_goal': str(payload.get('stage_goal') or ''),
             'stage_total_steps': int(payload.get('stage_total_steps') or 0),
+            'active_round_id': str(payload.get('active_round_id') or ''),
+            'active_round_tool_call_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('active_round_tool_call_ids') or [])
+                if str(item or '').strip()
+            ],
+            'active_round_started_at': str(payload.get('active_round_started_at') or ''),
             'messages': [dict(item) for item in list(payload.get('messages') or []) if isinstance(item, dict)],
             'pending_tool_calls': [dict(item) for item in list(payload.get('pending_tool_calls') or []) if isinstance(item, dict)],
             'pending_child_specs': [dict(item) for item in list(payload.get('pending_child_specs') or []) if isinstance(item, dict)],

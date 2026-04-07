@@ -532,7 +532,7 @@ class TaskQueryService:
         return False
 
     @staticmethod
-    def _compact_execution_trace_tool_call(step: Any) -> dict[str, str] | None:
+    def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
         if not isinstance(step, dict):
             return None
         return {
@@ -545,6 +545,19 @@ class TaskQueryService:
             'started_at': str(step.get('started_at') or ''),
             'finished_at': str(step.get('finished_at') or ''),
             'elapsed_seconds': step.get('elapsed_seconds'),
+            'recovery_decision': str(step.get('recovery_decision') or '').strip(),
+            'related_tool_call_ids': [
+                str(item or '').strip()
+                for item in list(step.get('related_tool_call_ids') or [])
+                if str(item or '').strip()
+            ],
+            'attempted_tools': [
+                str(item or '').strip()
+                for item in list(step.get('attempted_tools') or [])
+                if str(item or '').strip()
+            ],
+            'evidence': [dict(item) for item in list(step.get('evidence') or []) if isinstance(item, dict)],
+            'lost_result_summary': str(step.get('lost_result_summary') or '').strip(),
         }
 
     @staticmethod
