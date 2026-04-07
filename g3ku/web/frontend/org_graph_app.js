@@ -459,10 +459,15 @@ function rebuildCeoSessionIndex() {
     S.ceoSessions = [...(Array.isArray(S.ceoLocalSessions) ? S.ceoLocalSessions : []), ...flattenChannelGroups(S.ceoChannelGroups)];
 }
 
+function ceoSessionCreatedTime(session) {
+    const item = session && typeof session === "object" ? session : {};
+    return String(item.created_at || item.updated_at || "").trim();
+}
+
 function sortCeoSessionsByTime(items = []) {
     return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
-        const leftTime = String(ceoSessionDisplayTime(left) || "");
-        const rightTime = String(ceoSessionDisplayTime(right) || "");
+        const leftTime = String(ceoSessionCreatedTime(left) || "");
+        const rightTime = String(ceoSessionCreatedTime(right) || "");
         if (leftTime !== rightTime) return rightTime.localeCompare(leftTime);
         return String(right?.session_id || "").localeCompare(String(left?.session_id || ""));
     });
@@ -4306,7 +4311,7 @@ function renderModelDetail() {
                         <h3>基本信息</h3>
                         <div class="model-form-grid">
                             <label class="resource-field">
-                                <span class="resource-field-label">模型 Key *</span>
+                                <span class="resource-field-label">配置名 / 绑定名 *</span>
                                 <input class="resource-search" name="key" ${isCreate ? `value=""` : `value="${esc(current.key)}" disabled`} placeholder="如 openai_primary">
                             </label>
                             <label class="resource-field">
@@ -4912,7 +4917,7 @@ function collectModelFormData(form, current) {
     const selectedScopes = new Set(MODEL_SCOPES.filter((scope) => formData.get(`scope_${scope.key}`) === "on").map((scope) => scope.key));
     const hasApiKeyEntries = String(apiKey || "").split(/[\n,]/).some((item) => String(item || "").trim());
 
-    if (!key) throw new Error("模型 Key 不能为空");
+    if (!key) throw new Error("配置名 / 绑定名不能为空");
     if (!providerModel) throw new Error("Provider / Model 不能为空");
     if (!hasApiKeyEntries) throw new Error("API Key 不能为空");
     if (!apiKey) throw new Error("API Key 不能为空");
@@ -5727,7 +5732,11 @@ function sendCeoMessage() {
 }
 const canPause = (task) => !!task && !task.is_paused && pStatus(task.status) === "in_progress";
 const canResume = (task) => !!task && !!task.is_paused;
-const canRetry = (task) => !!task && pStatus(task.status) === "failed";
+const taskFailureClass = (task) => String(task?.failure_class || task?.metadata?.failure_class || "").trim().toLowerCase();
+const taskFinalAcceptanceStatus = (task) => String(task?.final_acceptance?.status || task?.metadata?.final_acceptance?.status || "").trim().toLowerCase();
+const taskIsUnpassed = (task) => !!task && pStatus(task.status) === "success" && taskFinalAcceptanceStatus(task) === "failed";
+const canRetry = (task) => !!task && pStatus(task.status) === "failed" && taskFailureClass(task) === "engine_failure";
+const canContinueEvaluate = (task) => !!task && taskIsUnpassed(task) && taskFailureClass(task) === "business_unpassed";
 const canDelete = (task) => !!task && (!!task.is_paused || ["success", "failed"].includes(pStatus(task.status)));
 const EMPTY_TOKEN_USAGE = () => ({
     tracked: false,
@@ -5743,6 +5752,7 @@ const EMPTY_TOKEN_USAGE = () => ({
 function taskStatusKey(task) {
     if (!task) return "unknown";
     if (task.is_paused) return "blocked";
+    if (taskIsUnpassed(task)) return "unpassed";
     return pStatus(task.status) || "unknown";
 }
 

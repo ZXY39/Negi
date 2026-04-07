@@ -23,6 +23,21 @@ RESULT_SCHEMA_VERSION = 2
 EXECUTION_POLICY_FOCUS = 'focus'
 EXECUTION_POLICY_COVERAGE = 'coverage'
 EXECUTION_POLICY_MODES = (EXECUTION_POLICY_FOCUS, EXECUTION_POLICY_COVERAGE)
+FAILURE_CLASS_ENGINE = 'engine_failure'
+FAILURE_CLASS_BUSINESS_UNPASSED = 'business_unpassed'
+FAILURE_CLASS_NON_RETRYABLE_BLOCKED = 'non_retryable_blocked'
+FAILURE_CLASSES = (
+    FAILURE_CLASS_ENGINE,
+    FAILURE_CLASS_BUSINESS_UNPASSED,
+    FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
+)
+
+
+def normalize_failure_class(value: Any, *, default: str = '') -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in FAILURE_CLASSES:
+        return normalized
+    return str(default or '').strip().lower()
 
 
 class NodeEvidenceItem(Model):

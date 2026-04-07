@@ -60,6 +60,74 @@ def _message_content_signature(message: dict) -> str:
     return _json_compact(content)
 
 
+def _normalize_provider_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in list(tool_calls or []):
+        if not isinstance(item, dict):
+            continue
+        function = item.get('function') if isinstance(item.get('function'), dict) else {}
+        name = str(function.get('name') or item.get('name') or '').strip()
+        arguments = function.get('arguments', item.get('arguments'))
+        call_id = str(item.get('id') or '').strip()
+        payload: dict[str, Any] = {
+            'type': 'function',
+            'function': {
+                'name': name,
+                'arguments': arguments,
+            },
+        }
+        if call_id:
+            payload['id'] = call_id
+        normalized.append(payload)
+    return normalized
+
+
+def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for item in list(messages or []):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get('role') or '').strip().lower()
+        if role not in {'system', 'user', 'assistant', 'tool'}:
+            continue
+        payload: dict[str, Any] = {'role': role}
+        content = item.get('content')
+        if role in {'system', 'user'}:
+            payload['content'] = content
+            name = str(item.get('name') or '').strip()
+            if name:
+                payload['name'] = name
+            sanitized.append(payload)
+            continue
+        if role == 'assistant':
+            payload['content'] = content
+            tool_calls = _normalize_provider_tool_calls(item.get('tool_calls'))
+            if tool_calls:
+                payload['tool_calls'] = tool_calls
+            function_call = item.get('function_call')
+            if isinstance(function_call, dict):
+                function_name = str(function_call.get('name') or '').strip()
+                if function_name:
+                    payload['function_call'] = {
+                        'name': function_name,
+                        'arguments': function_call.get('arguments'),
+                    }
+            name = str(item.get('name') or '').strip()
+            if name:
+                payload['name'] = name
+            sanitized.append(payload)
+            continue
+        payload['content'] = content
+        tool_call_id = str(item.get('tool_call_id') or '').strip()
+        if tool_call_id:
+            payload['tool_call_id'] = tool_call_id
+        name = str(item.get('name') or '').strip()
+        if name:
+            payload['name'] = name
+        sanitized.append(payload)
+    return sanitized
+
+
 def _tool_signature(tools: list[dict] | None) -> list[dict[str, object]]:
     signatures: list[dict[str, object]] = []
     for item in list(tools or []):
@@ -333,7 +401,7 @@ class ConfigChatBackend:
                     stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, base_target.model_id))
                     for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count, key_indexes=api_key_indexes):
                         target = base_target
-                        request_messages = list(messages or [])
+                        request_messages = sanitize_provider_messages(messages)
                         request_message_count, request_message_chars = _message_stats(request_messages)
                         permit_lease: ModelKeyPermitLease | None = None
                         use_held_turn_permit = bool(

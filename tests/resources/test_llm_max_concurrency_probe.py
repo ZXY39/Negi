@@ -220,7 +220,7 @@ def test_probe_max_concurrency_route_returns_result(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "g3ku.runtime.frontdoor.ceo_summarizer", stub_module)
     admin_rest = importlib.import_module("main.api.admin_rest")
 
-    class _StubManager:
+    class _StubFacade:
         async def probe_max_concurrency_draft(self, payload: dict):
             captured["payload"] = dict(payload)
             return {
@@ -230,7 +230,7 @@ def test_probe_max_concurrency_route_returns_result(monkeypatch) -> None:
                 "per_key_results": [],
             }
 
-    monkeypatch.setattr(admin_rest.ModelManager, "load", classmethod(lambda cls: _StubManager()))
+    monkeypatch.setattr(admin_rest.ModelManager, "load_facade", classmethod(lambda cls: _StubFacade()))
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix="/api")

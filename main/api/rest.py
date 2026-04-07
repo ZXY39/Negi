@@ -169,7 +169,7 @@ async def retry_task(task_id: str):
         record = await service.retry_task(task_id)
     except ValueError as exc:
         detail = str(exc)
-        if detail == 'task_not_failed':
+        if detail in {'task_not_failed', 'task_not_retryable'}:
             raise HTTPException(status_code=409, detail=detail) from exc
         if detail in {'task_worker_offline', 'task_worker_starting', 'task_worker_stale'}:
             raise HTTPException(status_code=503, detail=detail) from exc
@@ -177,6 +177,30 @@ async def retry_task(task_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'task': record.model_dump(mode='json')}
+
+
+@router.post('/tasks/{task_id}/continue-evaluate')
+async def continue_evaluate_task(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    task_id = service.normalize_task_id(task_id)
+    try:
+        payload = await service.continue_evaluate_task(task_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == 'task_not_unpassed':
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    if payload is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    continuation_task = payload.get('continuation_task')
+    return {
+        'ok': True,
+        'decision': str(payload.get('decision') or '').strip(),
+        'reply_text': str(payload.get('reply_text') or ''),
+        'task': (payload.get('task').model_dump(mode='json') if payload.get('task') is not None else None),
+        'continuation_task': (continuation_task.model_dump(mode='json') if continuation_task is not None else None),
+    }
 
 
 @router.post('/tasks/{task_id}/cancel')

@@ -281,6 +281,90 @@ async def test_config_chat_backend_omits_optional_model_parameters_when_unset(mo
 
 
 @pytest.mark.asyncio
+async def test_config_chat_backend_sanitizes_internal_runtime_message_fields_before_provider_call(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    class _RecorderProvider:
+        async def chat(self, **kwargs):
+            captured.append(dict(kwargs))
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    monkeypatch.setattr(
+        chat_backend_module,
+        "build_provider_from_model_key",
+        lambda config, ref, api_key_index=None: ProviderTarget(
+            provider_ref=str(ref),
+            provider_id="custom",
+            model_id="custom-model",
+            provider=_RecorderProvider(),
+            retry_on=[],
+            retry_count=0,
+            api_key_count=0,
+        ),
+    )
+
+    original_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "demo"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "content", "arguments": '{"action":"search"}'},
+                    "status": "running",
+                }
+            ],
+            "started_at": "2026-04-07T18:00:00+08:00",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "content",
+            "content": "Error: duplicate read-only request",
+            "started_at": "2026-04-07T18:00:01+08:00",
+            "finished_at": "2026-04-07T18:00:02+08:00",
+            "elapsed_seconds": 1.0,
+            "status": "error",
+            "ephemeral": True,
+        },
+    ]
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    await backend.chat(
+        messages=original_messages,
+        tools=None,
+        model_refs=["primary"],
+    )
+
+    assert original_messages[2]["started_at"] == "2026-04-07T18:00:00+08:00"
+    assert original_messages[3]["status"] == "error"
+    assert captured[0]["messages"] == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "demo"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "content", "arguments": '{"action":"search"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "content",
+            "content": "Error: duplicate read-only request",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_config_chat_backend_recommends_dynamic_hard_timeout_from_model_chain_budget(monkeypatch) -> None:
     class _Provider:
         async def chat(self, **kwargs):
@@ -411,6 +495,70 @@ async def test_direct_provider_chat_backend_omits_optional_model_parameters_when
     assert "max_tokens" not in captured[0]
     assert "temperature" not in captured[0]
     assert "reasoning_effort" not in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_direct_provider_chat_backend_sanitizes_internal_runtime_message_fields_before_provider_call() -> None:
+    captured: list[dict[str, object]] = []
+
+    class _Provider:
+        async def chat(self, **kwargs):
+            captured.append(dict(kwargs))
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    backend = _DirectProviderChatBackend(provider=_Provider())
+    original_messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "filesystem", "arguments": '{"action":"list"}'},
+                    "status": "queued",
+                }
+            ],
+            "finished_at": "2026-04-07T18:00:05+08:00",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "filesystem",
+            "content": "FILE a.txt",
+            "started_at": "2026-04-07T18:00:01+08:00",
+            "finished_at": "2026-04-07T18:00:02+08:00",
+            "elapsed_seconds": 1.0,
+            "status": "success",
+        },
+    ]
+
+    await backend.chat(
+        messages=original_messages,
+        tools=None,
+        model_refs=["custom:model"],
+    )
+
+    assert original_messages[0]["finished_at"] == "2026-04-07T18:00:05+08:00"
+    assert captured[0]["messages"] == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "filesystem", "arguments": '{"action":"list"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "filesystem",
+            "content": "FILE a.txt",
+        },
+    ]
 
 
 @pytest.mark.asyncio

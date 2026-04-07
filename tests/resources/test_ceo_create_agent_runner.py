@@ -500,6 +500,140 @@ async def test_create_agent_runner_rejects_unverified_dispatch_text_from_model()
 
 
 @pytest.mark.asyncio
+async def test_create_agent_runner_preserves_verified_dispatch_text_from_model() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
+        )
+    )
+
+    text = "后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。"
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": text,
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "error_text": "",
+                "reasoning_content": None,
+                "thinking_blocks": None,
+            },
+            "used_tools": ["create_async_task"],
+            "route_kind": "task_dispatch",
+            "verified_task_ids": ["task:demo-123"],
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "finalize"
+    assert result["final_output"] == text
+    assert result["route_kind"] == "task_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_rejects_dispatch_text_for_unverified_task_id_even_when_verified_task_exists() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
+    )
+
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": "后台修复任务已经建立，任务号 `task:fake-123`。我先继续排查。",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "error_text": "",
+                "reasoning_content": None,
+                "thinking_blocks": None,
+            },
+            "used_tools": ["create_async_task"],
+            "route_kind": "task_dispatch",
+            "verified_task_ids": ["task:demo-123"],
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "finalize"
+    assert "未确认成功创建后台任务" in result["final_output"]
+    assert "task:fake-123" in result["final_output"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_preserves_heartbeat_success_reply_for_current_task_id() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
+        )
+    )
+
+    text = "已通过异步任务 `task:demo-terminal` 完成修复，结果：skill 已恢复可见。"
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": text,
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "error_text": "",
+                "reasoning_content": None,
+                "thinking_blocks": None,
+            },
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "heartbeat_internal": True,
+            "user_input": {
+                "content": "[SESSION EVENTS]",
+                "metadata": {
+                    "heartbeat_internal": True,
+                    "heartbeat_reason": "task_terminal",
+                    "heartbeat_task_ids": ["task:demo-terminal"],
+                },
+            },
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "finalize"
+    assert result["final_output"] == text
+    assert "未确认成功创建后台任务" not in result["final_output"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_rejects_heartbeat_dispatch_claim_for_unknown_task_id() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
+    )
+
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": "任务 `demo-old` 已完成但未通过验收，已续跑为 `task:new-123`。",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "error_text": "",
+                "reasoning_content": None,
+                "thinking_blocks": None,
+            },
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "heartbeat_internal": True,
+            "user_input": {
+                "content": "[SESSION EVENTS]",
+                "metadata": {
+                    "heartbeat_internal": True,
+                    "heartbeat_reason": "task_terminal",
+                    "heartbeat_task_ids": ["task:demo-old"],
+                },
+            },
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "finalize"
+    assert "未确认成功创建后台任务" in result["final_output"]
+    assert "task:new-123" in result["final_output"]
+
+
+@pytest.mark.asyncio
 async def test_create_agent_postprocess_requires_persisted_task_for_dispatch_reply(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
@@ -550,6 +684,63 @@ async def test_create_agent_postprocess_requires_persisted_task_for_dispatch_rep
     assert result["jump_to"] == "end"
     assert "未确认成功创建后台任务" in result["final_output"]
     assert "task:fake-123" in result["final_output"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_postprocess_continues_after_verified_async_dispatch(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
+        )
+    )
+
+    async def _fake_summarize_messages(*, messages, state):
+        _ = state
+        return {
+            "messages": list(messages),
+            "summary_text": "",
+            "summary_payload": {},
+            "summary_version": 0,
+            "summary_model_key": "",
+        }
+
+    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
+
+    result = await runner._postprocess_completed_tool_cycle(
+        state={
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo"}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "create_async_task", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "create_async_task",
+                    "content": "创建任务成功task:demo-123",
+                },
+            ],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "tool_names": ["create_async_task"],
+        }
+    )
+
+    assert result is not None
+    assert "jump_to" not in result
+    assert result["verified_task_ids"] == ["task:demo-123"]
+    assert result["route_kind"] == "task_dispatch"
+    assert result["tool_call_payloads"] == []
 
 
 @pytest.mark.asyncio

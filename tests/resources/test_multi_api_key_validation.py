@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from g3ku.config.schema import ManagedModelConfig
 from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.llm_config.models import ModelBindingDraft, ProviderConfigDraft
@@ -95,4 +97,30 @@ def test_binding_api_key_limits_reject_all_zero_arrays() -> None:
         LLMConfigFacade._validate_binding_api_key_limits(
             api_key="key-1,key-2",
             value=[0, 0],
+        )
+
+
+def test_create_binding_rejects_duplicate_model_key_before_creating_config_record(monkeypatch, tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    facade = LLMConfigFacade(workspace)
+    config = SimpleNamespace(
+        models=SimpleNamespace(catalog=[]),
+        get_managed_model=lambda key: SimpleNamespace(key=key) if key == "primary" else None,
+    )
+
+    def _unexpected_create_config_record(payload):
+        raise AssertionError(f"create_config_record should not be called for duplicate keys: {payload!r}")
+
+    monkeypatch.setattr(facade, "create_config_record", _unexpected_create_config_record)
+
+    with pytest.raises(ValueError, match="Model key already exists: primary"):
+        facade.create_binding(
+            config,
+            draft_payload={"provider_id": "custom"},
+            binding_payload={
+                "key": "primary",
+                "config_id": "",
+                "enabled": True,
+            },
         )

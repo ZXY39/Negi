@@ -556,6 +556,11 @@ textarea {
     color: var(--status-failed-text);
 }
 
+.status-badge[data-status="unpassed"] {
+    background-color: rgba(245, 158, 11, 0.16);
+    color: #b45309;
+}
+
 .status-badge[data-status="queued"],
 .status-badge[data-status="unknown"],
 .status-badge[data-status="pending"],
@@ -6833,14 +6838,60 @@ textarea {
 
 .artifact-item {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
     width: 100%;
     text-align: left;
     padding: var(--space-3);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     background: var(--bg-app);
+}
+
+.artifact-item-path {
+    flex: 1;
+    min-width: 0;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.artifact-item-state {
+    flex-shrink: 0;
+    width: 1.9rem;
+    height: 1.9rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-full);
+    border: 1px solid transparent;
+}
+
+.artifact-item-state svg {
+    width: 0.95rem;
+    height: 0.95rem;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.artifact-item-state--created {
+    color: var(--status-success-text);
+    background: color-mix(in srgb, var(--status-success-bg) 92%, var(--bg-app));
+    border-color: color-mix(in srgb, var(--status-success-text) 22%, transparent);
+}
+
+.artifact-item-state--modified {
+    color: #b45309;
+    background: rgba(245, 158, 11, 0.14);
+    border-color: rgba(245, 158, 11, 0.28);
+}
+
+[data-theme="dark"] .artifact-item-state--modified {
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.18);
+    border-color: rgba(245, 158, 11, 0.34);
 }
 
 .artifact-item.active {

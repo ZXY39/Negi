@@ -83,25 +83,31 @@ class ModelConfigTool(Tool):
         }
 
     async def execute(self, action: str, **kwargs: Any) -> Any:
-        manager = ModelManager.load()
         action_name = str(action or "").strip().lower()
 
         if action_name == "list_templates":
-            return {"items": manager.list_templates()}
+            return {"items": ModelManager.load_facade().list_templates()}
 
         if action_name == "get_template":
-            return manager.get_template(str(kwargs.get("provider_id") or "").strip())
+            return ModelManager.load_facade().get_template(str(kwargs.get("provider_id") or "").strip())
 
         if action_name == "validate_draft":
-            return manager.validate_draft(kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {})
+            return ModelManager.load_facade().validate_draft(
+                kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {}
+            )
 
         if action_name == "probe_draft":
-            return manager.probe_draft(kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {})
+            return ModelManager.load_facade().probe_draft(
+                kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {}
+            )
+
+        manager = ModelManager.load()
 
         if action_name == "create_binding":
             draft = kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {}
             binding = kwargs.get("binding") if isinstance(kwargs.get("binding"), dict) else {}
             result = manager.facade.create_binding(manager.config, draft_payload=draft, binding_payload=binding)
+            manager._revalidate()
             manager.save()
             await self._refresh_runtime(kwargs)
             return result
@@ -112,6 +118,7 @@ class ModelConfigTool(Tool):
                 model_key=str(kwargs.get("key") or "").strip(),
                 draft_payload=kwargs.get("draft") if isinstance(kwargs.get("draft"), dict) else {},
             )
+            manager._revalidate()
             manager.save()
             await self._refresh_runtime(kwargs)
             return result

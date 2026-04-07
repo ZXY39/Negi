@@ -113,6 +113,8 @@ class TaskListItem(Model):
     title: str = ''
     brief: str = ''
     status: TaskStatus = 'in_progress'
+    failure_class: str = ''
+    final_acceptance: dict[str, Any] = Field(default_factory=dict)
     is_unread: bool = False
     is_paused: bool = False
     created_at: str = ''

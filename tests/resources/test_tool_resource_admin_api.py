@@ -1907,7 +1907,7 @@ def test_task_rest_endpoint_normalizes_short_task_id():
     assert response.json()['task']['task_id'] == 'task:demo'
 
 
-def test_task_retry_rest_endpoint_normalizes_short_task_id_and_returns_new_task():
+def test_task_retry_rest_endpoint_normalizes_short_task_id_and_returns_same_task():
     captured: dict[str, str] = {}
 
     class _Record:
@@ -1925,7 +1925,7 @@ def test_task_retry_rest_endpoint_normalizes_short_task_id_and_returns_new_task(
 
         async def retry_task(self, task_id: str):
             captured['retry_task_id'] = task_id
-            return _Record('task:retry-1')
+            return _Record(task_id)
 
     from main.api import rest as task_rest
 
@@ -1938,7 +1938,7 @@ def test_task_retry_rest_endpoint_normalizes_short_task_id_and_returns_new_task(
 
     assert response.status_code == 200
     assert captured == {'normalized_from': 'demo', 'retry_task_id': 'task:demo'}
-    assert response.json()['task']['task_id'] == 'task:retry-1'
+    assert response.json()['task']['task_id'] == 'task:demo'
 
 
 def test_task_retry_rest_endpoint_returns_conflict_for_non_failed_task():
@@ -1961,6 +1961,73 @@ def test_task_retry_rest_endpoint_returns_conflict_for_non_failed_task():
 
     assert response.status_code == 409
     assert response.json()['detail'] == 'task_not_failed'
+
+
+def test_task_retry_rest_endpoint_returns_conflict_for_non_retryable_task():
+    class _StubService:
+        def normalize_task_id(self, task_id: str) -> str:
+            return f'task:{task_id}'
+
+        async def retry_task(self, task_id: str):
+            _ = task_id
+            raise ValueError('task_not_retryable')
+
+    from main.api import rest as task_rest
+
+    app = FastAPI()
+    app.include_router(task_rest.router, prefix='/api')
+    task_rest.get_agent = lambda: SimpleNamespace(main_task_service=_StubService())
+
+    client = TestClient(app)
+    response = client.post('/api/tasks/demo/retry')
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'task_not_retryable'
+
+
+def test_task_continue_evaluate_rest_endpoint_normalizes_short_task_id_and_returns_decision_payload():
+    captured: dict[str, str] = {}
+
+    class _TaskRecord:
+        def __init__(self, task_id: str):
+            self.task_id = task_id
+
+        def model_dump(self, mode: str = 'json'):
+            _ = mode
+            return {'task_id': self.task_id, 'status': 'in_progress'}
+
+    class _StubService:
+        def normalize_task_id(self, task_id: str) -> str:
+            captured['normalized_from'] = task_id
+            return f'task:{task_id}'
+
+        async def continue_evaluate_task(self, task_id: str):
+            captured['continue_evaluate_task_id'] = task_id
+            return {
+                'task': _TaskRecord(task_id),
+                'decision': 'continuation_created',
+                'continuation_task': _TaskRecord('task:cont-1'),
+                'reply_text': 'continuation created',
+            }
+
+    from main.api import rest as task_rest
+
+    app = FastAPI()
+    app.include_router(task_rest.router, prefix='/api')
+    task_rest.get_agent = lambda: SimpleNamespace(main_task_service=_StubService())
+
+    client = TestClient(app)
+    response = client.post('/api/tasks/demo/continue-evaluate')
+
+    assert response.status_code == 200
+    assert captured == {
+        'normalized_from': 'demo',
+        'continue_evaluate_task_id': 'task:demo',
+    }
+    payload = response.json()
+    assert payload['decision'] == 'continuation_created'
+    assert payload['task']['task_id'] == 'task:demo'
+    assert payload['continuation_task']['task_id'] == 'task:cont-1'
 
 
 def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
@@ -2147,16 +2214,12 @@ def test_llm_config_update_refreshes_runtime(monkeypatch):
             captured['payload'] = dict(payload)
             return {'config_id': config_id, 'provider_id': 'responses'}
 
-    class _StubManager:
-        def __init__(self):
-            self.facade = _StubFacade()
-
     async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
 
-    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
+    monkeypatch.setattr(admin_rest.ModelManager, 'load_facade', classmethod(lambda cls: _StubFacade()))
     monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
 
     app = FastAPI()
@@ -2171,6 +2234,33 @@ def test_llm_config_update_refreshes_runtime(monkeypatch):
     assert captured['payload'] == {'default_model': 'gpt-5.2'}
     assert captured['force'] is True
     assert captured['reason'] == 'admin_llm_config_update'
+
+
+def test_llm_draft_validate_does_not_require_loading_runtime_config(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _StubFacade:
+        def validate_draft(self, payload: dict):
+            captured['payload'] = dict(payload)
+            return {'valid': True, 'errors': [], 'normalized_preview': {'provider_id': 'custom'}}
+
+    def _unexpected_load(_cls):
+        raise AssertionError('validate draft should not load full runtime config')
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(_unexpected_load))
+    monkeypatch.setattr(admin_rest.ModelManager, 'load_facade', classmethod(lambda cls: _StubFacade()))
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post('/api/llm/drafts/validate', json={'provider_id': 'custom'})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['result']['valid'] is True
+    assert captured['payload'] == {'provider_id': 'custom'}
 
 
 def test_llm_binding_retry_count_update_persists_without_provider_probe(tmp_path: Path, monkeypatch):
@@ -2202,6 +2292,38 @@ def test_llm_binding_retry_count_update_persists_without_provider_probe(tmp_path
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['models']['catalog'][0]['retryCount'] == 4
+
+
+def test_llm_binding_create_returns_structured_duplicate_name_error(monkeypatch):
+    class _StubFacade:
+        def create_binding(self, config, *, draft_payload: dict, binding_payload: dict):
+            _ = config, draft_payload, binding_payload
+            raise ValueError('Model key already exists: primary')
+
+    class _StubManager:
+        def __init__(self):
+            self.config = object()
+            self.facade = _StubFacade()
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post(
+        '/api/llm/bindings',
+        json={
+            'binding': {'key': 'primary', 'config_id': '', 'enabled': True},
+            'draft': {'provider_id': 'custom'},
+        },
+    )
+
+    assert response.status_code == 400
+    detail = response.json()['detail']
+    assert detail['code'] == 'llm_binding_key_exists'
+    assert detail['message'] == '配置名已存在，请使用其他配置名。'
+    assert detail['data']['key'] == 'primary'
 
 
 def test_llm_binding_per_key_concurrency_update_persists_without_provider_probe(tmp_path: Path, monkeypatch):

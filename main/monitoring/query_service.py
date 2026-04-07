@@ -5,7 +5,14 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from main.models import ModelTokenUsageRecord, NodeRecord, TokenUsageSummary, normalize_tool_file_changes
+from main.models import (
+    ModelTokenUsageRecord,
+    NodeRecord,
+    TokenUsageSummary,
+    normalize_failure_class,
+    normalize_final_acceptance_metadata,
+    normalize_tool_file_changes,
+)
 from main.monitoring.execution_trace import build_execution_trace
 from main.token_usage import aggregate_node_token_usage
 from main.monitoring.models import (
@@ -65,6 +72,8 @@ class TaskQueryService:
                 title=item.title or item.task_id,
                 brief=item.brief_text or '',
                 status=item.status,
+                failure_class=normalize_failure_class((item.metadata or {}).get('failure_class')),
+                final_acceptance=normalize_final_acceptance_metadata((item.metadata or {}).get('final_acceptance')).model_dump(mode='json'),
                 is_unread=bool(item.is_unread),
                 is_paused=bool(item.is_paused),
                 created_at=item.created_at,
@@ -601,6 +610,20 @@ class TaskQueryService:
             if child_id not in round_child_ids
         ]
 
+    @staticmethod
+    def _projection_round_visible_in_snapshot(round_record: Any) -> bool:
+        child_ids = [
+            str(child_id or '').strip()
+            for child_id in list(getattr(round_record, 'child_node_ids', []) or [])
+            if str(child_id or '').strip()
+        ]
+        if child_ids:
+            return True
+        return any(
+            int(getattr(round_record, field_name, 0) or 0) > 0
+            for field_name in ('total_children', 'completed_children', 'running_children', 'failed_children')
+        )
+
     def _projection_selected_round(
         self,
         record: Any,
@@ -691,6 +714,7 @@ class TaskQueryService:
                 child_ids=self._projection_round_child_ids(round_record),
             )
             for round_record in parent_rounds
+            if self._projection_round_visible_in_snapshot(round_record)
         ]
         return TaskTreeSnapshotNode(
             node_id=node_id,
@@ -700,7 +724,7 @@ class TaskQueryService:
             title=str(getattr(record, 'title', '') or node_id).strip() or node_id,
             updated_at=str(getattr(record, 'updated_at', '') or '').strip(),
             children_fingerprint=str(getattr(record, 'children_fingerprint', '') or '').strip(),
-            default_round_id=self._projection_default_round_id(record, parent_rounds),
+            default_round_id=self._projection_default_round_id(record, snapshot_rounds),
             rounds=snapshot_rounds,
             auxiliary_child_ids=auxiliary_child_ids,
         )

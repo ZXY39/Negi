@@ -185,6 +185,10 @@ class LLMConfigFacade:
         binding = ModelBindingDraft.model_validate(binding_payload)
         from g3ku.config.schema import ManagedModelConfig
 
+        existing = config.get_managed_model(binding.key)
+        if existing is not None:
+            raise ValueError(f"Model key already exists: {binding.key}")
+
         config_id = str(binding_payload.get("config_id") or "").strip()
         if config_id:
             self.repository.get(config_id)

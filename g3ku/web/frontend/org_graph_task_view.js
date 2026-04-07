@@ -1866,14 +1866,53 @@ function renderArtifacts() {
         return;
     }
     visibleFiles.forEach((item) => {
+        const changeVisual = describeFileChange(item?.change_type);
         const row = document.createElement("div");
         row.className = "artifact-item";
-        const changeLabel = String(item?.change_type || "modified") === "created" ? "created" : "modified";
-        row.innerHTML = `<strong>${esc(item?.path || "")}</strong><span>${esc(changeLabel)}</span>`;
+        row.dataset.changeType = changeVisual.type;
+        row.innerHTML = `
+            <strong class="artifact-item-path" title="${esc(item?.path || "")}">${esc(item?.path || "")}</strong>
+            <span class="artifact-item-state artifact-item-state--${esc(changeVisual.type)}" role="img" aria-label="${esc(changeVisual.label)}" title="${esc(changeVisual.label)}">
+                ${changeVisual.iconSvg}
+            </span>
+        `;
         U.artifactList.appendChild(row);
     });
     renderArtifactHeading(visibleFiles.length);
     refreshTaskDetailScrollRegions();
+}
+
+function normalizeFileChangeType(changeType) {
+    return String(changeType || "modified").trim().toLowerCase() === "created" ? "created" : "modified";
+}
+
+function describeFileChange(changeType) {
+    const type = normalizeFileChangeType(changeType);
+    if (type === "created") {
+        return {
+            type,
+            label: "Created file",
+            iconSvg: `
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"></path>
+                    <path d="M14 2v5h5"></path>
+                    <path d="M12 12v6"></path>
+                    <path d="M9 15h6"></path>
+                </svg>
+            `.trim(),
+        };
+    }
+    return {
+        type: "modified",
+        label: "Modified file",
+        iconSvg: `
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"></path>
+                <path d="M14 2v5h5"></path>
+                <path d="M9 15.5 15.5 9a1.414 1.414 0 0 1 2 2L11 17.5 8 18l.5-3z"></path>
+            </svg>
+        `.trim(),
+    };
 }
 
 function getFileChangesForSelectedNode() {
@@ -1886,7 +1925,7 @@ function getFileChangesForSelectedNode() {
     const items = Array.isArray(source?.tool_file_changes) ? source.tool_file_changes : [];
     return items.map((item) => ({
         path: String(item?.path || "").trim(),
-        change_type: String(item?.change_type || "modified").trim().toLowerCase() === "created" ? "created" : "modified",
+        change_type: normalizeFileChangeType(item?.change_type),
     })).filter((item) => item.path);
 }
 

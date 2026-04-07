@@ -83,6 +83,28 @@
     return String(value || "").trim();
   }
 
+  function bindingNameLabel() {
+    return "配置名 / 绑定名";
+  }
+
+  function bindingNameRequiredMessage() {
+    return `${bindingNameLabel()}不能为空`;
+  }
+
+  function normalizeBindingNameText(value) {
+    let text = String(value == null ? "" : value);
+    const variants = [
+      "模型 Key",
+      "妯″瀷 Key",
+      "ДЈРН Key",
+    ];
+    variants.forEach((variant) => {
+      text = text.replaceAll(variant, bindingNameLabel());
+    });
+    text = text.replaceAll(`${bindingNameLabel()} 不能为空`, bindingNameRequiredMessage());
+    return text;
+  }
+
   function capabilityLabel(value) {
     return ({ chat: "Chat", embedding: "Embedding", rerank: "Rerank" })[String(value || "")] || String(value || "-");
   }
@@ -1063,6 +1085,7 @@
         </article>`;
     }
 
+    U.llmEditorShell.innerHTML = normalizeBindingNameText(U.llmEditorShell.innerHTML);
     setDrawerOpen(U.llmEditorBackdrop, U.llmEditorPanel, true);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
     icons();
@@ -1771,6 +1794,9 @@
     parseSingleApiKeyMaxConcurrencyInput,
     validateSingleApiKeyMaxConcurrencyInput,
     bindingNotesTitle,
+    bindingNameLabel,
+    bindingNameRequiredMessage,
+    normalizeBindingNameText,
   };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.roleEditing) {

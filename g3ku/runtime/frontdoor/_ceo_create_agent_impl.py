@@ -235,10 +235,9 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 result["jump_to"] = "end"
                 return result
             result["verified_task_ids"] = [verified_task_id]
-            result["final_output"] = self._task_dispatch_reply(
-                result_text=str(successful_dispatch.get("result_text") or "")
-            )
-            result["jump_to"] = "end"
+            result["route_kind"] = "task_dispatch"
+            result["tool_names"] = []
+            result["repair_overlay_text"] = self._verified_dispatch_reply_overlay(task_id=verified_task_id)
         return result
 
     def _middleware(self) -> list[Any]:

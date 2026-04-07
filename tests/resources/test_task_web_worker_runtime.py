@@ -4107,7 +4107,7 @@ def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Pa
     assert response.json()["item"]["detail_level"] == "full"
 
 
-def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_path: Path):
+def test_failed_final_acceptance_node_preserves_root_status_and_marks_task_business_unpassed(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -4176,11 +4176,128 @@ def test_failed_final_acceptance_node_preserves_root_status_but_fails_task(tmp_p
     assert latest_root.final_output == "root deliverable"
     assert latest_root.failure_reason == ""
     assert latest_root.check_result == "final acceptance failed"
-    assert latest_task.status == "failed"
+    assert latest_task.status == "success"
     assert latest_task.failure_reason == "final acceptance failed"
     assert final_acceptance is not None
     assert final_acceptance.status == "failed"
+    assert latest_task.metadata.get("failure_class") == "business_unpassed"
     assert latest_task.metadata.get("final_execution_output") == "root deliverable"
+    items = service.query_service.get_tasks("web:shared", 1)
+    assert len(items) == 1
+    assert items[0].failure_class == "business_unpassed"
+    assert items[0].final_acceptance.get("status") == "failed"
+
+
+@pytest.mark.asyncio
+async def test_retry_task_reopens_same_task_in_place_for_engine_failure(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("retry me in place", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        service.log_service.update_node_status(
+            record.task_id,
+            root.node_id,
+            status="failed",
+            final_output="engine failure",
+            failure_reason="engine failure",
+        )
+
+        failed_task = service.get_task(record.task_id)
+        assert failed_task is not None
+        assert failed_task.status == "failed"
+        assert failed_task.metadata.get("failure_class") == "engine_failure"
+
+        retried = await service.retry_task(record.task_id)
+        latest_task = service.get_task(record.task_id)
+        latest_root = service.get_node(record.root_node_id)
+        runtime_frame = service.log_service.read_runtime_frame(record.task_id, record.root_node_id)
+
+        assert retried is not None
+        assert retried.task_id == record.task_id
+        assert latest_task is not None
+        assert latest_root is not None
+        assert len(service.store.list_tasks()) == 1
+        assert latest_task.status == "in_progress"
+        assert latest_task.finished_at is None
+        assert latest_task.failure_reason == ""
+        assert list(latest_task.metadata.get("retry_history") or [])
+        assert latest_root.status == "in_progress"
+        assert latest_root.final_output == ""
+        assert latest_root.failure_reason == ""
+        assert runtime_frame is not None
+        assert str(runtime_frame.get("phase") or "").strip() == "before_model"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_task_rejects_business_unpassed_task(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task(
+            "final acceptance retry blocked",
+            session_id="web:shared",
+            metadata={
+                "final_acceptance": {
+                    "required": True,
+                    "prompt": "verify the final answer",
+                }
+            },
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.update_node_status(
+            record.task_id,
+            root.node_id,
+            status="success",
+            final_output="root deliverable",
+        )
+
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=root,
+            goal="final acceptance",
+            acceptance_prompt="verify the final answer",
+            parent_node_id=root.node_id,
+            metadata={"final_acceptance": True},
+        )
+        service.log_service.update_node_status(
+            record.task_id,
+            acceptance.node_id,
+            status="failed",
+            final_output="acceptance failed",
+            failure_reason="acceptance failed",
+        )
+
+        with pytest.raises(ValueError, match="task_not_retryable"):
+            await service.retry_task(record.task_id)
+    finally:
+        await service.close()
 
 
 def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
@@ -5702,6 +5819,72 @@ async def test_task_snapshot_excludes_governance_and_node_detail_includes_spawn_
         assert len(node_payload["item"]["spawn_review_rounds"]) == 1
         assert node_payload["item"]["spawn_review_rounds"][0]["round_id"] == "detail-review"
         assert node_payload["item"]["spawn_review_rounds"][0]["blocked_specs"][0]["reason"] == "信息价值不足"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_tree_snapshot_excludes_fully_blocked_spawn_rounds_but_node_detail_keeps_spawn_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    backend = _SpawnReviewToolCallChatBackend(
+        arguments={
+            "allowed_indexes": [],
+            "blocked_specs": [
+                {
+                    "index": 0,
+                    "reason": "信息价值不足",
+                    "suggestion": "请由父节点直接执行",
+                },
+                {
+                    "index": 1,
+                    "reason": "拆分过细",
+                    "suggestion": "请合并为单个批次",
+                },
+            ],
+        }
+    )
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            raise AssertionError("blocked specs should not dispatch child nodes")
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[
+                SpawnChildSpec(goal="blocked detail 1", prompt="blocked prompt 1", execution_policy=_execution_policy()),
+                SpawnChildSpec(goal="blocked detail 2", prompt="blocked prompt 2", execution_policy=_execution_policy()),
+            ],
+            call_id="detail-review-all-blocked",
+        )
+
+        subtree = service.get_task_tree_subtree_payload(record.task_id, root.node_id)
+        node_payload = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="summary")
+
+        assert [item.check_result for item in results] == ["派生已被拦截", "派生已被拦截"]
+        assert subtree is not None
+        assert node_payload is not None
+        subtree_root = subtree["nodes_by_id"][root.node_id]
+        assert subtree_root["rounds"] == []
+        assert subtree_root["default_round_id"] == ""
+        assert "spawn_review_rounds" in node_payload["item"]
+        assert len(node_payload["item"]["spawn_review_rounds"]) == 1
+        assert node_payload["item"]["spawn_review_rounds"][0]["round_id"] == "detail-review-all-blocked"
     finally:
         await service.close()
 

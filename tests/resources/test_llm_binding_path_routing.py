@@ -36,6 +36,9 @@ def test_llm_binding_update_route_accepts_model_keys_with_slashes(monkeypatch) -
             self.config = object()
             self.facade = _StubFacade()
 
+        def _revalidate(self):
+            captured["revalidated"] = True
+
         def save(self):
             captured["saved"] = True
 
@@ -59,5 +62,6 @@ def test_llm_binding_update_route_accepts_model_keys_with_slashes(monkeypatch) -
     assert response.status_code == 200
     assert captured["model_key"] == "qwen/qwen3.6-plus:free"
     assert captured["draft_payload"] == {"retry_count": 4}
+    assert captured["revalidated"] is True
     assert captured["saved"] is True
     assert captured["reason"] == "admin_llm_binding_update"

@@ -679,6 +679,10 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
                 ],
                 finish_reason="tool_calls",
             ),
+            LLMResponse(
+                content="后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。",
+                finish_reason="stop",
+            ),
         ]
     )
     loop = SimpleNamespace(
@@ -725,9 +729,8 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
 
     output = await runner.run_turn(user_input=SimpleNamespace(content="帮我查有没有上下文管理 skill"), session=session)
 
-    assert "task:demo-123" in output
-    assert "异步任务" in output
-    assert len(backend.calls) == 1
+    assert output == "后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。"
+    assert len(backend.calls) == 2
 
 
 @pytest.mark.asyncio

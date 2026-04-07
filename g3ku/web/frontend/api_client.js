@@ -42,6 +42,8 @@ class ApiClient {
                 return "Task worker status is temporarily stale. Wait for reconnection and try again.";
             case "task_worker_offline":
                 return "Task worker is offline. Controls are unavailable right now.";
+            case "llm_binding_key_exists":
+                return "配置名已存在，请使用其他配置名。";
             default:
                 return "";
         }
@@ -445,6 +447,10 @@ class ApiClient {
     static async retryTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/retry`);
         return data.task || null;
+    }
+
+    static async continueEvaluateTask(taskId) {
+        return this.post(`/api/tasks/${taskId}/continue-evaluate`);
     }
 
     static async cancelTask(taskId) {

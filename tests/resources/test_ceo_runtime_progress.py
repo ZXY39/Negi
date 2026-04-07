@@ -61,6 +61,7 @@ class _TaskService:
         self.tasks: dict[str, object] = {}
         self.node_details: dict[tuple[str, str], dict[str, object]] = {}
         self.continuation_tasks: dict[tuple[str, str], object] = {}
+        self.retry_calls: list[str] = []
 
     async def startup(self) -> None:
         return None
@@ -78,6 +79,15 @@ class _TaskService:
     def find_reusable_continuation_task(self, *, session_id: str, continuation_of_task_id: str):
         key = (str(session_id or '').strip(), str(continuation_of_task_id or '').strip())
         return self.continuation_tasks.get(key)
+
+    async def retry_task(self, task_id: str):
+        normalized = str(task_id or "").strip()
+        self.retry_calls.append(normalized)
+        current = self.tasks.get(normalized)
+        if current is None:
+            return None
+        current.status = "in_progress"
+        return current
 
 
 class _RuntimeManager:
@@ -2415,14 +2425,14 @@ async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_retur
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_reports_auto_continuation_task_in_fallback_reply(tmp_path: Path) -> None:
-    session_id = "web:ceo-heartbeat-task-terminal-continuation"
+async def test_web_session_heartbeat_reports_unpassed_continuation_task_in_fallback_reply(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-unpassed-continuation"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
     live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
     task_service = _TaskService()
-    task_service.continuation_tasks[(session_id, "task:demo-failed")] = SimpleNamespace(task_id="task:cont-2")
+    task_service.continuation_tasks[(session_id, "task:demo-unpassed")] = SimpleNamespace(task_id="task:cont-2")
     service = WebSessionHeartbeatService(
         workspace=tmp_path,
         agent=SimpleNamespace(tool_execution_manager=None),
@@ -2431,14 +2441,16 @@ async def test_web_session_heartbeat_reports_auto_continuation_task_in_fallback_
         session_manager=session_manager,
     )
     payload = {
-        "task_id": "task:demo-failed",
+        "task_id": "task:demo-unpassed",
         "session_id": session_id,
-        "title": "demo failed task",
-        "status": "failed",
-        "brief_text": "model provider failed",
-        "failure_reason": "Model provider call failed after exhausting the configured fallback chain.",
+        "title": "demo unpassed task",
+        "status": "success",
+        "failure_class": "business_unpassed",
+        "final_acceptance_status": "failed",
+        "brief_text": "acceptance failed",
+        "failure_reason": "Acceptance failed after final review.",
         "finished_at": "2026-03-28T01:34:32+08:00",
-        "dedupe_key": "task-terminal:task:demo-failed:failed:2026-03-28T01:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-unpassed:success:2026-03-28T01:34:32+08:00",
     }
     accepted = service.enqueue_task_terminal_payload(payload)
     assert accepted is True
@@ -2451,12 +2463,100 @@ async def test_web_session_heartbeat_reports_auto_continuation_task_in_fallback_
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
     assert envelope["type"] == "ceo.reply.final"
-    assert envelope["data"]["text"] == "任务 `demo-failed` 已失败，已自动续跑为 `cont-2`，我会继续推进。"
+    assert envelope["data"]["text"] == "任务 `demo-unpassed` 已完成但未通过验收，已经续跑为 `cont-2`，我会继续推进。"
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
-    assert reloaded.messages[-1]["metadata"]["task_ids"] == ["task:demo-failed", "task:cont-2"]
-    assert reloaded.messages[-1]["content"] == "任务 `demo-failed` 已失败，已自动续跑为 `cont-2`，我会继续推进。"
+    assert reloaded.messages[-1]["metadata"]["task_ids"] == ["task:demo-unpassed", "task:cont-2"]
+    assert reloaded.messages[-1]["content"] == "任务 `demo-unpassed` 已完成但未通过验收，已经续跑为 `cont-2`，我会继续推进。"
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_does_not_report_continuation_for_engine_failure(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-engine-failure"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    task_service = _TaskService()
+    task_service.continuation_tasks[(session_id, "task:demo-engine-failed")] = SimpleNamespace(task_id="task:cont-3")
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    payload = {
+        "task_id": "task:demo-engine-failed",
+        "session_id": session_id,
+        "title": "demo engine failed task",
+        "status": "failed",
+        "failure_class": "engine_failure",
+        "brief_text": "model provider failed",
+        "failure_reason": "Model provider call failed after exhausting the configured fallback chain.",
+        "finished_at": "2026-03-28T02:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-engine-failed:failed:2026-03-28T02:34:32+08:00",
+    }
+    accepted = service.enqueue_task_terminal_payload(payload)
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert len(task_service.registry.published) == 1
+    published_session, envelope = task_service.registry.published[0]
+    assert published_session == session_id
+    assert envelope["type"] == "ceo.reply.final"
+    assert envelope["data"]["text"] == "任务 `demo-engine-failed` 已失败：model provider failed"
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_auto_retries_engine_failure_in_place(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-engine-retry"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    task_service = _TaskService()
+    task_id = "task:demo-engine-retry"
+    task_service.tasks[task_id] = SimpleNamespace(
+        task_id=task_id,
+        status="failed",
+        metadata={"failure_class": "engine_failure"},
+    )
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    payload = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "title": "demo engine retry task",
+        "status": "failed",
+        "failure_class": "engine_failure",
+        "brief_text": "model provider failed",
+        "failure_reason": "Model provider call failed after exhausting the configured fallback chain.",
+        "finished_at": "2026-03-28T03:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-engine-retry:failed:2026-03-28T03:34:32+08:00",
+    }
+    accepted = service.enqueue_task_terminal_payload(payload)
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert task_service.retry_calls == [task_id]
+    assert len(task_service.registry.published) == 1
+    published_session, envelope = task_service.registry.published[0]
+    assert published_session == session_id
+    assert envelope["type"] == "ceo.reply.final"
+    assert envelope["data"]["text"] == "任务 `demo-engine-retry` 遇到工程故障，已在原任务内继续重试。"
 
 
 @pytest.mark.asyncio

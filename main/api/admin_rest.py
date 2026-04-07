@@ -69,6 +69,23 @@ def _service():
     return service
 
 
+def _llm_facade():
+    return ModelManager.load_facade()
+
+
+def _llm_binding_create_error_detail(exc: Exception) -> dict[str, Any] | str:
+    message = str(exc or '').strip()
+    prefix = 'Model key already exists:'
+    if message.startswith(prefix):
+        duplicate_key = message[len(prefix):].strip()
+        return {
+            'code': 'llm_binding_key_exists',
+            'message': '配置名已存在，请使用其他配置名。',
+            'data': {'key': duplicate_key},
+        }
+    return message
+
+
 def _checkpoint_agent():
     try:
         return get_agent()
@@ -1820,15 +1837,13 @@ async def update_model_roles(scope: str, payload: dict = Body(...)):
 
 @router.get('/llm/templates')
 async def list_llm_templates():
-    manager = ModelManager.load()
-    return {'ok': True, 'items': manager.list_templates()}
+    return {'ok': True, 'items': _llm_facade().list_templates()}
 
 
 @router.get('/llm/templates/{provider_id}')
 async def get_llm_template(provider_id: str):
-    manager = ModelManager.load()
     try:
-        item = manager.get_template(provider_id)
+        item = _llm_facade().get_template(provider_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {'ok': True, 'item': item}
@@ -1836,9 +1851,8 @@ async def get_llm_template(provider_id: str):
 
 @router.post('/llm/drafts/validate')
 async def validate_llm_draft(payload: dict = Body(...)):
-    manager = ModelManager.load()
     try:
-        result = manager.validate_draft(payload)
+        result = _llm_facade().validate_draft(payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'ok': True, 'result': result}
@@ -1846,9 +1860,8 @@ async def validate_llm_draft(payload: dict = Body(...)):
 
 @router.post('/llm/drafts/probe')
 async def probe_llm_draft(payload: dict = Body(...)):
-    manager = ModelManager.load()
     try:
-        result = manager.probe_draft(payload)
+        result = _llm_facade().probe_draft(payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'ok': True, 'result': result}
@@ -1856,9 +1869,8 @@ async def probe_llm_draft(payload: dict = Body(...)):
 
 @router.post('/llm/drafts/probe-max-concurrency')
 async def probe_llm_draft_max_concurrency(payload: dict = Body(...)):
-    manager = ModelManager.load()
     try:
-        result = await manager.probe_max_concurrency_draft(payload)
+        result = await _llm_facade().probe_max_concurrency_draft(payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'ok': True, 'result': result}
@@ -1866,15 +1878,13 @@ async def probe_llm_draft_max_concurrency(payload: dict = Body(...)):
 
 @router.get('/llm/configs')
 async def list_llm_configs():
-    manager = ModelManager.load()
-    return {'ok': True, 'items': manager.facade.list_config_records()}
+    return {'ok': True, 'items': _llm_facade().list_config_records()}
 
 
 @router.get('/llm/configs/{config_id}')
 async def get_llm_config(config_id: str, include_secrets: bool = Query(False)):
-    manager = ModelManager.load()
     try:
-        item = manager.facade.get_config_record(config_id, include_secrets=include_secrets)
+        item = _llm_facade().get_config_record(config_id, include_secrets=include_secrets)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {'ok': True, 'item': item}
@@ -1882,9 +1892,8 @@ async def get_llm_config(config_id: str, include_secrets: bool = Query(False)):
 
 @router.post('/llm/configs')
 async def create_llm_config(payload: dict = Body(...)):
-    manager = ModelManager.load()
     try:
-        item = manager.facade.create_config_record(payload)
+        item = _llm_facade().create_config_record(payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'ok': True, 'item': item}
@@ -1892,9 +1901,8 @@ async def create_llm_config(payload: dict = Body(...)):
 
 @router.put('/llm/configs/{config_id}')
 async def update_llm_config(config_id: str, payload: dict = Body(...)):
-    manager = ModelManager.load()
     try:
-        item = manager.facade.update_config_record(config_id, payload)
+        item = _llm_facade().update_config_record(config_id, payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _refresh_runtime('admin_llm_config_update')
@@ -1903,9 +1911,8 @@ async def update_llm_config(config_id: str, payload: dict = Body(...)):
 
 @router.delete('/llm/configs/{config_id}')
 async def delete_llm_config(config_id: str):
-    manager = ModelManager.load()
     try:
-        manager.facade.delete_config_record(config_id)
+        _llm_facade().delete_config_record(config_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {'ok': True}
@@ -1928,8 +1935,9 @@ async def create_llm_binding(payload: dict = Body(...)):
     binding = payload.get('binding') if isinstance(payload.get('binding'), dict) else {}
     try:
         item = manager.facade.create_binding(manager.config, draft_payload=draft, binding_payload=binding)
+        manager._revalidate()
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_llm_binding_create_error_detail(exc)) from exc
     manager.save()
     await _refresh_runtime('admin_llm_binding_create')
     return {'ok': True, 'item': item}
@@ -1940,6 +1948,7 @@ async def update_llm_binding(model_key: str, payload: dict = Body(...)):
     manager = ModelManager.load()
     try:
         item = manager.facade.update_binding(manager.config, model_key=model_key, draft_payload=payload)
+        manager._revalidate()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     manager.save()

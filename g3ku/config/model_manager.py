@@ -89,6 +89,10 @@ class ModelManager:
     def load(cls) -> "ModelManager":
         return cls(load_config())
 
+    @classmethod
+    def load_facade(cls) -> LLMConfigFacade:
+        return LLMConfigFacade()
+
     def list_templates(self) -> list[dict[str, Any]]:
         return self.facade.list_templates()
 

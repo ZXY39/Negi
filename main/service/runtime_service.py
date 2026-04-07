@@ -47,10 +47,14 @@ from main.governance.roles import to_public_allowed_roles
 from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
+    FAILURE_CLASS_BUSINESS_UNPASSED,
+    FAILURE_CLASS_ENGINE,
+    FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
     NodeRecord,
     TaskArtifactRecord,
     TaskRecord,
     TokenUsageSummary,
+    normalize_failure_class,
     normalize_execution_policy_metadata,
     normalize_final_acceptance_metadata,
 )
@@ -989,6 +993,130 @@ class MainRuntimeService:
             )
         return self.get_task(task_id)
 
+    @staticmethod
+    def _runtime_session_context(session_id: str) -> dict[str, str]:
+        normalized_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
+        channel, _, chat_id = normalized_session_id.partition(':')
+        normalized_channel = str(channel or 'web').strip() or 'web'
+        normalized_chat_id = str(chat_id or normalized_session_id).strip() or normalized_session_id
+        return {
+            'session_key': normalized_session_id,
+            'channel': normalized_channel,
+            'chat_id': normalized_chat_id,
+        }
+
+    @staticmethod
+    def _append_retry_history(
+        metadata: dict[str, Any],
+        *,
+        source: str,
+        failure_class: str,
+        failure_reason: str,
+    ) -> dict[str, Any]:
+        next_metadata = dict(metadata or {})
+        history = list(next_metadata.get('retry_history') or [])
+        entry = {
+            'retried_at': now_iso(),
+            'source': str(source or 'manual').strip() or 'manual',
+            'failure_class': normalize_failure_class(failure_class, default=FAILURE_CLASS_ENGINE),
+            'failure_reason': str(failure_reason or '').strip(),
+        }
+        history.append(entry)
+        next_metadata['retry_history'] = history[-20:]
+        next_metadata['last_retry_at'] = entry['retried_at']
+        next_metadata['last_retry_source'] = entry['source']
+        return next_metadata
+
+    def _reopen_task_in_place_for_retry(self, task: TaskRecord, *, source: str) -> TaskRecord:
+        root = self.store.get_node(task.root_node_id)
+        if root is None:
+            raise ValueError('task_not_retryable')
+
+        failure_class = normalize_failure_class((task.metadata or {}).get('failure_class'), default=FAILURE_CLASS_ENGINE)
+        retry_metadata = self._append_retry_history(
+            dict(task.metadata or {}),
+            source=source,
+            failure_class=failure_class,
+            failure_reason=str(task.failure_reason or root.failure_reason or '').strip(),
+        )
+        retry_metadata.pop('final_execution_output', None)
+        retry_metadata.pop('failure_class', None)
+
+        def _mutate_task(record: TaskRecord) -> TaskRecord:
+            return record.model_copy(
+                update={
+                    'status': 'in_progress',
+                    'pause_requested': False,
+                    'is_paused': False,
+                    'cancel_requested': False,
+                    'finished_at': None,
+                    'final_output': '',
+                    'final_output_ref': '',
+                    'failure_reason': '',
+                    'updated_at': now_iso(),
+                    'metadata': dict(retry_metadata),
+                }
+            )
+
+        def _mutate_root(record: NodeRecord) -> NodeRecord:
+            metadata = dict(record.metadata or {})
+            metadata.pop('result_schema_version', None)
+            metadata.pop('result_payload', None)
+            metadata.pop('result_payload_ref', None)
+            metadata.pop('result_payload_summary', None)
+            return record.model_copy(
+                update={
+                    'status': 'in_progress',
+                    'check_result': '',
+                    'check_result_ref': '',
+                    'final_output': '',
+                    'final_output_ref': '',
+                    'failure_reason': '',
+                    'finished_at': None,
+                    'updated_at': now_iso(),
+                    'metadata': metadata,
+                }
+            )
+
+        self.store.update_task(task.task_id, _mutate_task)
+        self.store.update_node(root.node_id, _mutate_root)
+        self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
+
+        runtime_state = self.log_service.read_runtime_state(task.task_id) or {}
+        frames = [
+            dict(item)
+            for item in list(runtime_state.get('frames') or [])
+            if isinstance(item, dict) and str(item.get('node_id') or '').strip()
+        ]
+        if not any(str(item.get('node_id') or '').strip() == root.node_id for item in frames):
+            frames.append(
+                self.log_service._default_frame(
+                    node_id=root.node_id,
+                    depth=root.depth,
+                    node_kind=root.node_kind,
+                    phase='before_model',
+                )
+            )
+        self.log_service.replace_runtime_frames(
+            task.task_id,
+            frames=frames,
+            active_node_ids=[root.node_id],
+            runnable_node_ids=[root.node_id],
+            waiting_node_ids=[],
+            publish_snapshot=False,
+        )
+        self.log_service.update_task_runtime_meta(
+            task.task_id,
+            last_visible_output_at=self._stall_now_iso(),
+            last_stall_notice_bucket_minutes=0,
+        )
+        self.log_service.append_node_output(
+            task.task_id,
+            root.node_id,
+            content='System retry reopened this task in place after an engine failure.',
+        )
+        return self.get_task(task.task_id) or task
+
     async def retry_task(self, task_id: str) -> TaskRecord | None:
         await self.startup()
         task_id = self.normalize_task_id(task_id)
@@ -997,17 +1125,108 @@ class MainRuntimeService:
         task = self.get_task(task_id)
         if task is None:
             return None
+        metadata = dict(task.metadata or {})
+        failure_class = normalize_failure_class(metadata.get('failure_class'))
+        final_acceptance = normalize_final_acceptance_metadata(metadata.get('final_acceptance'))
+        if (
+            failure_class in {FAILURE_CLASS_BUSINESS_UNPASSED, FAILURE_CLASS_NON_RETRYABLE_BLOCKED}
+            or (
+                str(task.status or '').strip().lower() == 'success'
+                and bool(final_acceptance.required)
+                and str(final_acceptance.status or '').strip().lower() == 'failed'
+            )
+        ):
+            raise ValueError('task_not_retryable')
         if task.status != 'failed':
             raise ValueError('task_not_failed')
+        reopened = self._reopen_task_in_place_for_retry(task, source='manual')
+        if self.execution_mode in {'embedded', 'worker'}:
+            await self.global_scheduler.enqueue_task(task.task_id)
+        else:
+            self._enqueue_task_command(
+                command_type='resume_task',
+                task_id=task.task_id,
+                session_id=task.session_id,
+                payload={'task_id': task.task_id},
+            )
+        return reopened
+
+    async def continue_evaluate_task(self, task_id: str) -> dict[str, Any] | None:
+        await self.startup()
+        task_id = self.normalize_task_id(task_id)
+        task = self.get_task(task_id)
+        if task is None:
+            return None
         metadata = dict(task.metadata or {})
-        metadata['retry_of_task_id'] = task.task_id
-        return await self.create_task(
-            task.user_request,
-            session_id=task.session_id,
-            max_depth=task.max_depth,
-            title=task.title,
-            metadata=metadata,
+        failure_class = normalize_failure_class(metadata.get('failure_class'))
+        final_acceptance = normalize_final_acceptance_metadata(metadata.get('final_acceptance'))
+        if not (
+            failure_class == FAILURE_CLASS_BUSINESS_UNPASSED
+            or (
+                str(task.status or '').strip().lower() == 'success'
+                and bool(final_acceptance.required)
+                and str(final_acceptance.status or '').strip().lower() == 'failed'
+            )
+        ):
+            raise ValueError('task_not_unpassed')
+
+        origin_session_id = self._task_origin_session_id(task)
+        existing_continuation = self.find_reusable_continuation_task(
+            session_id=origin_session_id,
+            continuation_of_task_id=task.task_id,
         )
+        if existing_continuation is not None:
+            return {
+                'task': task,
+                'decision': 'continuation_created',
+                'continuation_task': existing_continuation,
+                'reply_text': '',
+            }
+
+        from g3ku.shells.web import get_agent, get_runtime_manager
+
+        runtime_manager = get_runtime_manager(get_agent())
+        context = self._runtime_session_context(origin_session_id)
+        root = self.get_node(task.root_node_id)
+        acceptance_node = self.get_node(final_acceptance.node_id) if str(final_acceptance.node_id or '').strip() else None
+        prompt_payload = {
+            'task_id': task.task_id,
+            'title': str(task.title or ''),
+            'failure_class': FAILURE_CLASS_BUSINESS_UNPASSED,
+            'final_acceptance': final_acceptance.model_dump(mode='json'),
+            'brief_text': str(task.brief_text or ''),
+            'failure_reason': str(task.failure_reason or ''),
+            'execution_deliverable': str((task.metadata or {}).get('final_execution_output') or task.final_output or ''),
+            'root_output': str(getattr(root, 'final_output', '') or ''),
+            'root_check_result': str(getattr(root, 'check_result', '') or ''),
+            'acceptance_output': str(getattr(acceptance_node, 'final_output', '') or ''),
+            'acceptance_failure_reason': str(getattr(acceptance_node, 'failure_reason', '') or ''),
+        }
+        prompt_text = (
+            'You are evaluating whether a completed but unpassed task should continue in a new continuation task.\n'
+            'You must choose exactly one path:\n'
+            '1. If the user request is still clearly unsatisfied and you can continue without asking for new user input or approval, call create_async_task with continuation_of_task_id set to the original task id.\n'
+            '2. Otherwise, do not create any new task and instead reply directly to the user with a concise closure that explains what remains uncertain or why no further autonomous work is justified.\n'
+            'Do not claim a continuation was created unless you actually call create_async_task.\n'
+            'Here is the task context:\n'
+            f'{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}'
+        )
+        prompt_result = await runtime_manager.prompt(
+            prompt_text,
+            session_key=context['session_key'],
+            channel=context['channel'],
+            chat_id=context['chat_id'],
+        )
+        continuation_task = self.find_reusable_continuation_task(
+            session_id=origin_session_id,
+            continuation_of_task_id=task.task_id,
+        )
+        return {
+            'task': self.get_task(task.task_id) or task,
+            'decision': 'continuation_created' if continuation_task is not None else 'self_closed',
+            'continuation_task': continuation_task,
+            'reply_text': str(getattr(prompt_result, 'output', '') or '').strip(),
+        }
 
     async def delete_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)

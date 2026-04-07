@@ -2357,7 +2357,8 @@ class NodeRunner:
     def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED
         self._log_service.finalize_execution_stage(task_id, node_id, status=status)
-        self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
+        if status == STATUS_SUCCESS:
+            self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
         self._persist_result_payload(task_id, node_id, result)
         self._log_service.update_node_status(
             task_id,

@@ -591,6 +591,35 @@ def _migrate_removed_ceo_frontdoor_implementation(raw_data: dict[str, Any]) -> b
     return changed
 
 
+def _dedupe_duplicate_model_catalog_keys(raw_data: dict[str, Any]) -> bool:
+    models = raw_data.get("models")
+    if not isinstance(models, dict):
+        return False
+    catalog = models.get("catalog")
+    if not isinstance(catalog, list):
+        return False
+
+    deduped: list[Any] = []
+    seen_keys: set[str] = set()
+    changed = False
+    for item in catalog:
+        if not isinstance(item, dict):
+            deduped.append(item)
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            deduped.append(item)
+            continue
+        if key in seen_keys:
+            changed = True
+            continue
+        seen_keys.add(key)
+        deduped.append(item)
+    if changed:
+        models["catalog"] = deduped
+    return changed
+
+
 def build_project_config_from_example(example_path: Path | None = None) -> Config:
     """Build a strict project config from a project-local or bundled example file."""
     raw, source = _read_example_config_text(example_path)
@@ -605,6 +634,7 @@ def load_config(config_path: Path | None = None) -> Config:
         raise ValueError(f"Config must be loaded from {expected_path}, got {path}")
     raw_data = _load_json_file(expected_path)
     changed = _migrate_legacy_gateway_config(raw_data)
+    changed = _dedupe_duplicate_model_catalog_keys(raw_data) or changed
     _ensure_no_removed_model_fields(raw_data)
     _ensure_no_removed_role_scopes(raw_data)
     _ensure_no_removed_tools_config(raw_data)

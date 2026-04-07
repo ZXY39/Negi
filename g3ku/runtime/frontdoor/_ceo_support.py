@@ -15,7 +15,7 @@ from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.protocol import now_iso
-from main.runtime.chat_backend import ConfigChatBackend
+from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
 from main.runtime.tool_call_repair import format_xml_repair_failure_reason
 
 
@@ -37,7 +37,7 @@ class _DirectProviderChatBackend:
     ):
         model = str(model_refs[0] if model_refs else "").strip() or None
         kwargs: dict[str, Any] = {
-            "messages": messages,
+            "messages": sanitize_provider_messages(messages),
             "tools": tools,
             "model": model,
             "tool_choice": "auto",

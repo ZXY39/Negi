@@ -540,6 +540,11 @@ textarea {
     color: var(--status-failed-text);
 }
 
+.status-badge[data-status="unpassed"] {
+    background-color: rgba(245, 158, 11, 0.16);
+    color: #b45309;
+}
+
 .status-badge[data-status="queued"],
 .status-badge[data-status="unknown"],
 .status-badge[data-status="pending"],

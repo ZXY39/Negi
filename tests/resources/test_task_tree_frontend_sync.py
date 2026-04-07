@@ -325,6 +325,66 @@ def test_sync_task_tree_header_counts_non_terminal_non_waiting_nodes() -> None:
     assert result["rootActiveNodeCount"] == 2
 
 
+def test_task_status_helpers_treat_unpassed_as_non_failed_and_show_continue_action() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const pStatusStart = appCode.indexOf("const pStatus");
+        const helperStart = appCode.indexOf("const canPause");
+        const helperEnd = appCode.indexOf("function normalizeTokenUsage");
+        vm.runInThisContext(appCode.slice(pStatusStart, helperStart));
+        vm.runInThisContext(appCode.slice(helperStart, helperEnd));
+
+        global.taskWorkerControlsAvailable = () => true;
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const labelStart = tasksCode.indexOf("function taskStatusLabel");
+        const labelEnd = tasksCode.indexOf("function getSelectedTasks");
+        const actionStart = tasksCode.indexOf("function taskActionTone");
+        const actionEnd = tasksCode.indexOf("function taskActionSuccessTitle");
+        vm.runInThisContext(tasksCode.slice(labelStart, labelEnd));
+        vm.runInThisContext(tasksCode.slice(actionStart, actionEnd));
+
+        const engineFailed = {
+          task_id: "task:engine",
+          status: "failed",
+          failure_class: "engine_failure",
+        };
+        const unpassed = {
+          task_id: "task:unpassed",
+          status: "success",
+          failure_class: "business_unpassed",
+          final_acceptance: { status: "failed" },
+        };
+
+        console.log(JSON.stringify({
+          engineRetry: canRetry(engineFailed),
+          unpassedRetry: canRetry(unpassed),
+          unpassedContinue: canContinueEvaluate(unpassed),
+          unpassedStatus: taskStatusKey(unpassed),
+          unpassedLabel: taskStatusLabel(unpassed),
+          unpassedInFailedBucket: statusBucketMatches(unpassed, "failed"),
+          primaryAction: primaryTaskAction(unpassed),
+          actions: taskCardActions(unpassed).map((item) => item.action),
+        }));
+        """
+    )
+
+    assert result["engineRetry"] is True
+    assert result["unpassedRetry"] is False
+    assert result["unpassedContinue"] is True
+    assert result["unpassedStatus"] == "unpassed"
+    assert result["unpassedLabel"] == "未通过"
+    assert result["unpassedInFailedBucket"] is False
+    assert result["primaryAction"]["action"] == "continue-evaluate"
+    assert result["actions"] == ["continue-evaluate", "delete"]
+
+
 def test_format_node_detail_heading_prefixes_node_id_before_title() -> None:
     result = _run_node_script(
         """
@@ -1229,6 +1289,89 @@ def test_load_selected_node_latest_context_preserves_detail_and_context_scroll()
     assert result["artifactContentScrollTop"] == 92
     assert result["contentLoaded"] is True
     assert result["payloadLength"] > 0
+
+
+def test_render_artifacts_uses_status_icons_instead_of_plain_change_text() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.HTMLElement = function HTMLElement() {};
+        global.window.requestAnimationFrame = (callback) => {
+          callback();
+          return 1;
+        };
+        const artifactList = {
+          innerHTML: "",
+          children: [],
+          appendChild(node) {
+            this.children.push(node);
+          },
+        };
+        global.document = {
+          createElement: () => ({
+            className: "",
+            dataset: {},
+            innerHTML: "",
+          }),
+        };
+        global.S = {
+          selectedNodeId: "node:1",
+          currentNodeDetail: {
+            node_id: "node:1",
+            tool_file_changes: [
+              { path: "D:/tmp/created.txt", change_type: "created" },
+              { path: "D:/tmp/updated.txt", change_type: "modified" },
+            ],
+          },
+          taskNodeDetails: {},
+        };
+        global.U = {
+          artifactList,
+        };
+        global.esc = (value) => String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        global.renderArtifactHeading = () => {};
+        global.refreshTaskDetailScrollRegions = () => {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        renderArtifacts();
+
+        const createdHtml = artifactList.children[0]?.innerHTML || "";
+        const modifiedHtml = artifactList.children[1]?.innerHTML || "";
+        console.log(JSON.stringify({
+          count: artifactList.children.length,
+          createdType: artifactList.children[0]?.dataset?.changeType || "",
+          modifiedType: artifactList.children[1]?.dataset?.changeType || "",
+          createdHasPathClass: createdHtml.includes("artifact-item-path"),
+          createdHasIconClass: createdHtml.includes("artifact-item-state artifact-item-state--created"),
+          modifiedHasIconClass: modifiedHtml.includes("artifact-item-state artifact-item-state--modified"),
+          createdHasSvg: createdHtml.includes("<svg"),
+          modifiedHasSvg: modifiedHtml.includes("<svg"),
+          createdPathBeforeIcon: createdHtml.indexOf("artifact-item-path") < createdHtml.indexOf("artifact-item-state"),
+          noPlainCreatedText: !createdHtml.includes(">created<"),
+          noPlainModifiedText: !modifiedHtml.includes(">modified<"),
+        }));
+        """
+    )
+
+    assert result["count"] == 2
+    assert result["createdType"] == "created"
+    assert result["modifiedType"] == "modified"
+    assert result["createdHasPathClass"] is True
+    assert result["createdHasIconClass"] is True
+    assert result["modifiedHasIconClass"] is True
+    assert result["createdHasSvg"] is True
+    assert result["modifiedHasSvg"] is True
+    assert result["createdPathBeforeIcon"] is True
+    assert result["noPlainCreatedText"] is True
+    assert result["noPlainModifiedText"] is True
 
 
 def test_ensure_task_node_detail_refetches_stale_flattened_summary_cache() -> None:

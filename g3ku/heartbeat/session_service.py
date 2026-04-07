@@ -695,9 +695,7 @@ class WebSessionHeartbeatService:
                 str(payload.get("brief_text") or payload.get("failure_reason") or "").strip() or "No summary.",
                 limit=180,
             )
-            if status == "success":
-                lines.append(f"任务 `{short_task_id}` 已完成：{summary}")
-            else:
+            if self._event_is_business_unpassed(event):
                 continuation_task = self._find_continuation_task_for_event(event)
                 if continuation_task is not None:
                     continuation_task_id = str(getattr(continuation_task, "task_id", "") or "").strip()
@@ -706,7 +704,15 @@ class WebSessionHeartbeatService:
                         if continuation_task_id.startswith("task:")
                         else continuation_task_id or "task"
                     )
-                    lines.append(f"任务 `{short_task_id}` 已失败，已自动续跑为 `{short_continuation_id}`，我会继续推进。")
+                    lines.append(f"任务 `{short_task_id}` 已完成但未通过验收，已经续跑为 `{short_continuation_id}`，我会继续推进。")
+                else:
+                    lines.append(f"任务 `{short_task_id}` 已完成但未通过验收，正在评估是否需要继续推进。")
+            elif status == "success":
+                lines.append(f"任务 `{short_task_id}` 已完成：{summary}")
+            else:
+                latest_task = self._event_current_task(event)
+                if latest_task is not None and str(getattr(latest_task, "status", "") or "").strip().lower() == "in_progress":
+                    lines.append(f"任务 `{short_task_id}` 遇到工程故障，已在原任务内继续重试。")
                 else:
                     lines.append(f"任务 `{short_task_id}` 已失败：{summary}")
         remaining = len(task_events) - min(3, len(task_events))
@@ -714,7 +720,64 @@ class WebSessionHeartbeatService:
             lines.append(f"另有 {remaining} 个任务终态已处理。")
         return "\n".join(lines).strip()
 
+    def _event_current_task(self, event: SessionHeartbeatEvent):
+        payload = dict(event.payload or {})
+        task_id = str(payload.get("task_id") or "").strip()
+        getter = getattr(self._main_task_service, "get_task", None)
+        if not task_id or not callable(getter):
+            return None
+        try:
+            return getter(task_id)
+        except Exception:
+            return None
+
+    def _event_is_business_unpassed(self, event: SessionHeartbeatEvent) -> bool:
+        payload = dict(event.payload or {})
+        failure_class = str(payload.get("failure_class") or "").strip().lower()
+        acceptance_status = str(payload.get("final_acceptance_status") or "").strip().lower()
+        if failure_class == "business_unpassed":
+            return True
+        if acceptance_status == "failed" and str(payload.get("status") or "").strip().lower() == "success":
+            return True
+        latest_task = self._event_current_task(event)
+        if latest_task is None:
+            return False
+        metadata = getattr(latest_task, "metadata", None) if isinstance(getattr(latest_task, "metadata", None), dict) else {}
+        final_acceptance = dict((metadata or {}).get("final_acceptance") or {}) if isinstance((metadata or {}).get("final_acceptance"), dict) else {}
+        return (
+            str((metadata or {}).get("failure_class") or "").strip().lower() == "business_unpassed"
+            or str(final_acceptance.get("status") or "").strip().lower() == "failed"
+        )
+
+    async def _auto_retry_engine_failure_events(self, events: list[SessionHeartbeatEvent]) -> list[str]:
+        retrier = getattr(self._main_task_service, "retry_task", None)
+        if not callable(retrier):
+            return []
+        retried_task_ids: list[str] = []
+        seen: set[str] = set()
+        for event in self._task_terminal_events(events):
+            if self._event_is_business_unpassed(event):
+                continue
+            payload = dict(event.payload or {})
+            task_id = str(payload.get("task_id") or "").strip()
+            if not task_id or task_id in seen:
+                continue
+            latest_task = self._event_current_task(event)
+            if latest_task is not None and str(getattr(latest_task, "status", "") or "").strip().lower() != "failed":
+                continue
+            try:
+                retried = await retrier(task_id)
+            except Exception:
+                continue
+            if retried is None:
+                continue
+            seen.add(task_id)
+            retried_task_ids.append(task_id)
+        return retried_task_ids
+
     def _find_continuation_task_for_event(self, event: SessionHeartbeatEvent) -> TaskRecord | None:
+        if not self._event_is_business_unpassed(event):
+            return None
         payload = dict(event.payload or {})
         session_id = str(payload.get("session_id") or event.session_id or "").strip()
         task_id = str(payload.get("task_id") or "").strip()
@@ -943,6 +1006,7 @@ class WebSessionHeartbeatService:
             events = [event for event in events if event.event_id not in discarded_task_stall_ids]
         if not events:
             return self._events.next_delay(key)
+        await self._auto_retry_engine_failure_events(events)
         reasons = sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events})
         heartbeat_reason = reasons[0] if len(reasons) == 1 else "mixed"
         user_input = UserInputMessage(

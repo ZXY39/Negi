@@ -100,6 +100,49 @@ def test_first_model_can_be_created_without_role_assignments(tmp_path, monkeypat
     assert reloaded.get_role_model_keys("ceo") == []
 
 
+def test_load_config_dedupes_duplicate_model_keys_preserving_first_entry(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workspace)
+    ensure_startup_config_ready()
+
+    config_path = workspace / ".g3ku" / "config.json"
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["models"]["catalog"] = [
+        {
+            "key": "primary",
+            "llmConfigId": "cfg-first",
+            "enabled": True,
+            "retryOn": ["network"],
+            "retryCount": 1,
+            "description": "first",
+        },
+        {
+            "key": "primary",
+            "llmConfigId": "cfg-second",
+            "enabled": True,
+            "retryOn": ["429"],
+            "retryCount": 2,
+            "description": "second",
+        },
+    ]
+    raw["models"]["roles"] = {
+        "ceo": ["primary"],
+        "execution": ["primary"],
+        "inspection": ["primary"],
+    }
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    cfg = load_config()
+
+    assert [item.key for item in cfg.models.catalog] == ["primary"]
+    assert cfg.models.catalog[0].llm_config_id == "cfg-first"
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert [item["key"] for item in saved["models"]["catalog"]] == ["primary"]
+    assert saved["models"]["catalog"][0]["llmConfigId"] == "cfg-first"
+
+
 def test_ceo_sessions_list_works_without_model(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)

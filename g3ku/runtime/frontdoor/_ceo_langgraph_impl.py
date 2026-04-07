@@ -602,6 +602,42 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         task_ids = self._verified_task_ids_from_text(text)
         return task_ids[0] if task_ids else ""
 
+    @staticmethod
+    def _verified_task_ids_from_state(state: CeoGraphState) -> list[str]:
+        return CeoFrontDoorRuntimeOps._normalize_task_ids(state.get("verified_task_ids"))
+
+    @staticmethod
+    def _heartbeat_task_ids_from_state(state: CeoGraphState) -> list[str]:
+        metadata = _user_input_metadata(state.get("user_input"))
+        return CeoFrontDoorRuntimeOps._normalize_task_ids(metadata.get("heartbeat_task_ids"))
+
+    def _allowed_dispatch_task_ids_from_state(self, state: CeoGraphState) -> list[str]:
+        allowed: list[str] = []
+        for task_id in self._verified_task_ids_from_state(state):
+            if task_id not in allowed:
+                allowed.append(task_id)
+        metadata = _user_input_metadata(state.get("user_input"))
+        heartbeat_internal = bool(state.get("heartbeat_internal", metadata.get("heartbeat_internal")))
+        if heartbeat_internal:
+            for task_id in self._heartbeat_task_ids_from_state(state):
+                if task_id not in allowed:
+                    allowed.append(task_id)
+        return allowed
+
+    def _dispatch_claim_uses_allowed_task_ids(
+        self,
+        *,
+        text: str,
+        state: CeoGraphState,
+    ) -> bool:
+        referenced_task_ids = self._normalize_task_ids(_TASK_ID_PATTERN.findall(str(text or "")))
+        if not referenced_task_ids:
+            return False
+        allowed_task_ids = set(self._allowed_dispatch_task_ids_from_state(state))
+        if not allowed_task_ids:
+            return False
+        return set(referenced_task_ids).issubset(allowed_task_ids)
+
     def _unverified_task_dispatch_reply(self, *, task_id: str = "") -> str:
         detail = f"：`{task_id}`" if str(task_id or "").strip() else ""
         return f"未确认成功创建后台任务{detail}。当前回合没有可验证的真实任务派发结果。"
@@ -624,6 +660,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "我会继续在后台推进，并在有结果后回复你。"
             )
         return text
+
+    @staticmethod
+    def _verified_dispatch_reply_overlay(*, task_id: str) -> str:
+        normalized_task_id = str(task_id or "").strip()
+        lines = [
+            "A real async task has already been created and verified.",
+            "Do not call any tools.",
+            "Do not create or reuse another async task.",
+            "Reply with the exact user-facing text to show now.",
+            "Use natural language rather than a rigid template.",
+        ]
+        if normalized_task_id:
+            lines.insert(1, f"The verified task id is `{normalized_task_id}`.")
+            lines.append("Include the verified task id in the reply.")
+        return "\n".join(lines).strip()
 
     async def _call_model_with_tools(
         self,
@@ -1030,7 +1081,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         text = self._content_text(response_view.content)
         if text.strip():
-            if self._looks_like_task_dispatch_claim(text):
+            if (
+                self._looks_like_task_dispatch_claim(text)
+                and not self._dispatch_claim_uses_allowed_task_ids(text=text, state=state)
+            ):
                 return {
                     "final_output": self._unverified_task_dispatch_reply(
                         task_id=self._extract_task_id(text)
@@ -1238,13 +1292,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "used_tools": used_tools,
                 "route_kind": route_kind,
                 "analysis_text": "",
+                "tool_names": [],
                 "tool_call_payloads": [],
                 "verified_task_ids": [verified_task_id],
+                "repair_overlay_text": self._verified_dispatch_reply_overlay(task_id=verified_task_id),
                 "synthetic_tool_calls_used": False,
-                "final_output": self._task_dispatch_reply(
-                    result_text=str(successful_dispatch.get("result_text") or "")
-                ),
-                "next_step": "finalize",
+                "next_step": "call_model",
             }
         return {
             "messages": messages,

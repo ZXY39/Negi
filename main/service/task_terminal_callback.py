@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from main.models import normalize_final_acceptance_metadata
+from main.models import normalize_failure_class, normalize_final_acceptance_metadata
 
 
 TASK_TERMINAL_CALLBACK_PATH = '/api/internal/task-terminal'
@@ -149,6 +149,8 @@ def build_task_terminal_payload(task: Any) -> dict[str, str]:
         'session_id': session_id,
         'title': str(getattr(task, 'title', '') or task_id).strip() or task_id,
         'status': status,
+        'failure_class': normalize_failure_class((getattr(task, 'metadata', None) or {}).get('failure_class')),
+        'final_acceptance_status': str(normalize_final_acceptance_metadata((getattr(task, 'metadata', None) or {}).get('final_acceptance')).status or '').strip().lower(),
         'brief_text': str(getattr(task, 'brief_text', '') or '').strip(),
         'failure_reason': str(getattr(task, 'failure_reason', '') or '').strip(),
         'finished_at': finished_at,
@@ -198,6 +200,8 @@ def normalize_task_terminal_payload(payload: dict[str, Any] | None) -> dict[str,
         'session_id': session_id,
         'title': str(source.get('title') or task_id).strip() or task_id,
         'status': status,
+        'failure_class': normalize_failure_class(source.get('failure_class') or source.get('failureClass')),
+        'final_acceptance_status': _normalize_task_terminal_text(source.get('final_acceptance_status') or source.get('finalAcceptanceStatus')).lower(),
         'brief_text': str(source.get('brief_text') or source.get('briefText') or '').strip(),
         'failure_reason': str(source.get('failure_reason') or source.get('failureReason') or '').strip(),
         'finished_at': finished_at,

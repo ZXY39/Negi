@@ -13,6 +13,9 @@ from g3ku.content import ContentNavigationService, content_summary_and_ref
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
+    FAILURE_CLASS_BUSINESS_UNPASSED,
+    FAILURE_CLASS_ENGINE,
+    FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
     ExecutionStageKeyRef,
     ExecutionStageRecord,
     ExecutionStageRound,
@@ -21,6 +24,7 @@ from main.models import (
     NodeOutputEntry,
     NodeRecord,
     TaskRecord,
+    normalize_failure_class,
     normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
     normalize_tool_file_changes,
@@ -1996,6 +2000,11 @@ class TaskLogService:
             next_final_output = str(output_fields.get('final_output') or '')
             next_final_output_ref = str(output_fields.get('final_output_ref') or '')
             next_failure_reason = str(output_fields.get('failure_reason') or '')
+            next_failure_class = self._next_failure_class(task_status=next_status, final_acceptance=final_acceptance)
+            current_failure_class = normalize_failure_class((task.metadata or {}).get('failure_class'))
+            if next_status == 'failed' and current_failure_class == FAILURE_CLASS_NON_RETRYABLE_BLOCKED:
+                next_failure_class = FAILURE_CLASS_NON_RETRYABLE_BLOCKED
+            next_metadata = self._task_metadata_with_failure_class(dict(task.metadata or {}), failure_class=next_failure_class)
             next_finished_at = now_iso() if next_status in {'success', 'failed'} and not task.finished_at else task.finished_at
             if (
                 str(task.status or '').strip() == str(next_status or '').strip()
@@ -2005,6 +2014,7 @@ class TaskLogService:
                 and str(task.final_output_ref or '') == next_final_output_ref
                 and str(task.failure_reason or '') == next_failure_reason
                 and str(task.finished_at or '') == str(next_finished_at or '')
+                and dict(task.metadata or {}) == next_metadata
             ):
                 self._record_debug('log_service.refresh_task_view', started_at=started_at, started_mono=started_mono)
                 return task
@@ -2018,12 +2028,27 @@ class TaskLogService:
                     'final_output_ref': next_final_output_ref,
                     'failure_reason': next_failure_reason,
                     'finished_at': next_finished_at,
+                    'metadata': next_metadata,
                 }
             )
             self._store.upsert_task(updated)
             if self._is_terminal_status(next_status):
                 self.flush_live_patch_history(updated.task_id)
-                self._store.replace_task_runtime_frames(updated.task_id, [])
+                if next_status == 'failed':
+                    frame_records = [
+                        record.model_copy(
+                            update={
+                                'active': False,
+                                'runnable': False,
+                                'waiting': False,
+                                'updated_at': now_iso(),
+                            }
+                        )
+                        for record in list(self._store.list_task_runtime_frames(updated.task_id) or [])
+                    ]
+                    self._projector.replace_runtime_frames(updated.task_id, frame_records)
+                else:
+                    self._store.replace_task_runtime_frames(updated.task_id, [])
                 self.update_task_runtime_meta(updated.task_id)
             self._publish_task_summary_patch_locked(task=updated, previous_task=task)
             if terminal_transition:
@@ -3010,6 +3035,29 @@ class TaskLogService:
         }
 
     @staticmethod
+    def _next_failure_class(*, task_status: str, final_acceptance) -> str:
+        normalized_status = str(task_status or '').strip().lower()
+        acceptance_failed = bool(
+            getattr(final_acceptance, 'required', False)
+            and str(getattr(final_acceptance, 'status', '') or '').strip().lower() == 'failed'
+        )
+        if acceptance_failed:
+            return FAILURE_CLASS_BUSINESS_UNPASSED
+        if normalized_status == 'failed':
+            return FAILURE_CLASS_ENGINE
+        return ''
+
+    @staticmethod
+    def _task_metadata_with_failure_class(metadata: dict[str, Any], *, failure_class: str) -> dict[str, Any]:
+        next_metadata = dict(metadata or {})
+        normalized_failure_class = normalize_failure_class(failure_class)
+        if normalized_failure_class:
+            next_metadata['failure_class'] = normalized_failure_class
+        else:
+            next_metadata.pop('failure_class', None)
+        return next_metadata
+
+    @staticmethod
     def _dual_channel_output(execution_output: str, failure_reason: str) -> str:
         execution_text = str(execution_output or '').strip()
         failure_text = str(failure_reason or '').strip()
@@ -3031,7 +3079,7 @@ class TaskLogService:
         if acceptance_status == 'passed':
             return 'success'
         if acceptance_status == 'failed':
-            return 'failed'
+            return 'success'
         return 'in_progress'
 
     def _require_task(self, task_id: str) -> TaskRecord:
@@ -3056,6 +3104,8 @@ class TaskLogService:
             'title': task.title,
             'brief': task.brief_text,
             'status': task.status,
+            'failure_class': normalize_failure_class((task.metadata or {}).get('failure_class')),
+            'final_acceptance': normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance')).model_dump(mode='json'),
             'is_unread': bool(task.is_unread),
             'is_paused': bool(task.is_paused),
             'created_at': task.created_at,

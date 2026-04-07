@@ -5,7 +5,7 @@ const TASK_SUMMARY_IDLE_RECONCILE_MS = 15_000;
 
 
 function taskStatusLabel(task) {
-    return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
+    return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", unpassed: "\u672a\u901a\u8fc7", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
 }
 
 function statusBucketMatches(task, bucketKey) {
@@ -749,6 +749,7 @@ function taskCardActions(task) {
     if (taskWorkerControlsAvailable() && canPause(task)) actions.push("pause");
     if (taskWorkerControlsAvailable() && canResume(task)) actions.push("resume");
     if (taskWorkerControlsAvailable() && canRetry(task)) actions.push("retry");
+    if (canContinueEvaluate(task)) actions.push("continue-evaluate");
     if (canDelete(task)) actions.push("delete");
     return actions.map((action) => ({ action, label: taskActionText(action), tone: taskActionTone(action) }));
 }
@@ -757,11 +758,12 @@ function primaryTaskAction(task) {
     if (taskWorkerControlsAvailable() && canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
     if (taskWorkerControlsAvailable() && canResume(task)) return { action: "resume", label: "开始", tone: "success" };
     if (taskWorkerControlsAvailable() && canRetry(task)) return { action: "retry", label: "重试", tone: "success" };
+    if (canContinueEvaluate(task)) return { action: "continue-evaluate", label: "\u8bc4\u4f30\u7eed\u8dd1", tone: "success" };
     return null;
 }
 
 function taskActionText(action) {
-    return ({ pause: "暂停", resume: "开始", retry: "重试", delete: "删除" }[action] || "操作");
+    return ({ pause: "暂停", resume: "开始", retry: "重试", "continue-evaluate": "\u8bc4\u4f30\u7eed\u8dd1", delete: "删除" }[action] || "操作");
 }
 
 function taskActionSuccessTitle(action) {
@@ -776,6 +778,11 @@ function taskActionErrorText(action, error) {
     const message = String(error?.message || error || "").trim();
     if (action === "retry") {
         if (message.includes("task_not_failed")) return "仅失败任务可重试";
+        if (message.includes("task_not_retryable")) return "\u8be5\u4efb\u52a1\u4e0d\u5141\u8bb8\u91cd\u8bd5";
+        if (message.includes("task_not_found")) return "任务不存在或已被删除";
+    }
+    if (action === "continue-evaluate") {
+        if (message.includes("task_not_unpassed")) return "\u4ec5\u672a\u901a\u8fc7\u9a8c\u6536\u7684\u4efb\u52a1\u53ef\u8bc4\u4f30\u7eed\u8dd1";
         if (message.includes("task_not_found")) return "任务不存在或已被删除";
     }
     if (action === "delete") {
@@ -794,6 +801,7 @@ async function requestTaskAction(taskId, action) {
     if (action === "pause") return ApiClient.pauseTask(taskId);
     if (action === "resume") return ApiClient.resumeTask(taskId);
     if (action === "retry") return ApiClient.retryTask(taskId);
+    if (action === "continue-evaluate") return ApiClient.continueEvaluateTask(taskId);
     if (action === "delete") return ApiClient.deleteTask(taskId);
     throw new Error(`Unsupported task action: ${action}`);
 }
@@ -825,11 +833,18 @@ async function performTaskAction(taskId, action) {
     renderTasksIfVisible();
     try {
         const result = await requestTaskAction(taskId, action);
-        const successText = action === "retry" ? (result?.task_id || taskId) : taskId;
+        const successText = action === "retry"
+            ? (result?.task_id || taskId)
+            : action === "continue-evaluate"
+                ? (result?.continuation_task?.task_id || result?.task?.task_id || taskId)
+                : taskId;
         showToast({ title: taskActionSuccessTitle(action), text: successText, kind: "success" });
         await loadTasks();
         if (action === "delete") {
             handleDeletedTasks([taskId]);
+        } else if (action === "continue-evaluate" && result?.continuation_task?.task_id) {
+            await loadTaskDetail(result.continuation_task.task_id, { preserveView: true, reopenSocket: false });
+            await loadTaskArtifacts();
         } else if (action !== "retry" && S.currentTaskId === taskId) {
             await loadTaskDetail(taskId, { preserveView: true, reopenSocket: false });
             await loadTaskArtifacts();
@@ -916,7 +931,7 @@ async function performTaskBatchAction(action, eligible) {
         const successText = action === "delete"
             ? `已删除 ${succeeded.length} 个任务`
             : action === "retry"
-                ? `已创建 ${succeeded.length} 个重试任务`
+                ? `已重试 ${succeeded.length} 个任务`
                 : `${succeeded.length} 个任务已更新`;
         showToast({
             title: taskActionSuccessTitle(action),

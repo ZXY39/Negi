@@ -532,13 +532,7 @@ class TaskActorService:
 
         self._record_final_execution_output(task_id, execution_output)
         failure_reason = acceptance_result.failure_text or check_result
-        self._log_service.update_node_status(
-            task_id,
-            root.node_id,
-            status='failed',
-            final_output=execution_output,
-            failure_reason=failure_reason,
-        )
+        self._log_service.refresh_task_view(task_id, mark_unread=True)
         return NodeFinalResult(
             status='failed',
             delivery_status='final',
