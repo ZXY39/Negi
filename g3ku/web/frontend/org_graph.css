@@ -3202,6 +3202,51 @@ textarea {
     gap: 10px;
 }
 
+.ceo-compression-toast {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    padding: 8px 12px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--brand-primary) 38%, transparent);
+    background: color-mix(in srgb, var(--brand-primary) 12%, var(--bg-panel));
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    line-height: 1.2;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.ceo-compression-toast.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.ceo-compression-toast-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--brand-primary);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-primary) 34%, transparent);
+    animation: ceo-compression-pulse 1.4s ease-in-out infinite;
+}
+
+.ceo-compression-toast-text {
+    white-space: nowrap;
+}
+
+@keyframes ceo-compression-pulse {
+    0%, 100% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-primary) 34%, transparent);
+    }
+    50% {
+        box-shadow: 0 0 0 6px color-mix(in srgb, var(--brand-primary) 8%, transparent);
+    }
+}
+
 .ceo-upload-status {
     font-size: 0.78rem;
     color: var(--text-muted);

@@ -1800,3 +1800,19 @@ def test_execution_trace_round_panel_is_full_width_block() -> None:
     block = match.group("body")
     assert "width: 100%;" in block
     assert "display: grid;" in block
+
+
+def test_ceo_composer_html_includes_local_compression_toast() -> None:
+    html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+
+    assert 'id="ceo-compression-toast"' in html
+    assert 'id="ceo-compression-toast-text"' in html
+    assert "上下文压缩中" in html
+
+
+def test_ceo_execution_trace_reuses_stage_round_helpers() -> None:
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+
+    assert "function renderCeoStageTraceIntoTurn" in app_js
+    assert "normalizeExecutionStageTrace(" in app_js
+    assert "renderExecutionStageRounds(" in app_js

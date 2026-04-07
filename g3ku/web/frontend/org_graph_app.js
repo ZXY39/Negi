@@ -24,6 +24,7 @@ const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v2";
 const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
+const CEO_COMPRESSION_TOAST_TEXT = "上下文压缩中";
 const CEO_COMPOSER_DRAFT_CACHE_KEY = "g3ku.ceo.composer-drafts.v1";
 const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
@@ -261,6 +262,8 @@ const U = {
     ceoAttach: document.getElementById("ceo-attach-btn"),
     ceoFileInput: document.getElementById("ceo-file-input"),
     ceoUploadList: document.getElementById("ceo-upload-list"),
+    ceoCompressionToast: document.getElementById("ceo-compression-toast"),
+    ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
     ceoSend: document.getElementById("ceo-send-btn"),
     viewCeo: document.getElementById("view-ceo"),
     viewTasks: document.getElementById("view-tasks-list"),
@@ -1008,6 +1011,30 @@ function normalizeCeoSnapshotToolEvents(events = []) {
         .slice(-CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT);
 }
 
+function normalizeCeoSnapshotExecutionTraceSummary(summary = null) {
+    if (!summary || typeof summary !== "object") return null;
+    const stages = (Array.isArray(summary?.stages) ? summary.stages : [])
+        .map((stage, index) => {
+            if (typeof normalizeExecutionStageTrace !== "function") return null;
+            return normalizeExecutionStageTrace(stage, index);
+        })
+        .filter(Boolean);
+    if (!stages.length) return null;
+    return { stages };
+}
+
+function normalizeCeoSnapshotCompression(compression = null) {
+    if (!compression || typeof compression !== "object") return null;
+    const status = String(compression?.status || "").trim().toLowerCase();
+    if (!status) return null;
+    const next = { status };
+    const source = String(compression?.source || "").trim().toLowerCase();
+    if (source) next.source = source;
+    const text = String(compression?.text || "").trim();
+    if (text) next.text = text;
+    return next;
+}
+
 function normalizeCeoSnapshotMessage(message = {}) {
     if (!message || typeof message !== "object") return null;
     const role = String(message?.role || "").trim().toLowerCase();
@@ -1022,8 +1049,10 @@ function normalizeCeoSnapshotMessage(message = {}) {
     if (attachments.length) next.attachments = attachments;
     if (role === "assistant") {
         const toolEvents = normalizeCeoSnapshotToolEvents(message?.tool_events);
+        const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(message?.execution_trace_summary);
         if (toolEvents.length) next.tool_events = toolEvents;
-        if (!String(next.content || "").trim() && !toolEvents.length) return null;
+        if (executionTraceSummary) next.execution_trace_summary = executionTraceSummary;
+        if (!String(next.content || "").trim() && !toolEvents.length && !executionTraceSummary) return null;
         return next;
     }
     if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
@@ -1050,10 +1079,14 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
         }
     }
     const toolEvents = normalizeCeoSnapshotToolEvents(snapshot?.tool_events);
+    const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(snapshot?.execution_trace_summary);
+    const compression = normalizeCeoSnapshotCompression(snapshot?.compression);
     const errorMessage = String(snapshot?.last_error?.message || "").trim();
     if (toolEvents.length) next.tool_events = toolEvents;
+    if (executionTraceSummary) next.execution_trace_summary = executionTraceSummary;
+    if (compression) next.compression = compression;
     if (errorMessage) next.last_error = { message: errorMessage };
-    if (!ceoInflightTurnHasVisibleAssistantState(next) && !next.user_message) return null;
+    if (!ceoInflightTurnHasVisibleAssistantState(next) && !next.user_message && !next.compression) return null;
     return next;
 }
 
@@ -1164,6 +1197,7 @@ function setCeoSessionSnapshotCache(sessionId, entry = {}) {
         [key]: normalized,
     });
     schedulePersistCeoSessionSnapshotCache();
+    syncCeoCompressionToast();
     return cloneCeoSessionSnapshotCacheEntry(normalized);
 }
 
@@ -1190,7 +1224,28 @@ function clearCeoSessionSnapshotCache(sessionId) {
     delete next[key];
     S.ceoSnapshotCache = pruneCeoSessionSnapshotCache(next);
     schedulePersistCeoSessionSnapshotCache();
+    syncCeoCompressionToast();
     return true;
+}
+
+function activeCeoSessionCompressionState() {
+    const cacheEntry = getCeoSessionSnapshotCache(activeSessionId());
+    const inflightTurn = normalizeCeoSnapshotInflight(cacheEntry?.inflight_turn);
+    const compression = normalizeCeoSnapshotCompression(inflightTurn?.compression);
+    if (!compression) return null;
+    return String(compression.status || "").trim().toLowerCase() === "running" ? compression : null;
+}
+
+function syncCeoCompressionToast() {
+    const toastEl = U.ceoCompressionToast;
+    const textEl = U.ceoCompressionToastText;
+    if (!toastEl || !textEl) return;
+    const compression = activeCeoSessionCompressionState();
+    const visible = !!compression;
+    textEl.textContent = visible ? CEO_COMPRESSION_TOAST_TEXT : "";
+    toastEl.hidden = !visible;
+    if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
+    toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
 }
 
 function appendCeoSessionSnapshotMessage(messages = [], message = null) {
@@ -1206,6 +1261,7 @@ function appendCeoSessionSnapshotMessage(messages = [], message = null) {
         && sameAttachments
     ) {
         if (nextMessage.tool_events) previous.tool_events = nextMessage.tool_events;
+        if (nextMessage.execution_trace_summary) previous.execution_trace_summary = nextMessage.execution_trace_summary;
         return trimCeoSessionSnapshotMessages(next);
     }
     next.push(nextMessage);
@@ -2483,7 +2539,8 @@ function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
     const status = String(snapshot.status || "").trim().toLowerCase();
     const assistantText = String(snapshot.assistant_text || "").trim();
     const toolEvents = normalizeCeoSnapshotToolEvents(snapshot.tool_events);
-    return !!assistantText || toolEvents.length > 0 || status === "paused" || status === "error";
+    const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(snapshot.execution_trace_summary);
+    return !!assistantText || toolEvents.length > 0 || !!executionTraceSummary || status === "paused" || status === "error";
 }
 
 function ceoNeedsAssistantTurn(snapshot = null) {
@@ -2544,6 +2601,44 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
     return events.length;
 }
 
+function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
+    if (!turn?.listEl || !turn?.flowEl) return 0;
+    const summary = normalizeCeoSnapshotExecutionTraceSummary(executionTraceSummary);
+    if (!summary?.stages?.length) {
+        resetCeoToolFlow(turn);
+        updateCeoTurnMeta(turn, "绛夊緟宸ュ叿寮€濮?..");
+        return 0;
+    }
+    if (typeof renderTraceStep !== "function"
+        || typeof renderExecutionStageRounds !== "function"
+        || typeof stageTraceStatus !== "function"
+        || typeof formatExecutionStageTitle !== "function"
+        || typeof displayTaskStageStatus !== "function") {
+        return 0;
+    }
+    resetCeoToolFlow(turn);
+    turn.listEl.classList?.add?.("task-trace-list");
+    turn.listEl.innerHTML = summary.stages.map((stage, index) => renderTraceStep({
+        traceKey: `ceo:stage:${stage.stage_id || stage.stage_index || index}`,
+        title: formatExecutionStageTitle(stage),
+        status: stageTraceStatus(stage),
+        statusLabel: displayTaskStageStatus(stage.status),
+        open: index === summary.stages.length - 1,
+        bodyHtml: [
+            renderTraceMessage(`本阶段最大轮数为${stage.stage_total_steps || 0}`, "本阶段最大轮数为0"),
+            renderExecutionStageRounds(stage),
+        ].join(""),
+    })).join("");
+    if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
+    const stageCount = summary.stages.length;
+    const roundCount = summary.stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
+    turn.steps = roundCount || stageCount;
+    turn.flowEl.hidden = false;
+    turn.flowEl.open = true;
+    updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
+    return roundCount;
+}
+
 function patchCeoInflightTurn(snapshot = null) {
     if (!snapshot || typeof snapshot !== "object") return false;
     const source = normalizeCeoTurnSource(snapshot?.source || "user");
@@ -2554,13 +2649,14 @@ function patchCeoInflightTurn(snapshot = null) {
     if (!turn?.textEl || !turn?.flowEl) return false;
     mutateCeoFeed(() => {
         renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
-        const toolCount = renderCeoToolEventsIntoTurn(turn, snapshot?.tool_events || [], { source });
-        if (!toolCount) {
+        const stageRoundCount = renderCeoStageTraceIntoTurn(turn, snapshot?.execution_trace_summary || null);
+        const toolCount = stageRoundCount || renderCeoToolEventsIntoTurn(turn, snapshot?.tool_events || [], { source });
+        if (!stageRoundCount && !toolCount) {
             if (status === "paused") updateCeoTurnMeta(turn, "已暂停");
             else if (status === "error") updateCeoTurnMeta(turn, "运行出错");
             else updateCeoTurnMeta(turn, "等待工具开始...");
         }
-        if (toolCount) {
+        if (stageRoundCount || toolCount) {
             turn.flowEl.hidden = false;
             turn.flowEl.open = status !== "completed";
         }
@@ -2594,9 +2690,10 @@ function restoreCeoInflightTurn(snapshot = null) {
 }
 
 function renderPersistedCeoAssistantTurn(item = {}) {
+    const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(item?.execution_trace_summary);
     const toolEvents = normalizeCeoSnapshotToolEvents(item?.tool_events);
     const content = String(item?.content || "");
-    if (!toolEvents.length) {
+    if (!executionTraceSummary && !toolEvents.length) {
         addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
         return;
     }
@@ -2608,7 +2705,8 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     S.ceoPendingTurns.push(turn);
     withCeoFeedBatch(() => {
         renderCeoAssistantTextIntoTurn(turn, content);
-        renderCeoToolEventsIntoTurn(turn, toolEvents, { source: "history" });
+        const stageRoundCount = renderCeoStageTraceIntoTurn(turn, executionTraceSummary);
+        if (!stageRoundCount) renderCeoToolEventsIntoTurn(turn, toolEvents, { source: "history" });
         turn.flowEl.hidden = false;
         turn.flowEl.open = false;
         icons();
@@ -3325,6 +3423,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
                 tool_events: inflightMatchesSource ? inflightTurn?.tool_events || [] : [],
+                execution_trace_summary: inflightMatchesSource ? inflightTurn?.execution_trace_summary || null : null,
             });
             return {
                 ...(entry || {}),
@@ -3371,6 +3470,7 @@ function finalizeCeoTurn(text, meta = {}) {
             role: "assistant",
             content: String(text || "").trim() || "Done.",
             tool_events: inflightTurn?.tool_events || [],
+            execution_trace_summary: inflightTurn?.execution_trace_summary || null,
         });
         return {
             ...(entry || {}),
@@ -5062,6 +5162,7 @@ function resetCeoSessionState({ scrollToLatest = false } = {}) {
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
     if (scrollToLatest) S.ceoScrollToLatestOnSnapshot = true;
+    syncCeoCompressionToast();
     syncCeoPrimaryButton();
 }
 
@@ -5092,6 +5193,7 @@ function renderCeoSessions() {
     if (!sessions.length) {
         U.ceoSessionList.innerHTML = '<div class="empty-state ceo-session-empty">No sessions yet.</div>';
         syncCeoSessionActions();
+        syncCeoCompressionToast();
         return;
     }
 
@@ -5134,6 +5236,7 @@ function renderCeoSessions() {
         `;
     }).join("");
     syncCeoSessionActions();
+    syncCeoCompressionToast();
     icons();
 }
 
@@ -5239,6 +5342,7 @@ function renderCeoSessions() {
         syncCeoComposerReadonlyState();
         syncCeoAttachButton();
         syncCeoSessionActions();
+        syncCeoCompressionToast();
         return;
     }
     if (S.ceoSessionTab === "channel") {
@@ -5259,6 +5363,7 @@ function renderCeoSessions() {
     syncCeoComposerReadonlyState();
     syncCeoAttachButton();
     syncCeoSessionActions();
+    syncCeoCompressionToast();
     icons();
 }
 
