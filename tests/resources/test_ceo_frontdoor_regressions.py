@@ -374,6 +374,20 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
                 content="",
                 tool_calls=[
                     ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "Create the CEO stage before using record_tool",
+                            "tool_round_budget": 1,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
                         id="call-1",
                         name="record_tool",
                         arguments={"value": "alpha"},
@@ -424,7 +438,7 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
 
     assert output == "done"
     assert executed == [("record_tool", "alpha")]
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 3
 
 
 @pytest.mark.asyncio
@@ -492,6 +506,20 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
     backend = _BackendRecorder(
         [
             LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "Open a stage before issuing XML tool syntax",
+                            "tool_round_budget": 1,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
                 content='<minimax:tool_call><invoke name="record_tool"><parameter name="value">alpha</parameter></invoke></minimax:tool_call>',
                 tool_calls=[],
                 finish_reason="stop",
@@ -539,10 +567,10 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
 
     assert output == "repair succeeded"
     assert executed == [("record_tool", "alpha")]
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 3
     assert not any(
         "XML-style pseudo tool calling" in str(item.get("content") or "")
-        for item in list(backend.calls[1].get("messages") or [])
+        for item in list(backend.calls[2].get("messages") or [])
     )
 
 
@@ -554,6 +582,20 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
     executed: list[int] = []
     backend = _BackendRecorder(
         [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "Open a stage before repairing the XML payload",
+                            "tool_round_budget": 1,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
             LLMResponse(
                 content='<minimax:tool_call><invoke name="count_tool"><parameter name="count">oops</parameter></invoke></minimax:tool_call>',
                 tool_calls=[],
@@ -607,8 +649,8 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
 
     assert output == "repair succeeded"
     assert executed == [2]
-    assert len(backend.calls) == 3
-    repair_messages = list(backend.calls[1].get("messages") or [])
+    assert len(backend.calls) == 4
+    repair_messages = list(backend.calls[2].get("messages") or [])
     assert any("XML-style pseudo tool calling" in str(item.get("content") or "") for item in repair_messages)
 
 
@@ -688,6 +730,20 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
                 content="",
                 tool_calls=[
                     ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "Create a stage before dispatching the async task",
+                            "tool_round_budget": 1,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
                         id="call-1",
                         name="create_async_task",
                         arguments={
@@ -750,13 +806,49 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     output = await runner.run_turn(user_input=SimpleNamespace(content="帮我查有没有上下文管理 skill"), session=session)
 
     assert output == "后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。"
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 3
 
 
 def test_frontdoor_compaction_settings_defaults_to_stage_budget() -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
     assert runner._frontdoor_compaction_settings() == (20, 10)
+
+
+def test_build_prompt_context_prefers_ceo_stage_overlay_over_summary_default() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = runner.build_prompt_context(
+        state={
+            "summary_text": "## CEO Durable Summary\n- durable memory",
+            "frontdoor_stage_state": {
+                "active_stage_id": "stage-1",
+                "transition_required": True,
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Inspect the current request",
+                        "tool_round_budget": 1,
+                        "tool_rounds_used": 1,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
+        runtime=SimpleNamespace(),
+        tools=[],
+    )
+
+    overlay = str(result["system_overlay"])
+    assert "Current CEO stage budget is exhausted: 1/1." in overlay
+    assert "Do not finish yet. First summarize the completed progress for this stage" in overlay
+    assert "Use the existing CEO layered context rules." not in overlay
+    assert "## CEO Durable Summary" not in overlay
 
 @pytest.mark.asyncio
 async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summarizer_disabled() -> None:

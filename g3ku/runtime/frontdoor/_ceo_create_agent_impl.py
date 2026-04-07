@@ -37,11 +37,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         overlay_text = self._effective_turn_overlay_text(state)
         if overlay_text:
             return {"system_overlay": overlay_text}
-        summary_text = str(state.get("summary_text") or "").strip()
-        system_overlay = "Use the existing CEO layered context rules."
-        if summary_text:
-            system_overlay = f"{system_overlay}\n\n{summary_text}"
-        return {"system_overlay": system_overlay}
+        return {"system_overlay": self._frontdoor_default_overlay_text(state)}
 
     def visible_langchain_tools(self, *, state, runtime) -> list[Any]:
         return list(self._build_langchain_tools_for_state(state=state, runtime=runtime))
@@ -190,6 +186,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 strict=False,
             )
         ]
+        frontdoor_stage_state = self._frontdoor_stage_state_after_tool_cycle(
+            state,
+            tool_call_payloads=tool_call_payloads,
+            tool_results=tool_results,
+        )
         substantive_tool_names = [
             str(payload.get("name") or "").strip()
             for payload in tool_call_payloads
@@ -212,6 +213,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "summary_payload": dict(compacted_state.get("summary_payload") or {}),
             "summary_version": int(compacted_state.get("summary_version") or 0),
             "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
+            "frontdoor_stage_state": frontdoor_stage_state,
             "used_tools": used_tools,
             "route_kind": route_kind,
             "analysis_text": "",

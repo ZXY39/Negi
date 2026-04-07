@@ -308,6 +308,10 @@ class CeoTurnLifecycleMiddleware(AgentMiddleware):
             "summary_payload": dict(finalized.get("summary_payload") or {}),
             "summary_version": int(finalized.get("summary_version") or 0),
             "summary_model_key": str(finalized.get("summary_model_key") or ""),
+            "frontdoor_stage_state": self._runner._frontdoor_stage_state_snapshot(state),
+            "compression_state": dict(
+                state.get("compression_state") or self._runner._default_compression_state()
+            ),
         }
 
 

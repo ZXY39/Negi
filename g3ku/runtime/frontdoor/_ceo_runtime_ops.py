@@ -17,7 +17,16 @@ from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.project_environment import current_project_environment
 from main.models import normalize_execution_policy_metadata
+from main.protocol import now_iso
 from main.runtime.chat_backend import build_prompt_cache_diagnostics, build_session_prompt_cache_key
+from main.runtime.internal_tools import SubmitNextStageTool
+from main.runtime.stage_budget import (
+    STAGE_TOOL_NAME,
+    response_tool_calls_count_against_stage_budget,
+    stage_gate_error_for_tool,
+    visible_tools_for_stage_iteration,
+)
+from main.runtime.stage_messages import build_ceo_stage_overlay, build_ceo_stage_result_block_message
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -287,6 +296,322 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             state.get("repair_overlay_text"),
         )
 
+    @staticmethod
+    def _default_frontdoor_stage_state() -> dict[str, Any]:
+        return {
+            "active_stage_id": "",
+            "transition_required": False,
+            "stages": [],
+        }
+
+    @staticmethod
+    def _default_compression_state() -> dict[str, Any]:
+        return {
+            "status": "",
+            "text": "",
+            "source": "",
+            "needs_recheck": False,
+        }
+
+    @classmethod
+    def _frontdoor_stage_state_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
+        raw = {}
+        if isinstance(state, dict):
+            raw_value = state.get("frontdoor_stage_state")
+            raw = dict(raw_value) if isinstance(raw_value, dict) else {}
+        active_stage_id = str(raw.get("active_stage_id") or "").strip()
+        normalized_stages: list[dict[str, Any]] = []
+        for index, raw_stage in enumerate(list(raw.get("stages") or []), start=1):
+            if not isinstance(raw_stage, dict):
+                continue
+            stage_id = str(raw_stage.get("stage_id") or f"frontdoor-stage-{index}").strip()
+            stage_status = str(raw_stage.get("status") or "").strip() or (
+                "active" if stage_id and stage_id == active_stage_id else "completed"
+            )
+            normalized_stages.append(
+                {
+                    "stage_id": stage_id,
+                    "stage_index": int(raw_stage.get("stage_index") or index),
+                    "stage_goal": str(raw_stage.get("stage_goal") or "").strip(),
+                    "tool_round_budget": max(0, int(raw_stage.get("tool_round_budget") or 0)),
+                    "tool_rounds_used": max(0, int(raw_stage.get("tool_rounds_used") or 0)),
+                    "status": stage_status,
+                    "mode": str(raw_stage.get("mode") or "自主执行").strip() or "自主执行",
+                    "stage_kind": str(raw_stage.get("stage_kind") or "normal").strip() or "normal",
+                    "system_generated": bool(raw_stage.get("system_generated", False)),
+                    "completed_stage_summary": str(raw_stage.get("completed_stage_summary") or "").strip(),
+                    "key_refs": [
+                        dict(item)
+                        for item in list(raw_stage.get("key_refs") or [])
+                        if isinstance(item, dict)
+                    ],
+                    "rounds": [
+                        dict(item)
+                        for item in list(raw_stage.get("rounds") or [])
+                        if isinstance(item, dict)
+                    ],
+                    "created_at": str(raw_stage.get("created_at") or ""),
+                    "finished_at": str(raw_stage.get("finished_at") or ""),
+                }
+            )
+        if active_stage_id and not any(
+            str(stage.get("stage_id") or "").strip() == active_stage_id
+            and str(stage.get("status") or "").strip().lower() == "active"
+            for stage in normalized_stages
+        ):
+            active_stage_id = ""
+        return {
+            "active_stage_id": active_stage_id,
+            "transition_required": bool(raw.get("transition_required")),
+            "stages": normalized_stages,
+        }
+
+    @classmethod
+    def _frontdoor_stage_gate(cls, state: CeoGraphState | None) -> dict[str, Any]:
+        stage_state = cls._frontdoor_stage_state_snapshot(state)
+        active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
+        active_stage = next(
+            (
+                dict(stage)
+                for stage in list(stage_state.get("stages") or [])
+                if str(stage.get("stage_id") or "").strip() == active_stage_id
+                and str(stage.get("status") or "").strip().lower() == "active"
+            ),
+            None,
+        )
+        completed_stages = [
+            dict(stage)
+            for stage in list(stage_state.get("stages") or [])
+            if active_stage is None or str(stage.get("stage_id") or "").strip() != str(active_stage.get("stage_id") or "").strip()
+        ]
+        return {
+            "enabled": True,
+            "has_active_stage": active_stage is not None,
+            "transition_required": bool(stage_state.get("transition_required")),
+            "active_stage": active_stage,
+            "completed_stages": completed_stages,
+        }
+
+    @staticmethod
+    def _frontdoor_stage_has_substantive_progress(active_stage: dict[str, Any] | None) -> bool:
+        if not isinstance(active_stage, dict):
+            return False
+        non_substantive = {STAGE_TOOL_NAME, *CeoFrontDoorSupport._CONTROL_TOOL_NAMES}
+        for round_item in list(active_stage.get("rounds") or []):
+            if not isinstance(round_item, dict):
+                continue
+            tool_names = [
+                str(name or "").strip()
+                for name in list(round_item.get("tool_names") or [])
+                if str(name or "").strip()
+            ]
+            if any(name not in non_substantive for name in tool_names):
+                return True
+        return False
+
+    @classmethod
+    def _submit_frontdoor_next_stage_state(
+        cls,
+        stage_state: dict[str, Any],
+        *,
+        stage_goal: str,
+        tool_round_budget: int,
+        completed_stage_summary: str = "",
+        key_refs: list[dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        normalized_goal = str(stage_goal or "").strip()
+        normalized_budget = int(tool_round_budget or 0)
+        normalized_summary = str(completed_stage_summary or "").strip()
+        normalized_key_refs = [dict(item) for item in list(key_refs or []) if isinstance(item, dict)]
+        if not normalized_goal:
+            raise ValueError("stage_goal must not be empty")
+        if normalized_budget < 1 or normalized_budget > 10:
+            raise ValueError("tool_round_budget must be between 1 and 10")
+
+        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
+        active_stage = next(
+            (
+                dict(stage)
+                for stage in list(normalized_state.get("stages") or [])
+                if str(stage.get("stage_id") or "").strip() == active_stage_id
+                and str(stage.get("status") or "").strip().lower() == "active"
+            ),
+            None,
+        )
+        if active_stage is not None and not cls._frontdoor_stage_has_substantive_progress(active_stage):
+            raise ValueError(
+                "current active stage has no substantive progress yet; "
+                "do not call submit_next_stage again before using a non-control tool "
+                "in this stage"
+            )
+
+        now = now_iso()
+        stages: list[dict[str, Any]] = []
+        for stage in list(normalized_state.get("stages") or []):
+            current = dict(stage)
+            if (
+                active_stage is not None
+                and str(current.get("stage_id") or "").strip() == str(active_stage.get("stage_id") or "").strip()
+                and str(current.get("status") or "").strip().lower() == "active"
+            ):
+                current.update(
+                    {
+                        "status": "completed",
+                        "finished_at": now,
+                        "completed_stage_summary": normalized_summary,
+                        "key_refs": normalized_key_refs,
+                    }
+                )
+            stages.append(current)
+
+        next_stage_index = max((int(stage.get("stage_index") or 0) for stage in stages), default=0) + 1
+        next_stage = {
+            "stage_id": f"frontdoor-stage-{next_stage_index}",
+            "stage_index": next_stage_index,
+            "stage_kind": "normal",
+            "system_generated": False,
+            "mode": "自主执行",
+            "status": "active",
+            "stage_goal": normalized_goal,
+            "completed_stage_summary": "",
+            "key_refs": [],
+            "tool_round_budget": normalized_budget,
+            "tool_rounds_used": 0,
+            "created_at": now,
+            "finished_at": "",
+            "rounds": [],
+        }
+        next_state = {
+            "active_stage_id": str(next_stage.get("stage_id") or ""),
+            "transition_required": False,
+            "stages": [*stages, next_stage],
+        }
+        return next_state, next_stage
+
+    @classmethod
+    def _record_frontdoor_stage_round(
+        cls,
+        stage_state: dict[str, Any],
+        *,
+        tool_call_payloads: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
+        if not active_stage_id or bool(normalized_state.get("transition_required")):
+            return normalized_state
+        visible_calls = [
+            dict(item)
+            for item in list(tool_call_payloads or [])
+            if str(item.get("name") or "").strip() and str(item.get("name") or "").strip() != STAGE_TOOL_NAME
+        ]
+        if not visible_calls:
+            return normalized_state
+        counts_budget = response_tool_calls_count_against_stage_budget(
+            visible_calls,
+            extra_non_budget_tools=CeoFrontDoorSupport._CONTROL_TOOL_NAMES,
+        )
+        stages: list[dict[str, Any]] = []
+        latest_active: dict[str, Any] | None = None
+        for stage in list(normalized_state.get("stages") or []):
+            current = dict(stage)
+            if (
+                str(current.get("stage_id") or "").strip() == active_stage_id
+                and str(current.get("status") or "").strip().lower() == "active"
+            ):
+                rounds = [dict(item) for item in list(current.get("rounds") or []) if isinstance(item, dict)]
+                round_index = len(rounds) + 1
+                rounds.append(
+                    {
+                        "round_id": f"{active_stage_id}:round-{round_index}",
+                        "round_index": round_index,
+                        "created_at": now_iso(),
+                        "tool_names": [
+                            str(item.get("name") or "").strip()
+                            for item in visible_calls
+                            if str(item.get("name") or "").strip()
+                        ],
+                        "tool_call_ids": [
+                            str(item.get("id") or "").strip()
+                            for item in visible_calls
+                            if str(item.get("id") or "").strip()
+                        ],
+                        "budget_counted": counts_budget,
+                    }
+                )
+                next_used = int(current.get("tool_rounds_used") or 0) + (1 if counts_budget else 0)
+                budget = int(current.get("tool_round_budget") or 0)
+                if budget > 0:
+                    next_used = min(next_used, budget)
+                current.update(
+                    {
+                        "tool_rounds_used": next_used,
+                        "rounds": rounds,
+                    }
+                )
+                latest_active = current
+            stages.append(current)
+        return {
+            "active_stage_id": active_stage_id,
+            "transition_required": bool(
+                latest_active is not None
+                and int(latest_active.get("tool_round_budget") or 0) > 0
+                and int(latest_active.get("tool_rounds_used") or 0) >= int(latest_active.get("tool_round_budget") or 0)
+            ),
+            "stages": stages,
+        }
+
+    @classmethod
+    def _frontdoor_stage_state_after_tool_cycle(
+        cls,
+        state: CeoGraphState,
+        *,
+        tool_call_payloads: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        stage_state = cls._frontdoor_stage_state_snapshot(state)
+        ordinary_calls: list[dict[str, Any]] = []
+        for payload, result in zip(list(tool_call_payloads or []), list(tool_results or []), strict=False):
+            tool_name = str(payload.get("name") or "").strip()
+            status = str(result.get("status") or "").strip().lower()
+            if tool_name == STAGE_TOOL_NAME:
+                if status != "error":
+                    stage_state, _ = cls._submit_frontdoor_next_stage_state(
+                        stage_state,
+                        stage_goal=str(dict(payload.get("arguments") or {}).get("stage_goal") or ""),
+                        tool_round_budget=int(dict(payload.get("arguments") or {}).get("tool_round_budget") or 0),
+                        completed_stage_summary=str(
+                            dict(payload.get("arguments") or {}).get("completed_stage_summary") or ""
+                        ),
+                        key_refs=[
+                            dict(item)
+                            for item in list(dict(payload.get("arguments") or {}).get("key_refs") or [])
+                            if isinstance(item, dict)
+                        ],
+                    )
+                continue
+            ordinary_calls.append(dict(payload))
+        return cls._record_frontdoor_stage_round(stage_state, tool_call_payloads=ordinary_calls)
+
+    @classmethod
+    def _frontdoor_stage_gate_error(cls, *, tool_name: str, stage_state: dict[str, Any]) -> str:
+        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        return stage_gate_error_for_tool(
+            tool_name,
+            has_active_stage=bool(str(snapshot.get("active_stage_id") or "").strip()),
+            transition_required=bool(snapshot.get("transition_required")),
+            extra_allowed_tools=cls._CONTROL_TOOL_NAMES,
+            stage_tool_name=STAGE_TOOL_NAME,
+        )
+
+    @classmethod
+    def _frontdoor_default_overlay_text(cls, state: CeoGraphState) -> str:
+        stage_gate = cls._frontdoor_stage_gate(state)
+        return _join_overlay_text(
+            build_ceo_stage_overlay(stage_gate),
+            build_ceo_stage_result_block_message(stage_gate),
+        )
+
     def _frontdoor_compaction_settings(self) -> tuple[int, int]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
         recent_count = max(1, int(getattr(assembly_cfg, "frontdoor_recent_message_count", 20) or 20))
@@ -430,14 +755,53 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime: Runtime[CeoRuntimeContext],
     ) -> list[BaseTool]:
         registered_tools = self._registered_tools_for_state(state)
+        mutable_stage_state = self._frontdoor_stage_state_snapshot(state)
+
+        async def _submit_stage(
+            stage_goal: str,
+            tool_round_budget: int,
+            completed_stage_summary: str = "",
+            key_refs: list[dict[str, Any]] | None = None,
+        ) -> dict[str, Any]:
+            next_stage_state, stage_payload = self._submit_frontdoor_next_stage_state(
+                mutable_stage_state,
+                stage_goal=stage_goal,
+                tool_round_budget=tool_round_budget,
+                completed_stage_summary=completed_stage_summary,
+                key_refs=key_refs,
+            )
+            mutable_stage_state.clear()
+            mutable_stage_state.update(next_stage_state)
+            return stage_payload
+
+        all_tools = {
+            **registered_tools,
+            STAGE_TOOL_NAME: SubmitNextStageTool(_submit_stage),
+        }
+        stage_gate = self._frontdoor_stage_gate({"frontdoor_stage_state": mutable_stage_state})
+        visible_tools = visible_tools_for_stage_iteration(
+            all_tools,
+            has_active_stage=bool(stage_gate.get("has_active_stage")),
+            transition_required=bool(stage_gate.get("transition_required")),
+            stage_tool_name=STAGE_TOOL_NAME,
+        )
         runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
         on_progress = runtime_context.get("on_progress")
 
         async def _tool_executor(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            tool = registered_tools.get(tool_name)
+            tool = visible_tools.get(tool_name)
             if tool is None:
                 return {
                     "result_text": f"Error: tool not available: {tool_name}",
+                    "status": "error",
+                    "started_at": "",
+                    "finished_at": "",
+                    "elapsed_seconds": None,
+                }
+            gate_error = self._frontdoor_stage_gate_error(tool_name=tool_name, stage_state=mutable_stage_state)
+            if gate_error:
+                return {
+                    "result_text": f"Error: {gate_error}",
                     "status": "error",
                     "started_at": "",
                     "finished_at": "",
@@ -466,7 +830,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
 
         tool_bundle = _build_visible_tool_bundle(
-            tools=registered_tools,
+            tools=visible_tools,
             executor=_tool_executor,
         )
         return list(tool_bundle.langchain_tools)
@@ -799,6 +1163,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "summary_payload": dict(get_value("summary_payload") or {}),
                 "summary_version": int(get_value("summary_version") or 0),
                 "summary_model_key": str(get_value("summary_model_key") or ""),
+                "frontdoor_stage_state": self._frontdoor_stage_state_snapshot(state),
+                "compression_state": dict(state.get("compression_state") or self._default_compression_state()),
             }
 
         user_input = _persistent_user_input_payload(state.get("user_input"))
@@ -895,6 +1261,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "summary_payload": dict(compacted_state.get("summary_payload") or {}),
             "summary_version": int(compacted_state.get("summary_version") or 0),
             "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
+            "frontdoor_stage_state": self._frontdoor_stage_state_snapshot(state),
+            "compression_state": dict(state.get("compression_state") or self._default_compression_state()),
             "turn_overlay_text": str(getattr(assembly, "turn_overlay_text", "") or "").strip() or None,
             "tool_names": list(tool_names),
             "used_tools": [],
