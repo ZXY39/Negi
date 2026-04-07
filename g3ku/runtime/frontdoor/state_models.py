@@ -18,6 +18,8 @@ from typing_extensions import TypedDict
 
 class CeoPersistentState(TypedDict, total=False):
 
+    session_key: str
+
     user_input: dict[str, Any]
 
     approval_request: dict[str, Any] | None
@@ -145,6 +147,8 @@ class CeoFrontdoorInterrupted(RuntimeError):  # noqa: N818
 def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
 
     return {
+
+        "session_key": "",
 
         "user_input": user_input,
 

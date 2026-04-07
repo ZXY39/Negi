@@ -489,7 +489,11 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
             deleted_task_count = await service.delete_task_records_for_session(session.key)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    delete_web_ceo_session_artifacts(session_manager=session_manager, session_id=session.key)
+    delete_web_ceo_session_artifacts(
+        session_manager=session_manager,
+        session_id=session.key,
+        task_service=service,
+    )
     remover = getattr(runtime_manager, "remove", None)
     if callable(remover):
         remover(session.key)

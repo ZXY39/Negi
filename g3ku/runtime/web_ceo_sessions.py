@@ -745,6 +745,10 @@ def upload_dir_for_session(session_id: str, *, create: bool = True) -> Path:
     return ensure_dir(path) if create else path
 
 
+def frontdoor_stage_archive_task_id(session_id: str) -> str:
+    return f"frontdoor-stage-archive:{str(session_id or '').strip()}"
+
+
 def inflight_snapshot_path_for_session(session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
     root = workspace_path() / WEB_CEO_INFLIGHT_ROOT
@@ -1395,7 +1399,7 @@ def create_web_ceo_session(session_manager: Any, *, session_id: str | None = Non
     return session
 
 
-def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str) -> None:
+def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str, task_service: Any | None = None) -> None:
     path = session_manager.get_path(session_id)
     if path.exists():
         path.unlink()
@@ -1405,6 +1409,21 @@ def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str) -
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)
+    archive_task_id = frontdoor_stage_archive_task_id(session_id)
+    artifact_store = getattr(task_service, "artifact_store", None) if task_service is not None else None
+    list_artifacts = getattr(artifact_store, "list_artifacts", None) if artifact_store is not None else None
+    delete_artifacts = getattr(artifact_store, "delete_artifacts_for_task", None) if artifact_store is not None else None
+    store = getattr(task_service, "store", None) if task_service is not None else None
+    delete_task = getattr(store, "delete_task", None) if store is not None else None
+    if callable(list_artifacts) and callable(delete_artifacts):
+        artifacts = list(list_artifacts(archive_task_id) or [])
+        if artifacts:
+            delete_artifacts(archive_task_id, artifacts=artifacts)
+    if callable(delete_task):
+        try:
+            delete_task(archive_task_id)
+        except Exception:
+            pass
 
 
 def list_web_ceo_sessions(

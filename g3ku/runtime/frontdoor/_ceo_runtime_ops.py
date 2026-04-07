@@ -33,6 +33,7 @@ from main.runtime.tool_call_repair import (
     extract_tool_calls_from_xml_pseudo_content,
     recover_tool_calls_from_json_payload,
 )
+from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id
 
 from ._ceo_support import CeoFrontDoorSupport
 from .ceo_summarizer import summarize_frontdoor_history
@@ -48,6 +49,9 @@ ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 CeoGraphState = CeoPersistentState
 
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
+_FRONTDOOR_STAGE_ARCHIVE_RETAIN_COMPLETED = 20
+_FRONTDOOR_STAGE_ARCHIVE_BATCH_SIZE = 10
+_FRONTDOOR_STAGE_ARCHIVE_SOURCE_KIND = "stage_history_archive"
 
 
 @dataclass(slots=True)
@@ -345,6 +349,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         for item in list(raw_stage.get("key_refs") or [])
                         if isinstance(item, dict)
                     ],
+                    "archive_ref": str(raw_stage.get("archive_ref") or "").strip(),
+                    "archive_stage_index_start": max(0, int(raw_stage.get("archive_stage_index_start") or 0)),
+                    "archive_stage_index_end": max(0, int(raw_stage.get("archive_stage_index_end") or 0)),
                     "rounds": [
                         dict(item)
                         for item in list(raw_stage.get("rounds") or [])
@@ -561,22 +568,126 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "stages": stages,
         }
 
-    @classmethod
+    def _externalize_frontdoor_stage_archive(
+        self,
+        *,
+        session_key: str,
+        stage_index_start: int,
+        stage_index_end: int,
+        stages: list[dict[str, Any]],
+    ) -> tuple[str, str]:
+        normalized_session_key = str(session_key or "").strip()
+        if not normalized_session_key:
+            return "", ""
+        service = getattr(self._loop, "main_task_service", None)
+        content_store = getattr(service, "content_store", None) if service is not None else None
+        summarize = getattr(content_store, "summarize_for_storage", None) if content_store is not None else None
+        if not callable(summarize):
+            return "", ""
+        archive_payload = {
+            "session_id": normalized_session_key,
+            "stage_index_start": stage_index_start,
+            "stage_index_end": stage_index_end,
+            "stages": [dict(stage) for stage in list(stages or []) if isinstance(stage, dict)],
+        }
+        summary, ref = summarize(
+            json.dumps(archive_payload, ensure_ascii=False, indent=2),
+            runtime={
+                "task_id": frontdoor_stage_archive_task_id(normalized_session_key),
+                "session_key": normalized_session_key,
+            },
+            display_name=f"stage-history:frontdoor:{stage_index_start}-{stage_index_end}",
+            source_kind=_FRONTDOOR_STAGE_ARCHIVE_SOURCE_KIND,
+            force=True,
+        )
+        return str(summary or "").strip(), str(ref or "").strip()
+
+    def _externalize_completed_frontdoor_stage_batches(
+        self,
+        *,
+        session_key: str,
+        stage_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_state = self._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        stages = [dict(stage) for stage in list(normalized_state.get("stages") or []) if isinstance(stage, dict)]
+        if not stages:
+            return normalized_state
+        while True:
+            completed_normal = [
+                (index, stage)
+                for index, stage in enumerate(stages)
+                if str(stage.get("stage_kind") or "normal").strip() == "normal"
+                and str(stage.get("status") or "").strip().lower() != "active"
+            ]
+            if len(completed_normal) <= _FRONTDOOR_STAGE_ARCHIVE_RETAIN_COMPLETED:
+                break
+            batch = completed_normal[:_FRONTDOOR_STAGE_ARCHIVE_BATCH_SIZE]
+            archive_stages = [dict(stage) for _, stage in batch]
+            if not archive_stages:
+                break
+            stage_index_start = int(batch[0][1].get("stage_index") or 0)
+            stage_index_end = int(batch[-1][1].get("stage_index") or 0)
+            archive_summary, archive_ref = self._externalize_frontdoor_stage_archive(
+                session_key=session_key,
+                stage_index_start=stage_index_start,
+                stage_index_end=stage_index_end,
+                stages=archive_stages,
+            )
+            if not archive_ref:
+                break
+            compression_stage = {
+                "stage_id": f"frontdoor-compression-{stage_index_start}-{stage_index_end}",
+                "stage_index": stage_index_end,
+                "stage_kind": "compression",
+                "system_generated": True,
+                "mode": "鑷富鎵ц",
+                "status": "completed",
+                "stage_goal": f"Archive completed stage history {stage_index_start}-{stage_index_end}",
+                "completed_stage_summary": (
+                    archive_summary
+                    or f"Archived completed stages {stage_index_start}-{stage_index_end} into stage history archive."
+                ),
+                "key_refs": [],
+                "archive_ref": archive_ref,
+                "archive_stage_index_start": stage_index_start,
+                "archive_stage_index_end": stage_index_end,
+                "tool_round_budget": 0,
+                "tool_rounds_used": 0,
+                "created_at": now_iso(),
+                "finished_at": now_iso(),
+                "rounds": [],
+            }
+            batch_indexes = {index for index, _stage in batch}
+            insert_at = min(batch_indexes)
+            next_stages: list[dict[str, Any]] = []
+            for index, stage in enumerate(stages):
+                if index == insert_at:
+                    next_stages.append(compression_stage)
+                if index in batch_indexes:
+                    continue
+                next_stages.append(dict(stage))
+            stages = next_stages
+        return {
+            "active_stage_id": str(normalized_state.get("active_stage_id") or "").strip(),
+            "transition_required": bool(normalized_state.get("transition_required")),
+            "stages": stages,
+        }
+
     def _frontdoor_stage_state_after_tool_cycle(
-        cls,
+        self,
         state: CeoGraphState,
         *,
         tool_call_payloads: list[dict[str, Any]],
         tool_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        stage_state = cls._frontdoor_stage_state_snapshot(state)
+        stage_state = self._frontdoor_stage_state_snapshot(state)
         ordinary_calls: list[dict[str, Any]] = []
         for payload, result in zip(list(tool_call_payloads or []), list(tool_results or []), strict=False):
             tool_name = str(payload.get("name") or "").strip()
             status = str(result.get("status") or "").strip().lower()
             if tool_name == STAGE_TOOL_NAME:
                 if status != "error":
-                    stage_state, _ = cls._submit_frontdoor_next_stage_state(
+                    stage_state, _ = self._submit_frontdoor_next_stage_state(
                         stage_state,
                         stage_goal=str(dict(payload.get("arguments") or {}).get("stage_goal") or ""),
                         tool_round_budget=int(dict(payload.get("arguments") or {}).get("tool_round_budget") or 0),
@@ -591,7 +702,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     )
                 continue
             ordinary_calls.append(dict(payload))
-        return cls._record_frontdoor_stage_round(stage_state, tool_call_payloads=ordinary_calls)
+        updated_state = self._record_frontdoor_stage_round(stage_state, tool_call_payloads=ordinary_calls)
+        return self._externalize_completed_frontdoor_stage_batches(
+            session_key=str(state.get("session_key") or "").strip(),
+            stage_state=updated_state,
+        )
 
     @classmethod
     def _frontdoor_stage_gate_error(cls, *, tool_name: str, stage_state: dict[str, Any]) -> str:
@@ -1158,6 +1273,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 else lambda key, default=None: getattr(compacted_state, key, default)
             )
             return {
+                "session_key": str(state.get("session_key") or "").strip(),
                 "messages": list(get_value("messages") or []),
                 "summary_text": str(get_value("summary_text") or ""),
                 "summary_payload": dict(get_value("summary_payload") or {}),
@@ -1252,6 +1368,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
+            "session_key": str(getattr(session.state, "session_key", "") or ""),
             "user_input": user_input,
             "approval_request": None,
             "approval_status": "",
