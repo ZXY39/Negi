@@ -59,7 +59,9 @@ def _summary_prefix_length(messages: list[dict[str, Any]]) -> int:
 def _tail_start_index(messages: list[dict[str, Any]], *, recent_message_count: int) -> int:
     if not messages:
         return 0
-    keep_count = max(1, int(recent_message_count))
+    # Once history is eligible for compaction, force at least one message into the
+    # compacted prefix unless that would isolate the current user turn.
+    keep_count = min(max(1, int(recent_message_count)), max(1, len(messages) - 1))
     if _message_role(messages[-1]) == "user" and len(messages) >= 2:
         keep_count = max(2, keep_count)
     split_index = max(0, len(messages) - keep_count)
