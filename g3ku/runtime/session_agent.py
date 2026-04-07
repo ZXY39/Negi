@@ -443,19 +443,36 @@ class RuntimeAgentSession:
                     for call_id in round_call_ids:
                         for item in list(tools_by_call_id.get(call_id) or []):
                             key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
-                            if key in seen_keys:
+                            if not key:
                                 continue
-                            seen_keys.add(key)
-                            selected.append(dict(item))
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                selected.append({"_key": key, **dict(item)})
+                                continue
+                            for index, existing in enumerate(selected):
+                                if str(existing.get("_key") or "").strip() != key:
+                                    continue
+                                selected[index] = {"_key": key, **dict(item)}
+                                break
                     for tool_name in round_tool_names:
                         for item in list(tools_by_name.get(tool_name) or []):
                             key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
-                            if key in seen_keys:
+                            if not key:
                                 continue
-                            seen_keys.add(key)
-                            selected.append(dict(item))
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                selected.append({"_key": key, **dict(item)})
+                                continue
+                            for index, existing in enumerate(selected):
+                                if str(existing.get("_key") or "").strip() != key:
+                                    continue
+                                selected[index] = {"_key": key, **dict(item)}
+                                break
                     if selected:
-                        round_item["tools"] = selected
+                        round_item["tools"] = [
+                            {key: value for key, value in item.items() if key != "_key"}
+                            for item in selected
+                        ]
             return snapshot
         interaction_flow = self._interaction_flow_snapshot()
         if not interaction_flow:

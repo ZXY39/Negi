@@ -480,6 +480,91 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compression_to_session() -> None:
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _last_route_kind="task_dispatch",
+        _frontdoor_stage_state={},
+        _compression_state={},
+    )
+
+    class _FakeAgent:
+        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
+            _ = payload, config, context, version
+            return {
+                "messages": [],
+                "route_kind": "self_execute",
+                "final_output": "ok",
+                "verified_task_ids": ["task:demo-123"],
+                "frontdoor_stage_state": {
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [{"stage_id": "frontdoor-stage-1", "rounds": []}],
+                },
+                "compression_state": {"status": "running", "text": "compressing", "source": "user"},
+            }
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
+    )
+    runner._agent = _FakeAgent()
+
+    output = await runner.run_turn(
+        user_input=SimpleNamespace(content="hello", metadata={}),
+        session=session,
+        on_progress=None,
+    )
+
+    assert output == "ok"
+    assert session._last_route_kind == "self_execute"
+    assert session._last_verified_task_ids == ["task:demo-123"]
+    assert session._frontdoor_stage_state["active_stage_id"] == "frontdoor-stage-1"
+    assert session._compression_state == {"status": "running", "text": "compressing", "source": "user"}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compression_to_session() -> None:
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _last_route_kind="task_dispatch",
+        _frontdoor_stage_state={},
+        _compression_state={},
+    )
+
+    class _FakeAgent:
+        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
+            _ = payload, config, context, version
+            return {
+                "messages": [],
+                "route_kind": "direct_reply",
+                "final_output": "approved",
+                "verified_task_ids": [],
+                "frontdoor_stage_state": {
+                    "active_stage_id": "",
+                    "transition_required": True,
+                    "stages": [{"stage_id": "frontdoor-stage-1", "status": "completed", "rounds": []}],
+                },
+                "compression_state": {"status": "idle", "text": "", "source": ""},
+            }
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
+    )
+    runner._agent = _FakeAgent()
+
+    output = await runner.resume_turn(
+        session=session,
+        resume_value={"decisions": [{"type": "approve"}]},
+        on_progress=None,
+    )
+
+    assert output == "approved"
+    assert session._last_route_kind == "direct_reply"
+    assert session._frontdoor_stage_state["transition_required"] is True
+    assert session._compression_state == {"status": "idle", "text": "", "source": ""}
+
+
+@pytest.mark.asyncio
 async def test_create_agent_runner_rejects_unverified_dispatch_text_from_model() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))

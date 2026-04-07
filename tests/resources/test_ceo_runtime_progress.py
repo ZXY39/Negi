@@ -1533,6 +1533,65 @@ def test_snapshot_includes_compression_state_when_frontdoor_archive_is_running()
     assert snapshot["compression"]["text"] == "上下文压缩中"
 
 
+def test_stage_trace_round_enrichment_uses_latest_tool_event_status() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "inspect repository",
+                "status": "active",
+                "rounds": [
+                    {
+                        "round_index": 1,
+                        "tool_call_ids": ["skill-installer:1"],
+                        "tool_names": ["skill-installer"],
+                    }
+                ],
+            }
+        ],
+    }
+    session._event_log = [
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-03-18T12:00:00",
+            "payload": {
+                "tool_name": "skill-installer",
+                "text": "started",
+                "tool_call_id": "skill-installer:1",
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-03-18T12:00:10",
+            "payload": {
+                "tool_name": "skill-installer",
+                "text": "completed",
+                "tool_call_id": "skill-installer:1",
+                "is_error": False,
+            },
+        },
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    tool = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
+    assert tool["tool_call_id"] == "skill-installer:1"
+    assert tool["status"] == "success"
+    assert tool["text"] == "completed"
+
+
 @pytest.mark.asyncio
 async def test_runtime_agent_session_persists_execution_trace_summary_into_session_transcript(
     tmp_path: Path,

@@ -276,6 +276,13 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             )
         return self._agent
 
+    @staticmethod
+    def _sync_frontdoor_session_state(*, session: Any, values: dict[str, Any]) -> None:
+        frontdoor_stage_state = values.get("frontdoor_stage_state")
+        compression_state = values.get("compression_state")
+        setattr(session, "_frontdoor_stage_state", dict(frontdoor_stage_state) if isinstance(frontdoor_stage_state, dict) else {})
+        setattr(session, "_compression_state", dict(compression_state) if isinstance(compression_state, dict) else {})
+
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._ensure_ready()
         setattr(session, "_last_route_kind", "direct_reply")
@@ -302,6 +309,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         values = self._unwrap_graph_output(graph_output)
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
+        self._sync_frontdoor_session_state(session=session, values=values)
         return str(values.get("final_output") or "")
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
@@ -321,4 +329,5 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         values = self._unwrap_graph_output(graph_output)
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
+        self._sync_frontdoor_session_state(session=session, values=values)
         return str(values.get("final_output") or "")
