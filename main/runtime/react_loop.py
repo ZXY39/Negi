@@ -99,7 +99,7 @@ class ReActToolLoop:
         self._max_parallel_tool_calls = self._normalize_optional_limit(max_parallel_tool_calls, default=10)
         self._node_turn_controller = None
         self._recovery_check_engine = RecoveryCheckEngine(workspace_root=Path.cwd())
-        self._model_response_timeout_seconds: float | None = _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS
+        self._model_response_timeout_seconds: float | None | object = _UNSET
 
     async def run(
         self,
@@ -259,13 +259,15 @@ class ReActToolLoop:
                             node_turn_lease=node_turn_lease,
                             model_concurrency_controller=getattr(self, '_model_concurrency_controller', None),
                         )
-                        timeout_seconds = self._normalized_model_response_timeout_seconds()
+                        timeout_seconds = self._resolved_model_response_timeout_seconds(
+                            model_refs=current_model_refs,
+                        )
                         if timeout_seconds is not None:
                             response = await asyncio.wait_for(chat_coro, timeout=timeout_seconds)
                         else:
                             response = await chat_coro
                     except asyncio.TimeoutError:
-                        timeout_message = self._model_response_timeout_message()
+                        timeout_message = self._model_response_timeout_message(timeout_seconds=timeout_seconds)
                         self._log_service.update_frame(
                             task.task_id,
                             node.node_id,
@@ -1685,8 +1687,10 @@ class ReActToolLoop:
             return max(1, item_count)
         return max(1, int(limit) if int(limit) > 0 else 1)
 
-    def _normalized_model_response_timeout_seconds(self) -> float | None:
-        value = getattr(self, '_model_response_timeout_seconds', None)
+    @staticmethod
+    def _normalized_model_response_timeout_seconds_value(value: Any | object) -> float | None | object:
+        if value is _UNSET:
+            return _UNSET
         if value in {None, ''}:
             return None
         try:
@@ -1697,8 +1701,37 @@ class ReActToolLoop:
             return None
         return normalized
 
-    def _model_response_timeout_message(self) -> str:
-        timeout_seconds = self._normalized_model_response_timeout_seconds()
+    def _normalized_model_response_timeout_seconds(self) -> float | None:
+        value = self._normalized_model_response_timeout_seconds_value(
+            getattr(self, '_model_response_timeout_seconds', _UNSET)
+        )
+        if value is _UNSET:
+            return _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS
+        return value
+
+    def _resolved_model_response_timeout_seconds(self, *, model_refs: list[str] | None = None) -> float | None:
+        override = self._normalized_model_response_timeout_seconds_value(
+            getattr(self, '_model_response_timeout_seconds', _UNSET)
+        )
+        if override is not _UNSET:
+            return override
+        recommended_timeout: float | None | object = _UNSET
+        timeout_supplier = getattr(self._chat_backend, 'recommended_model_response_timeout_seconds', None)
+        if callable(timeout_supplier):
+            try:
+                recommended_timeout = timeout_supplier(model_refs=list(model_refs or []))
+            except TypeError:
+                recommended_timeout = timeout_supplier(list(model_refs or []))
+        normalized_recommended = self._normalized_model_response_timeout_seconds_value(recommended_timeout)
+        if normalized_recommended is _UNSET:
+            return _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS
+        if normalized_recommended is None:
+            return None
+        return normalized_recommended
+
+    def _model_response_timeout_message(self, *, timeout_seconds: float | None | object = _UNSET) -> str:
+        if timeout_seconds is _UNSET:
+            timeout_seconds = self._resolved_model_response_timeout_seconds()
         if timeout_seconds is None:
             return 'model request timeout'
         return f'model request timeout after {timeout_seconds:.3f}s'

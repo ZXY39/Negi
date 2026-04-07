@@ -293,6 +293,7 @@ class MainRuntimeService:
         self.log_service.add_summary_metric_reporter(self._increment_summary_stat)
         self.task_stall_notifier = TaskStallNotifier(service=self)
         self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
+        self.log_service.add_task_terminal_listener(self._cleanup_terminal_task_temp_dir_if_empty)
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
         self.query_service = TaskQueryServiceV2(store=self.store, file_store=self.file_store, log_service=self.log_service, debug_recorder=self.runtime_debug_recorder)
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
@@ -1032,6 +1033,14 @@ class MainRuntimeService:
         await self.registry.forget_task(task.session_id, task_id)
         return task
 
+    async def _delete_task_with_task_delete_semantics(self, task_id: str) -> TaskRecord | None:
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress' and not bool(getattr(task, 'is_paused', False)):
+            await self.pause_task(task_id)
+        return await self.delete_task(task_id)
+
     async def wait_for_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         await self.global_scheduler.wait(task_id)
@@ -1151,10 +1160,8 @@ class MainRuntimeService:
         if task is None:
             return self._task_not_found_item(task_id)
         snapshot = self._task_stats_item(task)
-        if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress' and not bool(getattr(task, 'is_paused', False)):
-            await self.pause_task(task_id)
         try:
-            deleted = await self.delete_task(task_id)
+            deleted = await self._delete_task_with_task_delete_semantics(task_id)
         except ValueError as exc:
             if str(exc) in {'task_not_paused', 'task_still_stopping'}:
                 snapshot['result'] = 'still_stopping'
@@ -1949,16 +1956,23 @@ class MainRuntimeService:
     async def delete_task_records_for_session(self, session_id: str) -> int:
         deleted = 0
         for task in list(self.list_tasks_for_session(session_id)):
-            status = str(getattr(task, 'status', '') or '').strip().lower()
-            if status == 'in_progress' and not bool(getattr(task, 'is_paused', False)):
-                continue
             try:
-                await self.delete_task(task.task_id)
+                delete_helper = getattr(self, '_delete_task_with_task_delete_semantics', None)
+                if callable(delete_helper):
+                    removed = await delete_helper(task.task_id)
+                else:
+                    status = str(getattr(task, 'status', '') or '').strip().lower()
+                    if status == 'in_progress' and not bool(getattr(task, 'is_paused', False)):
+                        pause = getattr(self, 'pause_task', None)
+                        if callable(pause):
+                            await pause(task.task_id)
+                    removed = await self.delete_task(task.task_id)
             except ValueError as exc:
                 if str(exc) in {'task_not_paused', 'task_still_stopping'}:
                     continue
                 raise
-            deleted += 1
+            if removed is not None:
+                deleted += 1
         return deleted
 
     def get_node(self, node_id: str) -> NodeRecord | None:
@@ -3527,6 +3541,38 @@ class MainRuntimeService:
             if configured_path != legacy_temp_root:
                 return configured_path
         return self._task_temp_dir(task_id, create=False)
+
+    @classmethod
+    def _remove_directory_tree_if_empty(cls, path: Path) -> bool:
+        if not path.exists() or not path.is_dir():
+            return False
+        try:
+            children = list(path.iterdir())
+        except OSError:
+            return False
+        for child in children:
+            if child.is_symlink() or not child.is_dir():
+                return False
+            cls._remove_directory_tree_if_empty(child)
+        try:
+            if any(path.iterdir()):
+                return False
+        except OSError:
+            return False
+        try:
+            path.rmdir()
+        except OSError:
+            return False
+        return True
+
+    def _cleanup_terminal_task_temp_dir_if_empty(self, task: TaskRecord) -> None:
+        task_id = str(getattr(task, 'task_id', '') or '').strip()
+        if not task_id:
+            return
+        try:
+            self._remove_directory_tree_if_empty(self._effective_task_temp_dir(task_id))
+        except Exception:
+            return
 
     def _resource_base_dir(self, kind: ResourceKind) -> Path:
         manager = getattr(self, '_resource_manager', None)

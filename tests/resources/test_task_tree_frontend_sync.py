@@ -649,7 +649,7 @@ def test_build_node_execution_trace_falls_back_to_acceptance_final_output_when_c
     assert result["finalOutput"] == "## 验收裁定：拒绝交付"
 
 
-def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_duplicate_goal_field() -> None:
+def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_duplicate_goal_or_status_field() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -711,7 +711,7 @@ def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_dupli
 
     assert result["title"] == "full stage goal: locate entry, read context, organize evidence"
     assert result["containsStageGoalField"] is False
-    assert result["containsStatusField"] is True
+    assert result["containsStatusField"] is False
     assert result["containsToolOutput"] is True
 
 

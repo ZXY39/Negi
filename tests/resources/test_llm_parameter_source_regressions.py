@@ -7,6 +7,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 import main.runtime.chat_backend as chat_backend_module
+from g3ku.providers.fallback import DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.llm_config.enums import AuthMode, Capability, ProtocolAdapter
@@ -235,6 +236,7 @@ async def test_config_chat_backend_uses_config_center_model_parameters_when_not_
             "tool_choice": "auto",
             "parallel_tool_calls": None,
             "prompt_cache_key": captured[0]["prompt_cache_key"],
+            "request_timeout_seconds": DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
             "max_tokens": 4096,
             "temperature": 0.6,
             "reasoning_effort": "high",
@@ -275,6 +277,48 @@ async def test_config_chat_backend_omits_optional_model_parameters_when_unset(mo
     assert "max_tokens" not in captured[0]
     assert "temperature" not in captured[0]
     assert "reasoning_effort" not in captured[0]
+    assert captured[0]["request_timeout_seconds"] == DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_recommends_dynamic_hard_timeout_from_model_chain_budget(monkeypatch) -> None:
+    class _Provider:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    targets = {
+        "primary": ProviderTarget(
+            provider_ref="primary",
+            provider_id="custom",
+            model_id="primary-model",
+            provider=_Provider(),
+            retry_on=["network", "429", "5xx"],
+            retry_count=0,
+            api_key_count=3,
+            api_key_indexes=[0, 1, 2],
+        ),
+        "secondary": ProviderTarget(
+            provider_ref="secondary",
+            provider_id="responses",
+            model_id="secondary-model",
+            provider=_Provider(),
+            retry_on=["network", "429", "5xx"],
+            retry_count=10,
+            api_key_count=1,
+            api_key_indexes=[0],
+        ),
+    }
+
+    monkeypatch.setattr(
+        chat_backend_module,
+        "build_provider_from_model_key",
+        lambda config, ref, api_key_index=None: targets[str(ref)],
+    )
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+
+    assert backend.recommended_model_response_timeout_seconds(model_refs=["primary", "secondary"]) == 4215.0
 
 
 @pytest.mark.asyncio
@@ -321,6 +365,31 @@ async def test_react_loop_no_longer_passes_hardcoded_model_parameter_defaults() 
     assert result.status == "success"
     assert "max_tokens" not in captured[0]
     assert "temperature" not in captured[0]
+
+
+def test_react_loop_uses_backend_recommended_hard_timeout_when_unset() -> None:
+    loop = ReActToolLoop(
+        chat_backend=SimpleNamespace(
+            recommended_model_response_timeout_seconds=lambda *, model_refs: 33.0
+        ),
+        log_service=_FakeLogService(),
+        max_iterations=2,
+    )
+
+    assert loop._resolved_model_response_timeout_seconds(model_refs=["primary"]) == 33.0
+
+
+def test_react_loop_prefers_explicit_hard_timeout_override_over_backend_budget() -> None:
+    loop = ReActToolLoop(
+        chat_backend=SimpleNamespace(
+            recommended_model_response_timeout_seconds=lambda *, model_refs: 99.0
+        ),
+        log_service=_FakeLogService(),
+        max_iterations=2,
+    )
+    loop._model_response_timeout_seconds = 0.25
+
+    assert loop._resolved_model_response_timeout_seconds(model_refs=["primary"]) == 0.25
 
 
 @pytest.mark.asyncio

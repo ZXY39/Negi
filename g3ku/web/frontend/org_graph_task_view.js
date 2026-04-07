@@ -1247,7 +1247,6 @@ function buildExecutionTraceSteps(trace, node) {
                 open: index === trace.stages.length - 1,
                 bodyHtml: [
                     renderTraceMessage(`本阶段最大轮数为${stage.stage_total_steps || 0}`, "本阶段最大轮数为0"),
-                    renderTraceField("状态", displayTaskStageStatus(stage.status), "进行中"),
                     renderExecutionStageRounds(stage),
                 ].join(""),
             })),

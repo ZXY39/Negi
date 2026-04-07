@@ -22,6 +22,7 @@ from main.api import admin_rest
 from main.governance.resource_filter import list_effective_tool_names
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
 from main.models import TaskRecord
+from main.protocol import now_iso
 from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService, TaskNodeDetailTool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -227,8 +228,8 @@ def test_main_runtime_session_task_counts_distinguish_running_paused_and_deletab
 
 
 @pytest.mark.asyncio
-async def test_main_runtime_delete_task_records_for_session_skips_in_progress_records():
-    deleted_ids: list[str] = []
+async def test_main_runtime_delete_task_records_for_session_pauses_in_progress_records_before_deleting():
+    actions: list[tuple[str, str]] = []
     tasks = [
         SimpleNamespace(task_id='task:done', status='success', is_paused=False),
         SimpleNamespace(task_id='task:paused', status='in_progress', is_paused=True),
@@ -240,14 +241,23 @@ async def test_main_runtime_delete_task_records_for_session_skips_in_progress_re
             _ = session_id
             return tasks
 
-        async def delete_task(self, task_id: str):
-            deleted_ids.append(task_id)
+        async def pause_task(self, task_id: str):
+            actions.append(('pause', task_id))
             return None
+
+        async def delete_task(self, task_id: str):
+            actions.append(('delete', task_id))
+            return object()
 
     deleted = await MainRuntimeService.delete_task_records_for_session(_Service(), 'web:ceo-demo')
 
-    assert deleted == 2
-    assert deleted_ids == ['task:done', 'task:paused']
+    assert deleted == 3
+    assert actions == [
+        ('delete', 'task:done'),
+        ('delete', 'task:paused'),
+        ('pause', 'task:busy'),
+        ('delete', 'task:busy'),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1741,6 +1751,131 @@ def test_ceo_session_delete_accepts_inflight_only_session(tmp_path: Path, monkey
         'cancelled_session': target_id,
     }
     assert not inflight_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_ceo_session_delete_with_task_record_cleanup_deletes_task_disk_footprint(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def invalidate(self, key: str) -> None:
+            self._sessions.pop(key, None)
+            self._paths.pop(key, None)
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    current = Session(key='web:ceo-delete-cascade', metadata={'title': 'Delete Cascade'})
+    other = Session(key='web:ceo-keep-after-cascade', metadata={'title': 'Keep After Cascade'})
+    current_path = tmp_path / 'sessions' / 'web_ceo_delete_cascade.jsonl'
+    other_path = tmp_path / 'sessions' / 'web_ceo_keep_after_cascade.jsonl'
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    other_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    manager = _SessionManager(
+        [current, other],
+        {
+            current.key: current_path,
+            other.key: other_path,
+        },
+    )
+    captured: dict[str, object] = {}
+
+    service.store.upsert_worker_status(
+        worker_id='worker:test',
+        role='task_worker',
+        status='running',
+        updated_at=now_iso(),
+        payload={'execution_mode': 'worker', 'active_task_count': 0},
+    )
+    record = await service.create_task('delete cascade task', session_id=current.key)
+    task_file_dir = service.file_store.task_dir(record.task_id)
+    artifact_dir = Path(service.artifact_store._task_dir(record.task_id))
+    task_temp_dir = service._task_temp_dir(record.task_id)
+    event_dir = Path(service.store._event_history_dir) / service._safe_task_dir_name(record.task_id)
+    task_file_dir.joinpath('node.json').write_text('A', encoding='utf-8')
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.joinpath('artifact.txt').write_text('B', encoding='utf-8')
+    task_temp_dir.joinpath('temp.txt').write_text('C', encoding='utf-8')
+    event_dir.mkdir(parents=True, exist_ok=True)
+    event_dir.joinpath('1.json').write_text('D', encoding='utf-8')
+
+    class _RuntimeManager:
+        def get(self, session_id: str):
+            _ = session_id
+            return None
+
+        def remove(self, session_id: str):
+            captured['removed_session'] = session_id
+            return None
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        captured['cancelled_session'] = session_key
+        return 0
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    monkeypatch.setattr(
+        ceo_sessions,
+        'get_agent',
+        lambda: SimpleNamespace(
+            sessions=manager,
+            main_task_service=service,
+            cancel_session_tasks=_cancel_session_tasks,
+        ),
+    )
+    monkeypatch.setattr(ceo_sessions, 'get_runtime_manager', lambda _agent: _RuntimeManager())
+    monkeypatch.setattr(ceo_sessions, 'get_web_heartbeat_service', lambda _agent: None)
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    try:
+        response = client.request(
+            'DELETE',
+            f'/api/ceo/sessions/{current.key}',
+            json={'delete_task_records': True},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['deleted'] is True
+        assert payload['deleted_task_count'] == 1
+        assert captured == {
+            'removed_session': current.key,
+            'cancelled_session': current.key,
+        }
+        assert service.get_task(record.task_id) is None
+        assert not task_file_dir.exists()
+        assert not artifact_dir.exists()
+        assert not task_temp_dir.exists()
+        assert not event_dir.exists()
+    finally:
+        await service.close()
 
 
 def test_task_rest_endpoint_normalizes_short_task_id():

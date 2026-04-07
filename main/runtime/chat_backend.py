@@ -28,6 +28,7 @@ from main.runtime.node_turn_controller import NodeTurnLease
 
 _STAGE_COMPACT_PREFIX = '[G3KU_STAGE_COMPACT_V1]'
 _STAGE_EXTERNALIZED_PREFIX = '[G3KU_STAGE_EXTERNALIZED_V1]'
+_MODEL_CHAIN_HARD_TIMEOUT_SAFETY_SECONDS = 15.0
 
 
 class ChatBackend(Protocol):
@@ -239,6 +240,46 @@ class ConfigChatBackend:
 
     def _normalized_model_attempt_timeout_seconds(self) -> float | None:
         return normalize_request_timeout_seconds(getattr(self, "_model_attempt_timeout_seconds", None))
+
+    def _estimated_attempt_count_for_model_ref(self, model_ref: str) -> int:
+        normalized_ref = str(model_ref or "").strip()
+        if not normalized_ref:
+            return 1
+        try:
+            target = build_provider_from_model_key(self._config, normalized_ref)
+        except Exception:
+            return 1
+        configured_api_key_indexes = getattr(target, "api_key_indexes", None)
+        if configured_api_key_indexes is None:
+            enabled_key_count = max(1, int(getattr(target, "api_key_count", 0) or 0))
+        else:
+            enabled_key_count = len([int(item) for item in configured_api_key_indexes])
+            if enabled_key_count <= 0:
+                enabled_key_count = 1
+        retry_count = normalized_retry_count(getattr(target, "retry_count", 0))
+        return max(1, enabled_key_count) * max(1, retry_count + 1)
+
+    def recommended_model_response_timeout_seconds(self, *, model_refs: list[str] | None = None) -> float | None:
+        attempt_timeout_seconds = self._normalized_model_attempt_timeout_seconds()
+        refs = [
+            str(item or "").strip()
+            for item in list(model_refs or [])
+            if str(item or "").strip()
+        ]
+        if attempt_timeout_seconds is None or not refs:
+            return None
+        attempts_per_chain_round = sum(
+            self._estimated_attempt_count_for_model_ref(ref)
+            for ref in refs
+        )
+        if attempts_per_chain_round <= 0:
+            return None
+        total_attempt_budget_seconds = (
+            float(attempt_timeout_seconds)
+            * float(attempts_per_chain_round)
+            * float(RETRYABLE_MODEL_CHAIN_MAX_ROUNDS)
+        )
+        return float(total_attempt_budget_seconds + _MODEL_CHAIN_HARD_TIMEOUT_SAFETY_SECONDS)
 
     async def chat(
         self,
